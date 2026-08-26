@@ -21,6 +21,9 @@ import temporalio.common
 import temporalio.nexus
 import temporalio.nexus._util
 import temporalio.workflow
+from temporalio.nexus.system.workflow_service._system_nexus_interceptor import (
+    _SystemNexusWorkflowOutboundInterceptorMixin,
+)
 from temporalio.workflow import ContinueAsNewVersioningBehavior, VersioningIntent
 
 
@@ -414,7 +417,7 @@ class WorkflowInboundInterceptor:
         return await self.next.handle_update_handler(input)
 
 
-class WorkflowOutboundInterceptor:
+class WorkflowOutboundInterceptor(_SystemNexusWorkflowOutboundInterceptorMixin):
     """Outbound interceptor to wrap calls made from within workflows.
 
     This should be extended by any workflow outbound interceptors.

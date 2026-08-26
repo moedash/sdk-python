@@ -33,6 +33,7 @@ import temporalio.api.common.v1
 import temporalio.client
 import temporalio.converter
 import temporalio.exceptions
+import temporalio.nexus.system.workflow_service.models
 import temporalio.worker
 import temporalio.workflow
 from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
@@ -829,6 +830,20 @@ class _TracingWorkflowOutboundInterceptor(
         )
 
         return await super().start_nexus_operation(input)
+
+    async def start_signal_with_start_workflow(
+        self,
+        request: temporalio.nexus.system.workflow_service.models.SignalWithStartWorkflowRequest,
+    ) -> temporalio.workflow.NexusOperationHandle[
+        temporalio.nexus.system.workflow_service.models.SignalWithStartWorkflowResponse
+    ]:
+        request.headers = request.headers or {}
+        self.root._completed_span(
+            "SignalWithStartWorkflow",
+            kind=opentelemetry.trace.SpanKind.CLIENT,
+            add_to_outbound=cast(_InputWithHeaders, request),
+        )
+        return await super().start_signal_with_start_workflow(request)
 
 
 def _carrier_to_nexus_headers(
