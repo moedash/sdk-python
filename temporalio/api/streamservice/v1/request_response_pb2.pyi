@@ -1,5 +1,5 @@
-from temporalio.api.stream.v1 import message_pb2 as _message_pb2
-from temporalio.api.stream.v1 import stream_state_pb2 as _stream_state_pb2
+from temporalio.api.streamservice.v1 import message_pb2 as _message_pb2
+from temporalio.api.streamservice.v1 import stream_state_pb2 as _stream_state_pb2
 from temporalio.api.common.v1 import message_pb2 as _message_pb2_1
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor

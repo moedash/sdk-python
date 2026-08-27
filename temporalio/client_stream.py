@@ -11,7 +11,7 @@ change before this is a real feature:
 - **Requires the ``grpc`` extra.** The rest of this SDK reaches the server
   through sdk-core, which does not know about this service yet, so the client
   here opens its own channel with ``grpcio``.
-- **The protos are vendored** under ``temporalio.api.stream.v1`` instead of
+- **The protos are vendored** under ``temporalio.api.streamservice.v1`` instead of
   coming from the api submodule, because the service is still defined in the
   server. That is why the wire names read as server-internal.
 - **Producing and consuming from outside a Workflow only.** Consuming inside
@@ -29,8 +29,8 @@ from typing import AsyncIterator, Optional, Sequence
 import google.protobuf.duration_pb2
 
 import temporalio.api.common.v1
-import temporalio.api.stream.v1 as stream
-from temporalio.api.stream.v1 import service_pb2_grpc
+import temporalio.api.streamservice.v1 as stream
+from temporalio.api.streamservice.v1 import service_pb2_grpc
 
 __all__ = ["Message", "StreamClient", "StreamHandle"]
 

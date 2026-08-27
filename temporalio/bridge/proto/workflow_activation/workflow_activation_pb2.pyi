@@ -19,6 +19,7 @@ import google.protobuf.message
 import google.protobuf.timestamp_pb2
 
 import temporalio.api.common.v1.message_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
@@ -295,6 +296,9 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     def resolve_nexus_operation(self) -> global___ResolveNexusOperation:
         """A nexus operation resolved."""
     @property
+    def deliver_stream_messages(self) -> global___DeliverStreamMessages:
+        """A range of a stream the workflow subscribed to."""
+    @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
         cache after performing the activation. It is guaranteed that this will be the only job
@@ -322,6 +326,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         do_update: global___DoUpdate | None = ...,
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
+        deliver_stream_messages: global___DeliverStreamMessages | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -329,6 +334,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
+            "deliver_stream_messages",
+            b"deliver_stream_messages",
             "do_update",
             b"do_update",
             "fire_timer",
@@ -368,6 +375,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
+            "deliver_stream_messages",
+            b"deliver_stream_messages",
             "do_update",
             b"do_update",
             "fire_timer",
@@ -1439,6 +1448,63 @@ class ResolveNexusOperation(google.protobuf.message.Message):
     ) -> None: ...
 
 global___ResolveNexusOperation = ResolveNexusOperation
+
+class DeliverStreamMessages(google.protobuf.message.Message):
+    """Hand a workflow the next range of a stream it subscribed to.
+
+    The range is delivered once, on the task the server decided it belongs to,
+    and the offsets it covered are recorded in History rather than the payloads.
+    On replay the server re-supplies the same range by reading the stream again,
+    so this job appears at the same point with the same contents both times.
+
+    An empty range is still delivered: a task where the subscription saw nothing
+    is a fact replay has to reproduce, not an absence of one.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    FROM_OFFSET_FIELD_NUMBER: builtins.int
+    TO_OFFSET_FIELD_NUMBER: builtins.int
+    MESSAGES_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """Id of the stream this range came from."""
+    from_offset: builtins.int
+    """Inclusive."""
+    to_offset: builtins.int
+    """Exclusive. Equal to from_offset when the subscription saw nothing."""
+    @property
+    def messages(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamMessage
+    ]: ...
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        from_offset: builtins.int = ...,
+        to_offset: builtins.int = ...,
+        messages: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamMessage
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "from_offset",
+            b"from_offset",
+            "messages",
+            b"messages",
+            "stream_id",
+            b"stream_id",
+            "to_offset",
+            b"to_offset",
+        ],
+    ) -> None: ...
+
+global___DeliverStreamMessages = DeliverStreamMessages
 
 class RemoveFromCache(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

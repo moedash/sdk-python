@@ -95,6 +95,7 @@ from ._context import (
     upsert_search_attributes,
     uuid4,
     uuid7,
+    read_stream,
     wait_condition,
 )
 from ._definition import (
@@ -227,6 +228,7 @@ __all__ = [
     "upsert_search_attributes",
     "uuid4",
     "uuid7",
+    "read_stream",
     "wait_condition",
     "DynamicWorkflowConfig",
     "defn",

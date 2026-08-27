@@ -22,14 +22,14 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-from temporalio.api.stream.v1 import request_response_pb2 as temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2
+from temporalio.api.streamservice.v1 import request_response_pb2 as temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n&temporalio/api/stream/v1/service.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a/temporalio/api/stream/v1/request_response.proto2\xec\x0b\n\rStreamService\x12\x91\x01\n\x0c\x43reateStream\x12>.temporal.server.chasm.lib.stream.proto.v1.CreateStreamRequest\x1a?.temporal.server.chasm.lib.stream.proto.v1.CreateStreamResponse\"\x00\x12\x8e\x01\n\x0b\x41\x64\x64Messages\x12=.temporal.server.chasm.lib.stream.proto.v1.AddMessagesRequest\x1a>.temporal.server.chasm.lib.stream.proto.v1.AddMessagesResponse\"\x00\x12\x94\x01\n\rFinishWriting\x12?.temporal.server.chasm.lib.stream.proto.v1.FinishWritingRequest\x1a@.temporal.server.chasm.lib.stream.proto.v1.FinishWritingResponse\"\x00\x12\xa0\x01\n\x11SubscribeWorkflow\x12\x43.temporal.server.chasm.lib.stream.proto.v1.SubscribeWorkflowRequest\x1a\x44.temporal.server.chasm.lib.stream.proto.v1.SubscribeWorkflowResponse\"\x00\x12\x91\x01\n\x0cPollMessages\x12>.temporal.server.chasm.lib.stream.proto.v1.PollMessagesRequest\x1a?.temporal.server.chasm.lib.stream.proto.v1.PollMessagesResponse\"\x00\x12\x97\x01\n\x0e\x44\x65scribeStream\x12@.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamRequest\x1a\x41.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamResponse\"\x00\x12\x8e\x01\n\x0b\x43loseStream\x12=.temporal.server.chasm.lib.stream.proto.v1.CloseStreamRequest\x1a>.temporal.server.chasm.lib.stream.proto.v1.CloseStreamResponse\"\x00\x12\x97\x01\n\x0eTruncateStream\x12@.temporal.server.chasm.lib.stream.proto.v1.TruncateStreamRequest\x1a\x41.temporal.server.chasm.lib.stream.proto.v1.TruncateStreamResponse\"\x00\x12\x8e\x01\n\x0bListStreams\x12=.temporal.server.chasm.lib.stream.proto.v1.ListStreamsRequest\x1a>.temporal.server.chasm.lib.stream.proto.v1.ListStreamsResponse\"\x00\x12\x91\x01\n\x0c\x44\x65leteStream\x12>.temporal.server.chasm.lib.stream.proto.v1.DeleteStreamRequest\x1a?.temporal.server.chasm.lib.stream.proto.v1.DeleteStreamResponse\"\x00\x42>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'temporalio.api.stream.v1.service_pb2', _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'temporalio.api.streamservice.v1.service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampb'

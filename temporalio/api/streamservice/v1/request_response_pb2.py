@@ -22,8 +22,8 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-from temporalio.api.stream.v1 import message_pb2 as temporalio_dot_api_dot_stream_dot_v1_dot_message__pb2
-from temporalio.api.stream.v1 import stream_state_pb2 as temporalio_dot_api_dot_stream_dot_v1_dot_stream__state__pb2
+from temporalio.api.streamservice.v1 import message_pb2 as temporalio_dot_api_dot_streamservice_dot_v1_dot_message__pb2
+from temporalio.api.streamservice.v1 import stream_state_pb2 as temporalio_dot_api_dot_streamservice_dot_v1_dot_stream__state__pb2
 from temporalio.api.common.v1 import message_pb2 as temporalio_dot_api_dot_common_dot_v1_dot_message__pb2
 
 
@@ -31,7 +31,7 @@ DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n/temporalio/api/st
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'temporalio.api.stream.v1.request_response_pb2', _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'temporalio.api.streamservice.v1.request_response_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampb'

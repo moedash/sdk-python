@@ -30,7 +30,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 async def stream() -> AsyncIterator[StreamHandle]:
-    client = StreamClient.connect(TARGET or "", os.environ.get("TEMPORAL_NAMESPACE", "default"))
+    client = StreamClient.connect(
+        TARGET or "", os.environ.get("TEMPORAL_NAMESPACE", "default")
+    )
     try:
         yield await client.create("py-test-" + uuid.uuid4().hex[:8], max_items=1000)
     finally:

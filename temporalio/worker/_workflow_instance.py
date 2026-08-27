@@ -47,6 +47,7 @@ import temporalio.activity
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.api.sdk.v1
+import temporalio.api.stream.v1
 import temporalio.bridge.proto.activity_result
 import temporalio.bridge.proto.child_workflow
 import temporalio.bridge.proto.common
@@ -262,6 +263,46 @@ _Context: TypeAlias = dict[str, Any]
 _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], Any]
 
 
+class _StreamBuffer:
+    """Holds the stream ranges delivered to a workflow so far.
+
+    Delivery is driven by the server, not by whether workflow code happens to be
+    reading. A range arrives once, is recorded in History as consumed, and is
+    never sent again, so anything not yet read has to be kept here rather than
+    dropped.
+    """
+
+    def __init__(self) -> None:
+        self._messages: list[temporalio.api.stream.v1.StreamMessage] = []
+        self._waiters: list[asyncio.Future] = []
+
+    def extend(
+        self, messages: Sequence[temporalio.api.stream.v1.StreamMessage]
+    ) -> None:
+        # An empty range still counts as a delivery, but there is nothing to
+        # hand a reader, so only a non-empty one wakes anyone.
+        if not messages:
+            return
+        self._messages.extend(messages)
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def take(self) -> list[temporalio.api.stream.v1.StreamMessage]:
+        taken, self._messages = self._messages, []
+        return taken
+
+    def wait_future(self) -> asyncio.Future:
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self._waiters.append(fut)
+        return fut
+
+    def __len__(self) -> int:
+        return len(self._messages)
+
+
 class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     WorkflowInstance, temporalio.workflow._Runtime, asyncio.AbstractEventLoop
 ):
@@ -388,6 +429,11 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._buffered_signals: dict[
             str, list[temporalio.bridge.proto.workflow_activation.SignalWorkflow]
         ] = {}
+
+        # Stream ranges delivered to this workflow, keyed by stream id. Ranges
+        # arrive whether or not anything is reading yet, because the server has
+        # already recorded them as consumed and will not send them again.
+        self._stream_buffers: dict[str, _StreamBuffer] = {}
 
         # When we evict, we have to mark the workflow as deleting so we don't
         # add any commands and we swallow exceptions on tear down
@@ -604,6 +650,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     ) -> None:
         if job.HasField("cancel_workflow"):
             self._apply_cancel_workflow(job.cancel_workflow)
+        elif job.HasField("deliver_stream_messages"):
+            self._apply_deliver_stream_messages(job.deliver_stream_messages)
         elif job.HasField("do_update"):
             self._apply_do_update(job.do_update)
         elif job.HasField("fire_timer"):
@@ -1129,6 +1177,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         else:
             fut.set_result(None)
 
+    def _apply_deliver_stream_messages(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.DeliverStreamMessages,
+    ) -> None:
+        buffer = self._stream_buffers.get(job.stream_id)
+        if buffer is None:
+            # Nothing subscribed. The range is already recorded as consumed and
+            # will not be sent again, so buffering it is the only way a
+            # subscription made later in the same task still sees it.
+            buffer = _StreamBuffer()
+            self._stream_buffers[job.stream_id] = buffer
+        buffer.extend(job.messages)
+
     def _apply_signal_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.SignalWorkflow
     ) -> None:
@@ -1292,6 +1353,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
+
+    async def workflow_read_stream(
+        self, stream_id: str, max_messages: int
+    ) -> list[bytes]:
+        buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer())
+        while not len(buffer):
+            await buffer.wait_future()
+        taken = buffer.take()
+        if max_messages and len(taken) > max_messages:
+            # Put the tail back rather than dropping it: nothing will resend it.
+            buffer.extend(taken[max_messages:])
+            taken = taken[:max_messages]
+        return [m.body.data for m in taken]
 
     def workflow_get_current_history_length(self) -> int:
         return self._current_history_length

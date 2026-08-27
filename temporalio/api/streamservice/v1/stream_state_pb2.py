@@ -31,7 +31,7 @@ DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+temporalio/api/st
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'temporalio.api.stream.v1.stream_state_pb2', _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'temporalio.api.streamservice.v1.stream_state_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampb'

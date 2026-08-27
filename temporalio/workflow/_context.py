@@ -313,6 +313,11 @@ class _Runtime(ABC):
     ) -> temporalio.common.WorkerDeploymentVersion | None: ...
 
     @abstractmethod
+    async def workflow_read_stream(
+        self, stream_id: str, max_messages: int
+    ) -> list[bytes]: ...
+
+    @abstractmethod
     def workflow_get_current_history_length(self) -> int: ...
 
     @abstractmethod
@@ -943,6 +948,28 @@ async def sleep(duration: float | timedelta, *, summary: str | None = None) -> N
         ),
         summary=summary,
     )
+
+
+async def read_stream(stream_id: str, *, max_messages: int = 0) -> list[bytes]:
+    """Read the next messages of a stream this workflow consumes.
+
+    Waits until at least one message is available. Ranges arrive on Workflow
+    Tasks, and only the offsets they covered are written to History, so this is
+    deterministic on replay: the server re-supplies the same ranges by reading
+    the stream again.
+
+    Subscribe out of band with the stream client. This only reads what has
+    already been delivered to this workflow.
+
+    Args:
+        stream_id: Stream to read from.
+        max_messages: Most messages to return at once, or 0 for everything
+            available.
+
+    Returns:
+        The message bodies, in stream order.
+    """
+    return await _Runtime.current().workflow_read_stream(stream_id, max_messages)
 
 
 async def wait_condition(
