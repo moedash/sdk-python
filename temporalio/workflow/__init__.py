@@ -96,6 +96,7 @@ from ._context import (
     uuid4,
     uuid7,
     read_stream,
+    subscribe_stream,
     wait_condition,
 )
 from ._definition import (
@@ -229,6 +230,7 @@ __all__ = [
     "uuid4",
     "uuid7",
     "read_stream",
+    "subscribe_stream",
     "wait_condition",
     "DynamicWorkflowConfig",
     "defn",

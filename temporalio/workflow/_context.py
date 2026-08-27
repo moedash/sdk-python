@@ -313,6 +313,9 @@ class _Runtime(ABC):
     ) -> temporalio.common.WorkerDeploymentVersion | None: ...
 
     @abstractmethod
+    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None: ...
+
+    @abstractmethod
     async def workflow_read_stream(
         self, stream_id: str, max_messages: int
     ) -> list[bytes]: ...
@@ -948,6 +951,28 @@ async def sleep(duration: float | timedelta, *, summary: str | None = None) -> N
         ),
         summary=summary,
     )
+
+
+def subscribe_stream(stream_id: str, *, start_offset: int = 0) -> None:
+    """Subscribe this workflow to a stream.
+
+    From here on its Workflow Tasks carry the ranges it has not consumed yet,
+    and :func:`read_stream` returns them. Safe to call again: the server treats
+    a second subscription to the same stream as a no-op, which is what makes
+    calling it on every replay harmless.
+
+    Only the stream id and start offset go to the server. The rest of the
+    stream's addressing is resolved there, because a workflow cannot look it up
+    without doing I/O and a value it carried would be a reading rather than a
+    fact.
+
+    Args:
+        stream_id: Stream to consume.
+        start_offset: Where to start. Negative means from wherever the stream is
+            when the subscription is registered; the server resolves that once
+            and records it, so replay does not resolve it again.
+    """
+    _Runtime.current().workflow_subscribe_stream(stream_id, start_offset)
 
 
 async def read_stream(stream_id: str, *, max_messages: int = 0) -> list[bytes]:

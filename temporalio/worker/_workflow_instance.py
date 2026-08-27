@@ -1354,6 +1354,15 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
 
+    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None:
+        # Reissued on every replay, so the buffer has to exist before the first
+        # range arrives and the command has to be harmless the second time. The
+        # server treats a repeat subscription to the same stream as a no-op.
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer())
+        command = self._add_command()
+        command.subscribe_stream.stream_id = stream_id
+        command.subscribe_stream.start_offset = start_offset
+
     async def workflow_read_stream(
         self, stream_id: str, max_messages: int
     ) -> list[bytes]:
