@@ -14,9 +14,9 @@ change before this is a real feature:
 - **The protos are vendored** under ``temporalio.api.streamservice.v1`` instead of
   coming from the api submodule, because the service is still defined in the
   server. That is why the wire names read as server-internal.
-- **Producing and consuming from outside a Workflow only.** Consuming inside
-  Workflow code needs the slice to arrive on the Workflow Task, which is
-  delivered through sdk-core and is not wired up.
+- **This client is for use outside a Workflow.** Workflow code publishes and
+  consumes with ``workflow.add_stream_messages`` and ``workflow.read_stream``
+  instead.
 - **No TLS or API-key support**, for the same reason: the channel is built
   here rather than by the machinery that normally handles that.
 """
@@ -24,7 +24,7 @@ change before this is a real feature:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional, Sequence
+from typing import Any, AsyncIterator, Optional, Sequence
 
 import google.protobuf.duration_pb2
 
@@ -52,7 +52,7 @@ class Message:
 class StreamClient:
     """Creates and opens streams on a namespace."""
 
-    def __init__(self, channel, namespace: str) -> None:
+    def __init__(self, channel: Any, namespace: str) -> None:
         """Wrap an existing ``grpc.aio`` channel. Prefer :meth:`connect`."""
         self._channel = channel
         self._namespace = namespace
@@ -123,7 +123,10 @@ class StreamClient:
 class StreamHandle:
     """A handle to one stream."""
 
-    def __init__(self, stub, namespace: str, stream_id: str, run_id: str = "") -> None:
+    def __init__(
+        self, stub: Any, namespace: str, stream_id: str, run_id: str = ""
+    ) -> None:
+        """Prefer :meth:`StreamClient.get` or :meth:`StreamClient.create`."""
         self._stub = stub
         self._namespace = namespace
         self._id = stream_id
@@ -133,6 +136,7 @@ class StreamHandle:
 
     @property
     def id(self) -> str:
+        """Id of the stream this handle points at."""
         return self._id
 
     async def append(
@@ -157,7 +161,9 @@ class StreamHandle:
                     run_id=self._run_id,
                     messages=[
                         stream.StreamMessage(
-                            body=temporalio.api.common.v1.Payload(data=m),
+                            body=temporalio.api.common.v1.Payload(
+                                data=m, metadata={"encoding": b"binary/plain"}
+                            ),
                             topic=topic,
                             kind=stream.STREAM_MESSAGE_KIND_DATA,
                         )
@@ -260,6 +266,7 @@ class StreamHandle:
         )
 
     async def describe(self) -> stream.StreamState:
+        """Read the stream's current frontier, floor and closed state."""
         response = await self._stub.DescribeStream(
             stream.DescribeStreamRequest(
                 frontend_request=stream.DescribeStreamInput(

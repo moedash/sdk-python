@@ -263,6 +263,12 @@ _Context: TypeAlias = dict[str, Any]
 _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], Any]
 
 
+# Matches the server's per-batch limit. Rejecting here turns a wedged workflow,
+# which would replay and re-issue the same rejected command forever, into an
+# error the workflow author can see.
+_MAX_STREAM_MESSAGES_PER_BATCH = 1000
+
+
 class _StreamBuffer:
     """Holds the stream ranges delivered to a workflow so far.
 
@@ -1366,6 +1372,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def workflow_add_stream_messages(
         self, stream_id: str, messages: Sequence[bytes], topic: str
     ) -> None:
+        if not messages:
+            raise ValueError("add_stream_messages needs at least one message")
+        if len(messages) > _MAX_STREAM_MESSAGES_PER_BATCH:
+            raise ValueError(
+                f"a batch is limited to {_MAX_STREAM_MESSAGES_PER_BATCH} messages, "
+                f"got {len(messages)}"
+            )
         command = self._add_command()
         command.add_stream_messages.stream_id = stream_id
         for body in messages:
@@ -1373,11 +1386,18 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             # this produces stays the same size whatever is published here.
             message = command.add_stream_messages.messages.add()
             message.body.data = body
+            # Every other Temporal payload names its encoding, and the UI, the
+            # CLI and any codec server rely on that to decode what they read.
+            message.body.metadata["encoding"] = b"binary/plain"
             message.topic = topic
 
     async def workflow_read_stream(
         self, stream_id: str, max_messages: int
     ) -> list[bytes]:
+        # Ranges arrive on Workflow Tasks, and a query activation carries none,
+        # so without this the read waits on a future nothing can resolve and the
+        # query times out with nothing to say why.
+        self._assert_not_read_only("read stream")
         buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer())
         while not len(buffer):
             await buffer.wait_future()

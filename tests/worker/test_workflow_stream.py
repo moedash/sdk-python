@@ -14,7 +14,10 @@ import pytest
 
 import temporalio.api.common.v1
 import temporalio.api.stream.v1 as api_stream
-from temporalio.worker._workflow_instance import _StreamBuffer
+from temporalio.worker._workflow_instance import (
+    _StreamBuffer,
+    _WorkflowInstanceImpl,
+)
 
 
 def message(body: bytes) -> api_stream.StreamMessage:
@@ -64,16 +67,47 @@ async def test_buffer_keeps_data_delivered_before_anyone_reads() -> None:
     assert [m.body.data for m in buffer.take()] == [b"early"]
 
 
+class _ReadOnlyStub:
+    """Enough of the workflow instance to drive the real read.
+
+    The cap lives inside ``workflow_read_stream``, so a test that reimplements
+    it proves nothing about the code that ships.
+    """
+
+    def __init__(self) -> None:
+        self._stream_buffers: dict[str, _StreamBuffer] = {}
+        self.read_only_calls: list[str] = []
+
+    def _assert_not_read_only(self, action: str) -> None:
+        self.read_only_calls.append(action)
+
+
 @pytest.mark.parametrize("max_messages", [1, 2, 5])
-async def test_take_respects_a_cap_without_losing_the_tail(max_messages: int) -> None:
-    buffer = _StreamBuffer()
+async def test_read_respects_a_cap_without_losing_the_tail(max_messages: int) -> None:
+    stub = _ReadOnlyStub()
     bodies = [b"a", b"b", b"c"]
-    buffer.extend([message(b) for b in bodies])
+    stub._stream_buffers["s"] = _StreamBuffer()
+    stub._stream_buffers["s"].extend([message(b) for b in bodies])
 
-    taken = buffer.take()
-    kept = taken[:max_messages]
-    # Whatever a cap leaves behind has to go back: nothing will resend it.
-    buffer.extend(taken[max_messages:])
+    got = await _WorkflowInstanceImpl.workflow_read_stream(stub, "s", max_messages)
 
-    assert [m.body.data for m in kept] == bodies[:max_messages]
-    assert len(buffer) == max(0, len(bodies) - max_messages)
+    assert got == bodies[:max_messages]
+    # Whatever the cap left behind has to still be there: nothing resends it.
+    assert len(stub._stream_buffers["s"]) == max(0, len(bodies) - max_messages)
+
+    if len(stub._stream_buffers["s"]):
+        rest = await _WorkflowInstanceImpl.workflow_read_stream(stub, "s", 0)
+        assert got + rest == bodies
+    else:
+        assert got == bodies
+
+
+# A query activation carries no ranges, so a read there would wait on a future
+# nothing can resolve and the query would time out saying nothing.
+async def test_read_is_refused_in_a_read_only_context() -> None:
+    stub = _ReadOnlyStub()
+    stub._stream_buffers["s"] = _StreamBuffer()
+    stub._stream_buffers["s"].extend([message(b"a")])
+
+    await _WorkflowInstanceImpl.workflow_read_stream(stub, "s", 0)
+    assert stub.read_only_calls == ["read stream"]

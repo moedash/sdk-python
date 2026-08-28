@@ -236,6 +236,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     DO_UPDATE_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    DELIVER_STREAM_MESSAGES_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -430,6 +431,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "do_update",
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
+            "deliver_stream_messages",
             "remove_from_cache",
         ]
         | None
