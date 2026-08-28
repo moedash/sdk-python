@@ -1363,6 +1363,18 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         command.subscribe_stream.stream_id = stream_id
         command.subscribe_stream.start_offset = start_offset
 
+    def workflow_add_stream_messages(
+        self, stream_id: str, messages: Sequence[bytes], topic: str
+    ) -> None:
+        command = self._add_command()
+        command.add_stream_messages.stream_id = stream_id
+        for body in messages:
+            # The bodies ride the command and never enter History, so the event
+            # this produces stays the same size whatever is published here.
+            message = command.add_stream_messages.messages.add()
+            message.body.data = body
+            message.topic = topic
+
     async def workflow_read_stream(
         self, stream_id: str, max_messages: int
     ) -> list[bytes]:

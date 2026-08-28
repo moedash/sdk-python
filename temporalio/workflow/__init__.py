@@ -96,6 +96,7 @@ from ._context import (
     uuid4,
     uuid7,
     read_stream,
+    add_stream_messages,
     subscribe_stream,
     wait_condition,
 )
@@ -230,6 +231,7 @@ __all__ = [
     "uuid4",
     "uuid7",
     "read_stream",
+    "add_stream_messages",
     "subscribe_stream",
     "wait_condition",
     "DynamicWorkflowConfig",
