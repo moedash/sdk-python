@@ -32,6 +32,7 @@ from temporalio.client_stream import StreamClient, WorkflowStreamHandle
 from temporalio.converter import DataConverter, PayloadConverter
 
 __all__ = [
+    "RawPage",
     "TopicHandle",
     "WorkflowStream",
     "WorkflowStreamClient",
@@ -42,6 +43,19 @@ __all__ = [
 T = TypeVar("T")
 
 DEFAULT_BATCH_INTERVAL = timedelta(milliseconds=50)
+
+
+@dataclass
+class RawPage:
+    """One read whose items are still encoded.
+
+    ``closed`` with ``next_offset >= head_offset`` is the end of the stream.
+    """
+
+    items: list["WorkflowStreamItem[bytes]"]
+    next_offset: int
+    head_offset: int
+    closed: bool
 
 
 @dataclass
@@ -281,6 +295,31 @@ class WorkflowStreamClient:
                 data=_decode(self._converter, message.data, result_type),
                 offset=message.offset,
             )
+
+    async def poll_raw(
+        self,
+        *,
+        topics: Sequence[str] = (),
+        from_offset: int = 0,
+        wait: bool = True,
+    ) -> "RawPage":
+        """One read, with the bodies left as they were stored.
+
+        For a caller that forwards items on rather than using them. A gateway
+        would only have to encode again what this decoded.
+        """
+        page = await self._handle.poll(
+            from_offset=from_offset, topics=topics, wait=wait
+        )
+        return RawPage(
+            items=[
+                WorkflowStreamItem(topic=m.topic, data=m.data, offset=m.offset)
+                for m in page.messages
+            ],
+            next_offset=page.next_offset,
+            head_offset=page.head_offset,
+            closed=page.closed,
+        )
 
     async def flush(self) -> None:
         """Append everything buffered as one batch."""

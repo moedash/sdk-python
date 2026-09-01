@@ -5,7 +5,7 @@ import warnings
 
 from temporalio.api.streamservice.v1 import request_response_pb2 as temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2
 
-GRPC_GENERATED_VERSION = '1.83.1'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class StreamServiceStub:
+class StreamServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -101,7 +101,7 @@ class StreamServiceStub:
                 _registered_method=True)
 
 
-class StreamServiceServicer:
+class StreamServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def CreateStream(self, request, context):
@@ -261,7 +261,7 @@ def add_StreamServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class StreamService:
+class StreamService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod

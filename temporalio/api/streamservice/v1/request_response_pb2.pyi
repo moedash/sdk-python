@@ -45,7 +45,7 @@ class AddMessagesInput(_message.Message):
     expected_offset: int
     use_expected_offset: bool
     owner_epoch: int
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., run_id: _Optional[str] = ..., messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., producer_id: _Optional[str] = ..., sequence: _Optional[int] = ..., expected_offset: _Optional[int] = ..., use_expected_offset: _Optional[bool] = ..., owner_epoch: _Optional[int] = ...) -> None: ...
+    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., run_id: _Optional[str] = ..., messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., producer_id: _Optional[str] = ..., sequence: _Optional[int] = ..., expected_offset: _Optional[int] = ..., use_expected_offset: bool = ..., owner_epoch: _Optional[int] = ...) -> None: ...
 
 class AddMessagesOutput(_message.Message):
     __slots__ = ("first_offset", "next_offset", "count", "deduplicated")
@@ -57,7 +57,7 @@ class AddMessagesOutput(_message.Message):
     next_offset: int
     count: int
     deduplicated: bool
-    def __init__(self, first_offset: _Optional[int] = ..., next_offset: _Optional[int] = ..., count: _Optional[int] = ..., deduplicated: _Optional[bool] = ...) -> None: ...
+    def __init__(self, first_offset: _Optional[int] = ..., next_offset: _Optional[int] = ..., count: _Optional[int] = ..., deduplicated: bool = ...) -> None: ...
 
 class FinishWritingInput(_message.Message):
     __slots__ = ("namespace", "stream_id", "producer_id")
@@ -109,7 +109,7 @@ class PollMessagesInput(_message.Message):
     max_messages: int
     topics: _containers.RepeatedScalarFieldContainer[str]
     wait_new_messages: bool
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., run_id: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: _Optional[bool] = ...) -> None: ...
+    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., run_id: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: bool = ...) -> None: ...
 
 class PollMessagesOutput(_message.Message):
     __slots__ = ("messages", "next_offset", "head_offset", "closed", "close_reason")
@@ -123,7 +123,7 @@ class PollMessagesOutput(_message.Message):
     head_offset: int
     closed: bool
     close_reason: _message_pb2_1.Payload
-    def __init__(self, messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., next_offset: _Optional[int] = ..., head_offset: _Optional[int] = ..., closed: _Optional[bool] = ..., close_reason: _Optional[_Union[_message_pb2_1.Payload, _Mapping]] = ...) -> None: ...
+    def __init__(self, messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., next_offset: _Optional[int] = ..., head_offset: _Optional[int] = ..., closed: bool = ..., close_reason: _Optional[_Union[_message_pb2_1.Payload, _Mapping]] = ...) -> None: ...
 
 class DescribeStreamInput(_message.Message):
     __slots__ = ("namespace", "stream_id")
@@ -149,7 +149,7 @@ class PollWorkflowMessagesInput(_message.Message):
     max_messages: int
     topics: _containers.RepeatedScalarFieldContainer[str]
     wait_new_messages: bool
-    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: _Optional[bool] = ...) -> None: ...
+    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: bool = ...) -> None: ...
 
 class DescribeWorkflowStreamInput(_message.Message):
     __slots__ = ("namespace", "workflow_id", "stream_name")

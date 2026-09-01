@@ -32,7 +32,7 @@ import temporalio.api.common.v1
 import temporalio.api.streamservice.v1 as stream
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 
-__all__ = ["Message", "StreamClient", "StreamHandle", "WorkflowStreamHandle"]
+__all__ = ["Message", "Page", "StreamClient", "StreamHandle", "WorkflowStreamHandle"]
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,20 @@ class Message:
     A topic filter leaves gaps, so a reader that resumes between messages has
     to take this rather than count what it received.
     """
+
+
+@dataclass(frozen=True)
+class Page:
+    """One read of a stream.
+
+    ``closed`` with ``next_offset >= head_offset`` is the end: nothing more can
+    be added and this reader has everything.
+    """
+
+    messages: list[Message]
+    next_offset: int
+    head_offset: int
+    closed: bool
 
 
 class StreamClient:
@@ -400,33 +414,48 @@ class WorkflowStreamHandle:
         """Yield messages as they arrive, as :meth:`StreamHandle.follow`."""
         offset = from_offset
         while True:
-            messages, offset, closed, head = await self._poll(offset, topics)
-            for msg in messages:
+            page = await self.poll(from_offset=offset, topics=topics)
+            for msg in page.messages:
                 yield msg
-            if closed and offset >= head:
+            offset = page.next_offset
+            if page.closed and offset >= page.head_offset:
                 return
 
-    async def _poll(
-        self, offset: int, topics: Sequence[str]
-    ) -> tuple[list[Message], int, bool, int]:
+    async def poll(
+        self,
+        *,
+        from_offset: int = 0,
+        topics: Sequence[str] = (),
+        max_messages: int = 0,
+        wait: bool = True,
+    ) -> "Page":
+        """One read, with everything the caller needs to decide what to do next.
+
+        :meth:`read` is the same call without the frontier and the closed flag.
+        A caller that has to tell "nothing yet" from "nothing ever" needs both.
+        """
         response = await self._stub.PollWorkflowMessages(
             stream.PollWorkflowMessagesRequest(
                 frontend_request=stream.PollWorkflowMessagesInput(
                     namespace=self._namespace,
                     workflow_id=self._workflow_id,
                     stream_name=self._name,
-                    from_offset=offset,
+                    from_offset=from_offset,
+                    max_messages=max_messages,
                     topics=list(topics),
-                    wait_new_messages=True,
+                    wait_new_messages=wait,
                 )
             )
         )
         out = response.frontend_response
-        return (
-            [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages],
-            out.next_offset,
-            out.closed,
-            out.head_offset,
+        return Page(
+            messages=[
+                Message(data=m.body.data, topic=m.topic, offset=m.offset)
+                for m in out.messages
+            ],
+            next_offset=out.next_offset,
+            head_offset=out.head_offset,
+            closed=out.closed,
         )
 
     async def describe(self) -> stream.StreamState:

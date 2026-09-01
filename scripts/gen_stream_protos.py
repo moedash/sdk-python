@@ -6,6 +6,11 @@ server-side definitions change:
 
     uv run python scripts/gen_stream_protos.py /path/to/temporal
 
+Run it with an interpreter whose ``grpcio-tools`` matches the oldest protobuf
+runtime this package has to load on. Generated code refuses to load on a
+runtime older than the one it was built against, and these modules end up in
+applications that pin protobuf themselves.
+
 Two rewrites make the copies compile against this SDK. The server's own
 routing and API-category options are dropped, because they mean nothing to a
 client and their proto files are not vendored. Paths move under

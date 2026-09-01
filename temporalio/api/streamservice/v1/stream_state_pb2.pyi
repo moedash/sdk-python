@@ -53,7 +53,7 @@ class StreamState(_message.Message):
     lifecycle: StreamLifecycle
     redirect_run_id: str
     close_time: _timestamp_pb2.Timestamp
-    def __init__(self, head_offset: _Optional[int] = ..., base_offset: _Optional[int] = ..., last_txn_id: _Optional[int] = ..., closed: _Optional[bool] = ..., close_reason: _Optional[_Union[_message_pb2.Payload, _Mapping]] = ..., owner_epoch: _Optional[int] = ..., bucket_size: _Optional[int] = ..., collection_id: _Optional[str] = ..., producers: _Optional[_Mapping[str, ProducerCursor]] = ..., consumers: _Optional[_Mapping[str, ConsumerCursor]] = ..., lifecycle: _Optional[_Union[StreamLifecycle, _Mapping]] = ..., redirect_run_id: _Optional[str] = ..., close_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, head_offset: _Optional[int] = ..., base_offset: _Optional[int] = ..., last_txn_id: _Optional[int] = ..., closed: bool = ..., close_reason: _Optional[_Union[_message_pb2.Payload, _Mapping]] = ..., owner_epoch: _Optional[int] = ..., bucket_size: _Optional[int] = ..., collection_id: _Optional[str] = ..., producers: _Optional[_Mapping[str, ProducerCursor]] = ..., consumers: _Optional[_Mapping[str, ConsumerCursor]] = ..., lifecycle: _Optional[_Union[StreamLifecycle, _Mapping]] = ..., redirect_run_id: _Optional[str] = ..., close_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class ProducerCursor(_message.Message):
     __slots__ = ("seq", "first_offset", "count", "content_hash", "fenced")
@@ -67,7 +67,7 @@ class ProducerCursor(_message.Message):
     count: int
     content_hash: bytes
     fenced: bool
-    def __init__(self, seq: _Optional[int] = ..., first_offset: _Optional[int] = ..., count: _Optional[int] = ..., content_hash: _Optional[bytes] = ..., fenced: _Optional[bool] = ...) -> None: ...
+    def __init__(self, seq: _Optional[int] = ..., first_offset: _Optional[int] = ..., count: _Optional[int] = ..., content_hash: _Optional[bytes] = ..., fenced: bool = ...) -> None: ...
 
 class ConsumerCursor(_message.Message):
     __slots__ = ("workflow_id", "run_id", "offset", "active", "external")
@@ -81,7 +81,7 @@ class ConsumerCursor(_message.Message):
     offset: int
     active: bool
     external: bool
-    def __init__(self, workflow_id: _Optional[str] = ..., run_id: _Optional[str] = ..., offset: _Optional[int] = ..., active: _Optional[bool] = ..., external: _Optional[bool] = ...) -> None: ...
+    def __init__(self, workflow_id: _Optional[str] = ..., run_id: _Optional[str] = ..., offset: _Optional[int] = ..., active: bool = ..., external: bool = ...) -> None: ...
 
 class WorkflowStreamCursor(_message.Message):
     __slots__ = ("stream_id", "collection_id", "bucket_size", "offset", "known_head", "external", "pending_from", "pending_to", "has_pending")
@@ -103,7 +103,7 @@ class WorkflowStreamCursor(_message.Message):
     pending_from: int
     pending_to: int
     has_pending: bool
-    def __init__(self, stream_id: _Optional[str] = ..., collection_id: _Optional[str] = ..., bucket_size: _Optional[int] = ..., offset: _Optional[int] = ..., known_head: _Optional[int] = ..., external: _Optional[bool] = ..., pending_from: _Optional[int] = ..., pending_to: _Optional[int] = ..., has_pending: _Optional[bool] = ...) -> None: ...
+    def __init__(self, stream_id: _Optional[str] = ..., collection_id: _Optional[str] = ..., bucket_size: _Optional[int] = ..., offset: _Optional[int] = ..., known_head: _Optional[int] = ..., external: bool = ..., pending_from: _Optional[int] = ..., pending_to: _Optional[int] = ..., has_pending: bool = ...) -> None: ...
 
 class StreamLifecycle(_message.Message):
     __slots__ = ("retention", "max_items")
