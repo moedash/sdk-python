@@ -32,7 +32,7 @@ import temporalio.api.common.v1
 import temporalio.api.streamservice.v1 as stream
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 
-__all__ = ["Message", "StreamClient", "StreamHandle"]
+__all__ = ["Message", "StreamClient", "StreamHandle", "WorkflowStreamHandle"]
 
 
 @dataclass(frozen=True)
@@ -118,6 +118,23 @@ class StreamClient:
     def get(self, stream_id: str) -> "StreamHandle":
         """Open an existing stream without a round trip."""
         return StreamHandle(self._stub, self._namespace, stream_id)
+
+    def workflow_stream(
+        self, workflow_id: str, name: str = ""
+    ) -> "WorkflowStreamHandle":
+        """Open a stream a workflow publishes to.
+
+        A stream a workflow owns lives inside that workflow's execution and has
+        no id of its own, so it is named by its owner and its name. An empty
+        name is the workflow's default output stream, which is what
+        ``workflow.add_stream_messages`` writes to when it is given none.
+
+        The stream is created by the workflow's first publish. Reading one that
+        does not exist yet is not an error: it reads as empty and a
+        :meth:`WorkflowStreamHandle.follow` parked on it wakes when the
+        workflow publishes.
+        """
+        return WorkflowStreamHandle(self._stub, self._namespace, workflow_id, name)
 
 
 class StreamHandle:
@@ -271,6 +288,153 @@ class StreamHandle:
             stream.DescribeStreamRequest(
                 frontend_request=stream.DescribeStreamInput(
                     namespace=self._namespace, stream_id=self._id
+                )
+            )
+        )
+        return response.frontend_response.state
+
+
+class WorkflowStreamHandle:
+    """A handle to a stream a workflow publishes to.
+
+    The workflow writes to it from inside its Workflow Task, which costs it no
+    transition of its own. Anything else writes through :meth:`append`, which
+    costs one transition on the owning execution per batch. Both land in the
+    same log in the order the server accepted them.
+    """
+
+    def __init__(
+        self, stub: Any, namespace: str, workflow_id: str, name: str = ""
+    ) -> None:
+        """Prefer :meth:`StreamClient.workflow_stream`."""
+        self._stub = stub
+        self._namespace = namespace
+        self._workflow_id = workflow_id
+        self._name = name
+
+    @property
+    def workflow_id(self) -> str:
+        """Id of the workflow that owns this stream."""
+        return self._workflow_id
+
+    @property
+    def name(self) -> str:
+        """Name the owner publishes under, empty for its default stream."""
+        return self._name
+
+    async def append(
+        self,
+        *messages: bytes,
+        topic: str = "",
+        producer_id: str = "",
+        sequence: int = 0,
+    ) -> int:
+        """Append from outside the workflow, as :meth:`StreamHandle.append`.
+
+        Batch where you can. The append costs one transition on the owning
+        execution whatever its size, so a batch of a hundred costs what a batch
+        of one does.
+        """
+        response = await self._stub.AddWorkflowMessages(
+            stream.AddWorkflowMessagesRequest(
+                frontend_request=stream.AddWorkflowMessagesInput(
+                    namespace=self._namespace,
+                    workflow_id=self._workflow_id,
+                    stream_name=self._name,
+                    messages=[
+                        stream.StreamMessage(
+                            body=temporalio.api.common.v1.Payload(
+                                data=m, metadata={"encoding": b"binary/plain"}
+                            ),
+                            topic=topic,
+                            kind=stream.STREAM_MESSAGE_KIND_DATA,
+                        )
+                        for m in messages
+                    ],
+                    producer_id=producer_id,
+                    sequence=sequence,
+                )
+            )
+        )
+        return response.frontend_response.first_offset
+
+    async def read(
+        self,
+        *,
+        from_offset: int = 0,
+        max_messages: int = 0,
+        topics: Sequence[str] = (),
+        wait: bool = False,
+    ) -> tuple[list[Message], int]:
+        """Read once from ``from_offset``, as :meth:`StreamHandle.read`."""
+        response = await self._stub.PollWorkflowMessages(
+            stream.PollWorkflowMessagesRequest(
+                frontend_request=stream.PollWorkflowMessagesInput(
+                    namespace=self._namespace,
+                    workflow_id=self._workflow_id,
+                    stream_name=self._name,
+                    from_offset=from_offset,
+                    max_messages=max_messages,
+                    topics=list(topics),
+                    wait_new_messages=wait,
+                )
+            )
+        )
+        out = response.frontend_response
+        return [Message(data=m.body.data, topic=m.topic) for m in out.messages], (
+            out.next_offset
+        )
+
+    async def follow(
+        self,
+        *,
+        from_offset: int = 0,
+        topics: Sequence[str] = (),
+    ) -> AsyncIterator[Message]:
+        """Yield messages as they arrive, as :meth:`StreamHandle.follow`."""
+        offset = from_offset
+        while True:
+            messages, offset, closed, head = await self._poll(offset, topics)
+            for msg in messages:
+                yield msg
+            if closed and offset >= head:
+                return
+
+    async def _poll(
+        self, offset: int, topics: Sequence[str]
+    ) -> tuple[list[Message], int, bool, int]:
+        response = await self._stub.PollWorkflowMessages(
+            stream.PollWorkflowMessagesRequest(
+                frontend_request=stream.PollWorkflowMessagesInput(
+                    namespace=self._namespace,
+                    workflow_id=self._workflow_id,
+                    stream_name=self._name,
+                    from_offset=offset,
+                    topics=list(topics),
+                    wait_new_messages=True,
+                )
+            )
+        )
+        out = response.frontend_response
+        return (
+            [Message(data=m.body.data, topic=m.topic) for m in out.messages],
+            out.next_offset,
+            out.closed,
+            out.head_offset,
+        )
+
+    async def describe(self) -> stream.StreamState:
+        """Read the stream's current frontier, floor and closed state.
+
+        A reader that wants only what comes next starts from the head this
+        reports rather than from zero.
+        """
+        response = await self._stub.DescribeWorkflowStream(
+            stream.DescribeWorkflowStreamRequest(
+                frontend_request=stream.DescribeWorkflowStreamInput(
+                    namespace=self._namespace,
+                    workflow_id=self._workflow_id,
+                    stream_name=self._name,
                 )
             )
         )

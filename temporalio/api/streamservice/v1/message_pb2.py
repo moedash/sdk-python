@@ -22,7 +22,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-from temporalio.api.common.v1 import message_pb2 as temporalio_dot_api_dot_common_dot_v1_dot_message__pb2
+from temporalio.api.common.v1 import message_pb2 as temporal_dot_api_dot_common_dot_v1_dot_message__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n&temporalio/api/stream/v1/message.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a$temporal/api/common/v1/message.proto\"\xdd\x02\n\rStreamMessage\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12X\n\x08metadata\x18\x02 \x03(\x0b\x32\x46.temporal.server.chasm.lib.stream.proto.v1.StreamMessage.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x16\n\x0etopic_sequence\x18\x04 \x01(\x03\x12J\n\x04kind\x18\x05 \x01(\x0e\x32<.temporal.server.chasm.lib.stream.proto.v1.StreamMessageKind\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\"`\n\x12StreamMessageBatch\x12J\n\x08messages\x18\x01 \x03(\x0b\x32\x38.temporal.server.chasm.lib.stream.proto.v1.StreamMessage*u\n\x11StreamMessageKind\x12#\n\x1fSTREAM_MESSAGE_KIND_UNSPECIFIED\x10\x00\x12\x1c\n\x18STREAM_MESSAGE_KIND_DATA\x10\x01\x12\x1d\n\x19STREAM_MESSAGE_KIND_FLUSH\x10\x02\x42>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3')

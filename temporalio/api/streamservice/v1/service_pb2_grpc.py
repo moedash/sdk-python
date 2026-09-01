@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from temporalio.api.streamservice.v1 import request_response_pb2 as temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2
+from temporalio.api.streamservice.v1 import request_response_pb2 as temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2
 
-GRPC_GENERATED_VERSION = '1.83.0'
+GRPC_GENERATED_VERSION = '1.83.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -36,53 +36,68 @@ class StreamServiceStub:
         """
         self.CreateStream = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/CreateStream',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CreateStreamRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CreateStreamResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CreateStreamRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CreateStreamResponse.FromString,
                 _registered_method=True)
         self.AddMessages = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/AddMessages',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.AddMessagesRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.AddMessagesResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddMessagesRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddMessagesResponse.FromString,
                 _registered_method=True)
         self.FinishWriting = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/FinishWriting',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.FinishWritingRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.FinishWritingResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.FinishWritingRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.FinishWritingResponse.FromString,
                 _registered_method=True)
         self.SubscribeWorkflow = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/SubscribeWorkflow',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.SubscribeWorkflowRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.SubscribeWorkflowResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.SubscribeWorkflowRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.SubscribeWorkflowResponse.FromString,
                 _registered_method=True)
         self.PollMessages = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/PollMessages',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.PollMessagesRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.PollMessagesResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollMessagesRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollMessagesResponse.FromString,
                 _registered_method=True)
         self.DescribeStream = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/DescribeStream',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DescribeStreamRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DescribeStreamResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeStreamRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeStreamResponse.FromString,
+                _registered_method=True)
+        self.PollWorkflowMessages = channel.unary_unary(
+                '/temporal.server.chasm.lib.stream.proto.v1.StreamService/PollWorkflowMessages',
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollWorkflowMessagesRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollWorkflowMessagesResponse.FromString,
+                _registered_method=True)
+        self.DescribeWorkflowStream = channel.unary_unary(
+                '/temporal.server.chasm.lib.stream.proto.v1.StreamService/DescribeWorkflowStream',
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeWorkflowStreamRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeWorkflowStreamResponse.FromString,
+                _registered_method=True)
+        self.AddWorkflowMessages = channel.unary_unary(
+                '/temporal.server.chasm.lib.stream.proto.v1.StreamService/AddWorkflowMessages',
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddWorkflowMessagesRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddWorkflowMessagesResponse.FromString,
                 _registered_method=True)
         self.CloseStream = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/CloseStream',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CloseStreamRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CloseStreamResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CloseStreamRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CloseStreamResponse.FromString,
                 _registered_method=True)
         self.TruncateStream = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/TruncateStream',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.TruncateStreamRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.TruncateStreamResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.TruncateStreamRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.TruncateStreamResponse.FromString,
                 _registered_method=True)
         self.ListStreams = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/ListStreams',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.ListStreamsRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.ListStreamsResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.ListStreamsRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.ListStreamsResponse.FromString,
                 _registered_method=True)
         self.DeleteStream = channel.unary_unary(
                 '/temporal.server.chasm.lib.stream.proto.v1.StreamService/DeleteStream',
-                request_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DeleteStreamRequest.SerializeToString,
-                response_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DeleteStreamResponse.FromString,
+                request_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DeleteStreamRequest.SerializeToString,
+                response_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DeleteStreamResponse.FromString,
                 _registered_method=True)
 
 
@@ -125,6 +140,25 @@ class StreamServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PollWorkflowMessages(self, request, context):
+        """Routed on the owner, because the stream it reads has no id of its own.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DescribeWorkflowStream(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AddWorkflowMessages(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CloseStream(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -156,53 +190,68 @@ def add_StreamServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'CreateStream': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateStream,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CreateStreamRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CreateStreamResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CreateStreamRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CreateStreamResponse.SerializeToString,
             ),
             'AddMessages': grpc.unary_unary_rpc_method_handler(
                     servicer.AddMessages,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.AddMessagesRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.AddMessagesResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddMessagesRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddMessagesResponse.SerializeToString,
             ),
             'FinishWriting': grpc.unary_unary_rpc_method_handler(
                     servicer.FinishWriting,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.FinishWritingRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.FinishWritingResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.FinishWritingRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.FinishWritingResponse.SerializeToString,
             ),
             'SubscribeWorkflow': grpc.unary_unary_rpc_method_handler(
                     servicer.SubscribeWorkflow,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.SubscribeWorkflowRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.SubscribeWorkflowResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.SubscribeWorkflowRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.SubscribeWorkflowResponse.SerializeToString,
             ),
             'PollMessages': grpc.unary_unary_rpc_method_handler(
                     servicer.PollMessages,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.PollMessagesRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.PollMessagesResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollMessagesRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollMessagesResponse.SerializeToString,
             ),
             'DescribeStream': grpc.unary_unary_rpc_method_handler(
                     servicer.DescribeStream,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DescribeStreamRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DescribeStreamResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeStreamRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeStreamResponse.SerializeToString,
+            ),
+            'PollWorkflowMessages': grpc.unary_unary_rpc_method_handler(
+                    servicer.PollWorkflowMessages,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollWorkflowMessagesRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollWorkflowMessagesResponse.SerializeToString,
+            ),
+            'DescribeWorkflowStream': grpc.unary_unary_rpc_method_handler(
+                    servicer.DescribeWorkflowStream,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeWorkflowStreamRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeWorkflowStreamResponse.SerializeToString,
+            ),
+            'AddWorkflowMessages': grpc.unary_unary_rpc_method_handler(
+                    servicer.AddWorkflowMessages,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddWorkflowMessagesRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddWorkflowMessagesResponse.SerializeToString,
             ),
             'CloseStream': grpc.unary_unary_rpc_method_handler(
                     servicer.CloseStream,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CloseStreamRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CloseStreamResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CloseStreamRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CloseStreamResponse.SerializeToString,
             ),
             'TruncateStream': grpc.unary_unary_rpc_method_handler(
                     servicer.TruncateStream,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.TruncateStreamRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.TruncateStreamResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.TruncateStreamRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.TruncateStreamResponse.SerializeToString,
             ),
             'ListStreams': grpc.unary_unary_rpc_method_handler(
                     servicer.ListStreams,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.ListStreamsRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.ListStreamsResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.ListStreamsRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.ListStreamsResponse.SerializeToString,
             ),
             'DeleteStream': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteStream,
-                    request_deserializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DeleteStreamRequest.FromString,
-                    response_serializer=temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DeleteStreamResponse.SerializeToString,
+                    request_deserializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DeleteStreamRequest.FromString,
+                    response_serializer=temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DeleteStreamResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -230,8 +279,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/CreateStream',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CreateStreamRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CreateStreamResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CreateStreamRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CreateStreamResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -257,8 +306,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/AddMessages',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.AddMessagesRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.AddMessagesResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddMessagesRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddMessagesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -284,8 +333,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/FinishWriting',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.FinishWritingRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.FinishWritingResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.FinishWritingRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.FinishWritingResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -311,8 +360,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/SubscribeWorkflow',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.SubscribeWorkflowRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.SubscribeWorkflowResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.SubscribeWorkflowRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.SubscribeWorkflowResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -338,8 +387,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/PollMessages',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.PollMessagesRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.PollMessagesResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollMessagesRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollMessagesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -365,8 +414,89 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/DescribeStream',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DescribeStreamRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DescribeStreamResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeStreamRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeStreamResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PollWorkflowMessages(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/temporal.server.chasm.lib.stream.proto.v1.StreamService/PollWorkflowMessages',
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollWorkflowMessagesRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.PollWorkflowMessagesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DescribeWorkflowStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/temporal.server.chasm.lib.stream.proto.v1.StreamService/DescribeWorkflowStream',
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeWorkflowStreamRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DescribeWorkflowStreamResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AddWorkflowMessages(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/temporal.server.chasm.lib.stream.proto.v1.StreamService/AddWorkflowMessages',
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddWorkflowMessagesRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.AddWorkflowMessagesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -392,8 +522,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/CloseStream',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CloseStreamRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.CloseStreamResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CloseStreamRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.CloseStreamResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -419,8 +549,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/TruncateStream',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.TruncateStreamRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.TruncateStreamResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.TruncateStreamRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.TruncateStreamResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -446,8 +576,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/ListStreams',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.ListStreamsRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.ListStreamsResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.ListStreamsRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.ListStreamsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -473,8 +603,8 @@ class StreamService:
             request,
             target,
             '/temporal.server.chasm.lib.stream.proto.v1.StreamService/DeleteStream',
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DeleteStreamRequest.SerializeToString,
-            temporalio_dot_api_dot_streamservice_dot_v1_dot_request__response__pb2.DeleteStreamResponse.FromString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DeleteStreamRequest.SerializeToString,
+            temporalio_dot_api_dot_stream_dot_v1_dot_request__response__pb2.DeleteStreamResponse.FromString,
             options,
             channel_credentials,
             insecure,

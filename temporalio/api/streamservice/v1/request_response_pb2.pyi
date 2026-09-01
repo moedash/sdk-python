@@ -133,6 +133,50 @@ class DescribeStreamInput(_message.Message):
     stream_id: str
     def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ...) -> None: ...
 
+class PollWorkflowMessagesInput(_message.Message):
+    __slots__ = ("namespace", "workflow_id", "stream_name", "from_offset", "max_messages", "topics", "wait_new_messages")
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    WORKFLOW_ID_FIELD_NUMBER: _ClassVar[int]
+    STREAM_NAME_FIELD_NUMBER: _ClassVar[int]
+    FROM_OFFSET_FIELD_NUMBER: _ClassVar[int]
+    MAX_MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    TOPICS_FIELD_NUMBER: _ClassVar[int]
+    WAIT_NEW_MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    namespace: str
+    workflow_id: str
+    stream_name: str
+    from_offset: int
+    max_messages: int
+    topics: _containers.RepeatedScalarFieldContainer[str]
+    wait_new_messages: bool
+    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: _Optional[bool] = ...) -> None: ...
+
+class DescribeWorkflowStreamInput(_message.Message):
+    __slots__ = ("namespace", "workflow_id", "stream_name")
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    WORKFLOW_ID_FIELD_NUMBER: _ClassVar[int]
+    STREAM_NAME_FIELD_NUMBER: _ClassVar[int]
+    namespace: str
+    workflow_id: str
+    stream_name: str
+    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ...) -> None: ...
+
+class AddWorkflowMessagesInput(_message.Message):
+    __slots__ = ("namespace", "workflow_id", "stream_name", "messages", "producer_id", "sequence")
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    WORKFLOW_ID_FIELD_NUMBER: _ClassVar[int]
+    STREAM_NAME_FIELD_NUMBER: _ClassVar[int]
+    MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    PRODUCER_ID_FIELD_NUMBER: _ClassVar[int]
+    SEQUENCE_FIELD_NUMBER: _ClassVar[int]
+    namespace: str
+    workflow_id: str
+    stream_name: str
+    messages: _containers.RepeatedCompositeFieldContainer[_message_pb2.StreamMessage]
+    producer_id: str
+    sequence: int
+    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., producer_id: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
+
 class DescribeStreamOutput(_message.Message):
     __slots__ = ("state",)
     STATE_FIELD_NUMBER: _ClassVar[int]
@@ -262,6 +306,48 @@ class DescribeStreamResponse(_message.Message):
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: DescribeStreamOutput
     def __init__(self, frontend_response: _Optional[_Union[DescribeStreamOutput, _Mapping]] = ...) -> None: ...
+
+class PollWorkflowMessagesRequest(_message.Message):
+    __slots__ = ("namespace_id", "frontend_request")
+    NAMESPACE_ID_FIELD_NUMBER: _ClassVar[int]
+    FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    namespace_id: str
+    frontend_request: PollWorkflowMessagesInput
+    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[PollWorkflowMessagesInput, _Mapping]] = ...) -> None: ...
+
+class PollWorkflowMessagesResponse(_message.Message):
+    __slots__ = ("frontend_response",)
+    FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    frontend_response: PollMessagesOutput
+    def __init__(self, frontend_response: _Optional[_Union[PollMessagesOutput, _Mapping]] = ...) -> None: ...
+
+class DescribeWorkflowStreamRequest(_message.Message):
+    __slots__ = ("namespace_id", "frontend_request")
+    NAMESPACE_ID_FIELD_NUMBER: _ClassVar[int]
+    FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    namespace_id: str
+    frontend_request: DescribeWorkflowStreamInput
+    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[DescribeWorkflowStreamInput, _Mapping]] = ...) -> None: ...
+
+class DescribeWorkflowStreamResponse(_message.Message):
+    __slots__ = ("frontend_response",)
+    FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    frontend_response: DescribeStreamOutput
+    def __init__(self, frontend_response: _Optional[_Union[DescribeStreamOutput, _Mapping]] = ...) -> None: ...
+
+class AddWorkflowMessagesRequest(_message.Message):
+    __slots__ = ("namespace_id", "frontend_request")
+    NAMESPACE_ID_FIELD_NUMBER: _ClassVar[int]
+    FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    namespace_id: str
+    frontend_request: AddWorkflowMessagesInput
+    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[AddWorkflowMessagesInput, _Mapping]] = ...) -> None: ...
+
+class AddWorkflowMessagesResponse(_message.Message):
+    __slots__ = ("frontend_response",)
+    FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    frontend_response: AddMessagesOutput
+    def __init__(self, frontend_response: _Optional[_Union[AddMessagesOutput, _Mapping]] = ...) -> None: ...
 
 class CloseStreamRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")

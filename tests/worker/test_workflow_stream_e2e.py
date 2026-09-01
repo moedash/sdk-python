@@ -89,3 +89,83 @@ async def test_workflow_reads_back_what_it_published() -> None:
     # which is what makes batching free.
     assert counts[EVENT_STREAM_MESSAGES_ADDED] == 2
     assert counts[EVENT_STREAM_SUBSCRIBED] == 1
+
+
+@workflow.defn
+class PublishOnSignal:
+    """Publishes a token per signal, which is the shape an agent turn has."""
+
+    def __init__(self) -> None:
+        self._pending: list[str] = []
+        self._done = False
+
+    @workflow.run
+    async def run(self) -> int:
+        published = 0
+        while True:
+            await workflow.wait_condition(lambda: self._pending or self._done)
+            while self._pending:
+                workflow.add_stream_messages([self._pending.pop(0).encode()])
+                published += 1
+            if self._done:
+                return published
+
+    @workflow.signal
+    async def emit(self, token: str) -> None:
+        self._pending.append(token)
+
+    @workflow.signal
+    async def finish(self) -> None:
+        self._done = True
+
+
+async def test_a_client_follows_what_a_workflow_publishes() -> None:
+    """The harness shape: the workflow writes, something outside it reads live.
+
+    A stream a workflow owns has no id, so the reader addresses it by the
+    owner. It also attaches before the first publish, which is what a UI opening
+    on a session does.
+    """
+    from temporalio.client_stream import StreamClient
+
+    client = await Client.connect(TARGET or "")
+    streams = StreamClient.connect(TARGET or "")
+    task_queue = "follow-tq-" + uuid.uuid4().hex[:8]
+    wf_id = "follow-wf-" + uuid.uuid4().hex[:8]
+
+    tokens = [f"token-{i}" for i in range(5)]
+    received: list[str] = []
+
+    try:
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[PublishOnSignal],
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                PublishOnSignal.run, id=wf_id, task_queue=task_queue
+            )
+
+            # Attached before anything is published, so the stream does not
+            # exist yet and the first poll has to park rather than fail.
+            reader = streams.workflow_stream(wf_id)
+            assert (await reader.describe()).head_offset == 0
+
+            async def follow() -> None:
+                async for message in reader.follow():
+                    received.append(message.data.decode())
+                    if len(received) == len(tokens):
+                        return
+
+            following = asyncio.ensure_future(follow())
+            for token in tokens:
+                await handle.signal(PublishOnSignal.emit, token)
+            await asyncio.wait_for(following, timeout=60)
+
+            await handle.signal(PublishOnSignal.finish)
+            assert await asyncio.wait_for(handle.result(), timeout=60) == len(tokens)
+    finally:
+        await streams.close()
+
+    assert received == tokens
