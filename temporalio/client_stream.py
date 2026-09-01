@@ -39,14 +39,20 @@ __all__ = ["Message", "StreamClient", "StreamHandle", "WorkflowStreamHandle"]
 class Message:
     """One item read from a stream.
 
-    There is deliberately no per-message offset. Offsets are assigned over the
-    unfiltered stream, so when a read filters by topic the offsets of what
-    comes back are not contiguous and cannot be derived here. Checkpoint on the
-    ``next_offset`` that :meth:`StreamHandle.read` returns instead.
+    Offsets are assigned over the unfiltered stream, so a topic-filtered read
+    hands back messages whose offsets are not contiguous. To resume at the
+    boundary of a whole read, checkpoint the ``next_offset`` that
+    :meth:`StreamHandle.read` returns instead.
     """
 
     data: bytes
     topic: str = ""
+    offset: int = 0
+    """Where this message sits in the whole stream.
+
+    A topic filter leaves gaps, so a reader that resumes between messages has
+    to take this rather than count what it received.
+    """
 
 
 class StreamClient:
@@ -222,7 +228,7 @@ class StreamHandle:
             )
         )
         out = response.frontend_response
-        return [Message(data=m.body.data, topic=m.topic) for m in out.messages], (
+        return [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages], (
             out.next_offset
         )
 
@@ -255,7 +261,7 @@ class StreamHandle:
             )
             out = response.frontend_response
             for msg in out.messages:
-                yield Message(data=msg.body.data, topic=msg.topic)
+                yield Message(data=msg.body.data, topic=msg.topic, offset=msg.offset)
             offset = out.next_offset
             if out.closed and offset >= out.head_offset:
                 return
@@ -381,7 +387,7 @@ class WorkflowStreamHandle:
             )
         )
         out = response.frontend_response
-        return [Message(data=m.body.data, topic=m.topic) for m in out.messages], (
+        return [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages], (
             out.next_offset
         )
 
@@ -417,7 +423,7 @@ class WorkflowStreamHandle:
         )
         out = response.frontend_response
         return (
-            [Message(data=m.body.data, topic=m.topic) for m in out.messages],
+            [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages],
             out.next_offset,
             out.closed,
             out.head_offset,

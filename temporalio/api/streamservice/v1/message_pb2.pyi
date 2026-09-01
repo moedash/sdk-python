@@ -18,7 +18,7 @@ STREAM_MESSAGE_KIND_DATA: StreamMessageKind
 STREAM_MESSAGE_KIND_FLUSH: StreamMessageKind
 
 class StreamMessage(_message.Message):
-    __slots__ = ("body", "metadata", "topic", "topic_sequence", "kind")
+    __slots__ = ("body", "metadata", "topic", "topic_sequence", "kind", "offset")
     class MetadataEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -31,12 +31,14 @@ class StreamMessage(_message.Message):
     TOPIC_FIELD_NUMBER: _ClassVar[int]
     TOPIC_SEQUENCE_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
     body: _message_pb2.Payload
     metadata: _containers.MessageMap[str, _message_pb2.Payload]
     topic: str
     topic_sequence: int
     kind: StreamMessageKind
-    def __init__(self, body: _Optional[_Union[_message_pb2.Payload, _Mapping]] = ..., metadata: _Optional[_Mapping[str, _message_pb2.Payload]] = ..., topic: _Optional[str] = ..., topic_sequence: _Optional[int] = ..., kind: _Optional[_Union[StreamMessageKind, str]] = ...) -> None: ...
+    offset: int
+    def __init__(self, body: _Optional[_Union[_message_pb2.Payload, _Mapping]] = ..., metadata: _Optional[_Mapping[str, _message_pb2.Payload]] = ..., topic: _Optional[str] = ..., topic_sequence: _Optional[int] = ..., kind: _Optional[_Union[StreamMessageKind, str]] = ..., offset: _Optional[int] = ...) -> None: ...
 
 class StreamMessageBatch(_message.Message):
     __slots__ = ("messages",)

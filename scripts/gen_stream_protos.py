@@ -15,6 +15,7 @@ messages by the names this package actually publishes.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -24,10 +25,25 @@ from pathlib import Path
 
 BASE = Path(__file__).parent.parent
 OUT = BASE / "temporalio" / "api" / "streamservice" / "v1"
+# The stream protos reference the public API messages. They normally come from
+# the sdk-core submodule; TEMPORAL_API_PROTOS points at a `temporalio/api`
+# checkout instead when the submodule is not initialized.
 UPSTREAM_API = (
     BASE / "temporalio" / "bridge" / "sdk-core" / "crates" / "protos" / "protos"
     / "api_upstream"
 )
+
+
+def api_proto_path() -> Path:
+    override = os.environ.get("TEMPORAL_API_PROTOS")
+    if override:
+        return Path(override).resolve()
+    if (UPSTREAM_API / "temporal" / "api" / "common" / "v1" / "message.proto").is_file():
+        return UPSTREAM_API
+    raise SystemExit(
+        "no api protos found: initialize the sdk-core submodule or set "
+        "TEMPORAL_API_PROTOS to a temporalio/api checkout"
+    )
 
 SERVER_PROTO_DIR = Path("chasm/lib/stream/proto/v1")
 STAGE_PROTO_DIR = Path("temporalio/api/stream/v1")
@@ -77,7 +93,7 @@ def main() -> None:
             [
                 sys.executable, "-m", "grpc_tools.protoc",
                 f"--proto_path={work}",
-                f"--proto_path={UPSTREAM_API}",
+                f"--proto_path={api_proto_path()}",
                 f"--python_out={out}",
                 f"--pyi_out={out}",
                 f"--grpc_python_out={out}",
