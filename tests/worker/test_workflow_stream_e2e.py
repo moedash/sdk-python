@@ -17,6 +17,7 @@ import os
 import uuid
 
 import pytest
+from temporalio.api.enums.v1 import EventType
 
 from temporalio import workflow
 from temporalio.client import Client
@@ -169,3 +170,75 @@ async def test_a_client_follows_what_a_workflow_publishes() -> None:
         await streams.close()
 
     assert received == tokens
+
+
+@workflow.defn
+class ConsumeAcrossTasks:
+    """Reads a stream over several Workflow Tasks, then reports what it saw.
+
+    The turn structure is the point: each `read_stream` that finds nothing
+    blocks, which ends a Workflow Task, so the run spans several. With the
+    cache on, every task after the first is sticky.
+    """
+
+    @workflow.run
+    async def run(self, stream_id: str, expected: int) -> list[str]:
+        workflow.subscribe_stream(stream_id, start_offset=0)
+        seen: list[str] = []
+        while len(seen) < expected:
+            for body in await workflow.read_stream(stream_id):
+                seen.append(body.decode())
+        return seen
+
+
+async def test_a_cached_workflow_consumes_across_sticky_tasks() -> None:
+    """The workflow cache stays on, which is what a real worker does.
+
+    Every other end-to-end test here disables it, so the sticky path was never
+    exercised. The server sends no replay slice for a sticky task, while the
+    sticky history still carries the previous task's consumed range, and the
+    two together used to fail every task after the first consumed range.
+    """
+    from temporalio.client_stream import StreamClient
+
+    client = await Client.connect(TARGET or "")
+    streams = StreamClient.connect(TARGET or "")
+    task_queue = "sticky-tq-" + uuid.uuid4().hex[:8]
+    wf_id = "sticky-wf-" + uuid.uuid4().hex[:8]
+    stream_id = "sticky-src-" + uuid.uuid4().hex[:8]
+
+    batches = [["a1", "a2"], ["b1"], ["c1", "c2", "c3"]]
+    expected = [tok for batch in batches for tok in batch]
+
+    try:
+        await streams.create(stream_id)
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[ConsumeAcrossTasks],
+            # Left at the default deliberately. This is what the test is for.
+        ):
+            handle = await client.start_workflow(
+                ConsumeAcrossTasks.run,
+                args=[stream_id, len(expected)],
+                id=wf_id,
+                task_queue=task_queue,
+            )
+
+            # Spaced out so the workflow drains, blocks and ends a task between
+            # them. Without the gap the appends coalesce into one task and the
+            # sticky path is never taken.
+            for batch in batches:
+                await streams.get(stream_id).append(*[t.encode() for t in batch])
+                await asyncio.sleep(0.4)
+
+            assert await asyncio.wait_for(handle.result(), timeout=60) == expected
+
+        # More than one Workflow Task ran, otherwise the test proves nothing.
+        completed = 0
+        async for event in client.get_workflow_handle(wf_id).fetch_history_events():
+            if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+                completed += 1
+        assert completed >= 3, f"only {completed} workflow tasks, sticky path not exercised"
+    finally:
+        await streams.close()
