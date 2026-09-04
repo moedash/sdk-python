@@ -75,12 +75,38 @@ def _encode(converter: PayloadConverter, value: Any) -> bytes:
     """Serialize one value to a stream message body.
 
     The payload rather than the bare bytes, so the encoding metadata the
-    consumer needs to decode into a type travels with it. The codec chain is
-    not applied: it belongs to the client that owns the connection, and this
-    prototype opens its own.
+    consumer needs to decode into a type travels with it.
+
+    The codec chain is not applied. It cannot be applied here: a codec is async
+    and a Workflow publishing to a stream is not, so running one inside Workflow
+    code would be I/O on the Workflow thread. Regular payloads solve this in the
+    Worker, encoding on the way out and decoding on the way in, and a stream
+    needs the same plumbing before a codec can be honoured.
+
+    It is not applied on the client path either, deliberately. Encoding one side
+    and not the other is worse than encoding neither: an Activity's messages
+    would reach a consuming Workflow as ciphertext it has no way to decode.
+    :func:`_reject_configured_codec` is what keeps that from happening quietly.
     """
     payload = value if isinstance(value, Payload) else converter.to_payloads([value])[0]
     return payload.SerializeToString()
+
+
+def _reject_configured_codec(client: Client) -> None:
+    """Refuse a namespace whose payloads are meant to be encoded.
+
+    Stream bodies bypass the codec chain, so proceeding would write payloads
+    this namespace expects to be encrypted in the clear, and would do it
+    silently. Raising is the only honest answer until the Worker-side plumbing
+    exists.
+    """
+    if client.data_converter.payload_codec is not None:
+        raise RuntimeError(
+            "this client has a payload codec configured, and server-side stream "
+            "bodies do not pass through it. Publishing would store them "
+            "unencoded. Use a client without a codec, or wait for codec support "
+            "on streams."
+        )
 
 
 def _decode(converter: PayloadConverter, body: bytes, as_type: Optional[type]) -> Any:
@@ -222,6 +248,7 @@ class WorkflowStreamClient:
         batch_interval: timedelta = DEFAULT_BATCH_INTERVAL,
     ) -> "WorkflowStreamClient":
         """Open the stream owned by ``workflow_id``."""
+        _reject_configured_codec(client)
         return cls(
             _stream_client(client).workflow_stream(workflow_id),
             client.data_converter.payload_converter,
