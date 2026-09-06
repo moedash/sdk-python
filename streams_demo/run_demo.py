@@ -24,6 +24,7 @@ import uuid
 from typing import Any
 
 from temporalio import streams
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -87,24 +88,52 @@ async def main() -> int:
         await second.append({"id": "r3", "value": 3}, {"id": "r4", "value": 4})
         await second.finish()
 
+        # A failed Workflow Task is not an outcome. The server rejects a
+        # completion that raced newly buffered events, and the retry usually
+        # gets through, so reading the first failure as the result reports a
+        # working run as a broken one. Wait for a terminal event, then report
+        # the retries separately so they are neither the headline nor hidden.
         deadline = time.monotonic() + 120
+        # Taken from the enum rather than written out, because guessing these
+        # numbers is how a run that completed gets reported as terminated.
+        terminal = {
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED: "completed",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED: "workflow_failed",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT: "execution_timed_out",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED: "canceled",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED: "terminated",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW: "continued_as_new",
+        }
         while time.monotonic() < deadline:
             history = await handle.fetch_history()
-            failed = [e for e in history.events if e.event_type == 9]
-            if failed:
-                record["outcome"] = "workflow_task_failed"
-                record["failures"] = [
-                    e.workflow_task_failed_event_attributes.failure.message
-                    for e in failed
-                ]
-                break
-            if any(e.event_type == 2 for e in history.events):
-                record["outcome"] = "completed"
-                record["trace"] = await handle.result()
+            reached = [
+                terminal[e.event_type]
+                for e in history.events
+                if e.event_type in terminal
+            ]
+            if reached:
+                record["outcome"] = reached[-1]
+                if record["outcome"] == "completed":
+                    record["trace"] = await handle.result()
                 break
             await asyncio.sleep(0.1)
         else:
-            record["outcome"] = "timed_out"
+            record["outcome"] = "timed_out_waiting"
+            history = await handle.fetch_history()
+
+        retried = [
+            e
+            for e in history.events
+            if e.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+        ]
+        record["task_failures"] = [
+            {
+                "event_id": e.event_id,
+                "cause": int(e.workflow_task_failed_event_attributes.cause),
+                "message": e.workflow_task_failed_event_attributes.failure.message,
+            }
+            for e in retried
+        ]
 
         try:
             record["observed_output"] = await asyncio.wait_for(output, timeout=20)

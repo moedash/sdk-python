@@ -11,13 +11,15 @@ implementations.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.external_workflow_streams import (
     BEGINNING as PROVIDER_BEGINNING,
     AFTER,
@@ -217,13 +219,25 @@ class Producer:
                 raise
 
     async def _consumer_has_gone(self) -> bool:
-        """Whether the consuming execution has closed. Asked, not assumed."""
+        """Whether the consuming execution is closing or closed.
+
+        Asked rather than assumed, and asked for a few seconds rather than
+        once: the server refuses the wake while the execution is closing, and
+        at that moment its status is still the running one. A single look would
+        read "running" and turn the ordinary ending into an error.
+        """
         if self._client is None or not self._workflow_id:
             return False
-        description = await self._client.get_workflow_handle(
-            self._workflow_id
-        ).describe()
-        return description.status is not None and description.status.value != 1
+        handle = self._client.get_workflow_handle(self._workflow_id)
+        deadline = time.monotonic() + 5
+        while True:
+            description = await handle.describe()
+            status = description.status
+            if status is not None and status != WorkflowExecutionStatus.RUNNING:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
 
     def _encode(self, value: Any) -> bytes:
         payload = (

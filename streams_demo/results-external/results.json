@@ -1,100 +1,21 @@
 {
   "provider": "external",
-  "workflow_id": "ai198-contract-external-964ae464a3984e2b8e2017aa0eb04455",
-  "target": "127.0.0.1:55186",
+  "workflow_id": "ai198-contract-external-2dd4c62879474eb2a1ce596aa04e4c05",
+  "target": "127.0.0.1:53266",
   "max_cached_workflows": 2,
-  "outcome": "completed",
-  "trace": [
+  "outcome": "timed_out_waiting",
+  "task_failures": [
     {
-      "kind": "decision",
-      "receipt": "recorded:r1:odd",
-      "value": {
-        "branch": "odd",
-        "computed": 101,
-        "source": "r1"
-      }
+      "event_id": 48,
+      "cause": 1,
+      "message": "UnhandledCommand"
     },
     {
-      "kind": "decision",
-      "receipt": "recorded:r2:even",
-      "value": {
-        "branch": "even",
-        "computed": 20,
-        "source": "r2"
-      }
-    },
-    {
-      "attempt": 2,
-      "kind": "superseded",
-      "producer": "model",
-      "replaced": 1
-    },
-    {
-      "kind": "decision",
-      "receipt": "recorded:r3:odd",
-      "value": {
-        "branch": "odd",
-        "computed": 103,
-        "source": "r3"
-      }
-    },
-    {
-      "kind": "decision",
-      "receipt": "recorded:r4:even",
-      "value": {
-        "branch": "even",
-        "computed": 40,
-        "source": "r4"
-      }
-    },
-    {
-      "kind": "finish",
-      "producer": "model"
+      "event_id": 53,
+      "cause": 14,
+      "message": "Workflow output publish calls do not match the external output manifest recorded in History"
     }
   ],
-  "observed_output": [
-    {
-      "kind": "DATA",
-      "value": {
-        "branch": "odd",
-        "computed": 101,
-        "source": "r1"
-      }
-    },
-    {
-      "kind": "DATA",
-      "value": {
-        "branch": "even",
-        "computed": 20,
-        "source": "r2"
-      }
-    },
-    {
-      "kind": "DATA",
-      "value": {
-        "retracting_attempt": 1
-      }
-    },
-    {
-      "kind": "DATA",
-      "value": {
-        "branch": "odd",
-        "computed": 103,
-        "source": "r3"
-      }
-    },
-    {
-      "kind": "DATA",
-      "value": {
-        "branch": "even",
-        "computed": 40,
-        "source": "r4"
-      }
-    },
-    {
-      "kind": "FINISH",
-      "value": null
-    }
-  ],
-  "history_events": 47
+  "observed_output": "timed_out",
+  "history_events": 55
 }
