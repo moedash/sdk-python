@@ -1,7 +1,7 @@
 {
   "provider": "native",
-  "workflow_id": "ai198-contract-native-3a065813eb2c4e22bdc91f3c81402e39",
-  "target": "127.0.0.1:52916",
+  "workflow_id": "ai198-contract-native-9ced6157d131409c97f64a5a90c9c2b4",
+  "target": "127.0.0.1:54657",
   "max_cached_workflows": 0,
   "outcome": "completed",
   "trace": [
