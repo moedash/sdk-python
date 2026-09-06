@@ -29,6 +29,9 @@ to include examples, links to docs, or any other relevant information.
   loaded History page, including Workers with workflow caching disabled.
 - Avoid an unnecessary output replacement Workflow Task after stream input has
   resumed the Workflow and it is waiting on an Activity or timer.
+- Keep an incomplete retained external stream task alive when workflow caching
+  is disabled; evict it after its normal task boundary instead of repeatedly
+  interrupting input readiness with shutdown markers.
 
 ### Added
 
