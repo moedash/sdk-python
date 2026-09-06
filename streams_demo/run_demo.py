@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_loop import INPUTS, AgentLoop, record_decision  # noqa: E402
 import provider_setup  # noqa: E402
 
-EXPECTED_DECISIONS = 4
+DECISION_LIMIT = 8
 EXPECTED_OUTPUT = 6
 
 
@@ -69,7 +69,7 @@ async def main() -> int:
         **streams.worker_options(),
     ):
         handle = await client.start_workflow(
-            AgentLoop.run, EXPECTED_DECISIONS, id=uid, task_queue=uid
+            AgentLoop.run, DECISION_LIMIT, id=uid, task_queue=uid
         )
         output = asyncio.create_task(collect_output(client, uid, EXPECTED_OUTPUT))
 

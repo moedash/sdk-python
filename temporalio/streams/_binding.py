@@ -23,6 +23,7 @@ from temporalio.contrib.external_workflow_streams import (
     AFTER,
     ExternalOutputStreamClient,
     ExternalStreamProducer,
+    WakeNotAcknowledgedError,
     WorkflowChainKey,
     external_output_stream,
     external_stream,
@@ -158,6 +159,8 @@ class Producer:
         stream: str,
         producer_id: str,
         attempt: int,
+        client: Client | None = None,
+        workflow_id: str = "",
     ) -> None:
         """Prefer :func:`producer`."""
         self._topic = topic
@@ -165,6 +168,8 @@ class Producer:
         self._stream = stream
         self._producer_id = producer_id
         self._attempt = attempt
+        self._client = client
+        self._workflow_id = workflow_id
         self._sequence = 0
 
     @property
@@ -201,7 +206,24 @@ class Producer:
             body=b"",
         )
         self._sequence += 1
-        await self._topic.publish(frame)
+        try:
+            await self._topic.publish(frame)
+        except WakeNotAcknowledgedError:
+            # The record is appended; what failed is telling a consumer that is
+            # no longer there to be told. A terminal record most often races the
+            # consumer acting on it, so treating an absent consumer as a failed
+            # publish would make the ordinary ending look like an error.
+            if not await self._consumer_has_gone():
+                raise
+
+    async def _consumer_has_gone(self) -> bool:
+        """Whether the consuming execution has closed. Asked, not assumed."""
+        if self._client is None or not self._workflow_id:
+            return False
+        description = await self._client.get_workflow_handle(
+            self._workflow_id
+        ).describe()
+        return description.status is not None and description.status.value != 1
 
     def _encode(self, value: Any) -> bytes:
         payload = (
@@ -247,6 +269,8 @@ async def producer(
         stream,
         producer_id,
         attempt,
+        client,
+        workflow_id,
     )
 
 
