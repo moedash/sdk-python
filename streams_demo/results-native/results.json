@@ -1,0 +1,96 @@
+{
+  "provider": "native",
+  "workflow_id": "ai198-contract-native-3a065813eb2c4e22bdc91f3c81402e39",
+  "target": "127.0.0.1:52916",
+  "max_cached_workflows": 0,
+  "outcome": "completed",
+  "trace": [
+    {
+      "kind": "decision",
+      "receipt": "recorded:r1:odd",
+      "value": {
+        "branch": "odd",
+        "computed": 101,
+        "source": "r1"
+      }
+    },
+    {
+      "kind": "decision",
+      "receipt": "recorded:r2:even",
+      "value": {
+        "branch": "even",
+        "computed": 20,
+        "source": "r2"
+      }
+    },
+    {
+      "attempt": 2,
+      "kind": "superseded",
+      "producer": "model",
+      "replaced": 1
+    },
+    {
+      "kind": "decision",
+      "receipt": "recorded:r3:odd",
+      "value": {
+        "branch": "odd",
+        "computed": 103,
+        "source": "r3"
+      }
+    },
+    {
+      "kind": "decision",
+      "receipt": "recorded:r4:even",
+      "value": {
+        "branch": "even",
+        "computed": 40,
+        "source": "r4"
+      }
+    }
+  ],
+  "observed_output": [
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "odd",
+        "computed": 101,
+        "source": "r1"
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "even",
+        "computed": 20,
+        "source": "r2"
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "retracting_attempt": 1
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "odd",
+        "computed": 103,
+        "source": "r3"
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "even",
+        "computed": 40,
+        "source": "r4"
+      }
+    },
+    {
+      "kind": "FINISH",
+      "value": null
+    }
+  ],
+  "history_events": 42
+}

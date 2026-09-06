@@ -326,6 +326,11 @@ class _Runtime(ABC):
     ) -> list[bytes]: ...
 
     @abstractmethod
+    async def workflow_read_stream_messages(
+        self, stream_id: str, max_messages: int
+    ) -> list[DeliveredStreamMessage]: ...
+
+    @abstractmethod
     def workflow_get_current_history_length(self) -> int: ...
 
     @abstractmethod
@@ -1006,6 +1011,35 @@ def add_stream_messages(
             assigned over the unfiltered stream.
     """
     _Runtime.current().workflow_add_stream_messages(stream_id, messages, topic)
+
+
+@dataclass(frozen=True)
+class DeliveredStreamMessage:
+    """One message a consuming workflow was given, with where it sat."""
+
+    body: bytes
+    topic: str
+    offset: int
+    """Its position in the whole stream, which is what a reader resumes from."""
+
+
+async def read_stream_messages(
+    stream_id: str, *, max_messages: int = 0
+) -> list[DeliveredStreamMessage]:
+    """Read the next messages, keeping their topic and position.
+
+    Same delivery as :func:`read_stream`. A reader that has to name where it
+    got to, filter a topic, or hand a position to something outside the
+    workflow needs more than the bodies.
+
+    Args:
+        stream_id: Stream to read from.
+        max_messages: Most messages to return at once, or 0 for everything
+            available.
+    """
+    return await _Runtime.current().workflow_read_stream_messages(
+        stream_id, max_messages
+    )
 
 
 async def read_stream(stream_id: str, *, max_messages: int = 0) -> list[bytes]:

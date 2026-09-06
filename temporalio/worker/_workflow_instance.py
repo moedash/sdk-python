@@ -279,25 +279,44 @@ class _StreamBuffer:
     """
 
     def __init__(self) -> None:
-        self._messages: list[temporalio.api.stream.v1.StreamMessage] = []
+        self._messages: list[temporalio.workflow.DeliveredStreamMessage] = []
         self._waiters: list[asyncio.Future] = []
 
     def extend(
-        self, messages: Sequence[temporalio.api.stream.v1.StreamMessage]
+        self,
+        messages: Sequence[temporalio.api.stream.v1.StreamMessage],
+        from_offset: int = 0,
     ) -> None:
         # An empty range still counts as a delivery, but there is nothing to
         # hand a reader, so only a non-empty one wakes anyone.
         if not messages:
             return
-        self._messages.extend(messages)
+        # Offsets are dense inside a delivered range and the range arrives in
+        # order, so counting from its start is the position rather than an
+        # estimate of it. The per-message field is not on the activation, and a
+        # reader that has to resume elsewhere needs a position it can name.
+        self._messages.extend(
+            temporalio.workflow.DeliveredStreamMessage(
+                body=message.body.data,
+                topic=message.topic,
+                offset=from_offset + index,
+            )
+            for index, message in enumerate(messages)
+        )
         waiters, self._waiters = self._waiters, []
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_result(None)
 
-    def take(self) -> list[temporalio.api.stream.v1.StreamMessage]:
+    def take(self) -> list[temporalio.workflow.DeliveredStreamMessage]:
         taken, self._messages = self._messages, []
         return taken
+
+    def put_back(
+        self, messages: Sequence[temporalio.workflow.DeliveredStreamMessage]
+    ) -> None:
+        """Return an unread tail to the front of the buffer."""
+        self._messages[:0] = messages
 
     def wait_future(self) -> asyncio.Future:
         loop = asyncio.get_event_loop()
@@ -1194,7 +1213,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             # subscription made later in the same task still sees it.
             buffer = _StreamBuffer()
             self._stream_buffers[job.stream_id] = buffer
-        buffer.extend(job.messages)
+        buffer.extend(job.messages, job.from_offset)
 
     def _apply_signal_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.SignalWorkflow
@@ -1394,6 +1413,14 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     async def workflow_read_stream(
         self, stream_id: str, max_messages: int
     ) -> list[bytes]:
+        return [
+            m.body
+            for m in await self.workflow_read_stream_messages(stream_id, max_messages)
+        ]
+
+    async def workflow_read_stream_messages(
+        self, stream_id: str, max_messages: int
+    ) -> list[temporalio.workflow.DeliveredStreamMessage]:
         # Ranges arrive on Workflow Tasks, and a query activation carries none,
         # so without this the read waits on a future nothing can resolve and the
         # query times out with nothing to say why.
@@ -1404,9 +1431,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         taken = buffer.take()
         if max_messages and len(taken) > max_messages:
             # Put the tail back rather than dropping it: nothing will resend it.
-            buffer.extend(taken[max_messages:])
+            buffer.put_back(taken[max_messages:])
             taken = taken[:max_messages]
-        return [m.body.data for m in taken]
+        return taken
 
     def workflow_get_current_history_length(self) -> int:
         return self._current_history_length
