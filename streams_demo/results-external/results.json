@@ -1,8 +1,8 @@
 {
   "provider": "external",
-  "workflow_id": "ai198-contract-external-ac320e57fafc4eaf949c1aa0b4f846be",
+  "workflow_id": "ai198-contract-external-7ca349992dbf4181abde3a8ec57849c9",
   "target": "127.0.0.1:53266",
-  "max_cached_workflows": 0,
+  "max_cached_workflows": 2,
   "outcome": "completed",
   "trace": [
     {
@@ -54,7 +54,7 @@
   ],
   "task_failures": [
     {
-      "event_id": 52,
+      "event_id": 47,
       "cause": 1,
       "message": "UnhandledCommand"
     }
@@ -103,5 +103,5 @@
       "value": null
     }
   ],
-  "history_events": 61
+  "history_events": 53
 }
