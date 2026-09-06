@@ -442,6 +442,23 @@ class Worker:
             self._external_stream_backend = _validate_backend(
                 self._external_stream_backend
             )
+            # A consuming Workflow whose cache slot can be taken from under it
+            # never receives: the records are read out of the provider and then
+            # dropped with the evicted Run, and the readiness reported for them
+            # arrives for a subscription that no longer exists. There is no
+            # error and no failed Workflow Task, so the only symptom is a
+            # Workflow that stops. Refusing the configuration here is the
+            # difference between a startup error and an afternoon of reading
+            # History that says nothing happened.
+            cache_size = config.get("max_cached_workflows")
+            if cache_size is not None and cache_size < 2:
+                raise ValueError(
+                    f"max_cached_workflows is {cache_size}, and external "
+                    "streams need at least 2. A consuming Workflow that is "
+                    "evicted between tasks stalls with no error rather than "
+                    "failing. To test recovery, kill the Worker or replay in a "
+                    "fresh process instead of shrinking the cache."
+                )
 
         if not (
             config.get("activities")
