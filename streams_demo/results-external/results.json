@@ -1,7 +1,7 @@
 {
   "provider": "external",
-  "workflow_id": "ai198-contract-external-431cd7e2ba734bcdacd71371e17f0a28",
-  "target": "127.0.0.1:52916",
+  "workflow_id": "ai198-contract-external-aa7a558fe58f4001b7189fd04e2bdb53",
+  "target": "127.0.0.1:54657",
   "max_cached_workflows": 2,
   "outcome": "completed",
   "trace": [
@@ -92,5 +92,5 @@
       "value": null
     }
   ],
-  "history_events": 54
+  "history_events": 53
 }
