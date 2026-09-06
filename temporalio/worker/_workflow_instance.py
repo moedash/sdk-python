@@ -936,6 +936,16 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             runtime.begin_output_replay(output)
             self._pending_output_replay_finish = True
         plan = runtime.take_replay_plan()
+        if (
+            has_output
+            and plan is not None
+            and len(plan.segments) != len(output_segments)
+        ):
+            raise temporalio.workflow.NondeterminismError(
+                "External stream History has incompatible input and output "
+                "activation schedules. This prerelease marker omitted empty "
+                "input activations, whose positions cannot be recovered safely."
+            )
         if plan is None:
             if has_output:
                 # An output-only marker deliberately has no input ReplayPlan.
