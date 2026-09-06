@@ -35,10 +35,10 @@ def decide(token: dict[str, Any]) -> dict[str, Any]:
 
 @workflow.defn(name="AI198StreamContractDemo", sandboxed=False)
 class AgentLoop:
-    """Read, decide, write, until the input topic finishes."""
+    """Read, decide, write, until the producer says it has finished."""
 
     @workflow.run
-    async def run(self, expected: int) -> list[dict[str, Any]]:
+    async def run(self, limit: int) -> list[dict[str, Any]]:
         inputs = streams.reader(
             INPUTS, type=dict, idle_timeout=timedelta(seconds=1)
         )
@@ -64,8 +64,12 @@ class AgentLoop:
                     )
                     continue
                 if record.kind is streams.RecordKind.FINISH:
+                    # The producer says it is done, which is what ends the loop.
+                    # Counting decisions instead would leave the terminal record
+                    # unread and let the workflow finish while its producer is
+                    # still writing.
                     trace.append({"kind": "finish", "producer": record.producer})
-                    continue
+                    break
                 decision = decide(record.value)
                 await decisions.publish(decision)
                 receipt = await workflow.execute_activity(
@@ -78,7 +82,9 @@ class AgentLoop:
                     {"kind": "decision", "value": decision, "receipt": receipt}
                 )
                 accepted += 1
-                if accepted >= expected:
+                if accepted >= limit:
+                    # A bound so a stuck producer cannot run this forever. The
+                    # terminal record above is the ordinary way out.
                     break
         finally:
             inputs.close()

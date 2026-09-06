@@ -1,7 +1,7 @@
 {
   "provider": "native",
-  "workflow_id": "ai198-contract-native-9ced6157d131409c97f64a5a90c9c2b4",
-  "target": "127.0.0.1:54657",
+  "workflow_id": "ai198-contract-native-1bda85e84d494e43979476a1bfcf00ac",
+  "target": "127.0.0.1:55186",
   "max_cached_workflows": 0,
   "outcome": "completed",
   "trace": [
@@ -46,6 +46,10 @@
         "computed": 40,
         "source": "r4"
       }
+    },
+    {
+      "kind": "finish",
+      "producer": "model"
     }
   ],
   "observed_output": [

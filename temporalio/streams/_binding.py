@@ -191,6 +191,13 @@ def _reject_configured_codec(client: Client) -> None:
         )
 
 
+# Streams this process has already opened, so a second producer for the same
+# stream reuses the handle rather than asking the server to create it again.
+# The second create is answered correctly, and it is still a failed call the
+# server logs, which is noise an operator has to learn to ignore.
+_handles: dict[str, Any] = {}
+
+
 # One channel per target and namespace, shared by every handle in the process.
 # A channel is multiplexed and long lived, and callers open a handle per
 # subscription, which would otherwise be a connection per subscription.
@@ -321,12 +328,15 @@ async def producer(
         attempt = activity.info().attempt
     streams = _stream_client(client)
     stream_id = inbound_stream_id(workflow_id, stream)
-    try:
-        handle = await streams.create(stream_id)
-    except Exception:
-        # Already created by whoever set the stream up. A producer opening a
-        # stream it does not own is the ordinary case, not the exception.
-        handle = streams.get(stream_id)
+    handle = _handles.get(stream_id)
+    if handle is None:
+        try:
+            handle = await streams.create(stream_id)
+        except Exception:
+            # Created by whoever set the stream up. A producer opening a stream
+            # it does not own is the ordinary case, not the exception.
+            handle = streams.get(stream_id)
+        _handles[stream_id] = handle
     return Producer(
         handle,
         client.data_converter.payload_converter,
