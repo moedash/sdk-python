@@ -47,6 +47,7 @@ import temporalio.activity
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.api.sdk.v1
+import temporalio.api.stream.v1
 import temporalio.bridge.proto.activity_result
 import temporalio.bridge.proto.child_workflow
 import temporalio.bridge.proto.common
@@ -262,6 +263,71 @@ _Context: TypeAlias = dict[str, Any]
 _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], Any]
 
 
+# Matches the server's per-batch limit. Rejecting here turns a wedged workflow,
+# which would replay and re-issue the same rejected command forever, into an
+# error the workflow author can see.
+_MAX_STREAM_MESSAGES_PER_BATCH = 1000
+
+
+class _StreamBuffer:
+    """Holds the stream ranges delivered to a workflow so far.
+
+    Delivery is driven by the server, not by whether workflow code happens to be
+    reading. A range arrives once, is recorded in History as consumed, and is
+    never sent again, so anything not yet read has to be kept here rather than
+    dropped.
+    """
+
+    def __init__(self) -> None:
+        self._messages: list[temporalio.workflow.DeliveredStreamMessage] = []
+        self._waiters: list[asyncio.Future] = []
+
+    def extend(
+        self,
+        messages: Sequence[temporalio.api.stream.v1.StreamMessage],
+        from_offset: int = 0,
+    ) -> None:
+        # An empty range still counts as a delivery, but there is nothing to
+        # hand a reader, so only a non-empty one wakes anyone.
+        if not messages:
+            return
+        # Offsets are dense inside a delivered range and the range arrives in
+        # order, so counting from its start is the position rather than an
+        # estimate of it. The per-message field is not on the activation, and a
+        # reader that has to resume elsewhere needs a position it can name.
+        self._messages.extend(
+            temporalio.workflow.DeliveredStreamMessage(
+                body=message.body.data,
+                topic=message.topic,
+                offset=from_offset + index,
+            )
+            for index, message in enumerate(messages)
+        )
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def take(self) -> list[temporalio.workflow.DeliveredStreamMessage]:
+        taken, self._messages = self._messages, []
+        return taken
+
+    def put_back(
+        self, messages: Sequence[temporalio.workflow.DeliveredStreamMessage]
+    ) -> None:
+        """Return an unread tail to the front of the buffer."""
+        self._messages[:0] = messages
+
+    def wait_future(self) -> asyncio.Future:
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self._waiters.append(fut)
+        return fut
+
+    def __len__(self) -> int:
+        return len(self._messages)
+
+
 class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     WorkflowInstance, temporalio.workflow._Runtime, asyncio.AbstractEventLoop
 ):
@@ -388,6 +454,11 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._buffered_signals: dict[
             str, list[temporalio.bridge.proto.workflow_activation.SignalWorkflow]
         ] = {}
+
+        # Stream ranges delivered to this workflow, keyed by stream id. Ranges
+        # arrive whether or not anything is reading yet, because the server has
+        # already recorded them as consumed and will not send them again.
+        self._stream_buffers: dict[str, _StreamBuffer] = {}
 
         # When we evict, we have to mark the workflow as deleting so we don't
         # add any commands and we swallow exceptions on tear down
@@ -604,6 +675,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     ) -> None:
         if job.HasField("cancel_workflow"):
             self._apply_cancel_workflow(job.cancel_workflow)
+        elif job.HasField("deliver_stream_messages"):
+            self._apply_deliver_stream_messages(job.deliver_stream_messages)
         elif job.HasField("do_update"):
             self._apply_do_update(job.do_update)
         elif job.HasField("fire_timer"):
@@ -1129,6 +1202,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         else:
             fut.set_result(None)
 
+    def _apply_deliver_stream_messages(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.DeliverStreamMessages,
+    ) -> None:
+        buffer = self._stream_buffers.get(job.stream_id)
+        if buffer is None:
+            # Nothing subscribed. The range is already recorded as consumed and
+            # will not be sent again, so buffering it is the only way a
+            # subscription made later in the same task still sees it.
+            buffer = _StreamBuffer()
+            self._stream_buffers[job.stream_id] = buffer
+        buffer.extend(job.messages, job.from_offset)
+
     def _apply_signal_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.SignalWorkflow
     ) -> None:
@@ -1292,6 +1378,62 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
+
+    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None:
+        # Reissued on every replay, so the buffer has to exist before the first
+        # range arrives and the command has to be harmless the second time. The
+        # server treats a repeat subscription to the same stream as a no-op.
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer())
+        command = self._add_command()
+        command.subscribe_stream.stream_id = stream_id
+        command.subscribe_stream.start_offset = start_offset
+
+    def workflow_add_stream_messages(
+        self, stream_id: str, messages: Sequence[bytes], topic: str
+    ) -> None:
+        if not messages:
+            raise ValueError("add_stream_messages needs at least one message")
+        if len(messages) > _MAX_STREAM_MESSAGES_PER_BATCH:
+            raise ValueError(
+                f"a batch is limited to {_MAX_STREAM_MESSAGES_PER_BATCH} messages, "
+                f"got {len(messages)}"
+            )
+        command = self._add_command()
+        command.add_stream_messages.stream_id = stream_id
+        for body in messages:
+            # The bodies ride the command and never enter History, so the event
+            # this produces stays the same size whatever is published here.
+            message = command.add_stream_messages.messages.add()
+            message.body.data = body
+            # Every other Temporal payload names its encoding, and the UI, the
+            # CLI and any codec server rely on that to decode what they read.
+            message.body.metadata["encoding"] = b"binary/plain"
+            message.topic = topic
+
+    async def workflow_read_stream(
+        self, stream_id: str, max_messages: int
+    ) -> list[bytes]:
+        return [
+            m.body
+            for m in await self.workflow_read_stream_messages(stream_id, max_messages)
+        ]
+
+    async def workflow_read_stream_messages(
+        self, stream_id: str, max_messages: int
+    ) -> list[temporalio.workflow.DeliveredStreamMessage]:
+        # Ranges arrive on Workflow Tasks, and a query activation carries none,
+        # so without this the read waits on a future nothing can resolve and the
+        # query times out with nothing to say why.
+        self._assert_not_read_only("read stream")
+        buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer())
+        while not len(buffer):
+            await buffer.wait_future()
+        taken = buffer.take()
+        if max_messages and len(taken) > max_messages:
+            # Put the tail back rather than dropping it: nothing will resend it.
+            buffer.put_back(taken[max_messages:])
+            taken = taken[:max_messages]
+        return taken
 
     def workflow_get_current_history_length(self) -> int:
         return self._current_history_length
