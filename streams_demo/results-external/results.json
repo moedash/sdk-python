@@ -1,0 +1,107 @@
+{
+  "provider": "external",
+  "workflow_id": "ai198-contract-external-ac320e57fafc4eaf949c1aa0b4f846be",
+  "target": "127.0.0.1:53266",
+  "max_cached_workflows": 0,
+  "outcome": "completed",
+  "trace": [
+    {
+      "kind": "decision",
+      "receipt": "recorded:r1:odd",
+      "value": {
+        "branch": "odd",
+        "computed": 101,
+        "source": "r1"
+      }
+    },
+    {
+      "kind": "decision",
+      "receipt": "recorded:r2:even",
+      "value": {
+        "branch": "even",
+        "computed": 20,
+        "source": "r2"
+      }
+    },
+    {
+      "attempt": 2,
+      "kind": "superseded",
+      "producer": "model",
+      "replaced": 1
+    },
+    {
+      "kind": "decision",
+      "receipt": "recorded:r3:odd",
+      "value": {
+        "branch": "odd",
+        "computed": 103,
+        "source": "r3"
+      }
+    },
+    {
+      "kind": "decision",
+      "receipt": "recorded:r4:even",
+      "value": {
+        "branch": "even",
+        "computed": 40,
+        "source": "r4"
+      }
+    },
+    {
+      "kind": "finish",
+      "producer": "model"
+    }
+  ],
+  "task_failures": [
+    {
+      "event_id": 52,
+      "cause": 1,
+      "message": "UnhandledCommand"
+    }
+  ],
+  "observed_output": [
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "odd",
+        "computed": 101,
+        "source": "r1"
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "even",
+        "computed": 20,
+        "source": "r2"
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "retracting_attempt": 1
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "odd",
+        "computed": 103,
+        "source": "r3"
+      }
+    },
+    {
+      "kind": "DATA",
+      "value": {
+        "branch": "even",
+        "computed": 40,
+        "source": "r4"
+      }
+    },
+    {
+      "kind": "FINISH",
+      "value": null
+    }
+  ],
+  "history_events": 61
+}
