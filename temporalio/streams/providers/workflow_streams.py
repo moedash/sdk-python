@@ -69,6 +69,21 @@ def _runtime() -> _Runtime:
     return runtime
 
 
+def drain() -> None:
+    """Release parked pollers so the workflow can return.
+
+    An Option 0 stream dies with its workflow, and a parked long-poll Update
+    would otherwise hold completion open. Call it right before the workflow
+    returns, the same obligation the shipped feature's ``detach_pollers``
+    documents. A storage provider has no such step, which is one of the
+    differences the comparison table charges this transport with.
+    """
+    instance = workflow.instance()
+    runtime = getattr(instance, _RUN_ATTR, None)
+    if runtime is not None:
+        runtime.stream.detach_pollers()
+
+
 class _WSReadSource:
     """Reads the signal-fed log the shipped feature keeps in workflow state.
 
