@@ -1,17 +1,19 @@
-"""The client-side binding of the stream interface.
+"""The client-side (Redis) provider.
 
 Streams live in a store the customer runs, Redis here. A workflow's publish is
 buffered by the worker, staged invisibly under a token, and promoted only once
 a marker in History proves the workflow task that produced it was accepted.
 Consumption is recorded the same way, as ranges and boundaries in History.
 
-This is the only module of the package that differs between the two
-implementations.
+``configure`` builds the backend from ``url`` and ``key_prefix`` (defaulting
+to ``AI198_REDIS_URL`` and ``AI198_REDIS_PREFIX``), or takes a constructed
+``backend`` when the caller wants to own its lifecycle.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -30,56 +32,10 @@ from temporalio.contrib.external_workflow_streams import (
     external_output_stream,
     external_stream,
 )
-from temporalio.streams import _frame
+from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
-
-__all__ = [
-    "Consumer",
-    "Producer",
-    "configure",
-    "consumer",
-    "open_read",
-    "open_write",
-    "producer",
-    "worker_options",
-]
-
-PROVIDER = "external"
-
-_backend: Any = None
-
-
-def configure(**options: Any) -> None:
-    """Name the provider for this process.
-
-    Args:
-        backend: A ``StreamBackend`` instance, such as ``RedisStreamBackend``.
-            There is no registry to name one from out here, so the caller
-            constructs it and hands it over.
-    """
-    global _backend
-    unknown = sorted(set(options) - {"backend"})
-    if unknown:
-        raise TypeError(f"unknown provider options {unknown}")
-    if "backend" not in options:
-        raise TypeError("the client-side provider needs a backend")
-    _backend = options["backend"]
-
-
-def worker_options() -> dict[str, Any]:
-    """What a ``Worker`` or ``Replayer`` needs to serve this provider."""
-    return {"external_stream_backend": _require_backend()}
-
-
-def _require_backend() -> Any:
-    if _backend is None:
-        raise RuntimeError(
-            "no stream provider configured; call temporalio.streams.configure("
-            "backend=...) before opening a producer, a consumer or a worker"
-        )
-    return _backend
 
 
 class _ExternalReadSource:
@@ -108,34 +64,6 @@ class _ExternalWriteSink:
         await self._topic.publish(frame)
 
 
-def open_read(
-    stream: str,
-    *,
-    start: Cursor = BEGINNING,
-    idle_timeout: timedelta | None = None,
-) -> ReadSource:
-    """Subscribe the running workflow to its inbound stream ``stream``."""
-    # The provider resolves the name under this run's chain key, so a start
-    # position is only meaningful to a reader that already has one, and this
-    # provider's first subscription always starts at the beginning of the
-    # stream it minted.
-    if start is not BEGINNING and start.token:
-        raise ValueError(
-            "the client-side provider starts a new subscription at the "
-            "beginning of the stream it owns; resuming elsewhere is not "
-            "supported yet"
-        )
-    options = external_stream
-    if idle_timeout is not None:
-        options = options.with_options(idle_timeout=idle_timeout)
-    return _ExternalReadSource(options.topic(stream, type=bytes).subscribe())
-
-
-def open_write(topic: str) -> WriteSink:
-    """Bind ``topic`` on the stream the running workflow owns."""
-    return _ExternalWriteSink(external_output_stream.topic(topic, type=bytes))
-
-
 async def _chain_key(client: Client, workflow_id: str) -> WorkflowChainKey:
     description = await client.get_workflow_handle(workflow_id).describe()
     return WorkflowChainKey(
@@ -145,7 +73,7 @@ async def _chain_key(client: Client, workflow_id: str) -> WorkflowChainKey:
     )
 
 
-class Producer:
+class RedisProducer:
     """Appends to a stream from outside workflow code.
 
     Every append is visible as soon as it is written. That is the point for an
@@ -164,7 +92,6 @@ class Producer:
         client: Client | None = None,
         workflow_id: str = "",
     ) -> None:
-        """Prefer :func:`producer`."""
         self._topic = topic
         self._converter = converter
         self._stream = stream
@@ -248,51 +175,10 @@ class Producer:
         return payload.SerializeToString()
 
 
-async def producer(
-    client: Client,
-    *,
-    workflow_id: str,
-    stream: str,
-    producer_id: str = "",
-    attempt: int = 0,
-) -> Producer:
-    """Open a producer for the inbound stream ``stream`` of ``workflow_id``.
-
-    Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
-    activity's own id and attempt are the right answer and are what let a
-    reader tell a retry from a new generation.
-    """
-    if not producer_id:
-        producer_id = activity.info().activity_id
-    if not attempt:
-        attempt = activity.info().attempt
-    session = await ExternalStreamProducer.connect(
-        backend=_require_backend(),
-        workflow=await _chain_key(client, workflow_id),
-        client=client,
-        # The attempt is part of it. Deduplication answers "is this the same
-        # append again", and a second attempt writing different words at the
-        # same sequence is not: this provider rejects that outright. Folding
-        # the attempt in keeps a retried append idempotent without letting a
-        # new generation be refused as a conflicting duplicate.
-        session_id=f"{producer_id}#{attempt}",
-    )
-    return Producer(
-        session.topic(stream, type=bytes),
-        client.data_converter.payload_converter,
-        stream,
-        producer_id,
-        attempt,
-        client,
-        workflow_id,
-    )
-
-
-class Consumer:
+class RedisConsumer:
     """Reads a stream from outside workflow code, resumably."""
 
     def __init__(self, client: Any, converter: Any) -> None:
-        """Prefer :func:`consumer`."""
         self._client = client
         self._converter = converter
 
@@ -345,26 +231,142 @@ class Consumer:
         return self._converter.from_payloads([payload], [as_type])[0]
 
 
-async def consumer(
-    client: Client, *, workflow_id: str, stream: str = ""
-) -> Consumer:
-    """Open a reader for what ``workflow_id`` publishes.
+class _RedisProvider:
+    name = "redis"
 
-    An empty ``stream`` reads what the workflow wrote through
-    :func:`temporalio.streams.writer`. This provider keeps inbound and outbound
-    records in separate stores, so naming an inbound stream is not supported
-    from here yet.
-    """
-    if stream:
-        raise ValueError(
-            "this provider separates inbound and outbound storage, so an "
-            "outside reader cannot follow an inbound stream yet"
+    def __init__(self) -> None:
+        self._backend: Any = None
+
+    def configure(self, **options: Any) -> None:
+        backend = options.pop("backend", None)
+        url = options.pop("url", None)
+        key_prefix = options.pop("key_prefix", None)
+        if options:
+            raise TypeError(
+                "the redis provider takes backend, url and key_prefix, got "
+                f"{sorted(options)}"
+            )
+        if backend is not None:
+            self._backend = backend
+            return
+        import redis.asyncio
+
+        from temporalio.contrib.external_workflow_streams._redis import (
+            RedisStreamBackend,
         )
-    return Consumer(
-        await ExternalOutputStreamClient.connect(
-            backend=_require_backend(),
+
+        # redis-py defaults to a socket timeout equal to this provider's own
+        # blocking read, so an idle read would abandon a healthy socket.
+        self._backend = RedisStreamBackend(
+            client=redis.asyncio.from_url(
+                url or os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6399"),
+                decode_responses=False,
+                socket_timeout=30,
+            ),
+            key_prefix=key_prefix
+            or os.environ.get("AI198_REDIS_PREFIX", "ai198-contract"),
+        )
+
+    def _require_backend(self) -> Any:
+        if self._backend is None:
+            raise RuntimeError(
+                "no store configured; call temporalio.streams.configure("
+                'provider="redis", ...) before opening a producer, a consumer '
+                "or a worker"
+            )
+        return self._backend
+
+    def worker_options(self) -> dict[str, Any]:
+        return {"external_stream_backend": self._require_backend()}
+
+    def open_read(
+        self,
+        stream: str,
+        *,
+        start: Cursor = BEGINNING,
+        idle_timeout: timedelta | None = None,
+    ) -> ReadSource:
+        # The provider resolves the name under this run's chain key, so a start
+        # position is only meaningful to a reader that already has one, and this
+        # provider's first subscription always starts at the beginning of the
+        # stream it minted.
+        if start is not BEGINNING and start.token:
+            raise ValueError(
+                "the client-side provider starts a new subscription at the "
+                "beginning of the stream it owns; resuming elsewhere is not "
+                "supported yet"
+            )
+        options = external_stream
+        if idle_timeout is not None:
+            options = options.with_options(idle_timeout=idle_timeout)
+        return _ExternalReadSource(options.topic(stream, type=bytes).subscribe())
+
+    def open_write(self, topic: str) -> WriteSink:
+        return _ExternalWriteSink(external_output_stream.topic(topic, type=bytes))
+
+    async def producer(
+        self,
+        client: Client,
+        *,
+        workflow_id: str,
+        stream: str,
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> RedisProducer:
+        """Open a producer for the inbound stream ``stream`` of ``workflow_id``.
+
+        Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
+        activity's own id and attempt are the right answer and are what let a
+        reader tell a retry from a new generation.
+        """
+        if not producer_id:
+            producer_id = activity.info().activity_id
+        if not attempt:
+            attempt = activity.info().attempt
+        session = await ExternalStreamProducer.connect(
+            backend=self._require_backend(),
             workflow=await _chain_key(client, workflow_id),
             client=client,
-        ),
-        client.data_converter.payload_converter,
-    )
+            # The attempt is part of it. Deduplication answers "is this the
+            # same append again", and a second attempt writing different words
+            # at the same sequence is not: this provider rejects that outright.
+            # Folding the attempt in keeps a retried append idempotent without
+            # letting a new generation be refused as a conflicting duplicate.
+            session_id=f"{producer_id}#{attempt}",
+        )
+        return RedisProducer(
+            session.topic(stream, type=bytes),
+            client.data_converter.payload_converter,
+            stream,
+            producer_id,
+            attempt,
+            client,
+            workflow_id,
+        )
+
+    async def consumer(
+        self, client: Client, *, workflow_id: str, stream: str = ""
+    ) -> RedisConsumer:
+        """Open a reader for what ``workflow_id`` publishes.
+
+        An empty ``stream`` reads what the workflow wrote through
+        :func:`temporalio.streams.writer`. This provider keeps inbound and
+        outbound records in separate stores, so naming an inbound stream is
+        not supported from here yet.
+        """
+        if stream:
+            raise ValueError(
+                "this provider separates inbound and outbound storage, so an "
+                "outside reader cannot follow an inbound stream yet"
+            )
+        return RedisConsumer(
+            await ExternalOutputStreamClient.connect(
+                backend=self._require_backend(),
+                workflow=await _chain_key(client, workflow_id),
+                client=client,
+            ),
+            client.data_converter.payload_converter,
+        )
+
+
+_provider.register("redis", _RedisProvider)
