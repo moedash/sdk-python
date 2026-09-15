@@ -21,7 +21,7 @@ The contract, in five statements:
 5. **A workflow names its streams relative to itself, and the provider
    resolves them.** ``reader("inputs")`` is this workflow's inbound stream
    called ``inputs``; ``writer("decisions")`` is a topic it publishes on. One
-   provider stores that as a namespace-level stream id and the other as a name
+   provider stores that as a namespace-level stream id and another as a name
    under the run's chain key, and workflow code does not have to know which.
    The provider itself is chosen when the worker is built.
 
@@ -40,9 +40,9 @@ means the writing activity succeeded, that a superseded attempt's records can
 be withdrawn, or that a stream outlives the retention its provider is
 configured for.
 
-Prototype support for AI-198. The public names are the proposal; the module
-behind them (``_binding``) is the only file that differs between the
-server-side and the client-side implementation.
+Prototype support for AI-198. The public names are the proposal; providers
+live under :mod:`temporalio.streams.providers`, one module each, registered
+by name and chosen by :func:`configure`. Everything else is shared.
 """
 
 from __future__ import annotations
@@ -50,9 +50,11 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, TypeVar
 
-from temporalio.streams._binding import (
+from temporalio.streams._handles import ReadSource, StreamReader, StreamWriter, WriteSink
+from temporalio.streams._provider import (
     Consumer,
     Producer,
+    StreamProvider,
     configure,
     consumer,
     open_read,
@@ -60,7 +62,6 @@ from temporalio.streams._binding import (
     producer,
     worker_options,
 )
-from temporalio.streams._handles import ReadSource, StreamReader, StreamWriter, WriteSink
 from temporalio.streams._record import (
     BEGINNING,
     Cursor,
@@ -76,6 +77,7 @@ __all__ = [
     "Producer",
     "ReadSource",
     "RecordKind",
+    "StreamProvider",
     "StreamReader",
     "StreamRecord",
     "StreamWriter",
@@ -133,3 +135,9 @@ def writer(topic: str, *, type: type | None = None) -> StreamWriter[Any]:
     """
     del type
     return StreamWriter(open_write(topic), topic)
+
+
+# Importing the package registers every provider whose dependencies are
+# present in this tree. Import order matters: the registry above must exist
+# before a provider module can register with it.
+from temporalio.streams import providers as _providers  # noqa: E402,F401
