@@ -1,0 +1,315 @@
+"""The in-process reference provider.
+
+Exists so the conformance suite can exercise the whole surface without a
+store, and to document in one file what a provider owes. Two honest limits,
+both stated so nobody mistakes this for evidence:
+
+- It is not replay-safe. Workflow-side state lives in plain process memory,
+  so run it with a warm workflow cache and do not use it to demonstrate
+  recovery.
+- A workflow's publish becomes visible at ``publish`` time rather than at
+  task acceptance, so it only approximates rule 1 of the contract.
+
+The outside surface (producer, consumer, dedupe, supersession, cursors) is
+faithful, which is what the conformance tests lean on.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from datetime import timedelta
+from typing import Any
+
+import temporalio.converter
+from temporalio import workflow
+from temporalio.api.common.v1 import Payload
+from temporalio.streams import _frame, _provider
+from temporalio.streams._handles import ReadSource, WriteSink
+from temporalio.streams._policy import AttemptTracker
+from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+
+_DEFAULT_POLL = timedelta(milliseconds=100)
+
+
+class _MemoryStream:
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+        # Dedupe identity is (producer#attempt, first sequence of the append),
+        # the same pair the storage providers use.
+        self.seen: dict[tuple[str, int], int] = {}
+        self._arrival = asyncio.Event()
+
+    def append(self, frames: list[bytes], *, producer_id: str, sequence: int) -> int:
+        key = (producer_id, sequence)
+        already = self.seen.get(key)
+        if already is not None:
+            return already
+        offset = len(self.frames)
+        self.frames.extend(frames)
+        self.seen[key] = offset
+        arrival, self._arrival = self._arrival, asyncio.Event()
+        arrival.set()
+        return offset
+
+    async def wait_past(self, offset: int) -> None:
+        while len(self.frames) <= offset:
+            await self._arrival.wait()
+
+
+_streams: dict[str, _MemoryStream] = {}
+
+
+def _stream(stream_id: str) -> _MemoryStream:
+    found = _streams.get(stream_id)
+    if found is None:
+        found = _streams[stream_id] = _MemoryStream()
+    return found
+
+
+def reset() -> None:
+    """Drop every stream. For tests."""
+    _streams.clear()
+
+
+def _inbound_id(workflow_id: str, stream: str) -> str:
+    return f"{workflow_id}:{stream}" if stream else workflow_id
+
+
+def _converter(client: Any) -> Any:
+    if client is None:
+        return temporalio.converter.DataConverter.default.payload_converter
+    return client.data_converter.payload_converter
+
+
+class _MemReadSource:
+    """Workflow-side read that wakes by polling a timer.
+
+    A real provider wakes the workflow by delivering; polling is the price of
+    having no delivery path, and it is why this provider is for tests.
+    """
+
+    def __init__(self, store: _MemoryStream, start: int, poll: timedelta) -> None:
+        self._store = store
+        self._cursor = start
+        self._poll = poll
+        self._closed = False
+
+    async def next_batch(self) -> list[tuple[Cursor, bytes]]:
+        while not self._closed:
+            frames = self._store.frames
+            if len(frames) > self._cursor:
+                batch = [
+                    (Cursor(str(offset)), frames[offset])
+                    for offset in range(self._cursor, len(frames))
+                ]
+                self._cursor = len(frames)
+                return batch
+            await workflow.sleep(self._poll)
+        raise StopAsyncIteration
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class _MemWriteSink:
+    def __init__(self, store: _MemoryStream, topic: str) -> None:
+        self._store = store
+        self._topic = topic
+        self._sequence = 0
+
+    async def publish(self, frame: bytes) -> None:
+        self._store.append(
+            [frame],
+            producer_id=f"__workflow__:{self._topic}",
+            sequence=self._sequence,
+        )
+        self._sequence += 1
+
+
+class MemoryProducer:
+    """The outside producer, faithful to the contract."""
+
+    def __init__(
+        self, store: _MemoryStream, converter: Any, topic: str, producer_id: str, attempt: int
+    ) -> None:
+        self._store = store
+        self._converter = converter
+        self._topic = topic
+        self._producer_id = producer_id
+        self._attempt = attempt
+        self._sequence = 0
+
+    @property
+    def attempt(self) -> int:
+        return self._attempt
+
+    @property
+    def _provider_id(self) -> str:
+        return (
+            f"{self._producer_id}#{self._attempt}" if self._attempt else self._producer_id
+        )
+
+    async def append(self, *values: Any) -> Cursor:
+        frames = []
+        for value in values:
+            frames.append(
+                _frame.encode(
+                    topic=self._topic,
+                    kind=RecordKind.DATA,
+                    producer=self._producer_id,
+                    attempt=self._attempt,
+                    sequence=self._sequence,
+                    body=self._encode(value),
+                )
+            )
+            self._sequence += 1
+        offset = self._store.append(
+            frames,
+            producer_id=self._provider_id,
+            sequence=self._sequence - len(frames),
+        )
+        return Cursor(str(offset))
+
+    async def finish(self) -> None:
+        frame = _frame.encode(
+            topic=self._topic,
+            kind=RecordKind.FINISH,
+            producer=self._producer_id,
+            attempt=self._attempt,
+            sequence=self._sequence,
+            body=b"",
+        )
+        self._sequence += 1
+        self._store.append(
+            [frame], producer_id=self._provider_id, sequence=self._sequence - 1
+        )
+
+    def _encode(self, value: Any) -> bytes:
+        payload = (
+            value
+            if isinstance(value, Payload)
+            else self._converter.to_payloads([value])[0]
+        )
+        return payload.SerializeToString()
+
+
+class MemoryConsumer:
+    """The outside reader, with the shared supersession rule."""
+
+    def __init__(self, store: _MemoryStream, converter: Any) -> None:
+        self._store = store
+        self._converter = converter
+
+    async def read(
+        self,
+        *,
+        start: Cursor = BEGINNING,
+        topic: str | None = None,
+        type: type | None = None,
+    ) -> AsyncIterator[StreamRecord[Any]]:
+        attempts = AttemptTracker()
+        offset = int(start.token) if start.token else 0
+        while True:
+            await self._store.wait_past(offset)
+            frames = self._store.frames
+            while offset < len(frames):
+                cursor = Cursor(str(offset))
+                frame = frames[offset]
+                offset += 1
+                try:
+                    kind, frame_topic, source, attempt, sequence, body = _frame.decode(
+                        frame
+                    )
+                except ValueError:
+                    continue
+                if topic is not None and frame_topic != topic:
+                    continue
+                superseded = attempts.note(source, attempt, cursor)
+                if superseded is not None:
+                    yield superseded
+                yield StreamRecord(
+                    value=self._decode(body, type) if kind is RecordKind.DATA else None,
+                    cursor=cursor,
+                    kind=kind,
+                    topic=frame_topic,
+                    producer=source,
+                    attempt=attempt,
+                    sequence=sequence,
+                )
+
+    def _decode(self, body: bytes, as_type: type | None) -> Any:
+        payload = Payload()
+        payload.ParseFromString(body)
+        if as_type is None:
+            return self._converter.from_payloads([payload])[0]
+        return self._converter.from_payloads([payload], [as_type])[0]
+
+
+class _MemoryProvider:
+    name = "memory"
+
+    def __init__(self) -> None:
+        self._poll = _DEFAULT_POLL
+
+    def configure(self, **options: Any) -> None:
+        poll = options.pop("poll_interval", None)
+        if poll is not None:
+            self._poll = poll
+        if options:
+            raise TypeError(
+                f"the memory provider takes only poll_interval, got {sorted(options)}"
+            )
+
+    def worker_options(self) -> dict[str, Any]:
+        return {}
+
+    def open_read(
+        self,
+        stream: str,
+        *,
+        start: Cursor = BEGINNING,
+        idle_timeout: timedelta | None = None,
+    ) -> ReadSource:
+        store = _stream(_inbound_id(workflow.info().workflow_id, stream))
+        return _MemReadSource(
+            store,
+            int(start.token) if start.token else 0,
+            idle_timeout or self._poll,
+        )
+
+    def open_write(self, topic: str) -> WriteSink:
+        store = _stream(_inbound_id(workflow.info().workflow_id, ""))
+        return _MemWriteSink(store, topic)
+
+    async def producer(
+        self,
+        client: Any,
+        *,
+        workflow_id: str,
+        stream: str,
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> MemoryProducer:
+        if not producer_id:
+            from temporalio import activity
+
+            producer_id = activity.info().activity_id
+            attempt = attempt or activity.info().attempt
+        return MemoryProducer(
+            _stream(_inbound_id(workflow_id, stream)),
+            _converter(client),
+            stream,
+            producer_id,
+            attempt,
+        )
+
+    async def consumer(
+        self, client: Any, *, workflow_id: str, stream: str = ""
+    ) -> MemoryConsumer:
+        return MemoryConsumer(
+            _stream(_inbound_id(workflow_id, stream)), _converter(client)
+        )
+
+
+_provider.register("memory", _MemoryProvider)
