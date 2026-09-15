@@ -159,9 +159,18 @@ def configure(provider: str | None = None, **options: Any) -> None:
     ``provider`` may be omitted when exactly one provider is registered.
     """
     global _active
+    _active = instance(provider, **options)
+
+
+def instance(provider: str | None = None, **options: Any) -> StreamProvider:
+    """A configured provider that is not installed as the process default.
+
+    For code that serves one provider while the process is configured with
+    another, such as a Nexus stream handler delegating to its store.
+    """
     chosen = _make(provider)
     chosen.configure(**options)
-    _active = chosen
+    return chosen
 
 
 def _current() -> StreamProvider:
