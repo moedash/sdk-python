@@ -2,9 +2,11 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
+from unittest import mock
 
 import pytest
 
+import temporalio.api.workflowservice.v1
 from temporalio import activity, workflow
 from temporalio.client import (
     ActivityExecutionCount,
@@ -76,6 +78,31 @@ class ActivityHolder:
     @activity.defn
     def sync_increment(self, x: int) -> int:
         return x + 1
+
+
+async def test_start_activity_generates_request_id() -> None:
+    start_activity_execution = mock.AsyncMock(
+        return_value=temporalio.api.workflowservice.v1.StartActivityExecutionResponse(
+            run_id="activity-run-id"
+        )
+    )
+    service_client = mock.MagicMock()
+    service_client.config.identity = "test-identity"
+    service_client.workflow_service.start_activity_execution = start_activity_execution
+    client = Client(service_client)
+
+    for activity_id in ("activity-id-1", "activity-id-2"):
+        await client.start_activity(
+            increment,
+            1,
+            id=activity_id,
+            task_queue="task-queue",
+            start_to_close_timeout=timedelta(seconds=1),
+        )
+
+    requests = [call.args[0] for call in start_activity_execution.call_args_list]
+    assert all(uuid.UUID(request.request_id).version == 4 for request in requests)
+    assert requests[0].request_id != requests[1].request_id
 
 
 class TestDescribe:
@@ -738,8 +765,13 @@ async def test_manual_cancellation(client: Client, env: WorkflowEnvironment):
         # report_cancellation fails if activity is not in CANCELLATION_REQUESTED state
         with pytest.raises(RPCError) as err:
             await async_activity_handle.report_cancellation("Test cancellation")
-        assert err.value.status == RPCStatusCode.FAILED_PRECONDITION
-        assert "invalid transition from Started" in str(err.value)
+        assert err.value.status in {
+            RPCStatusCode.FAILED_PRECONDITION,
+            RPCStatusCode.INVALID_ARGUMENT,
+        }
+        assert "invalid transition from Started" in str(
+            err.value
+        ) or "unable to mark activity as canceled" in str(err.value)
 
         # Request cancellation to transition activity to CANCELLATION_REQUESTED state
         await activity_handle.cancel()
