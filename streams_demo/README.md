@@ -62,3 +62,10 @@ handler worker.
 The conformance suite runs the same expectations on every provider:
 `pytest tests/streams/` (memory and Workflow Streams on the test server), plus
 `STREAMS_LIVE=native|redis|nexus` for the suites that need a store.
+
+## The examples
+
+`examples/streams/` is the same thing written as a worked example rather than
+a measurement run: `agent.py` holds the workflow and activities, identical on
+every provider, and `run.py` picks one. See its `configure_provider`, which
+is the whole difference between the options.
