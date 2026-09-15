@@ -18,6 +18,7 @@ import pytest
 from temporalio import streams, workflow
 from temporalio.client import Client
 from temporalio.streams import RecordKind
+from temporalio.streams.providers.workflow_streams import drain
 from temporalio.worker import Worker
 
 pytestmark = pytest.mark.skipif(
@@ -28,7 +29,19 @@ pytestmark = pytest.mark.skipif(
 
 @workflow.defn
 class EchoLoop:
-    """Reads ``inputs``, echoes each value onto ``decisions``, ends on FINISH."""
+    """Reads ``inputs``, echoes each value onto ``decisions``, ends on FINISH.
+
+    Lingers until released, because an Option 0 stream dies with its
+    workflow: a reader that arrives after close finds nothing, which is the
+    transport limit the doc states rather than a defect to fix here.
+    """
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
 
     @workflow.run
     async def run(self) -> int:
@@ -43,6 +56,9 @@ class EchoLoop:
             seen += 1
             await decisions.publish({"echo": record.value["n"]})
         await decisions.finish()
+        await workflow.wait_condition(lambda: self._released)
+        drain()
+        await workflow.wait_condition(workflow.all_handlers_finished)
         return seen
 
 
@@ -97,6 +113,7 @@ async def test_interface_loop_over_workflow_streams():
         ]
         assert [r.value["echo"] for r in records[:3]] == [1, 2, 3]
 
+        await handle.signal(EchoLoop.release)
         assert await handle.result() == 3
 
 
