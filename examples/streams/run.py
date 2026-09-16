@@ -16,11 +16,10 @@ import argparse
 import asyncio
 import uuid
 
+from examples.streams.agent import Agent, generate, record_decision
 from temporalio import streams
 from temporalio.client import Client
 from temporalio.worker import Worker
-
-from examples.streams.agent import Agent, generate, record_decision
 
 
 def configure_provider(args: argparse.Namespace) -> None:
@@ -39,7 +38,9 @@ def configure_provider(args: argparse.Namespace) -> None:
         raise SystemExit(f"unknown provider {args.provider}")
 
 
-async def ensure_stream(args: argparse.Namespace, client: Client, workflow_id: str) -> None:
+async def ensure_stream(
+    args: argparse.Namespace, client: Client, workflow_id: str
+) -> None:
     """Create the inbound stream when the provider needs it to pre-exist.
 
     The two storage providers want opposite orders, which is worth knowing
@@ -74,6 +75,7 @@ def outside_surface(args: argparse.Namespace):
 
 
 async def main() -> None:
+    """Run the loop once on the provider named on the command line."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "provider", choices=["workflow_streams", "redis", "native", "nexus"]
