@@ -62,11 +62,28 @@ class Consumer(Protocol):
     def read(
         self,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
-        """Yield records from ``start`` as they arrive."""
+        """Yield the records after ``after`` as they arrive.
+
+        ``BEGINNING`` yields everything the stream retains. Any other cursor
+        came from a record this or another reader saw, and reading resumes
+        just past it, so a reader that stores the last cursor it handled and
+        hands it back sees every record exactly once.
+        """
+        ...
+
+    async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the newest record, or ``BEGINNING`` when there is none.
+
+        For a reader that wants to follow from now: ``read(after=latest())``
+        yields only what is published after this call returned, which is how
+        a client that is about to send a message positions itself before
+        sending, without the workflow having to report a position. ``topic``
+        is for the provider that keeps each topic in its own store.
+        """
         ...
 
 
@@ -95,7 +112,7 @@ class StreamProvider(Protocol):
         self,
         stream: str,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
         """Subscribe the running workflow to its inbound stream ``stream``."""
@@ -110,11 +127,18 @@ class StreamProvider(Protocol):
         client: Any,
         *,
         workflow_id: str,
-        stream: str,
+        stream: str = "",
+        topic: str = "",
         producer_id: str = "",
         attempt: int = 0,
     ) -> Producer:
-        """Open a producer for ``workflow_id``'s inbound stream ``stream``."""
+        """Open a producer that appends on ``workflow_id``'s account.
+
+        ``stream`` names one of the workflow's inbound streams. With no
+        ``stream``, ``topic`` names a topic on the stream the workflow itself
+        publishes, which is how an activity puts its live output next to the
+        workflow's own records for the same outside reader.
+        """
         ...
 
     async def consumer(
@@ -210,11 +234,11 @@ def worker_options() -> dict[str, Any]:
 def open_read(
     stream: str,
     *,
-    start: Cursor = BEGINNING,
+    after: Cursor = BEGINNING,
     idle_timeout: timedelta | None = None,
 ) -> ReadSource:
     """Subscribe the running workflow to its inbound stream ``stream``."""
-    return _current().open_read(stream, start=start, idle_timeout=idle_timeout)
+    return _current().open_read(stream, after=after, idle_timeout=idle_timeout)
 
 
 def open_write(topic: str) -> WriteSink:
@@ -252,15 +276,28 @@ async def producer(
     client: Any,
     *,
     workflow_id: str,
-    stream: str,
+    stream: str = "",
+    topic: str = "",
     producer_id: str = "",
     attempt: int = 0,
 ) -> Producer:
-    """Open a producer for the inbound stream ``stream`` of ``workflow_id``."""
+    """Open a producer that appends on ``workflow_id``'s account.
+
+    Name either an inbound ``stream`` of the workflow, or a ``topic`` on the
+    stream the workflow publishes. Inside an activity, leave ``producer_id``
+    and ``attempt`` unset: the activity's own id and attempt are the right
+    answer, and they are what let a reader tell a retry from a new generation.
+    """
+    if bool(stream) == bool(topic):
+        raise ValueError(
+            "name exactly one of stream (an inbound stream of the workflow) or "
+            "topic (a topic on the stream the workflow publishes)"
+        )
     return await _current().producer(
         client,
         workflow_id=workflow_id,
         stream=stream,
+        topic=topic,
         producer_id=producer_id,
         attempt=attempt,
     )

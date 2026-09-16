@@ -12,12 +12,16 @@ The contract, in five statements:
    it found nothing, is committed with the commands that reading produced.
    Recovery re-supplies the same records in the same order.
 3. **Anything that does I/O publishes on its own account.** An activity, a
-   local activity, or an outside process writes through :func:`producer`, and
-   its records are visible as soon as they are written. It carries a producer
-   id, an attempt and a sequence so a retry can be told from a new generation.
-4. **A cursor is opaque and belongs to its provider.** Hand it back to resume.
-   Do not compare two cursors or do arithmetic on one: one provider numbers
-   records with integers and another with a millisecond-and-sequence pair.
+   local activity, or an outside process writes through :func:`producer`,
+   either into one of the workflow's inbound streams or onto a topic of the
+   stream the workflow publishes, and its records are visible as soon as they
+   are written. It carries a producer id, an attempt and a sequence so a retry
+   can be told from a new generation.
+4. **A cursor is opaque and belongs to its provider.** Hand it back to resume
+   after the record it names. Do not compare two cursors or do arithmetic on
+   one: one provider numbers records with integers and another with a
+   millisecond-and-sequence pair. A reader that wants to follow from now asks
+   the consumer for :meth:`Consumer.latest` instead of guessing a position.
 5. **A workflow names its streams relative to itself, and the provider
    resolves them.** ``reader("inputs")`` is this workflow's inbound stream
    called ``inputs``; ``writer("decisions")`` is a topic it publishes on. One
@@ -103,7 +107,7 @@ def reader(
     *,
     type: type | None = None,
     topic: str | None = None,
-    start: Cursor = BEGINNING,
+    after: Cursor = BEGINNING,
     idle_timeout: timedelta | None = None,
 ) -> StreamReader[Any]:
     """Subscribe this workflow to its inbound stream ``stream``.
@@ -116,14 +120,15 @@ def reader(
         stream: The inbound stream's name, relative to this workflow.
         type: The value type, used as the decode hint.
         topic: Only records on this topic, or every topic when omitted.
-        start: Where to start. Only honoured on the first subscription of a
-            run, because after that the recorded cursor decides.
+        after: Resume after this record. Only honoured on the first
+            subscription of a run, because after that the recorded cursor
+            decides.
         idle_timeout: How long the workflow waits with nothing arriving before
             the provider is allowed to release the worker. ``None`` takes the
             provider's default.
     """
     return StreamReader(
-        open_read(stream, start=start, idle_timeout=idle_timeout),
+        open_read(stream, after=after, idle_timeout=idle_timeout),
         topic=topic,
         type=type,
     )
