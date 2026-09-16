@@ -41,6 +41,15 @@ def decide(token: dict[str, Any]) -> dict[str, Any]:
 class AgentLoop:
     """Read, decide, write, until the producer says it has finished."""
 
+    def __init__(self) -> None:
+        """Let the provider install what it needs before the first task.
+
+        A no-op except on a transport that serves outside readers through
+        handlers on this workflow, which has to register them before the
+        first task completes or an early reader finds nothing to talk to.
+        """
+        streams.prepare()
+
     @workflow.run
     async def run(self, limit: int) -> list[dict[str, Any]]:
         """Decide on at most ``limit`` inputs, then return the trace."""
@@ -92,4 +101,7 @@ class AgentLoop:
         finally:
             inputs.close()
         await decisions.finish()
+        # Lets go of anything the provider parked against this run, so a
+        # transport that holds a long poll open can let the workflow return.
+        streams.drain()
         return trace
