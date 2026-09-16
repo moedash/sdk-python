@@ -103,7 +103,9 @@ async def test_both_producers_reach_one_subscriber() -> None:
 
     # The Workflow's own publishes bracket the Activity's, and both are on one
     # log in the order the server took them.
-    assert [e.source for e in seen] == ["workflow"] + ["activity"] * tokens + ["workflow"]
+    assert [e.source for e in seen] == ["workflow"] + ["activity"] * tokens + [
+        "workflow"
+    ]
     assert seen[0].text == "turn started"
     assert seen[-1].text == "turn ended"
     assert offsets == list(range(tokens + 2))
@@ -115,7 +117,9 @@ async def test_both_producers_reach_one_subscriber() -> None:
     assert await late.get_offset() == tokens + 2
     replayed = [
         item.data.text
-        async for item in late.subscribe(topics=[TOPIC], from_offset=0, result_type=Event)
+        async for item in late.subscribe(
+            topics=[TOPIC], from_offset=0, result_type=Event
+        )
     ]
     assert replayed == [e.text for e in seen]
 
@@ -132,14 +136,14 @@ async def test_a_reader_resumes_from_an_offset_it_was_given() -> None:
         activities=[emit_from_activity],
         max_cached_workflows=0,
     ):
-        await client.execute_workflow(
-            Emitting.run, 3, id=wf_id, task_queue=task_queue
-        )
+        await client.execute_workflow(Emitting.run, 3, id=wf_id, task_queue=task_queue)
 
     stream = WorkflowStreamClient.create(client, wf_id)
     first = [
         item
-        async for item in stream.subscribe(topics=[TOPIC], from_offset=0, result_type=Event)
+        async for item in stream.subscribe(
+            topics=[TOPIC], from_offset=0, result_type=Event
+        )
     ]
     assert len(first) == 5
 
