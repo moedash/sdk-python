@@ -29,7 +29,7 @@ import dataclasses
 import json
 import urllib.error
 import urllib.request
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import timedelta
 from typing import Any
 
@@ -51,6 +51,8 @@ _WORKFLOW_SIDE_ERROR = (
 
 @dataclasses.dataclass
 class AppendInput:
+    """One append call: who is writing, where, and what."""
+
     workflow_id: str
     stream: str
     producer_id: str
@@ -63,11 +65,15 @@ class AppendInput:
 
 @dataclasses.dataclass
 class AppendOutput:
+    """Where the append landed, empty when it wrote nothing."""
+
     cursor: str = ""
 
 
 @dataclasses.dataclass
 class ReadInput:
+    """One read call: where to resume from and how long to wait."""
+
     workflow_id: str
     stream: str = ""
     topic: str = ""
@@ -81,18 +87,24 @@ class ReadInput:
 
 @dataclasses.dataclass
 class RecordWire:
+    """One record on the wire: its cursor and its base64 frame."""
+
     token: str
     frame: str
 
 
 @dataclasses.dataclass
 class ReadOutput:
+    """What one read call answered, and where to resume."""
+
     records: list[RecordWire] = dataclasses.field(default_factory=list)
     next_token: str = ""
 
 
 @nexusrpc.service
 class TemporalStreams:
+    """The stream endpoint's two operations."""
+
     append: nexusrpc.Operation[AppendInput, AppendOutput]
     read: nexusrpc.Operation[ReadInput, ReadOutput]
 
@@ -107,6 +119,7 @@ class TemporalStreamsHandler:
     """
 
     def __init__(self, client: Any, provider: str, **provider_options: Any) -> None:
+        """Serve the endpoint out of the provider named by ``provider``."""
         self._client = client
         self._delegate = _provider.instance(provider, **provider_options)
         self._producers: dict[tuple[str, str, str, int], tuple[Any, int]] = {}
@@ -115,6 +128,7 @@ class TemporalStreamsHandler:
     async def append(
         self, _ctx: nexusrpc.handler.StartOperationContext, input: AppendInput
     ) -> AppendOutput:
+        """Append on the caller's account, dropping a repeated batch."""
         key = (
             input.workflow_id,
             input.stream or f"@{input.topic}",
@@ -152,6 +166,7 @@ class TemporalStreamsHandler:
     async def read(
         self, _ctx: nexusrpc.handler.StartOperationContext, input: ReadInput
     ) -> ReadOutput:
+        """Answer with the records after the caller's token, or time out."""
         delegate = await self._delegate.consumer(
             self._client, workflow_id=input.workflow_id, stream=input.stream
         )
@@ -172,7 +187,9 @@ class TemporalStreamsHandler:
                         continue
                     body = b""
                     if record.kind is RecordKind.DATA:
-                        body = converter.to_payloads([record.value])[0].SerializeToString()
+                        body = converter.to_payloads([record.value])[
+                            0
+                        ].SerializeToString()
                     frame = _frame.encode(
                         topic=record.topic,
                         kind=record.kind,
@@ -193,7 +210,11 @@ class TemporalStreamsHandler:
         except TimeoutError:
             pass
         finally:
-            await subscription.aclose()
+            # The delegate's read parks against its store, and this call
+            # answers before the caller asks again, so let it go now rather
+            # than when the collector is next swept.
+            if isinstance(subscription, AsyncGenerator):
+                await subscription.aclose()
         return ReadOutput(records=records, next_token=next_token)
 
 
@@ -217,9 +238,16 @@ class NexusProducer:
     """Appends through the stream endpoint; framing happens behind it."""
 
     def __init__(
-        self, base_url: str, converter: Any, workflow_id: str, stream: str,
-        topic: str, producer_id: str, attempt: int,
+        self,
+        base_url: str,
+        converter: Any,
+        workflow_id: str,
+        stream: str,
+        topic: str,
+        producer_id: str,
+        attempt: int,
     ) -> None:
+        """Bind this producer to one stream or topic on the endpoint."""
         self._base_url = base_url
         self._converter = converter
         self._workflow_id = workflow_id
@@ -231,9 +259,11 @@ class NexusProducer:
 
     @property
     def attempt(self) -> int:
+        """The generation this producer is writing."""
         return self._attempt
 
     async def append(self, *values: Any) -> Cursor:
+        """Append ``values`` through the endpoint."""
         payloads = []
         for value in values:
             payload = (
@@ -245,9 +275,12 @@ class NexusProducer:
         return Cursor((await self._call(payloads=payloads)).get("cursor", ""))
 
     async def finish(self) -> None:
+        """Mark this producer done, so a reader stops waiting on it."""
         await self._call(finish=True)
 
-    async def _call(self, payloads: list[str] | None = None, finish: bool = False) -> dict:
+    async def _call(
+        self, payloads: list[str] | None = None, finish: bool = False
+    ) -> dict:
         self._batch_index += 1
         return await asyncio.to_thread(
             _post,
@@ -270,7 +303,10 @@ class NexusProducer:
 class NexusConsumer:
     """Reads batches from the stream endpoint, re-synthesizing supersession."""
 
-    def __init__(self, base_url: str, converter: Any, workflow_id: str, stream: str) -> None:
+    def __init__(
+        self, base_url: str, converter: Any, workflow_id: str, stream: str
+    ) -> None:
+        """Read what ``workflow_id`` publishes, through the endpoint."""
         self._base_url = base_url
         self._converter = converter
         self._workflow_id = workflow_id
@@ -283,6 +319,7 @@ class NexusConsumer:
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
+        """Yield records after ``after``, one endpoint batch at a time."""
         attempts = AttemptTracker()
         token = after.token
         while True:
@@ -323,6 +360,7 @@ class NexusConsumer:
             token = raw.get("next_token", token) or token
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the last record written, for following from now."""
         raw = await asyncio.to_thread(
             _post,
             f"{self._base_url}/read",
@@ -363,9 +401,7 @@ class _NexusProvider:
             )
         if not endpoint:
             raise TypeError("the nexus provider needs endpoint=<nexus endpoint name>")
-        self._base_url = (
-            f"{http_address}/nexus/endpoints/{endpoint}/services/{service}"
-        )
+        self._base_url = f"{http_address}/nexus/endpoints/{endpoint}/services/{service}"
 
     def worker_options(self) -> dict[str, Any]:
         raise RuntimeError(_WORKFLOW_SIDE_ERROR)
@@ -377,9 +413,11 @@ class _NexusProvider:
         after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
+        del stream, after, idle_timeout
         raise RuntimeError(_WORKFLOW_SIDE_ERROR)
 
     def open_write(self, topic: str) -> WriteSink:
+        del topic
         raise RuntimeError(_WORKFLOW_SIDE_ERROR)
 
     def _url(self) -> str:

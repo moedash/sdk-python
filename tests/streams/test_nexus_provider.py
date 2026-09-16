@@ -13,7 +13,6 @@ Environment: ``TEMPORAL_ADDRESS`` (default ``localhost:7233``),
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
@@ -27,7 +26,6 @@ from temporalio.streams import RecordKind
 from temporalio.streams._provider import instance
 from temporalio.streams.providers.nexus import TemporalStreamsHandler
 from temporalio.worker import Worker
-
 from tests.streams.test_workflow_streams_provider import EchoLoop, take
 
 pytestmark = pytest.mark.skipif(
@@ -43,9 +41,17 @@ def _endpoint_id() -> str:
     # The HTTP ingress dispatches by endpoint id, not name.
     out = subprocess.run(
         [
-            "temporal", "operator", "nexus", "endpoint", "get",
-            "--name", ENDPOINT, "-o", "json",
-            "--address", os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"),
+            "temporal",
+            "operator",
+            "nexus",
+            "endpoint",
+            "get",
+            "--name",
+            ENDPOINT,
+            "-o",
+            "json",
+            "--address",
+            os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"),
         ],
         capture_output=True,
         text=True,
@@ -58,9 +64,7 @@ async def test_interface_loop_through_the_nexus_front():
     # The workflow worker and the handler worker both use the storage
     # provider; only the caller goes through the front.
     streams.configure(provider="workflow_streams")
-    client = await Client.connect(
-        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     front = instance(
         "nexus",
         endpoint=_endpoint_id(),
@@ -110,9 +114,7 @@ async def test_interface_loop_through_the_nexus_front():
             # just past the record it names.
             checkpoint = records[0].cursor
             resumed = await front.consumer(None, workflow_id=workflow_id)
-            again = await take(
-                resumed.read(type=dict, after=checkpoint), 2, timeout=60
-            )
+            again = await take(resumed.read(type=dict, after=checkpoint), 2, timeout=60)
             assert [r.value["echo"] for r in again[:2]] == [2, 3]
 
             await handle.signal(EchoLoop.release)
