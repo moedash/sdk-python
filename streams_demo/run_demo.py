@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from temporalio import streams
@@ -29,14 +29,15 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_loop import INPUTS, AgentLoop, record_decision  # noqa: E402
 import provider_setup  # noqa: E402
+from agent_loop import INPUTS, AgentLoop, record_decision  # noqa: E402
 
 DECISION_LIMIT = 8
 EXPECTED_OUTPUT = 6
 
 
 async def collect_output(client: Client, workflow_id: str, want: int) -> list[dict]:
+    """Read ``want`` decisions off the workflow's stream from outside it."""
     reader = await streams.consumer(client, workflow_id=workflow_id)
     seen: list[dict] = []
     async for record in reader.read(type=dict, topic="decisions"):
@@ -47,6 +48,7 @@ async def collect_output(client: Client, workflow_id: str, want: int) -> list[di
 
 
 async def main() -> int:
+    """Run the demo once and write what happened next to this file."""
     out = Path(__file__).resolve().parent / f"results-{provider_setup.NAME}"
     out.mkdir(exist_ok=True)
     target, options = await provider_setup.open()

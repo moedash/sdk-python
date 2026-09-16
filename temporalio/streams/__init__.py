@@ -54,11 +54,17 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, TypeVar
 
-from temporalio.streams._handles import ReadSource, StreamReader, StreamWriter, WriteSink
+from temporalio.streams._handles import (
+    ReadSource,
+    StreamReader,
+    StreamWriter,
+    WriteSink,
+)
 from temporalio.streams._provider import (
     Consumer,
     Producer,
     StreamProvider,
+    StreamProviderLifecycle,
     configure,
     consumer,
     drain,
@@ -84,6 +90,7 @@ __all__ = [
     "ReadSource",
     "RecordKind",
     "StreamProvider",
+    "StreamProviderLifecycle",
     "StreamReader",
     "StreamRecord",
     "StreamWriter",
@@ -149,4 +156,6 @@ def writer(topic: str, *, type: type | None = None) -> StreamWriter[Any]:
 # Importing the package registers every provider whose dependencies are
 # present in this tree. Import order matters: the registry above must exist
 # before a provider module can register with it.
-from temporalio.streams import providers as _providers  # noqa: E402,F401
+from temporalio.streams import (
+    providers as _providers,  # noqa: E402,F401  # pyright: ignore[reportUnusedImport]
+)

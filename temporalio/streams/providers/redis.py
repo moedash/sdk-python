@@ -19,11 +19,10 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, workflow
+from temporalio import activity
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.external_workflow_streams import (
-    BEGINNING as PROVIDER_BEGINNING,
     AFTER,
     ExternalOutputStreamClient,
     ExternalOutputStreamProducer,
@@ -33,6 +32,9 @@ from temporalio.contrib.external_workflow_streams import (
     WorkflowChainKey,
     external_output_stream,
     external_stream,
+)
+from temporalio.contrib.external_workflow_streams import (
+    BEGINNING as PROVIDER_BEGINNING,
 )
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
@@ -94,6 +96,7 @@ class RedisProducer:
         client: Client | None = None,
         workflow_id: str = "",
     ) -> None:
+        """Bind this producer to ``topic`` on the external store."""
         self._topic = topic
         self._converter = converter
         self._stream = stream
@@ -181,6 +184,7 @@ class RedisConsumer:
     """Reads a stream from outside workflow code, resumably."""
 
     def __init__(self, client: Any, converter: Any) -> None:
+        """Read what ``client`` reaches in the external store."""
         self._client = client
         self._converter = converter
 
@@ -197,9 +201,7 @@ class RedisConsumer:
         and a workflow watching one activity agree on which attempt is current.
         """
         attempts = AttemptTracker()
-        boundary = (
-            AFTER(Offset(after.token)) if after.token else PROVIDER_BEGINNING
-        )
+        boundary = AFTER(Offset(after.token)) if after.token else PROVIDER_BEGINNING
         handle = self._client.topic(self._require_topic(topic), type=bytes)
         async for item in handle.subscribe(after=boundary):
             cursor = Cursor(str(item.offset))
@@ -223,6 +225,7 @@ class RedisConsumer:
             )
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the last record written, for following from now."""
         tail = await self._client.topic(self._require_topic(topic), type=bytes).tail()
         if tail.is_beginning:
             return BEGINNING

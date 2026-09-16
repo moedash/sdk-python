@@ -22,7 +22,7 @@ from temporalio.streams.providers import memory
 
 
 @pytest.fixture(autouse=True)
-def _fresh_memory_provider():
+def _fresh_memory_provider():  # pyright: ignore[reportUnusedFunction]
     memory.reset()
     streams.configure(provider="memory")
     yield
