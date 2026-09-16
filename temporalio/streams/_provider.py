@@ -23,8 +23,10 @@ __all__ = [
     "StreamProvider",
     "configure",
     "consumer",
+    "drain",
     "open_read",
     "open_write",
+    "prepare",
     "producer",
     "register",
     "registered",
@@ -121,6 +123,24 @@ class StreamProvider(Protocol):
         """Open a reader for what ``workflow_id`` publishes."""
         ...
 
+    def prepare(self) -> None:
+        """Install whatever this provider needs before the workflow runs.
+
+        Optional. A provider that serves outside readers through handlers on
+        the workflow itself has to register them before the first task
+        completes, or a reader that arrives early finds nothing to talk to.
+        """
+        ...
+
+    def drain(self) -> None:
+        """Release anything this provider parked on the workflow's behalf.
+
+        Optional. A provider that parks an outside reader against the running
+        workflow, as the Workflow Streams transport does with its long-poll
+        update, has to let go before the workflow can return.
+        """
+        ...
+
 
 _factories: dict[str, Callable[[], StreamProvider]] = {}
 _active: StreamProvider | None = None
@@ -159,9 +179,18 @@ def configure(provider: str | None = None, **options: Any) -> None:
     ``provider`` may be omitted when exactly one provider is registered.
     """
     global _active
+    _active = instance(provider, **options)
+
+
+def instance(provider: str | None = None, **options: Any) -> StreamProvider:
+    """A configured provider that is not installed as the process default.
+
+    For code that serves one provider while the process is configured with
+    another, such as a Nexus stream handler delegating to its store.
+    """
     chosen = _make(provider)
     chosen.configure(**options)
-    _active = chosen
+    return chosen
 
 
 def _current() -> StreamProvider:
@@ -191,6 +220,32 @@ def open_read(
 def open_write(topic: str) -> WriteSink:
     """Bind ``topic`` on the stream the running workflow owns."""
     return _current().open_write(topic)
+
+
+def prepare() -> None:
+    """Let the provider install what it needs, before the workflow runs.
+
+    Call it from the workflow's constructor. It is a no-op on providers that
+    need nothing, so workflow code can call it unconditionally and stay
+    portable.
+    """
+    provider = _current()
+    install = getattr(provider, "prepare", None)
+    if install is not None:
+        install()
+
+
+def drain() -> None:
+    """Release anything the provider parked on this workflow's behalf.
+
+    Call it before a workflow that read a stream returns. It is a no-op on
+    providers that park nothing, so workflow code can call it unconditionally
+    and stay portable.
+    """
+    provider = _current()
+    release = getattr(provider, "drain", None)
+    if release is not None:
+        release()
 
 
 async def producer(
