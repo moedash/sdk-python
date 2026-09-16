@@ -28,7 +28,7 @@ async def test_buffer_hands_over_in_order() -> None:
     buffer = _StreamBuffer()
     buffer.extend([message(b"one"), message(b"two")])
 
-    assert [m.body.data for m in buffer.take()] == [b"one", b"two"]
+    assert [m.body for m in buffer.take()] == [b"one", b"two"]
     assert len(buffer) == 0
 
 
@@ -41,7 +41,7 @@ async def test_buffer_wakes_a_waiting_reader() -> None:
 
     buffer.extend([message(b"late")])
     await asyncio.wait_for(waiter, timeout=1)
-    assert [m.body.data for m in buffer.take()] == [b"late"]
+    assert [m.body for m in buffer.take()] == [b"late"]
 
 
 # An empty range is still a delivery the server recorded, but there is nothing
@@ -64,15 +64,20 @@ async def test_buffer_keeps_data_delivered_before_anyone_reads() -> None:
     assert len(buffer) == 1
     waiter = buffer.wait_future()
     assert not waiter.done(), "a fresh waiter is only resolved by new data"
-    assert [m.body.data for m in buffer.take()] == [b"early"]
+    assert [m.body for m in buffer.take()] == [b"early"]
 
 
 class _ReadOnlyStub:
     """Enough of the workflow instance to drive the real read.
 
-    The cap lives inside ``workflow_read_stream``, so a test that reimplements
-    it proves nothing about the code that ships.
+    The cap lives inside ``workflow_read_stream_messages``, so a test that
+    reimplements it proves nothing about the code that ships. Borrowing the
+    method off the real class is what keeps the test on the shipped path.
     """
+
+    workflow_read_stream_messages = (
+        _WorkflowInstanceImpl.workflow_read_stream_messages
+    )
 
     def __init__(self) -> None:
         self._stream_buffers: dict[str, _StreamBuffer] = {}
