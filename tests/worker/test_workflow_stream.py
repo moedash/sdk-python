@@ -75,9 +75,7 @@ class _ReadOnlyStub:
     method off the real class is what keeps the test on the shipped path.
     """
 
-    workflow_read_stream_messages = (
-        _WorkflowInstanceImpl.workflow_read_stream_messages
-    )
+    workflow_read_stream_messages = _WorkflowInstanceImpl.workflow_read_stream_messages
 
     def __init__(self) -> None:
         self._stream_buffers: dict[str, _StreamBuffer] = {}

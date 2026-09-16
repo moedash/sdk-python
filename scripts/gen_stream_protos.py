@@ -34,7 +34,13 @@ OUT = BASE / "temporalio" / "api" / "streamservice" / "v1"
 # the sdk-core submodule; TEMPORAL_API_PROTOS points at a `temporalio/api`
 # checkout instead when the submodule is not initialized.
 UPSTREAM_API = (
-    BASE / "temporalio" / "bridge" / "sdk-core" / "crates" / "protos" / "protos"
+    BASE
+    / "temporalio"
+    / "bridge"
+    / "sdk-core"
+    / "crates"
+    / "protos"
+    / "protos"
     / "api_upstream"
 )
 
@@ -43,16 +49,24 @@ def api_proto_path() -> Path:
     override = os.environ.get("TEMPORAL_API_PROTOS")
     if override:
         return Path(override).resolve()
-    if (UPSTREAM_API / "temporal" / "api" / "common" / "v1" / "message.proto").is_file():
+    if (
+        UPSTREAM_API / "temporal" / "api" / "common" / "v1" / "message.proto"
+    ).is_file():
         return UPSTREAM_API
     raise SystemExit(
         "no api protos found: initialize the sdk-core submodule or set "
         "TEMPORAL_API_PROTOS to a temporalio/api checkout"
     )
 
+
 SERVER_PROTO_DIR = Path("chasm/lib/stream/proto/v1")
 STAGE_PROTO_DIR = Path("temporalio/api/stream/v1")
-FILES = ["message.proto", "stream_state.proto", "request_response.proto", "service.proto"]
+FILES = [
+    "message.proto",
+    "stream_state.proto",
+    "request_response.proto",
+    "service.proto",
+]
 
 # Server-only options. They carry shard routing and rate-limit category, which
 # a client neither reads nor can resolve, since the files defining them are not
@@ -63,7 +77,10 @@ DROP_OPTION = re.compile(r"^\s*option \(temporal\.server\.api\..*?\n", re.M)
 # protoc names a python module after the proto path. These put the generated
 # modules where this package publishes them.
 FIX_PY = [
-    (re.compile(r"from temporalio\.api\.stream\.v1 import"), "from temporalio.api.streamservice.v1 import"),
+    (
+        re.compile(r"from temporalio\.api\.stream\.v1 import"),
+        "from temporalio.api.streamservice.v1 import",
+    ),
     (re.compile(r"temporalio\.api\.stream\.v1\."), "temporalio.api.streamservice.v1."),
     (re.compile(r"from temporal\.api\."), "from temporalio.api."),
     (re.compile(r"import temporal\.api\."), "import temporalio.api."),
@@ -96,7 +113,9 @@ def main() -> None:
         out.mkdir()
         subprocess.run(
             [
-                sys.executable, "-m", "grpc_tools.protoc",
+                sys.executable,
+                "-m",
+                "grpc_tools.protoc",
                 f"--proto_path={work}",
                 f"--proto_path={api_proto_path()}",
                 f"--python_out={out}",

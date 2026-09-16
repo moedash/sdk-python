@@ -169,9 +169,7 @@ class WorkflowStream:
     @overload
     def topic(self, name: str, *, type: type[T]) -> WorkflowTopicHandle[T]: ...
 
-    def topic(
-        self, name: str, *, type: type = object
-    ) -> WorkflowTopicHandle[Any]:
+    def topic(self, name: str, *, type: type = object) -> WorkflowTopicHandle[Any]:
         """Bind a topic on this Workflow's stream."""
         return WorkflowTopicHandle(name, type)
 
@@ -179,7 +177,9 @@ class WorkflowStream:
 class TopicHandle(Generic[T]):
     """A topic on a Workflow's stream, from outside that Workflow."""
 
-    def __init__(self, client: "WorkflowStreamClient", topic: str, value_type: type[T]) -> None:
+    def __init__(
+        self, client: "WorkflowStreamClient", topic: str, value_type: type[T]
+    ) -> None:
         """Prefer :meth:`WorkflowStreamClient.topic`."""
         self._client = client
         self._name = topic
@@ -316,7 +316,9 @@ class WorkflowStreamClient:
         to re-ask; the server parks this read until something arrives.
         """
         del poll_cooldown
-        async for message in self._handle.follow(from_offset=from_offset, topics=topics):
+        async for message in self._handle.follow(
+            from_offset=from_offset, topics=topics
+        ):
             yield WorkflowStreamItem(
                 topic=message.topic,
                 data=_decode(self._converter, message.data, result_type),

@@ -242,9 +242,10 @@ class StreamHandle:
             )
         )
         out = response.frontend_response
-        return [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages], (
-            out.next_offset
-        )
+        return [
+            Message(data=m.body.data, topic=m.topic, offset=m.offset)
+            for m in out.messages
+        ], (out.next_offset)
 
     async def follow(
         self,
@@ -401,9 +402,10 @@ class WorkflowStreamHandle:
             )
         )
         out = response.frontend_response
-        return [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages], (
-            out.next_offset
-        )
+        return [
+            Message(data=m.body.data, topic=m.topic, offset=m.offset)
+            for m in out.messages
+        ], (out.next_offset)
 
     async def follow(
         self,
