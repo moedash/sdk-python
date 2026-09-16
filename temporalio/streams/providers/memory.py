@@ -204,12 +204,12 @@ class MemoryConsumer:
     async def read(
         self,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
         attempts = AttemptTracker()
-        offset = int(start.token) if start.token else 0
+        offset = int(after.token) + 1 if after.token else 0
         while True:
             await self._store.wait_past(offset)
             frames = self._store.frames
@@ -237,6 +237,11 @@ class MemoryConsumer:
                     attempt=attempt,
                     sequence=sequence,
                 )
+
+    async def latest(self, *, topic: str | None = None) -> Cursor:
+        del topic  # one store per stream, so the position is topic-independent
+        count = len(self._store.frames)
+        return Cursor(str(count - 1)) if count else BEGINNING
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
@@ -268,13 +273,13 @@ class _MemoryProvider:
         self,
         stream: str,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
         store = _stream(_inbound_id(workflow.info().workflow_id, stream))
         return _MemReadSource(
             store,
-            int(start.token) if start.token else 0,
+            int(after.token) + 1 if after.token else 0,
             idle_timeout or self._poll,
         )
 
@@ -287,7 +292,8 @@ class _MemoryProvider:
         client: Any,
         *,
         workflow_id: str,
-        stream: str,
+        stream: str = "",
+        topic: str = "",
         producer_id: str = "",
         attempt: int = 0,
     ) -> MemoryProducer:
@@ -296,10 +302,12 @@ class _MemoryProvider:
 
             producer_id = activity.info().activity_id
             attempt = attempt or activity.info().attempt
+        # With no inbound stream named, the target is the store the workflow's
+        # own writer appends to, and the frame carries the topic instead.
         return MemoryProducer(
             _stream(_inbound_id(workflow_id, stream)),
             _converter(client),
-            stream,
+            stream or topic,
             producer_id,
             attempt,
         )
