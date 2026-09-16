@@ -60,12 +60,18 @@ class _Runtime:
         self.stream = WorkflowStream()
 
 
+# Held per run rather than on the workflow instance, because the provider is
+# asked to install its handlers from the workflow's constructor, and the
+# instance is not registered with the runtime yet at that point.
+_runtimes: dict[str, _Runtime] = {}
+
+
 def _runtime() -> _Runtime:
-    instance = workflow.instance()
-    runtime = getattr(instance, _RUN_ATTR, None)
+    key = workflow.info().run_id
+    runtime = _runtimes.get(key)
     if runtime is None:
         runtime = _Runtime()
-        setattr(instance, _RUN_ATTR, runtime)
+        _runtimes[key] = runtime
     return runtime
 
 
@@ -78,8 +84,7 @@ def drain() -> None:
     documents. A storage provider has no such step, which is one of the
     differences the comparison table charges this transport with.
     """
-    instance = workflow.instance()
-    runtime = getattr(instance, _RUN_ATTR, None)
+    runtime = _runtimes.pop(workflow.info().run_id, None)
     if runtime is not None:
         runtime.stream.detach_pollers()
 
@@ -301,6 +306,19 @@ class _WorkflowStreamsProvider:
 
     def worker_options(self) -> dict[str, Any]:
         return {}
+
+    def prepare(self) -> None:
+        """Register the shipped publish signal and poll update handlers.
+
+        Done here rather than on the first read, because an outside reader
+        can poll before workflow code has opened anything, and an update with
+        no handler yet is rejected rather than held.
+        """
+        _runtime()
+
+    def drain(self) -> None:
+        """Release parked pollers so the workflow can return."""
+        drain()
 
     def open_read(
         self,
