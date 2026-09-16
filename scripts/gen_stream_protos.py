@@ -9,7 +9,9 @@ server-side definitions change:
 Run it with an interpreter whose ``grpcio-tools`` matches the oldest protobuf
 runtime this package has to load on. Generated code refuses to load on a
 runtime older than the one it was built against, and these modules end up in
-applications that pin protobuf themselves.
+applications that pin protobuf themselves. The stubs come from
+``mypy-protobuf`` rather than protoc's own ``--pyi_out``, which that
+generation of protoc does not have.
 
 Two rewrites make the copies compile against this SDK. The server's own
 routing and API-category options are dropped, because they mean nothing to a
@@ -119,8 +121,9 @@ def main() -> None:
                 f"--proto_path={work}",
                 f"--proto_path={api_proto_path()}",
                 f"--python_out={out}",
-                f"--pyi_out={out}",
                 f"--grpc_python_out={out}",
+                f"--mypy_out={out}",
+                f"--mypy_grpc_out={out}",
                 *targets,
             ],
             check=True,

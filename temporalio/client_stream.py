@@ -77,7 +77,9 @@ class StreamClient:
         """Wrap an existing ``grpc.aio`` channel. Prefer :meth:`connect`."""
         self._channel = channel
         self._namespace = namespace
-        self._stub = service_pb2_grpc.StreamServiceStub(channel)
+        # The generated stub is typed for a synchronous channel. This client
+        # drives it over ``grpc.aio``, where every call is awaited.
+        self._stub: Any = service_pb2_grpc.StreamServiceStub(channel)
 
     @staticmethod
     def connect(target_host: str, namespace: str = "default") -> "StreamClient":
