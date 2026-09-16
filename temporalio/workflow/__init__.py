@@ -58,6 +58,7 @@ from ._asyncio import (
     wait,
 )
 from ._context import (
+    DeliveredStreamMessage,
     Info,
     ParentInfo,
     RootInfo,
@@ -65,6 +66,7 @@ from ._context import (
     _current_update_info,
     _Runtime,
     _set_current_update_info,
+    add_stream_messages,
     cancellation_reason,
     current_update_info,
     deprecate_patch,
@@ -86,9 +88,12 @@ from ._context import (
     payload_converter,
     random,
     random_seed,
+    read_stream,
+    read_stream_messages,
     register_random_seed_callback,
     set_current_details,
     sleep,
+    subscribe_stream,
     time,
     time_ns,
     upsert_memo,

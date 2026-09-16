@@ -9,6 +9,7 @@ this SDK owns; the delivery decision itself lives in the server and sdk-core.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -28,7 +29,7 @@ async def test_buffer_hands_over_in_order() -> None:
     buffer = _StreamBuffer()
     buffer.extend([message(b"one"), message(b"two")])
 
-    assert [m.body.data for m in buffer.take()] == [b"one", b"two"]
+    assert [m.body for m in buffer.take()] == [b"one", b"two"]
     assert len(buffer) == 0
 
 
@@ -41,7 +42,7 @@ async def test_buffer_wakes_a_waiting_reader() -> None:
 
     buffer.extend([message(b"late")])
     await asyncio.wait_for(waiter, timeout=1)
-    assert [m.body.data for m in buffer.take()] == [b"late"]
+    assert [m.body for m in buffer.take()] == [b"late"]
 
 
 # An empty range is still a delivery the server recorded, but there is nothing
@@ -64,15 +65,18 @@ async def test_buffer_keeps_data_delivered_before_anyone_reads() -> None:
     assert len(buffer) == 1
     waiter = buffer.wait_future()
     assert not waiter.done(), "a fresh waiter is only resolved by new data"
-    assert [m.body.data for m in buffer.take()] == [b"early"]
+    assert [m.body for m in buffer.take()] == [b"early"]
 
 
 class _ReadOnlyStub:
     """Enough of the workflow instance to drive the real read.
 
-    The cap lives inside ``workflow_read_stream``, so a test that reimplements
-    it proves nothing about the code that ships.
+    The cap lives inside ``workflow_read_stream_messages``, so a test that
+    reimplements it proves nothing about the code that ships. Borrowing the
+    method off the real class is what keeps the test on the shipped path.
     """
+
+    workflow_read_stream_messages = _WorkflowInstanceImpl.workflow_read_stream_messages
 
     def __init__(self) -> None:
         self._stream_buffers: dict[str, _StreamBuffer] = {}
@@ -80,6 +84,12 @@ class _ReadOnlyStub:
 
     def _assert_not_read_only(self, action: str) -> None:
         self.read_only_calls.append(action)
+
+    async def read(self, stream: str, max_messages: int) -> list[bytes]:
+        instance: Any = self
+        return await _WorkflowInstanceImpl.workflow_read_stream(
+            instance, stream, max_messages
+        )
 
 
 @pytest.mark.parametrize("max_messages", [1, 2, 5])
@@ -89,14 +99,14 @@ async def test_read_respects_a_cap_without_losing_the_tail(max_messages: int) ->
     stub._stream_buffers["s"] = _StreamBuffer()
     stub._stream_buffers["s"].extend([message(b) for b in bodies])
 
-    got = await _WorkflowInstanceImpl.workflow_read_stream(stub, "s", max_messages)
+    got = await stub.read("s", max_messages)
 
     assert got == bodies[:max_messages]
     # Whatever the cap left behind has to still be there: nothing resends it.
     assert len(stub._stream_buffers["s"]) == max(0, len(bodies) - max_messages)
 
     if len(stub._stream_buffers["s"]):
-        rest = await _WorkflowInstanceImpl.workflow_read_stream(stub, "s", 0)
+        rest = await stub.read("s", 0)
         assert got + rest == bodies
     else:
         assert got == bodies
@@ -109,5 +119,5 @@ async def test_read_is_refused_in_a_read_only_context() -> None:
     stub._stream_buffers["s"] = _StreamBuffer()
     stub._stream_buffers["s"].extend([message(b"a")])
 
-    await _WorkflowInstanceImpl.workflow_read_stream(stub, "s", 0)
+    await stub.read("s", 0)
     assert stub.read_only_calls == ["read stream"]

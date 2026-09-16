@@ -11,15 +11,6 @@ from .message_pb2 import (
     StreamMessageBatch,
     StreamMessageKind,
 )
-
-from .stream_state_pb2 import (
-    ConsumerCursor,
-    ProducerCursor,
-    StreamLifecycle,
-    StreamState,
-    WorkflowStreamCursor,
-)
-
 from .request_response_pb2 import (
     AddMessagesInput,
     AddMessagesOutput,
@@ -28,6 +19,10 @@ from .request_response_pb2 import (
     AddWorkflowMessagesInput,
     AddWorkflowMessagesRequest,
     AddWorkflowMessagesResponse,
+    AdvanceConsumerHeadInput,
+    AdvanceConsumerHeadOutput,
+    AdvanceConsumerHeadRequest,
+    AdvanceConsumerHeadResponse,
     CloseStreamInput,
     CloseStreamOutput,
     CloseStreamRequest,
@@ -62,6 +57,10 @@ from .request_response_pb2 import (
     PollWorkflowMessagesInput,
     PollWorkflowMessagesRequest,
     PollWorkflowMessagesResponse,
+    RegisterStreamConsumerInput,
+    RegisterStreamConsumerOutput,
+    RegisterStreamConsumerRequest,
+    RegisterStreamConsumerResponse,
     StreamListEntry,
     SubscribeWorkflowInput,
     SubscribeWorkflowOutput,
@@ -72,6 +71,13 @@ from .request_response_pb2 import (
     TruncateStreamRequest,
     TruncateStreamResponse,
 )
+from .stream_state_pb2 import (
+    ConsumerCursor,
+    ProducerCursor,
+    StreamLifecycle,
+    StreamState,
+    WorkflowStreamCursor,
+)
 
 __all__ = [
     "AddMessagesInput",
@@ -81,6 +87,10 @@ __all__ = [
     "AddWorkflowMessagesInput",
     "AddWorkflowMessagesRequest",
     "AddWorkflowMessagesResponse",
+    "AdvanceConsumerHeadInput",
+    "AdvanceConsumerHeadOutput",
+    "AdvanceConsumerHeadRequest",
+    "AdvanceConsumerHeadResponse",
     "CloseStreamInput",
     "CloseStreamOutput",
     "CloseStreamRequest",
@@ -117,6 +127,10 @@ __all__ = [
     "PollWorkflowMessagesRequest",
     "PollWorkflowMessagesResponse",
     "ProducerCursor",
+    "RegisterStreamConsumerInput",
+    "RegisterStreamConsumerOutput",
+    "RegisterStreamConsumerRequest",
+    "RegisterStreamConsumerResponse",
     "STREAM_MESSAGE_KIND_DATA",
     "STREAM_MESSAGE_KIND_FLUSH",
     "STREAM_MESSAGE_KIND_UNSPECIFIED",

@@ -20,16 +20,17 @@ yet, which is also why it does not support TLS or API keys.
 from __future__ import annotations
 
 import asyncio
+import builtins
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Generic, Optional, TypeVar, overload
+from typing import Any, Generic, TypeVar, overload
 
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.client_stream import StreamClient, WorkflowStreamHandle
-from temporalio.converter import DataConverter, PayloadConverter
+from temporalio.converter import PayloadConverter
 
 __all__ = [
     "RawPage",
@@ -109,7 +110,7 @@ def _reject_configured_codec(client: Client) -> None:
         )
 
 
-def _decode(converter: PayloadConverter, body: bytes, as_type: Optional[type]) -> Any:
+def _decode(converter: PayloadConverter, body: bytes, as_type: type | None) -> Any:
     payload = Payload()
     payload.ParseFromString(body)
     if as_type is None:
@@ -169,9 +170,7 @@ class WorkflowStream:
     @overload
     def topic(self, name: str, *, type: type[T]) -> WorkflowTopicHandle[T]: ...
 
-    def topic(
-        self, name: str, *, type: type = object
-    ) -> WorkflowTopicHandle[Any]:
+    def topic(self, name: str, *, type: type = object) -> WorkflowTopicHandle[Any]:
         """Bind a topic on this Workflow's stream."""
         return WorkflowTopicHandle(name, type)
 
@@ -179,7 +178,9 @@ class WorkflowStream:
 class TopicHandle(Generic[T]):
     """A topic on a Workflow's stream, from outside that Workflow."""
 
-    def __init__(self, client: "WorkflowStreamClient", topic: str, value_type: type[T]) -> None:
+    def __init__(
+        self, client: "WorkflowStreamClient", topic: str, value_type: type[T]
+    ) -> None:
         """Prefer :meth:`WorkflowStreamClient.topic`."""
         self._client = client
         self._name = topic
@@ -210,8 +211,9 @@ class TopicHandle(Generic[T]):
         self,
         *,
         from_offset: int = 0,
-        result_type: Optional[type] = None,
-        poll_cooldown: Optional[timedelta] = None,
+        # Spelled out because `type` in this class body is the property below.
+        result_type: builtins.type | None = None,
+        poll_cooldown: timedelta | None = None,
     ) -> AsyncIterator[WorkflowStreamItem[T]]:
         """Read this topic from ``from_offset`` onwards."""
         return self._client.subscribe(
@@ -236,7 +238,7 @@ class WorkflowStreamClient:
         self._converter = converter
         self._batch_interval = batch_interval
         self._buffered: list[tuple[str, Any]] = []
-        self._flusher: Optional[asyncio.Task[None]] = None
+        self._flusher: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
 
     @classmethod
@@ -260,10 +262,13 @@ class WorkflowStreamClient:
         cls, *, batch_interval: timedelta = DEFAULT_BATCH_INTERVAL
     ) -> "WorkflowStreamClient":
         """Open the stream owned by the Workflow that scheduled this Activity."""
-        client = activity.client()
-        return cls.create(
-            client, activity.info().workflow_id, batch_interval=batch_interval
-        )
+        workflow_id = activity.info().workflow_id
+        if workflow_id is None:
+            raise RuntimeError(
+                "no Workflow stream to open: this Activity was not started by a "
+                "Workflow"
+            )
+        return cls.create(activity.client(), workflow_id, batch_interval=batch_interval)
 
     async def __aenter__(self) -> "WorkflowStreamClient":
         """Start the background flusher."""
@@ -307,8 +312,8 @@ class WorkflowStreamClient:
         *,
         topics: Sequence[str] = (),
         from_offset: int = 0,
-        result_type: Optional[type] = None,
-        poll_cooldown: Optional[timedelta] = None,
+        result_type: type | None = None,
+        poll_cooldown: timedelta | None = None,
     ) -> AsyncIterator[WorkflowStreamItem[Any]]:
         """Yield items from ``from_offset`` as they arrive.
 
@@ -316,7 +321,9 @@ class WorkflowStreamClient:
         to re-ask; the server parks this read until something arrives.
         """
         del poll_cooldown
-        async for message in self._handle.follow(from_offset=from_offset, topics=topics):
+        async for message in self._handle.follow(
+            from_offset=from_offset, topics=topics
+        ):
             yield WorkflowStreamItem(
                 topic=message.topic,
                 data=_decode(self._converter, message.data, result_type),

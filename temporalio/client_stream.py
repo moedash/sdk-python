@@ -23,8 +23,9 @@ change before this is a real feature:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional, Sequence
+from typing import Any
 
 import google.protobuf.duration_pb2
 
@@ -76,7 +77,9 @@ class StreamClient:
         """Wrap an existing ``grpc.aio`` channel. Prefer :meth:`connect`."""
         self._channel = channel
         self._namespace = namespace
-        self._stub = service_pb2_grpc.StreamServiceStub(channel)
+        # The generated stub is typed for a synchronous channel. This client
+        # drives it over ``grpc.aio``, where every call is awaited.
+        self._stub: Any = service_pb2_grpc.StreamServiceStub(channel)
 
     @staticmethod
     def connect(target_host: str, namespace: str = "default") -> "StreamClient":
@@ -102,8 +105,8 @@ class StreamClient:
         self,
         stream_id: str,
         *,
-        retention: Optional[float] = None,
-        max_items: Optional[int] = None,
+        retention: float | None = None,
+        max_items: int | None = None,
     ) -> "StreamHandle":
         """Create a stream and return a handle to it.
 
@@ -242,9 +245,10 @@ class StreamHandle:
             )
         )
         out = response.frontend_response
-        return [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages], (
-            out.next_offset
-        )
+        return [
+            Message(data=m.body.data, topic=m.topic, offset=m.offset)
+            for m in out.messages
+        ], (out.next_offset)
 
     async def follow(
         self,
@@ -401,9 +405,10 @@ class WorkflowStreamHandle:
             )
         )
         out = response.frontend_response
-        return [Message(data=m.body.data, topic=m.topic, offset=m.offset) for m in out.messages], (
-            out.next_offset
-        )
+        return [
+            Message(data=m.body.data, topic=m.topic, offset=m.offset)
+            for m in out.messages
+        ], (out.next_offset)
 
     async def follow(
         self,

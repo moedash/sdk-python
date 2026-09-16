@@ -171,6 +171,7 @@ class NativeProducer:
         producer_id: str,
         attempt: int,
     ) -> None:
+        """Bind this producer to ``topic`` on the stream ``handle`` names."""
         self._handle = handle
         self._converter = converter
         self._topic = topic
@@ -193,7 +194,11 @@ class NativeProducer:
         without letting a new generation be swallowed as a duplicate of the old
         one.
         """
-        return f"{self._producer_id}#{self._attempt}" if self._attempt else self._producer_id
+        return (
+            f"{self._producer_id}#{self._attempt}"
+            if self._attempt
+            else self._producer_id
+        )
 
     async def append(self, *values: Any) -> Cursor:
         """Append values and return where the first one landed."""
@@ -240,7 +245,9 @@ class NativeProducer:
 
     def _encode(self, value: Any) -> bytes:
         payload = (
-            value if isinstance(value, Payload) else self._converter.to_payloads([value])[0]
+            value
+            if isinstance(value, Payload)
+            else self._converter.to_payloads([value])[0]
         )
         return payload.SerializeToString()
 
@@ -249,6 +256,7 @@ class NativeConsumer:
     """Reads a stream from outside workflow code, resumably."""
 
     def __init__(self, handle: Any, converter: Any) -> None:
+        """Read the stream ``handle`` names, from anywhere."""
         self._handle = handle
         self._converter = converter
 
@@ -291,6 +299,7 @@ class NativeConsumer:
             )
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the last record written, for following from now."""
         del topic  # one server-side log per stream, whatever the topic
         try:
             state = await self._handle.describe()
@@ -298,7 +307,9 @@ class NativeConsumer:
             # A stream nobody has published to does not exist yet, and that
             # is the same answer as an empty one.
             return BEGINNING
-        return Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
+        return (
+            Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
+        )
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
@@ -312,9 +323,12 @@ class _NativeProvider:
     name = "native"
 
     def configure(self, **options: Any) -> None:
-        """Nothing to name: the streams are on the server the client is
-        already connected to. It exists so a process that switches providers
-        changes one call rather than its structure."""
+        """Take no options.
+
+        The streams are on the server the client is already connected to.
+        This exists so a process that switches providers changes one call
+        rather than its structure.
+        """
         if options:
             raise TypeError(
                 f"the native provider takes no options, got {sorted(options)}"
