@@ -36,10 +36,15 @@ async def record_decision(decision: dict) -> str:
 
 @workflow.defn
 class Agent:
+    """Reads ``inputs``, publishes a decision each time, ends on FINISH."""
+
     def __init__(self) -> None:
-        # Lets the provider install what it needs before the first task
-        # completes. A no-op except on the transport that serves outside
-        # readers through handlers on this workflow.
+        """Let the provider install what it needs before the first task.
+
+        A no-op except on the transport that serves outside readers through
+        handlers on this workflow, which has to register them before the
+        first task completes.
+        """
         streams.prepare()
         self._done = False
 
@@ -54,6 +59,7 @@ class Agent:
 
     @workflow.run
     async def run(self, count: int) -> int:
+        """Decide on at most ``count`` inputs, then return how many landed."""
         inputs = streams.reader("inputs", type=dict, idle_timeout=timedelta(seconds=1))
         decisions = streams.writer("decisions")
 
