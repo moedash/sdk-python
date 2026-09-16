@@ -152,11 +152,47 @@ async def test_cursor_resumes_where_it_points():
 
     consumer = await streams.consumer(None, workflow_id="wf", stream="inputs")
     records = await take(consumer.read(type=dict), 3)
-    checkpoint = records[1].cursor
+    checkpoint = records[0].cursor
 
+    # Resuming after a record hands back everything past it and nothing
+    # twice, without the reader ever advancing a cursor itself.
     resumed = await streams.consumer(None, workflow_id="wf", stream="inputs")
-    again = await take(resumed.read(type=dict, start=checkpoint), 2)
+    again = await take(resumed.read(type=dict, after=checkpoint), 2)
     assert [r.value for r in again] == [{"n": 2}, {"n": 3}]
+
+
+async def test_latest_positions_a_reader_at_the_end():
+    producer = await streams.producer(
+        None, workflow_id="wf", stream="inputs", producer_id="model", attempt=1
+    )
+    consumer = await streams.consumer(None, workflow_id="wf", stream="inputs")
+    assert await consumer.latest() == streams.BEGINNING
+
+    await producer.append({"n": 1}, {"n": 2})
+    since = await consumer.latest()
+    await producer.append({"n": 3})
+
+    # A reader that positioned itself before the last append sees only what
+    # came after, which is how a client follows a turn it is about to start.
+    records = await take(consumer.read(type=dict, after=since), 1)
+    assert [r.value for r in records] == [{"n": 3}]
+
+
+async def test_producer_appends_onto_the_owners_topic():
+    # An activity's live output lands on the same topic the workflow
+    # publishes, so one outside reader follows both.
+    producer = await streams.producer(
+        None, workflow_id="wf", topic="events", producer_id="model", attempt=1
+    )
+    await producer.append({"delta": "hel"}, {"delta": "lo"})
+
+    consumer = await streams.consumer(None, workflow_id="wf")
+    records = await take(consumer.read(type=dict, topic="events"), 2)
+    assert [r.value["delta"] for r in records] == ["hel", "lo"]
+    assert {r.producer for r in records} == {"model"}
+
+    with pytest.raises(ValueError):
+        await streams.producer(None, workflow_id="wf", producer_id="model", attempt=1)
 
 
 def test_unknown_provider_is_a_clear_error():

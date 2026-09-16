@@ -56,6 +56,7 @@ class AppendInput:
     producer_id: str
     attempt: int
     batch_index: int
+    topic: str = ""
     payloads: list[str] = dataclasses.field(default_factory=list)
     finish: bool = False
 
@@ -69,9 +70,13 @@ class AppendOutput:
 class ReadInput:
     workflow_id: str
     stream: str = ""
-    from_token: str = ""
+    topic: str = ""
+    after_token: str = ""
     max_records: int = 100
     wait_ms: int = 5000
+    # Answer with the newest position and no records, for a reader that
+    # wants to follow from now.
+    latest_only: bool = False
 
 
 @dataclasses.dataclass
@@ -110,7 +115,12 @@ class TemporalStreamsHandler:
     async def append(
         self, _ctx: nexusrpc.handler.StartOperationContext, input: AppendInput
     ) -> AppendOutput:
-        key = (input.workflow_id, input.stream, input.producer_id, input.attempt)
+        key = (
+            input.workflow_id,
+            input.stream or f"@{input.topic}",
+            input.producer_id,
+            input.attempt,
+        )
         cached = self._producers.get(key)
         if cached is not None and input.batch_index <= cached[1]:
             return AppendOutput()
@@ -119,6 +129,7 @@ class TemporalStreamsHandler:
                 self._client,
                 workflow_id=input.workflow_id,
                 stream=input.stream,
+                topic=input.topic,
                 producer_id=input.producer_id,
                 attempt=input.attempt,
             )
@@ -144,11 +155,15 @@ class TemporalStreamsHandler:
         delegate = await self._delegate.consumer(
             self._client, workflow_id=input.workflow_id, stream=input.stream
         )
+        topic = input.topic or None
+        if input.latest_only:
+            return ReadOutput(next_token=(await delegate.latest(topic=topic)).token)
         converter = temporalio.converter.DataConverter.default.payload_converter
         records: list[RecordWire] = []
-        next_token = input.from_token
+        next_token = input.after_token
         subscription = delegate.read(
-            start=Cursor(input.from_token) if input.from_token else BEGINNING
+            after=Cursor(input.after_token) if input.after_token else BEGINNING,
+            topic=topic,
         )
         try:
             async with asyncio.timeout(input.wait_ms / 1000):
@@ -203,12 +218,13 @@ class NexusProducer:
 
     def __init__(
         self, base_url: str, converter: Any, workflow_id: str, stream: str,
-        producer_id: str, attempt: int,
+        topic: str, producer_id: str, attempt: int,
     ) -> None:
         self._base_url = base_url
         self._converter = converter
         self._workflow_id = workflow_id
         self._stream = stream
+        self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
         self._batch_index = 0
@@ -243,6 +259,7 @@ class NexusProducer:
                     producer_id=self._producer_id,
                     attempt=self._attempt,
                     batch_index=self._batch_index,
+                    topic=self._topic,
                     payloads=payloads or [],
                     finish=finish,
                 )
@@ -262,13 +279,12 @@ class NexusConsumer:
     async def read(
         self,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
         attempts = AttemptTracker()
-        token = start.token
-        last_yielded: str | None = None
+        token = after.token
         while True:
             raw = await asyncio.to_thread(
                 _post,
@@ -277,15 +293,12 @@ class NexusConsumer:
                     ReadInput(
                         workflow_id=self._workflow_id,
                         stream=self._stream,
-                        from_token=token,
+                        topic=topic or "",
+                        after_token=token,
                     )
                 ),
             )
             for wire in raw.get("records", []):
-                if wire["token"] == last_yielded:
-                    # An opaque token cannot be advanced past itself, so a
-                    # resumed batch starts with the record already yielded.
-                    continue
                 try:
                     kind, frame_topic, source, attempt, sequence, body = _frame.decode(
                         base64.b64decode(wire["frame"])
@@ -293,7 +306,6 @@ class NexusConsumer:
                 except ValueError:
                     continue
                 if topic is not None and frame_topic != topic:
-                    last_yielded = wire["token"]
                     continue
                 cursor = Cursor(wire["token"])
                 superseded = attempts.note(source, attempt, cursor)
@@ -308,8 +320,23 @@ class NexusConsumer:
                     attempt=attempt,
                     sequence=sequence,
                 )
-                last_yielded = wire["token"]
             token = raw.get("next_token", token) or token
+
+    async def latest(self, *, topic: str | None = None) -> Cursor:
+        raw = await asyncio.to_thread(
+            _post,
+            f"{self._base_url}/read",
+            dataclasses.asdict(
+                ReadInput(
+                    workflow_id=self._workflow_id,
+                    stream=self._stream,
+                    topic=topic or "",
+                    latest_only=True,
+                )
+            ),
+        )
+        token = raw.get("next_token", "")
+        return Cursor(token) if token else BEGINNING
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
@@ -347,7 +374,7 @@ class _NexusProvider:
         self,
         stream: str,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
         raise RuntimeError(_WORKFLOW_SIDE_ERROR)
@@ -365,7 +392,8 @@ class _NexusProvider:
         client: Any,
         *,
         workflow_id: str,
-        stream: str,
+        stream: str = "",
+        topic: str = "",
         producer_id: str = "",
         attempt: int = 0,
     ) -> NexusProducer:
@@ -379,6 +407,7 @@ class _NexusProvider:
             _converter(client),
             workflow_id,
             stream,
+            topic,
             producer_id,
             attempt,
         )

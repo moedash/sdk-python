@@ -26,7 +26,9 @@ from temporalio.contrib.external_workflow_streams import (
     BEGINNING as PROVIDER_BEGINNING,
     AFTER,
     ExternalOutputStreamClient,
+    ExternalOutputStreamProducer,
     ExternalStreamProducer,
+    Offset,
     WakeNotAcknowledgedError,
     WorkflowChainKey,
     external_output_stream,
@@ -185,24 +187,21 @@ class RedisConsumer:
     async def read(
         self,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
-        """Yield records from ``start`` as they arrive.
+        """Yield the records after ``after`` as they arrive.
 
         Applies the same supersession rule as a workflow reader, so a browser
         and a workflow watching one activity agree on which attempt is current.
         """
-        if topic is None:
-            raise ValueError(
-                "this provider stores each topic separately, so an outside "
-                "reader has to name one"
-            )
         attempts = AttemptTracker()
-        after = PROVIDER_BEGINNING if not start.token else AFTER(start.token)
-        handle = self._client.topic(topic, type=bytes)
-        async for item in handle.subscribe(after=after):
+        boundary = (
+            AFTER(Offset(after.token)) if after.token else PROVIDER_BEGINNING
+        )
+        handle = self._client.topic(self._require_topic(topic), type=bytes)
+        async for item in handle.subscribe(after=boundary):
             cursor = Cursor(str(item.offset))
             try:
                 kind, frame_topic, source, attempt, sequence, body = _frame.decode(
@@ -222,6 +221,21 @@ class RedisConsumer:
                 attempt=attempt,
                 sequence=sequence,
             )
+
+    async def latest(self, *, topic: str | None = None) -> Cursor:
+        tail = await self._client.topic(self._require_topic(topic), type=bytes).tail()
+        if tail.is_beginning:
+            return BEGINNING
+        return Cursor(tail.offset.token)
+
+    @staticmethod
+    def _require_topic(topic: str | None) -> str:
+        if topic is None:
+            raise ValueError(
+                "this provider stores each topic separately, so an outside "
+                "reader has to name one"
+            )
+        return topic
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
@@ -283,14 +297,14 @@ class _RedisProvider:
         self,
         stream: str,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
         # The provider resolves the name under this run's chain key, so a start
         # position is only meaningful to a reader that already has one, and this
         # provider's first subscription always starts at the beginning of the
         # stream it minted.
-        if start is not BEGINNING and start.token:
+        if after.token:
             raise ValueError(
                 "the client-side provider starts a new subscription at the "
                 "beginning of the stream it owns; resuming elsewhere is not "
@@ -309,35 +323,48 @@ class _RedisProvider:
         client: Client,
         *,
         workflow_id: str,
-        stream: str,
+        stream: str = "",
+        topic: str = "",
         producer_id: str = "",
         attempt: int = 0,
     ) -> RedisProducer:
-        """Open a producer for the inbound stream ``stream`` of ``workflow_id``.
+        """Open a producer on ``workflow_id``'s account.
 
-        Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
-        activity's own id and attempt are the right answer and are what let a
-        reader tell a retry from a new generation.
+        ``stream`` names an inbound stream; with none, ``topic`` names a topic
+        on the workflow's output stream, appended directly rather than through
+        the workflow's staged commit. Inside an activity, leave ``producer_id``
+        and ``attempt`` unset: the activity's own id and attempt are the right
+        answer and are what let a reader tell a retry from a new generation.
         """
         if not producer_id:
             producer_id = activity.info().activity_id
         if not attempt:
             attempt = activity.info().attempt
-        session = await ExternalStreamProducer.connect(
-            backend=self._require_backend(),
-            workflow=await _chain_key(client, workflow_id),
-            client=client,
-            # The attempt is part of it. Deduplication answers "is this the
-            # same append again", and a second attempt writing different words
-            # at the same sequence is not: this provider rejects that outright.
-            # Folding the attempt in keeps a retried append idempotent without
-            # letting a new generation be refused as a conflicting duplicate.
-            session_id=f"{producer_id}#{attempt}",
-        )
+        # The attempt is part of it. Deduplication answers "is this the
+        # same append again", and a second attempt writing different words
+        # at the same sequence is not: this provider rejects that outright.
+        # Folding the attempt in keeps a retried append idempotent without
+        # letting a new generation be refused as a conflicting duplicate.
+        session_id = f"{producer_id}#{attempt}"
+        chain = await _chain_key(client, workflow_id)
+        if stream:
+            session: Any = await ExternalStreamProducer.connect(
+                backend=self._require_backend(),
+                workflow=chain,
+                client=client,
+                session_id=session_id,
+            )
+        else:
+            session = await ExternalOutputStreamProducer.connect(
+                backend=self._require_backend(),
+                workflow=chain,
+                client=client,
+                session_id=session_id,
+            )
         return RedisProducer(
-            session.topic(stream, type=bytes),
+            session.topic(stream or topic, type=bytes),
             client.data_converter.payload_converter,
-            stream,
+            stream or topic,
             producer_id,
             attempt,
             client,
