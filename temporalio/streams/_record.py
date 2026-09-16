@@ -50,8 +50,8 @@ class Cursor:
 
     Opaque on purpose. One provider numbers records with integers and another
     with a millisecond-and-sequence pair, so comparing tokens here would be
-    right for one and wrong for the other. Hand a cursor back to resume from
-    it; ask the reader to compare two.
+    right for one and wrong for the other. Hand a cursor back to resume after
+    the record it names; nothing here advances one.
     """
 
     token: str
