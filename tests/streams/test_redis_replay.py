@@ -71,9 +71,7 @@ async def test_query_after_completion_replays_the_final_task():
         url=os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6399"),
         key_prefix=f"streams-redis-replay-{uuid.uuid4().hex}",
     )
-    client = await Client.connect(
-        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     workflow_id = f"streams-redis-replay-{uuid.uuid4().hex}"
 
     async with Worker(
