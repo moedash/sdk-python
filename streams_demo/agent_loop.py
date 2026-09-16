@@ -43,6 +43,7 @@ class AgentLoop:
 
     @workflow.run
     async def run(self, limit: int) -> list[dict[str, Any]]:
+        """Decide on at most ``limit`` inputs, then return the trace."""
         inputs = streams.reader(INPUTS, type=dict, idle_timeout=timedelta(seconds=1))
         decisions = streams.writer(DECISIONS)
         trace: list[dict[str, Any]] = []
