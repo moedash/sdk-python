@@ -255,18 +255,18 @@ class NativeConsumer:
     async def read(
         self,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
-        """Yield records from ``start`` as they arrive.
+        """Yield the records after ``after`` as they arrive.
 
         Applies the same supersession rule as a workflow reader, so a browser
         and a workflow watching one activity agree on which attempt is current.
         """
         attempts = AttemptTracker()
         async for message in self._handle.follow(
-            from_offset=int(start.token) if start.token else 0
+            from_offset=int(after.token) + 1 if after.token else 0
         ):
             cursor = Cursor(str(message.offset))
             try:
@@ -289,6 +289,16 @@ class NativeConsumer:
                 attempt=attempt,
                 sequence=sequence,
             )
+
+    async def latest(self, *, topic: str | None = None) -> Cursor:
+        del topic  # one server-side log per stream, whatever the topic
+        try:
+            state = await self._handle.describe()
+        except Exception:
+            # A stream nobody has published to does not exist yet, and that
+            # is the same answer as an empty one.
+            return BEGINNING
+        return Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
@@ -317,7 +327,7 @@ class _NativeProvider:
         self,
         stream: str,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
         # Accepted and ignored. Delivery arrives on workflow tasks the server
@@ -329,7 +339,7 @@ class _NativeProvider:
         fanout = fanouts.get(stream_id)
         if fanout is None:
             workflow.subscribe_stream(
-                stream_id, start_offset=int(start.token) if start.token else 0
+                stream_id, start_offset=int(after.token) + 1 if after.token else 0
             )
             fanout = fanouts[stream_id] = _Fanout(stream_id)
         return _NativeReadSource(fanout)
@@ -342,15 +352,18 @@ class _NativeProvider:
         client: Client,
         *,
         workflow_id: str,
-        stream: str,
+        stream: str = "",
+        topic: str = "",
         producer_id: str = "",
         attempt: int = 0,
     ) -> NativeProducer:
-        """Open a producer for the inbound stream ``stream`` of ``workflow_id``.
+        """Open a producer on ``workflow_id``'s account.
 
-        Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
-        activity's own id and attempt are the right answer and are what let a
-        reader tell a retry from a new generation.
+        ``stream`` names an inbound stream; with none, ``topic`` names a topic
+        on the stream the workflow publishes, which the server lets any
+        producer append to. Inside an activity, leave ``producer_id`` and
+        ``attempt`` unset: the activity's own id and attempt are the right
+        answer and are what let a reader tell a retry from a new generation.
         """
         _reject_configured_codec(client)
         if not producer_id:
@@ -358,6 +371,14 @@ class _NativeProvider:
         if not attempt:
             attempt = activity.info().attempt
         streams = _stream_client(client)
+        if not stream:
+            return NativeProducer(
+                streams.workflow_stream(workflow_id),
+                client.data_converter.payload_converter,
+                topic,
+                producer_id,
+                attempt,
+            )
         stream_id = inbound_stream_id(workflow_id, stream)
         handle = _handles.get(stream_id)
         if handle is None:
