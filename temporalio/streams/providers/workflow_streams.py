@@ -12,7 +12,9 @@ The mapping, in one place:
 
 - An interface record's frame rides as the item's ``Payload`` data.
 - Inbound stream ``s`` is shipped topic ``in:s``; a writer topic ``t`` is
-  shipped topic ``out:t``, so the two namespaces cannot collide.
+  shipped topic ``out:t``, so the two namespaces cannot collide. A producer
+  appending onto the workflow's own topic ``t`` writes ``out:t`` as well,
+  which is what today's activities already do through the publish Signal.
 - Producer identity dedupes through the shipped publisher state: the
   publisher id is ``producer#attempt`` and every publish Signal carries a
   monotonic sequence, so a retried batch drops and a new attempt passes.
@@ -155,15 +157,30 @@ class WorkflowStreamsProducer:
     """
 
     def __init__(
-        self, handle: Any, converter: Any, stream: str, producer_id: str, attempt: int
+        self,
+        handle: Any,
+        converter: Any,
+        stream: str,
+        topic: str,
+        producer_id: str,
+        attempt: int,
     ) -> None:
         self._handle = handle
         self._converter = converter
         self._stream = stream
+        self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
         self._sequence = 0
         self._signal_sequence = 0
+
+    @property
+    def _frame_topic(self) -> str:
+        return self._stream or self._topic
+
+    @property
+    def _shipped_topic(self) -> str:
+        return f"{_IN}{self._stream}" if self._stream else f"{_OUT}{self._topic}"
 
     @property
     def attempt(self) -> int:
@@ -179,7 +196,7 @@ class WorkflowStreamsProducer:
         entries = []
         for value in values:
             frame = _frame.encode(
-                topic=self._stream,
+                topic=self._frame_topic,
                 kind=RecordKind.DATA,
                 producer=self._producer_id,
                 attempt=self._attempt,
@@ -193,7 +210,7 @@ class WorkflowStreamsProducer:
 
     async def finish(self) -> None:
         frame = _frame.encode(
-            topic=self._stream,
+            topic=self._frame_topic,
             kind=RecordKind.FINISH,
             producer=self._producer_id,
             attempt=self._attempt,
@@ -205,7 +222,7 @@ class WorkflowStreamsProducer:
 
     def _entry(self, frame: bytes) -> PublishEntry:
         payload = Payload(data=frame)
-        return PublishEntry(topic=f"{_IN}{self._stream}", data=_encode_payload(payload))
+        return PublishEntry(topic=self._shipped_topic, data=_encode_payload(payload))
 
     async def _send(self, entries: list[PublishEntry]) -> None:
         self._signal_sequence += 1
@@ -243,14 +260,14 @@ class WorkflowStreamsConsumer:
     async def read(
         self,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
         attempts = AttemptTracker()
         subscription = self._client.subscribe(
             self._shipped_topic,
-            from_offset=int(start.token) if start.token else 0,
+            from_offset=int(after.token) + 1 if after.token else 0,
             result_type=RawValue,
             poll_cooldown=self._poll_cooldown,
         )
@@ -278,6 +295,11 @@ class WorkflowStreamsConsumer:
                 attempt=attempt,
                 sequence=sequence,
             )
+
+    async def latest(self, *, topic: str | None = None) -> Cursor:
+        del topic  # one log per workflow, whatever the topic
+        head = await self._client.get_offset()
+        return Cursor(str(head - 1)) if head > 0 else BEGINNING
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
@@ -324,7 +346,7 @@ class _WorkflowStreamsProvider:
         self,
         stream: str,
         *,
-        start: Cursor = BEGINNING,
+        after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
         # Ignored: a publish Signal is a workflow event, so the wait below
@@ -333,7 +355,7 @@ class _WorkflowStreamsProvider:
         return _WSReadSource(
             _runtime().stream,
             f"{_IN}{stream}",
-            int(start.token) if start.token else 0,
+            int(after.token) + 1 if after.token else 0,
         )
 
     def open_write(self, topic: str) -> WriteSink:
@@ -344,7 +366,8 @@ class _WorkflowStreamsProvider:
         client: Client,
         *,
         workflow_id: str,
-        stream: str,
+        stream: str = "",
+        topic: str = "",
         producer_id: str = "",
         attempt: int = 0,
     ) -> WorkflowStreamsProducer:
@@ -357,6 +380,7 @@ class _WorkflowStreamsProvider:
             client.get_workflow_handle(workflow_id),
             client.data_converter.payload_converter,
             stream,
+            topic,
             producer_id,
             attempt,
         )
