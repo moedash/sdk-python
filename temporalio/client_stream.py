@@ -23,8 +23,9 @@ change before this is a real feature:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional, Sequence
+from typing import Any
 
 import google.protobuf.duration_pb2
 
@@ -102,8 +103,8 @@ class StreamClient:
         self,
         stream_id: str,
         *,
-        retention: Optional[float] = None,
-        max_items: Optional[int] = None,
+        retention: float | None = None,
+        max_items: int | None = None,
     ) -> "StreamHandle":
         """Create a stream and return a handle to it.
 
