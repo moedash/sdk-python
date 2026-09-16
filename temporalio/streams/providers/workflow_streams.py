@@ -5,8 +5,10 @@ Speaks the shipped contrib feature's wire format, the
 and existing Workflow Streams code interoperate on one stream, and old
 histories replay. Records live in the owning workflow's History, which is
 also this provider's limit: Option 0's caps (payloads in History, the Signal
-cap, bounded subscribers, no reads after the workflow closes) are transport
-properties and remain.
+cap, bounded subscribers) are transport properties and remain. Reads after
+the workflow closes go through one Query this provider adds, which serves
+the log from workflow state for as long as the History is retained, so a
+reader between polls when the workflow completed still gets the tail.
 
 The mapping, in one place:
 
@@ -24,6 +26,7 @@ The mapping, in one place:
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
@@ -46,6 +49,7 @@ from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
 _RUN_ATTR = "__temporal_streams_ws_runtime"
+_TAIL_QUERY = "__temporal_streams_tail"
 _IN = "in:"
 _OUT = "out:"
 
@@ -60,6 +64,23 @@ class _Runtime:
 
     def __init__(self) -> None:
         self.stream = WorkflowStream()
+        # The poll Update stops answering once the workflow is closing, and a
+        # reader between polls at that moment would lose what the final task
+        # published. The log is workflow state, so a Query still serves it
+        # after completion.
+        workflow.set_query_handler(_TAIL_QUERY, self._tail)
+
+    def _tail(self, from_offset: int) -> list[dict[str, Any]]:
+        base = self.stream._base_offset
+        return [
+            {
+                "offset": base + index,
+                "topic": item.topic,
+                "data": base64.b64encode(item.data.data).decode("ascii"),
+            }
+            for index, item in enumerate(self.stream._log)
+            if base + index >= from_offset
+        ]
 
 
 # Held per run rather than on the workflow instance, because the provider is
@@ -265,28 +286,70 @@ class WorkflowStreamsConsumer:
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
         attempts = AttemptTracker()
+        next_offset = int(after.token) + 1 if after.token else 0
         subscription = self._client.subscribe(
             self._shipped_topic,
-            from_offset=int(after.token) + 1 if after.token else 0,
+            from_offset=next_offset,
             result_type=RawValue,
             poll_cooldown=self._poll_cooldown,
         )
         async for item in subscription:
-            if self._shipped_topic is None and not item.topic.startswith(_OUT):
-                continue
-            cursor = Cursor(str(item.offset))
-            try:
-                kind, frame_topic, source, attempt, sequence, body = _frame.decode(
-                    item.data.payload.data
-                )
-            except ValueError:
-                continue
-            if topic is not None and frame_topic != topic:
-                continue
-            superseded = attempts.note(source, attempt, cursor)
-            if superseded is not None:
-                yield superseded
-            yield StreamRecord(
+            next_offset = item.offset + 1
+            record = self._record(
+                attempts, item.offset, item.topic, item.data.payload.data, topic, type
+            )
+            for out in record:
+                yield out
+        # The subscription ends when the workflow is closing or closed. What
+        # landed after the last poll is still in workflow state, so the tail
+        # comes back by Query rather than being lost with the run.
+        for wire in await self._tail(next_offset):
+            for out in self._record(
+                attempts,
+                wire["offset"],
+                wire["topic"],
+                base64.b64decode(wire["data"]),
+                topic,
+                type,
+            ):
+                yield out
+
+    async def _tail(self, from_offset: int) -> list[dict[str, Any]]:
+        try:
+            return await self._client._handle.query(
+                _TAIL_QUERY, from_offset, result_type=list
+            )
+        except Exception:
+            # A workflow that never opened a stream has no handler to ask, and
+            # one whose History is gone has nothing left to serve.
+            return []
+
+    def _record(
+        self,
+        attempts: AttemptTracker,
+        offset: int,
+        shipped_topic: str,
+        frame: bytes,
+        topic: str | None,
+        type: type | None,
+    ) -> list[StreamRecord[Any]]:
+        if self._shipped_topic is None and not shipped_topic.startswith(_OUT):
+            return []
+        if self._shipped_topic is not None and shipped_topic != self._shipped_topic:
+            return []
+        cursor = Cursor(str(offset))
+        try:
+            kind, frame_topic, source, attempt, sequence, body = _frame.decode(frame)
+        except ValueError:
+            return []
+        if topic is not None and frame_topic != topic:
+            return []
+        out: list[StreamRecord[Any]] = []
+        superseded = attempts.note(source, attempt, cursor)
+        if superseded is not None:
+            out.append(superseded)
+        out.append(
+            StreamRecord(
                 value=self._decode(body, type) if kind is RecordKind.DATA else None,
                 cursor=cursor,
                 kind=kind,
@@ -295,6 +358,8 @@ class WorkflowStreamsConsumer:
                 attempt=attempt,
                 sequence=sequence,
             )
+        )
+        return out
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
         del topic  # one log per workflow, whatever the topic
