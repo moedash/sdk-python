@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from typing import Any
 
 import pytest
 
@@ -62,7 +63,7 @@ class EchoLoop:
         return seen
 
 
-async def take(records, count: int, timeout: float = 30.0) -> list:
+async def take(records: Any, count: int, timeout: float = 30.0) -> list:
     out: list = []
 
     async def _collect() -> None:
@@ -77,9 +78,7 @@ async def take(records, count: int, timeout: float = 30.0) -> list:
 
 async def test_interface_loop_over_workflow_streams():
     streams.configure(provider="workflow_streams")
-    client = await Client.connect(
-        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     workflow_id = f"streams-ws-live-{uuid.uuid4().hex}"
 
     async with Worker(
@@ -119,9 +118,7 @@ async def test_interface_loop_over_workflow_streams():
 
 async def test_retried_producer_dedupes_and_new_attempt_supersedes():
     streams.configure(provider="workflow_streams")
-    client = await Client.connect(
-        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     workflow_id = f"streams-ws-live-{uuid.uuid4().hex}"
 
     async with Worker(
@@ -135,19 +132,28 @@ async def test_retried_producer_dedupes_and_new_attempt_supersedes():
         )
 
         first = await streams.producer(
-            client, workflow_id=workflow_id, stream="inputs",
-            producer_id="model", attempt=1,
+            client,
+            workflow_id=workflow_id,
+            stream="inputs",
+            producer_id="model",
+            attempt=1,
         )
         await first.append({"n": 1})
         # The retry of the same attempt re-sends its first batch.
         retry = await streams.producer(
-            client, workflow_id=workflow_id, stream="inputs",
-            producer_id="model", attempt=1,
+            client,
+            workflow_id=workflow_id,
+            stream="inputs",
+            producer_id="model",
+            attempt=1,
         )
         await retry.append({"n": 1})
         second = await streams.producer(
-            client, workflow_id=workflow_id, stream="inputs",
-            producer_id="model", attempt=2,
+            client,
+            workflow_id=workflow_id,
+            stream="inputs",
+            producer_id="model",
+            attempt=2,
         )
         await second.append({"n": 2})
 
