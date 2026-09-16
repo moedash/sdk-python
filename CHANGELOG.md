@@ -35,6 +35,15 @@ to include examples, links to docs, or any other relevant information.
 
 ### Added
 
+- **Experimental**: `temporalio.streams` defines one stream interface a workflow
+  can read, decide on, and write, with a registry that picks the provider when
+  the worker is built. `temporalio.streams.providers.memory` is the in-memory
+  reference provider the conformance tests run against, and
+  `temporalio.streams.providers.redis` serves the same interface over External
+  Workflow Streams.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
+
 - Added experimental External Workflow Streams in
   `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
   stored in a configured external backend instead of Temporal History, with a
