@@ -21,6 +21,7 @@ __all__ = [
     "Consumer",
     "Producer",
     "StreamProvider",
+    "StreamProviderLifecycle",
     "configure",
     "consumer",
     "drain",
@@ -96,6 +97,9 @@ class StreamProvider(Protocol):
     outside pair (:meth:`producer`, :meth:`consumer`) runs anywhere and moves
     framed bytes. A transport-only provider may serve just the outside pair
     and raise on the workflow side, naming the provider a worker should use.
+
+    A provider whose transport parks something against the running workflow
+    also implements :class:`StreamProviderLifecycle`.
     """
 
     name: str
@@ -147,21 +151,30 @@ class StreamProvider(Protocol):
         """Open a reader for what ``workflow_id`` publishes."""
         ...
 
+
+class StreamProviderLifecycle(Protocol):
+    """The hooks a provider adds when it needs the workflow's own lifetime.
+
+    Separate from :class:`StreamProvider` because most transports need
+    neither, and a provider is not asked to carry a pair of empty methods to
+    say so. :func:`prepare` and :func:`drain` call whichever half is present.
+    """
+
     def prepare(self) -> None:
         """Install whatever this provider needs before the workflow runs.
 
-        Optional. A provider that serves outside readers through handlers on
-        the workflow itself has to register them before the first task
-        completes, or a reader that arrives early finds nothing to talk to.
+        A provider that serves outside readers through handlers on the
+        workflow itself has to register them before the first task completes,
+        or a reader that arrives early finds nothing to talk to.
         """
         ...
 
     def drain(self) -> None:
         """Release anything this provider parked on the workflow's behalf.
 
-        Optional. A provider that parks an outside reader against the running
-        workflow, as the Workflow Streams transport does with its long-poll
-        update, has to let go before the workflow can return.
+        A provider that parks an outside reader against the running workflow,
+        as the Workflow Streams transport does with its long-poll update, has
+        to let go before the workflow can return.
         """
         ...
 

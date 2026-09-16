@@ -26,6 +26,7 @@ class AttemptTracker:
     """Watches producer attempts on one subscription."""
 
     def __init__(self) -> None:
+        """Start with no producer seen."""
         self._attempts: dict[str, int] = {}
 
     def note(

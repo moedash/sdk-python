@@ -138,6 +138,7 @@ class MemoryProducer:
         producer_id: str,
         attempt: int,
     ) -> None:
+        """Bind this producer to ``topic`` on ``store``."""
         self._store = store
         self._converter = converter
         self._topic = topic
@@ -147,6 +148,7 @@ class MemoryProducer:
 
     @property
     def attempt(self) -> int:
+        """The generation this producer is writing."""
         return self._attempt
 
     @property
@@ -158,6 +160,7 @@ class MemoryProducer:
         )
 
     async def append(self, *values: Any) -> Cursor:
+        """Append ``values`` and return the cursor of the last one."""
         frames = []
         for value in values:
             frames.append(
@@ -179,6 +182,7 @@ class MemoryProducer:
         return Cursor(str(offset))
 
     async def finish(self) -> None:
+        """Mark this producer done, so a reader stops waiting on it."""
         frame = _frame.encode(
             topic=self._topic,
             kind=RecordKind.FINISH,
@@ -205,6 +209,7 @@ class MemoryConsumer:
     """The outside reader, with the shared supersession rule."""
 
     def __init__(self, store: _MemoryStream, converter: Any) -> None:
+        """Read whatever ``store`` holds, now and as it grows."""
         self._store = store
         self._converter = converter
 
@@ -215,6 +220,7 @@ class MemoryConsumer:
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
+        """Yield records after ``after``, waiting for ones not written yet."""
         attempts = AttemptTracker()
         offset = int(after.token) + 1 if after.token else 0
         while True:
@@ -246,6 +252,7 @@ class MemoryConsumer:
                 )
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the last record written, for following from now."""
         del topic  # one store per stream, so the position is topic-independent
         count = len(self._store.frames)
         return Cursor(str(count - 1)) if count else BEGINNING
