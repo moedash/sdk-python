@@ -39,6 +39,10 @@ to include examples, links to docs, or any other relevant information.
   `temporalio.contrib.workflow_streams` without naming it. Records are the
   `StreamRecord` proto inside the shipped item payload, and a handle without a
   run id follows continue-as-new run by run.
+- **Experimental**: `temporalio.streams.providers.workflow_streams` serves the
+  stream interface over the shipped Workflow Streams transport, so a workflow
+  reads and publishes through `temporalio.contrib.workflow_streams` without
+  naming it.
 
 ### Changed
 
