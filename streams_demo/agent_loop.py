@@ -29,7 +29,11 @@ async def record_decision(decision: dict[str, Any]) -> str:
 def decide(token: dict[str, Any]) -> dict[str, Any]:
     """The decision the workflow is here to make."""
     if token["value"] % 2 == 0:
-        return {"source": token["id"], "branch": "even", "computed": token["value"] * 10}
+        return {
+            "source": token["id"],
+            "branch": "even",
+            "computed": token["value"] * 10,
+        }
     return {"source": token["id"], "branch": "odd", "computed": token["value"] + 100}
 
 
@@ -39,9 +43,7 @@ class AgentLoop:
 
     @workflow.run
     async def run(self, limit: int) -> list[dict[str, Any]]:
-        inputs = streams.reader(
-            INPUTS, type=dict, idle_timeout=timedelta(seconds=1)
-        )
+        inputs = streams.reader(INPUTS, type=dict, idle_timeout=timedelta(seconds=1))
         decisions = streams.writer(DECISIONS)
         trace: list[dict[str, Any]] = []
         accepted = 0

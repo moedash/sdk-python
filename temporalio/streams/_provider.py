@@ -186,8 +186,7 @@ def _make(name: str | None) -> StreamProvider:
             name = next(iter(_factories))
         else:
             raise RuntimeError(
-                "name a provider: configure(provider=...) with one of "
-                f"{registered()}"
+                f"name a provider: configure(provider=...) with one of {registered()}"
             )
     factory = _factories.get(name)
     if factory is None:
