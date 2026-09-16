@@ -18,7 +18,6 @@ from temporalio import streams, workflow
 from temporalio.client import Client
 from temporalio.streams import RecordKind
 from temporalio.worker import Worker
-
 from tests.streams.test_workflow_streams_provider import EchoLoop, take
 
 pytestmark = pytest.mark.skipif(
@@ -33,9 +32,7 @@ async def test_interface_loop_over_redis():
         url=os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6399"),
         key_prefix=f"streams-redis-live-{uuid.uuid4().hex}",
     )
-    client = await Client.connect(
-        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     workflow_id = f"streams-redis-live-{uuid.uuid4().hex}"
 
     async with Worker(
@@ -50,8 +47,11 @@ async def test_interface_loop_over_redis():
         )
 
         producer = await streams.producer(
-            client, workflow_id=workflow_id, stream="inputs",
-            producer_id="model", attempt=1,
+            client,
+            workflow_id=workflow_id,
+            stream="inputs",
+            producer_id="model",
+            attempt=1,
         )
         await producer.append({"n": 1}, {"n": 2})
         await producer.append({"n": 3})
@@ -107,9 +107,7 @@ async def test_query_after_completion_replays_the_final_task():
         url=os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6399"),
         key_prefix=f"streams-redis-live-{uuid.uuid4().hex}",
     )
-    client = await Client.connect(
-        os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     workflow_id = f"streams-redis-replay-{uuid.uuid4().hex}"
 
     async with Worker(
