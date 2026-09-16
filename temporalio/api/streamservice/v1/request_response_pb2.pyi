@@ -1,11 +1,16 @@
-from temporalio.api.streamservice.v1 import message_pb2 as _message_pb2
-from temporalio.api.streamservice.v1 import stream_state_pb2 as _stream_state_pb2
-from temporalio.api.common.v1 import message_pb2 as _message_pb2_1
-from google.protobuf.internal import containers as _containers
+from collections.abc import Iterable as _Iterable
+from collections.abc import Mapping as _Mapping
+from typing import ClassVar as _ClassVar
+from typing import Optional as _Optional
+from typing import Union as _Union
+
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+from google.protobuf.internal import containers as _containers
+
+from temporalio.api.common.v1 import message_pb2 as _message_pb2_1
+from temporalio.api.streamservice.v1 import message_pb2 as _message_pb2
+from temporalio.api.streamservice.v1 import stream_state_pb2 as _stream_state_pb2
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -17,7 +22,12 @@ class CreateStreamInput(_message.Message):
     namespace: str
     stream_id: str
     lifecycle: _stream_state_pb2.StreamLifecycle
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., lifecycle: _Optional[_Union[_stream_state_pb2.StreamLifecycle, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        lifecycle: _Optional[_Union[_stream_state_pb2.StreamLifecycle, _Mapping]] = ...,
+    ) -> None: ...
 
 class CreateStreamOutput(_message.Message):
     __slots__ = ("run_id",)
@@ -26,7 +36,17 @@ class CreateStreamOutput(_message.Message):
     def __init__(self, run_id: _Optional[str] = ...) -> None: ...
 
 class AddMessagesInput(_message.Message):
-    __slots__ = ("namespace", "stream_id", "run_id", "messages", "producer_id", "sequence", "expected_offset", "use_expected_offset", "owner_epoch")
+    __slots__ = (
+        "namespace",
+        "stream_id",
+        "run_id",
+        "messages",
+        "producer_id",
+        "sequence",
+        "expected_offset",
+        "use_expected_offset",
+        "owner_epoch",
+    )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     STREAM_ID_FIELD_NUMBER: _ClassVar[int]
     RUN_ID_FIELD_NUMBER: _ClassVar[int]
@@ -45,7 +65,20 @@ class AddMessagesInput(_message.Message):
     expected_offset: int
     use_expected_offset: bool
     owner_epoch: int
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., run_id: _Optional[str] = ..., messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., producer_id: _Optional[str] = ..., sequence: _Optional[int] = ..., expected_offset: _Optional[int] = ..., use_expected_offset: bool = ..., owner_epoch: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        run_id: _Optional[str] = ...,
+        messages: _Optional[
+            _Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]
+        ] = ...,
+        producer_id: _Optional[str] = ...,
+        sequence: _Optional[int] = ...,
+        expected_offset: _Optional[int] = ...,
+        use_expected_offset: bool = ...,
+        owner_epoch: _Optional[int] = ...,
+    ) -> None: ...
 
 class AddMessagesOutput(_message.Message):
     __slots__ = ("first_offset", "next_offset", "count", "deduplicated")
@@ -57,7 +90,13 @@ class AddMessagesOutput(_message.Message):
     next_offset: int
     count: int
     deduplicated: bool
-    def __init__(self, first_offset: _Optional[int] = ..., next_offset: _Optional[int] = ..., count: _Optional[int] = ..., deduplicated: bool = ...) -> None: ...
+    def __init__(
+        self,
+        first_offset: _Optional[int] = ...,
+        next_offset: _Optional[int] = ...,
+        count: _Optional[int] = ...,
+        deduplicated: bool = ...,
+    ) -> None: ...
 
 class FinishWritingInput(_message.Message):
     __slots__ = ("namespace", "stream_id", "producer_id")
@@ -67,7 +106,12 @@ class FinishWritingInput(_message.Message):
     namespace: str
     stream_id: str
     producer_id: str
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., producer_id: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        producer_id: _Optional[str] = ...,
+    ) -> None: ...
 
 class FinishWritingOutput(_message.Message):
     __slots__ = ()
@@ -85,7 +129,14 @@ class SubscribeWorkflowInput(_message.Message):
     stream_name: str
     stream_id: str
     start_offset: int
-    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., stream_id: _Optional[str] = ..., start_offset: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        workflow_id: _Optional[str] = ...,
+        stream_name: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        start_offset: _Optional[int] = ...,
+    ) -> None: ...
 
 class SubscribeWorkflowOutput(_message.Message):
     __slots__ = ("start_offset",)
@@ -94,7 +145,15 @@ class SubscribeWorkflowOutput(_message.Message):
     def __init__(self, start_offset: _Optional[int] = ...) -> None: ...
 
 class PollMessagesInput(_message.Message):
-    __slots__ = ("namespace", "stream_id", "run_id", "from_offset", "max_messages", "topics", "wait_new_messages")
+    __slots__ = (
+        "namespace",
+        "stream_id",
+        "run_id",
+        "from_offset",
+        "max_messages",
+        "topics",
+        "wait_new_messages",
+    )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     STREAM_ID_FIELD_NUMBER: _ClassVar[int]
     RUN_ID_FIELD_NUMBER: _ClassVar[int]
@@ -109,7 +168,16 @@ class PollMessagesInput(_message.Message):
     max_messages: int
     topics: _containers.RepeatedScalarFieldContainer[str]
     wait_new_messages: bool
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., run_id: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: bool = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        run_id: _Optional[str] = ...,
+        from_offset: _Optional[int] = ...,
+        max_messages: _Optional[int] = ...,
+        topics: _Optional[_Iterable[str]] = ...,
+        wait_new_messages: bool = ...,
+    ) -> None: ...
 
 class PollMessagesOutput(_message.Message):
     __slots__ = ("messages", "next_offset", "head_offset", "closed", "close_reason")
@@ -123,7 +191,16 @@ class PollMessagesOutput(_message.Message):
     head_offset: int
     closed: bool
     close_reason: _message_pb2_1.Payload
-    def __init__(self, messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., next_offset: _Optional[int] = ..., head_offset: _Optional[int] = ..., closed: bool = ..., close_reason: _Optional[_Union[_message_pb2_1.Payload, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        messages: _Optional[
+            _Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]
+        ] = ...,
+        next_offset: _Optional[int] = ...,
+        head_offset: _Optional[int] = ...,
+        closed: bool = ...,
+        close_reason: _Optional[_Union[_message_pb2_1.Payload, _Mapping]] = ...,
+    ) -> None: ...
 
 class DescribeStreamInput(_message.Message):
     __slots__ = ("namespace", "stream_id")
@@ -131,10 +208,20 @@ class DescribeStreamInput(_message.Message):
     STREAM_ID_FIELD_NUMBER: _ClassVar[int]
     namespace: str
     stream_id: str
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ...
+    ) -> None: ...
 
 class PollWorkflowMessagesInput(_message.Message):
-    __slots__ = ("namespace", "workflow_id", "stream_name", "from_offset", "max_messages", "topics", "wait_new_messages")
+    __slots__ = (
+        "namespace",
+        "workflow_id",
+        "stream_name",
+        "from_offset",
+        "max_messages",
+        "topics",
+        "wait_new_messages",
+    )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     WORKFLOW_ID_FIELD_NUMBER: _ClassVar[int]
     STREAM_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -149,7 +236,16 @@ class PollWorkflowMessagesInput(_message.Message):
     max_messages: int
     topics: _containers.RepeatedScalarFieldContainer[str]
     wait_new_messages: bool
-    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., from_offset: _Optional[int] = ..., max_messages: _Optional[int] = ..., topics: _Optional[_Iterable[str]] = ..., wait_new_messages: bool = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        workflow_id: _Optional[str] = ...,
+        stream_name: _Optional[str] = ...,
+        from_offset: _Optional[int] = ...,
+        max_messages: _Optional[int] = ...,
+        topics: _Optional[_Iterable[str]] = ...,
+        wait_new_messages: bool = ...,
+    ) -> None: ...
 
 class DescribeWorkflowStreamInput(_message.Message):
     __slots__ = ("namespace", "workflow_id", "stream_name")
@@ -159,10 +255,22 @@ class DescribeWorkflowStreamInput(_message.Message):
     namespace: str
     workflow_id: str
     stream_name: str
-    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        workflow_id: _Optional[str] = ...,
+        stream_name: _Optional[str] = ...,
+    ) -> None: ...
 
 class AddWorkflowMessagesInput(_message.Message):
-    __slots__ = ("namespace", "workflow_id", "stream_name", "messages", "producer_id", "sequence")
+    __slots__ = (
+        "namespace",
+        "workflow_id",
+        "stream_name",
+        "messages",
+        "producer_id",
+        "sequence",
+    )
     NAMESPACE_FIELD_NUMBER: _ClassVar[int]
     WORKFLOW_ID_FIELD_NUMBER: _ClassVar[int]
     STREAM_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -175,13 +283,25 @@ class AddWorkflowMessagesInput(_message.Message):
     messages: _containers.RepeatedCompositeFieldContainer[_message_pb2.StreamMessage]
     producer_id: str
     sequence: int
-    def __init__(self, namespace: _Optional[str] = ..., workflow_id: _Optional[str] = ..., stream_name: _Optional[str] = ..., messages: _Optional[_Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]] = ..., producer_id: _Optional[str] = ..., sequence: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        workflow_id: _Optional[str] = ...,
+        stream_name: _Optional[str] = ...,
+        messages: _Optional[
+            _Iterable[_Union[_message_pb2.StreamMessage, _Mapping]]
+        ] = ...,
+        producer_id: _Optional[str] = ...,
+        sequence: _Optional[int] = ...,
+    ) -> None: ...
 
 class DescribeStreamOutput(_message.Message):
     __slots__ = ("state",)
     STATE_FIELD_NUMBER: _ClassVar[int]
     state: _stream_state_pb2.StreamState
-    def __init__(self, state: _Optional[_Union[_stream_state_pb2.StreamState, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, state: _Optional[_Union[_stream_state_pb2.StreamState, _Mapping]] = ...
+    ) -> None: ...
 
 class CloseStreamInput(_message.Message):
     __slots__ = ("namespace", "stream_id", "reason")
@@ -191,7 +311,12 @@ class CloseStreamInput(_message.Message):
     namespace: str
     stream_id: str
     reason: _message_pb2_1.Payload
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., reason: _Optional[_Union[_message_pb2_1.Payload, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        reason: _Optional[_Union[_message_pb2_1.Payload, _Mapping]] = ...,
+    ) -> None: ...
 
 class CloseStreamOutput(_message.Message):
     __slots__ = ()
@@ -205,7 +330,12 @@ class TruncateStreamInput(_message.Message):
     namespace: str
     stream_id: str
     new_base_offset: int
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ..., new_base_offset: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        stream_id: _Optional[str] = ...,
+        new_base_offset: _Optional[int] = ...,
+    ) -> None: ...
 
 class TruncateStreamOutput(_message.Message):
     __slots__ = ()
@@ -217,7 +347,9 @@ class DeleteStreamInput(_message.Message):
     STREAM_ID_FIELD_NUMBER: _ClassVar[int]
     namespace: str
     stream_id: str
-    def __init__(self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, namespace: _Optional[str] = ..., stream_id: _Optional[str] = ...
+    ) -> None: ...
 
 class DeleteStreamOutput(_message.Message):
     __slots__ = ()
@@ -229,13 +361,19 @@ class CreateStreamRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: CreateStreamInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[CreateStreamInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[CreateStreamInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class CreateStreamResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: CreateStreamOutput
-    def __init__(self, frontend_response: _Optional[_Union[CreateStreamOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[CreateStreamOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class AddMessagesRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -243,13 +381,19 @@ class AddMessagesRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: AddMessagesInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[AddMessagesInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[AddMessagesInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class AddMessagesResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: AddMessagesOutput
-    def __init__(self, frontend_response: _Optional[_Union[AddMessagesOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[AddMessagesOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class FinishWritingRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -257,13 +401,19 @@ class FinishWritingRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: FinishWritingInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[FinishWritingInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[FinishWritingInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class FinishWritingResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: FinishWritingOutput
-    def __init__(self, frontend_response: _Optional[_Union[FinishWritingOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[FinishWritingOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class SubscribeWorkflowRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -271,13 +421,20 @@ class SubscribeWorkflowRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: SubscribeWorkflowInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[SubscribeWorkflowInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[SubscribeWorkflowInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class SubscribeWorkflowResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: SubscribeWorkflowOutput
-    def __init__(self, frontend_response: _Optional[_Union[SubscribeWorkflowOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        frontend_response: _Optional[_Union[SubscribeWorkflowOutput, _Mapping]] = ...,
+    ) -> None: ...
 
 class PollMessagesRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -285,13 +442,19 @@ class PollMessagesRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: PollMessagesInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[PollMessagesInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[PollMessagesInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class PollMessagesResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: PollMessagesOutput
-    def __init__(self, frontend_response: _Optional[_Union[PollMessagesOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[PollMessagesOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class DescribeStreamRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -299,13 +462,19 @@ class DescribeStreamRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: DescribeStreamInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[DescribeStreamInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[DescribeStreamInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class DescribeStreamResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: DescribeStreamOutput
-    def __init__(self, frontend_response: _Optional[_Union[DescribeStreamOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[DescribeStreamOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class PollWorkflowMessagesRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -313,13 +482,19 @@ class PollWorkflowMessagesRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: PollWorkflowMessagesInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[PollWorkflowMessagesInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[PollWorkflowMessagesInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class PollWorkflowMessagesResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: PollMessagesOutput
-    def __init__(self, frontend_response: _Optional[_Union[PollMessagesOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[PollMessagesOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class DescribeWorkflowStreamRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -327,13 +502,21 @@ class DescribeWorkflowStreamRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: DescribeWorkflowStreamInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[DescribeWorkflowStreamInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[
+            _Union[DescribeWorkflowStreamInput, _Mapping]
+        ] = ...,
+    ) -> None: ...
 
 class DescribeWorkflowStreamResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: DescribeStreamOutput
-    def __init__(self, frontend_response: _Optional[_Union[DescribeStreamOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[DescribeStreamOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class AddWorkflowMessagesRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -341,13 +524,19 @@ class AddWorkflowMessagesRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: AddWorkflowMessagesInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[AddWorkflowMessagesInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[AddWorkflowMessagesInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class AddWorkflowMessagesResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: AddMessagesOutput
-    def __init__(self, frontend_response: _Optional[_Union[AddMessagesOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[AddMessagesOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class CloseStreamRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -355,13 +544,19 @@ class CloseStreamRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: CloseStreamInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[CloseStreamInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[CloseStreamInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class CloseStreamResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: CloseStreamOutput
-    def __init__(self, frontend_response: _Optional[_Union[CloseStreamOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[CloseStreamOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class TruncateStreamRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -369,13 +564,19 @@ class TruncateStreamRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: TruncateStreamInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[TruncateStreamInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[TruncateStreamInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class TruncateStreamResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: TruncateStreamOutput
-    def __init__(self, frontend_response: _Optional[_Union[TruncateStreamOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[TruncateStreamOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class ListStreamsInput(_message.Message):
     __slots__ = ("namespace", "page_size", "next_page_token", "query")
@@ -387,7 +588,13 @@ class ListStreamsInput(_message.Message):
     page_size: int
     next_page_token: bytes
     query: str
-    def __init__(self, namespace: _Optional[str] = ..., page_size: _Optional[int] = ..., next_page_token: _Optional[bytes] = ..., query: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace: _Optional[str] = ...,
+        page_size: _Optional[int] = ...,
+        next_page_token: _Optional[bytes] = ...,
+        query: _Optional[str] = ...,
+    ) -> None: ...
 
 class StreamListEntry(_message.Message):
     __slots__ = ("stream_id", "run_id")
@@ -395,7 +602,9 @@ class StreamListEntry(_message.Message):
     RUN_ID_FIELD_NUMBER: _ClassVar[int]
     stream_id: str
     run_id: str
-    def __init__(self, stream_id: _Optional[str] = ..., run_id: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, stream_id: _Optional[str] = ..., run_id: _Optional[str] = ...
+    ) -> None: ...
 
 class ListStreamsOutput(_message.Message):
     __slots__ = ("streams", "next_page_token")
@@ -403,7 +612,11 @@ class ListStreamsOutput(_message.Message):
     NEXT_PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
     streams: _containers.RepeatedCompositeFieldContainer[StreamListEntry]
     next_page_token: bytes
-    def __init__(self, streams: _Optional[_Iterable[_Union[StreamListEntry, _Mapping]]] = ..., next_page_token: _Optional[bytes] = ...) -> None: ...
+    def __init__(
+        self,
+        streams: _Optional[_Iterable[_Union[StreamListEntry, _Mapping]]] = ...,
+        next_page_token: _Optional[bytes] = ...,
+    ) -> None: ...
 
 class ListStreamsRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -411,13 +624,19 @@ class ListStreamsRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: ListStreamsInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[ListStreamsInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[ListStreamsInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class ListStreamsResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: ListStreamsOutput
-    def __init__(self, frontend_response: _Optional[_Union[ListStreamsOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[ListStreamsOutput, _Mapping]] = ...
+    ) -> None: ...
 
 class DeleteStreamRequest(_message.Message):
     __slots__ = ("namespace_id", "frontend_request")
@@ -425,10 +644,16 @@ class DeleteStreamRequest(_message.Message):
     FRONTEND_REQUEST_FIELD_NUMBER: _ClassVar[int]
     namespace_id: str
     frontend_request: DeleteStreamInput
-    def __init__(self, namespace_id: _Optional[str] = ..., frontend_request: _Optional[_Union[DeleteStreamInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        namespace_id: _Optional[str] = ...,
+        frontend_request: _Optional[_Union[DeleteStreamInput, _Mapping]] = ...,
+    ) -> None: ...
 
 class DeleteStreamResponse(_message.Message):
     __slots__ = ("frontend_response",)
     FRONTEND_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     frontend_response: DeleteStreamOutput
-    def __init__(self, frontend_response: _Optional[_Union[DeleteStreamOutput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, frontend_response: _Optional[_Union[DeleteStreamOutput, _Mapping]] = ...
+    ) -> None: ...

@@ -11,15 +11,6 @@ from .message_pb2 import (
     StreamMessageBatch,
     StreamMessageKind,
 )
-
-from .stream_state_pb2 import (
-    ConsumerCursor,
-    ProducerCursor,
-    StreamLifecycle,
-    StreamState,
-    WorkflowStreamCursor,
-)
-
 from .request_response_pb2 import (
     AddMessagesInput,
     AddMessagesOutput,
@@ -71,6 +62,13 @@ from .request_response_pb2 import (
     TruncateStreamOutput,
     TruncateStreamRequest,
     TruncateStreamResponse,
+)
+from .stream_state_pb2 import (
+    ConsumerCursor,
+    ProducerCursor,
+    StreamLifecycle,
+    StreamState,
+    WorkflowStreamCursor,
 )
 
 __all__ = [

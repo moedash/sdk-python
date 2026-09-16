@@ -1,4 +1,5 @@
 from .message_pb2 import (
+    AddStreamMessagesCommandAttributes,
     CancelTimerCommandAttributes,
     CancelWorkflowExecutionCommandAttributes,
     Command,
@@ -16,10 +17,12 @@ from .message_pb2 import (
     SignalExternalWorkflowExecutionCommandAttributes,
     StartChildWorkflowExecutionCommandAttributes,
     StartTimerCommandAttributes,
+    SubscribeStreamCommandAttributes,
     UpsertWorkflowSearchAttributesCommandAttributes,
 )
 
 __all__ = [
+    "AddStreamMessagesCommandAttributes",
     "CancelTimerCommandAttributes",
     "CancelWorkflowExecutionCommandAttributes",
     "Command",
@@ -37,5 +40,6 @@ __all__ = [
     "SignalExternalWorkflowExecutionCommandAttributes",
     "StartChildWorkflowExecutionCommandAttributes",
     "StartTimerCommandAttributes",
+    "SubscribeStreamCommandAttributes",
     "UpsertWorkflowSearchAttributesCommandAttributes",
 ]

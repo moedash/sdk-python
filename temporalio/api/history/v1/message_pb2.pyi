@@ -23,6 +23,7 @@ import temporalio.api.failure.v1.message_pb2
 import temporalio.api.sdk.v1.event_group_marker_pb2
 import temporalio.api.sdk.v1.task_complete_metadata_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.api.workflow.v1.message_pb2
@@ -1010,6 +1011,7 @@ class WorkflowTaskCompletedEventAttributes(google.protobuf.message.Message):
     WORKER_DEPLOYMENT_VERSION_FIELD_NUMBER: builtins.int
     WORKER_DEPLOYMENT_NAME_FIELD_NUMBER: builtins.int
     DEPLOYMENT_VERSION_FIELD_NUMBER: builtins.int
+    STREAM_CURSORS_FIELD_NUMBER: builtins.int
     scheduled_event_id: builtins.int
     """The id of the `WORKFLOW_TASK_SCHEDULED` event this task corresponds to"""
     started_event_id: builtins.int
@@ -1069,6 +1071,15 @@ class WorkflowTaskCompletedEventAttributes(google.protobuf.message.Message):
         """The Worker Deployment Version that completed this task. Must be set if `versioning_behavior`
         is set. This value updates workflow execution's `versioning_info.deployment_version`.
         """
+    @property
+    def stream_cursors(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamCursor
+    ]:
+        """The offsets this task consumed, without the payloads. Recorded so replay
+        can reproduce what the task saw, including a range that was empty.
+        """
     def __init__(
         self,
         *,
@@ -1087,6 +1098,10 @@ class WorkflowTaskCompletedEventAttributes(google.protobuf.message.Message):
         worker_deployment_version: builtins.str = ...,
         worker_deployment_name: builtins.str = ...,
         deployment_version: temporalio.api.deployment.v1.message_pb2.WorkerDeploymentVersion
+        | None = ...,
+        stream_cursors: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamCursor
+        ]
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -1123,6 +1138,8 @@ class WorkflowTaskCompletedEventAttributes(google.protobuf.message.Message):
             b"sdk_metadata",
             "started_event_id",
             b"started_event_id",
+            "stream_cursors",
+            b"stream_cursors",
             "versioning_behavior",
             b"versioning_behavior",
             "worker_deployment_name",
@@ -3603,6 +3620,87 @@ global___ActivityPropertiesModifiedExternallyEventAttributes = (
     ActivityPropertiesModifiedExternallyEventAttributes
 )
 
+class WorkflowStreamMessagesAddedEventAttributes(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    FIRST_OFFSET_FIELD_NUMBER: builtins.int
+    MESSAGE_COUNT_FIELD_NUMBER: builtins.int
+    workflow_task_completed_event_id: builtins.int
+    """The WorkflowTaskCompleted event of the task whose command published this
+    batch.
+    """
+    stream_id: builtins.str
+    """Stream the Workflow published to."""
+    first_offset: builtins.int
+    """Offset the first message of the batch landed at."""
+    message_count: builtins.int
+    """How many messages the batch held. With first_offset this names the range
+    without carrying any of it, which is what keeps this event a fixed size
+    no matter how large the batch or its payloads are.
+    """
+    def __init__(
+        self,
+        *,
+        workflow_task_completed_event_id: builtins.int = ...,
+        stream_id: builtins.str = ...,
+        first_offset: builtins.int = ...,
+        message_count: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "first_offset",
+            b"first_offset",
+            "message_count",
+            b"message_count",
+            "stream_id",
+            b"stream_id",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___WorkflowStreamMessagesAddedEventAttributes = (
+    WorkflowStreamMessagesAddedEventAttributes
+)
+
+class WorkflowStreamSubscribedEventAttributes(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    START_OFFSET_FIELD_NUMBER: builtins.int
+    workflow_task_completed_event_id: builtins.int
+    stream_id: builtins.str
+    start_offset: builtins.int
+    """Resolved by the server when the subscription is registered, so replay
+    reads the resolved value rather than resolving it again.
+    """
+    def __init__(
+        self,
+        *,
+        workflow_task_completed_event_id: builtins.int = ...,
+        stream_id: builtins.str = ...,
+        start_offset: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "start_offset",
+            b"start_offset",
+            "stream_id",
+            b"stream_id",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___WorkflowStreamSubscribedEventAttributes = (
+    WorkflowStreamSubscribedEventAttributes
+)
+
 class WorkflowExecutionUpdateAcceptedEventAttributes(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -4460,6 +4558,8 @@ class HistoryEvent(google.protobuf.message.Message):
     WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED_EVENT_ATTRIBUTES_FIELD_NUMBER: (
         builtins.int
     )
+    WORKFLOW_STREAM_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    WORKFLOW_STREAM_MESSAGES_ADDED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
     event_id: builtins.int
     """Monotonically increasing event number, starts at 1."""
     @property
@@ -4745,6 +4845,14 @@ class HistoryEvent(google.protobuf.message.Message):
     def workflow_execution_time_skipping_transitioned_event_attributes(
         self,
     ) -> global___WorkflowExecutionTimeSkippingTransitionedEventAttributes: ...
+    @property
+    def workflow_stream_subscribed_event_attributes(
+        self,
+    ) -> global___WorkflowStreamSubscribedEventAttributes: ...
+    @property
+    def workflow_stream_messages_added_event_attributes(
+        self,
+    ) -> global___WorkflowStreamMessagesAddedEventAttributes: ...
     def __init__(
         self,
         *,
@@ -4882,6 +4990,10 @@ class HistoryEvent(google.protobuf.message.Message):
         | None = ...,
         workflow_execution_time_skipping_transitioned_event_attributes: global___WorkflowExecutionTimeSkippingTransitionedEventAttributes
         | None = ...,
+        workflow_stream_subscribed_event_attributes: global___WorkflowStreamSubscribedEventAttributes
+        | None = ...,
+        workflow_stream_messages_added_event_attributes: global___WorkflowStreamMessagesAddedEventAttributes
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -5004,6 +5116,10 @@ class HistoryEvent(google.protobuf.message.Message):
             b"workflow_properties_modified_event_attributes",
             "workflow_properties_modified_externally_event_attributes",
             b"workflow_properties_modified_externally_event_attributes",
+            "workflow_stream_messages_added_event_attributes",
+            b"workflow_stream_messages_added_event_attributes",
+            "workflow_stream_subscribed_event_attributes",
+            b"workflow_stream_subscribed_event_attributes",
             "workflow_task_completed_event_attributes",
             b"workflow_task_completed_event_attributes",
             "workflow_task_failed_event_attributes",
@@ -5151,6 +5267,10 @@ class HistoryEvent(google.protobuf.message.Message):
             b"workflow_properties_modified_event_attributes",
             "workflow_properties_modified_externally_event_attributes",
             b"workflow_properties_modified_externally_event_attributes",
+            "workflow_stream_messages_added_event_attributes",
+            b"workflow_stream_messages_added_event_attributes",
+            "workflow_stream_subscribed_event_attributes",
+            b"workflow_stream_subscribed_event_attributes",
             "workflow_task_completed_event_attributes",
             b"workflow_task_completed_event_attributes",
             "workflow_task_failed_event_attributes",
@@ -5227,6 +5347,8 @@ class HistoryEvent(google.protobuf.message.Message):
             "workflow_execution_paused_event_attributes",
             "workflow_execution_unpaused_event_attributes",
             "workflow_execution_time_skipping_transitioned_event_attributes",
+            "workflow_stream_subscribed_event_attributes",
+            "workflow_stream_messages_added_event_attributes",
         ]
         | None
     ): ...
