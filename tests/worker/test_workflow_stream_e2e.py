@@ -17,9 +17,9 @@ import os
 import uuid
 
 import pytest
-from temporalio.api.enums.v1 import EventType
 
 from temporalio import workflow
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -239,6 +239,8 @@ async def test_a_cached_workflow_consumes_across_sticky_tasks() -> None:
         async for event in client.get_workflow_handle(wf_id).fetch_history_events():
             if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
                 completed += 1
-        assert completed >= 3, f"only {completed} workflow tasks, sticky path not exercised"
+        assert completed >= 3, (
+            f"only {completed} workflow tasks, sticky path not exercised"
+        )
     finally:
         await streams.close()

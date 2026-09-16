@@ -193,7 +193,11 @@ class NativeProducer:
         without letting a new generation be swallowed as a duplicate of the old
         one.
         """
-        return f"{self._producer_id}#{self._attempt}" if self._attempt else self._producer_id
+        return (
+            f"{self._producer_id}#{self._attempt}"
+            if self._attempt
+            else self._producer_id
+        )
 
     async def append(self, *values: Any) -> Cursor:
         """Append values and return where the first one landed."""
@@ -240,7 +244,9 @@ class NativeProducer:
 
     def _encode(self, value: Any) -> bytes:
         payload = (
-            value if isinstance(value, Payload) else self._converter.to_payloads([value])[0]
+            value
+            if isinstance(value, Payload)
+            else self._converter.to_payloads([value])[0]
         )
         return payload.SerializeToString()
 
@@ -298,7 +304,9 @@ class NativeConsumer:
             # A stream nobody has published to does not exist yet, and that
             # is the same answer as an empty one.
             return BEGINNING
-        return Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
+        return (
+            Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
+        )
 
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
