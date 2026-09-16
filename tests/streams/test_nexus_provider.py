@@ -106,11 +106,12 @@ async def test_interface_loop_through_the_nexus_front():
             ]
             assert [r.value["echo"] for r in records[:3]] == [1, 2, 3]
 
-            # An opaque cursor from behind the front resumes a fresh reader.
-            checkpoint = records[1].cursor
+            # An opaque cursor from behind the front resumes a fresh reader
+            # just past the record it names.
+            checkpoint = records[0].cursor
             resumed = await front.consumer(None, workflow_id=workflow_id)
             again = await take(
-                resumed.read(type=dict, start=checkpoint), 2, timeout=60
+                resumed.read(type=dict, after=checkpoint), 2, timeout=60
             )
             assert [r.value["echo"] for r in again[:2]] == [2, 3]
 
