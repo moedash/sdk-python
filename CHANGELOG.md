@@ -81,6 +81,10 @@ to include examples, links to docs, or any other relevant information.
   `temporal_streams.nexusrpc.yaml` and the bindings are generated from it.
   Configure it with `data_converter=` to run a payload codec on the caller
   side, so records are encoded before they leave the process.
+  through the endpoint and never names the store.
+- Added `examples/streams`, one agent loop that runs unchanged on every
+  stream provider and on the Nexus front.
+
 - Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
 - **Experimental**: server-side streams. A workflow reads a stream the server
   delivers on its Workflow Tasks and publishes with a command, through
