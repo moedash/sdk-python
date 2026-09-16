@@ -131,7 +131,12 @@ class MemoryProducer:
     """The outside producer, faithful to the contract."""
 
     def __init__(
-        self, store: _MemoryStream, converter: Any, topic: str, producer_id: str, attempt: int
+        self,
+        store: _MemoryStream,
+        converter: Any,
+        topic: str,
+        producer_id: str,
+        attempt: int,
     ) -> None:
         self._store = store
         self._converter = converter
@@ -147,7 +152,9 @@ class MemoryProducer:
     @property
     def _provider_id(self) -> str:
         return (
-            f"{self._producer_id}#{self._attempt}" if self._attempt else self._producer_id
+            f"{self._producer_id}#{self._attempt}"
+            if self._attempt
+            else self._producer_id
         )
 
     async def append(self, *values: Any) -> Cursor:
