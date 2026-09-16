@@ -43,6 +43,9 @@ to include examples, links to docs, or any other relevant information.
   stream interface over the shipped Workflow Streams transport, so a workflow
   reads and publishes through `temporalio.contrib.workflow_streams` without
   naming it.
+- **Experimental**: `temporalio.streams.providers.nexus` puts one Nexus
+  endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store.
 
 ### Changed
 
