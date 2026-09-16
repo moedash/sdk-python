@@ -104,7 +104,7 @@ class PublishOnSignal:
     async def run(self) -> int:
         published = 0
         while True:
-            await workflow.wait_condition(lambda: self._pending or self._done)
+            await workflow.wait_condition(lambda: bool(self._pending) or self._done)
             while self._pending:
                 workflow.add_stream_messages([self._pending.pop(0).encode()])
                 published += 1
