@@ -180,34 +180,38 @@ class TemporalStreamsHandler:
             after=Cursor(input.after_token) if input.after_token else BEGINNING,
             topic=topic,
         )
+
+        async def collect() -> None:
+            nonlocal next_token
+            async for record in subscription:
+                if record.kind is RecordKind.SUPERSEDED:
+                    continue
+                body = b""
+                if record.kind is RecordKind.DATA:
+                    body = converter.to_payloads([record.value])[0].SerializeToString()
+                frame = _frame.encode(
+                    topic=record.topic,
+                    kind=record.kind,
+                    producer=record.producer,
+                    attempt=record.attempt,
+                    sequence=record.sequence,
+                    body=body,
+                )
+                records.append(
+                    RecordWire(
+                        token=record.cursor.token,
+                        frame=base64.b64encode(frame).decode("ascii"),
+                    )
+                )
+                next_token = record.cursor.token
+                if len(records) >= input.max_records:
+                    return
+
         try:
-            async with asyncio.timeout(input.wait_ms / 1000):
-                async for record in subscription:
-                    if record.kind is RecordKind.SUPERSEDED:
-                        continue
-                    body = b""
-                    if record.kind is RecordKind.DATA:
-                        body = converter.to_payloads([record.value])[
-                            0
-                        ].SerializeToString()
-                    frame = _frame.encode(
-                        topic=record.topic,
-                        kind=record.kind,
-                        producer=record.producer,
-                        attempt=record.attempt,
-                        sequence=record.sequence,
-                        body=body,
-                    )
-                    records.append(
-                        RecordWire(
-                            token=record.cursor.token,
-                            frame=base64.b64encode(frame).decode("ascii"),
-                        )
-                    )
-                    next_token = record.cursor.token
-                    if len(records) >= input.max_records:
-                        break
-        except TimeoutError:
+            # `wait_for` rather than `asyncio.timeout`, which 3.10 does not
+            # have. Whatever was collected before the deadline is the answer.
+            await asyncio.wait_for(collect(), input.wait_ms / 1000)
+        except asyncio.TimeoutError:
             pass
         finally:
             # The delegate's read parks against its store, and this call
