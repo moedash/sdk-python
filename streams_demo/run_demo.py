@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from temporalio import streams
@@ -29,8 +29,8 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_loop import INPUTS, AgentLoop, record_decision  # noqa: E402
 import provider_setup  # noqa: E402
+from agent_loop import INPUTS, AgentLoop, record_decision  # noqa: E402
 
 DECISION_LIMIT = 8
 EXPECTED_OUTPUT = 6

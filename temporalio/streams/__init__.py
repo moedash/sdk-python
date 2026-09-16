@@ -54,7 +54,12 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, TypeVar
 
-from temporalio.streams._handles import ReadSource, StreamReader, StreamWriter, WriteSink
+from temporalio.streams._handles import (
+    ReadSource,
+    StreamReader,
+    StreamWriter,
+    WriteSink,
+)
 from temporalio.streams._provider import (
     Consumer,
     Producer,
