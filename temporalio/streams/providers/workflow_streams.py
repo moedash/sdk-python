@@ -186,6 +186,7 @@ class WorkflowStreamsProducer:
         producer_id: str,
         attempt: int,
     ) -> None:
+        """Bind this producer to one stream or topic on ``handle``."""
         self._handle = handle
         self._converter = converter
         self._stream = stream
@@ -205,15 +206,19 @@ class WorkflowStreamsProducer:
 
     @property
     def attempt(self) -> int:
+        """The generation this producer is writing."""
         return self._attempt
 
     @property
     def _provider_id(self) -> str:
         return (
-            f"{self._producer_id}#{self._attempt}" if self._attempt else self._producer_id
+            f"{self._producer_id}#{self._attempt}"
+            if self._attempt
+            else self._producer_id
         )
 
     async def append(self, *values: Any) -> Cursor:
+        """Append ``values`` through the shipped publish Signal."""
         entries = []
         for value in values:
             frame = _frame.encode(
@@ -230,6 +235,7 @@ class WorkflowStreamsProducer:
         return Cursor("")
 
     async def finish(self) -> None:
+        """Mark this producer done, so a reader stops waiting on it."""
         frame = _frame.encode(
             topic=self._frame_topic,
             kind=RecordKind.FINISH,
@@ -274,6 +280,7 @@ class WorkflowStreamsConsumer:
         shipped_topic: str | None,
         poll_cooldown: timedelta,
     ) -> None:
+        """Read what ``stream_client`` reaches, one long poll at a time."""
         self._client = stream_client
         self._shipped_topic = shipped_topic
         self._poll_cooldown = poll_cooldown
@@ -285,6 +292,7 @@ class WorkflowStreamsConsumer:
         topic: str | None = None,
         type: type | None = None,
     ) -> AsyncIterator[StreamRecord[Any]]:
+        """Yield records after ``after``, waiting for ones not written yet."""
         attempts = AttemptTracker()
         next_offset = int(after.token) + 1 if after.token else 0
         subscription = self._client.subscribe(
@@ -362,6 +370,7 @@ class WorkflowStreamsConsumer:
         return out
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the last record written, for following from now."""
         del topic  # one log per workflow, whatever the topic
         head = await self._client.get_offset()
         return Cursor(str(head - 1)) if head > 0 else BEGINNING
@@ -369,7 +378,7 @@ class WorkflowStreamsConsumer:
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
         payload.ParseFromString(body)
-        converter = self._client._client.data_converter.payload_converter
+        converter = self._client._payload_converter()
         if as_type is None:
             return converter.from_payloads([payload])[0]
         return converter.from_payloads([payload], [as_type])[0]
