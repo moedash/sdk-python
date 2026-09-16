@@ -25,6 +25,10 @@ to include examples, links to docs, or any other relevant information.
   can read, decide on, and write, with a registry that picks the provider when
   the worker is built. `temporalio.streams.providers.memory` is the in-memory
   reference provider the conformance tests run against.
+- **Experimental**: `temporalio.streams.providers.workflow_streams` serves the
+  stream interface over the shipped Workflow Streams transport, so a workflow
+  reads and publishes through `temporalio.contrib.workflow_streams` without
+  naming it.
 
 ### Changed
 
