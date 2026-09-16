@@ -20,6 +20,11 @@ to include examples, links to docs, or any other relevant information.
 
 ### Added
 
+- **Experimental**: `temporalio.streams` defines one stream interface a workflow
+  can read, decide on, and write, with a registry that picks the provider when
+  the worker is built. `temporalio.streams.providers.memory` is the in-memory
+  reference provider the conformance tests run against.
+
 ### Changed
 
 ### Deprecated
