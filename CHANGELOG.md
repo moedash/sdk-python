@@ -57,7 +57,7 @@ to include examples, links to docs, or any other relevant information.
   through `ExternalOutputStreamClient`. Workflow output is staged outside
   History and becomes readable only after its compact Workflow Task marker is
   committed.
-  reference provider the conformance tests run against.
+
 - **Experimental**: server-side streams. A workflow reads a stream the server
   delivers on its Workflow Tasks and publishes with a command, through
   `temporalio.workflow.read_stream`, `subscribe_stream` and
