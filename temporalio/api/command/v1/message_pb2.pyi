@@ -18,6 +18,7 @@ import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
 import temporalio.api.sdk.v1.event_group_marker_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 import temporalio.api.workflow.v1.message_pb2
 
@@ -1094,6 +1095,62 @@ global___RequestCancelNexusOperationCommandAttributes = (
     RequestCancelNexusOperationCommandAttributes
 )
 
+class AddStreamMessagesCommandAttributes(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    MESSAGES_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """Empty means the Workflow's default output stream."""
+    @property
+    def messages(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamMessage
+    ]: ...
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        messages: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamMessage
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "messages", b"messages", "stream_id", b"stream_id"
+        ],
+    ) -> None: ...
+
+global___AddStreamMessagesCommandAttributes = AddStreamMessagesCommandAttributes
+
+class SubscribeStreamCommandAttributes(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    START_OFFSET_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    start_offset: builtins.int
+    """Negative means from wherever the stream is when the subscription is
+    registered. The server resolves that once and records it.
+    """
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        start_offset: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "start_offset", b"start_offset", "stream_id", b"stream_id"
+        ],
+    ) -> None: ...
+
+global___SubscribeStreamCommandAttributes = SubscribeStreamCommandAttributes
+
 class Command(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -1119,6 +1176,8 @@ class Command(google.protobuf.message.Message):
     MODIFY_WORKFLOW_PROPERTIES_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     SCHEDULE_NEXUS_OPERATION_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     REQUEST_CANCEL_NEXUS_OPERATION_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    ADD_STREAM_MESSAGES_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    SUBSCRIBE_STREAM_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     command_type: temporalio.api.enums.v1.command_type_pb2.CommandType.ValueType
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
@@ -1209,6 +1268,14 @@ class Command(google.protobuf.message.Message):
     def request_cancel_nexus_operation_command_attributes(
         self,
     ) -> global___RequestCancelNexusOperationCommandAttributes: ...
+    @property
+    def add_stream_messages_command_attributes(
+        self,
+    ) -> global___AddStreamMessagesCommandAttributes: ...
+    @property
+    def subscribe_stream_command_attributes(
+        self,
+    ) -> global___SubscribeStreamCommandAttributes: ...
     def __init__(
         self,
         *,
@@ -1253,10 +1320,16 @@ class Command(google.protobuf.message.Message):
         | None = ...,
         request_cancel_nexus_operation_command_attributes: global___RequestCancelNexusOperationCommandAttributes
         | None = ...,
+        add_stream_messages_command_attributes: global___AddStreamMessagesCommandAttributes
+        | None = ...,
+        subscribe_stream_command_attributes: global___SubscribeStreamCommandAttributes
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
+            "add_stream_messages_command_attributes",
+            b"add_stream_messages_command_attributes",
             "attributes",
             b"attributes",
             "cancel_timer_command_attributes",
@@ -1291,6 +1364,8 @@ class Command(google.protobuf.message.Message):
             b"start_child_workflow_execution_command_attributes",
             "start_timer_command_attributes",
             b"start_timer_command_attributes",
+            "subscribe_stream_command_attributes",
+            b"subscribe_stream_command_attributes",
             "upsert_workflow_search_attributes_command_attributes",
             b"upsert_workflow_search_attributes_command_attributes",
             "user_metadata",
@@ -1300,6 +1375,8 @@ class Command(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "add_stream_messages_command_attributes",
+            b"add_stream_messages_command_attributes",
             "attributes",
             b"attributes",
             "cancel_timer_command_attributes",
@@ -1338,6 +1415,8 @@ class Command(google.protobuf.message.Message):
             b"start_child_workflow_execution_command_attributes",
             "start_timer_command_attributes",
             b"start_timer_command_attributes",
+            "subscribe_stream_command_attributes",
+            b"subscribe_stream_command_attributes",
             "upsert_workflow_search_attributes_command_attributes",
             b"upsert_workflow_search_attributes_command_attributes",
             "user_metadata",
@@ -1365,6 +1444,8 @@ class Command(google.protobuf.message.Message):
             "modify_workflow_properties_command_attributes",
             "schedule_nexus_operation_command_attributes",
             "request_cancel_nexus_operation_command_attributes",
+            "add_stream_messages_command_attributes",
+            "subscribe_stream_command_attributes",
         ]
         | None
     ): ...

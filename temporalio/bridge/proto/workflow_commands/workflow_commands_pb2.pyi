@@ -23,9 +23,9 @@ import google.protobuf.timestamp_pb2
 import temporalio.api.common.v1.message_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
-import temporalio.api.stream.v1.message_pb2
 import temporalio.api.sdk.v1.event_group_marker_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
@@ -228,6 +228,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     def HasField(
         self,
         field_name: typing_extensions.Literal[
+            "add_stream_messages",
+            b"add_stream_messages",
             "cancel_child_workflow_execution",
             b"cancel_child_workflow_execution",
             "cancel_signal_workflow",
@@ -252,10 +254,6 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"request_cancel_local_activity",
             "request_cancel_nexus_operation",
             b"request_cancel_nexus_operation",
-            "subscribe_stream",
-            b"subscribe_stream",
-            "add_stream_messages",
-            b"add_stream_messages",
             "respond_to_query",
             b"respond_to_query",
             "schedule_activity",
@@ -272,6 +270,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"start_child_workflow_execution",
             "start_timer",
             b"start_timer",
+            "subscribe_stream",
+            b"subscribe_stream",
             "update_response",
             b"update_response",
             "upsert_workflow_search_attributes",
@@ -285,6 +285,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "add_stream_messages",
+            b"add_stream_messages",
             "cancel_child_workflow_execution",
             b"cancel_child_workflow_execution",
             "cancel_signal_workflow",
@@ -311,10 +313,6 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"request_cancel_local_activity",
             "request_cancel_nexus_operation",
             b"request_cancel_nexus_operation",
-            "subscribe_stream",
-            b"subscribe_stream",
-            "add_stream_messages",
-            b"add_stream_messages",
             "respond_to_query",
             b"respond_to_query",
             "schedule_activity",
@@ -331,6 +329,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"start_child_workflow_execution",
             "start_timer",
             b"start_timer",
+            "subscribe_stream",
+            b"subscribe_stream",
             "update_response",
             b"update_response",
             "upsert_workflow_search_attributes",
@@ -375,38 +375,14 @@ class WorkflowCommand(google.protobuf.message.Message):
 
 global___WorkflowCommand = WorkflowCommand
 
-class StartTimer(google.protobuf.message.Message):
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    SEQ_FIELD_NUMBER: builtins.int
-    START_TO_FIRE_TIMEOUT_FIELD_NUMBER: builtins.int
-    seq: builtins.int
-    """Lang's incremental sequence number, used as the operation identifier"""
-    @property
-    def start_to_fire_timeout(self) -> google.protobuf.duration_pb2.Duration: ...
-    def __init__(
-        self,
-        *,
-        seq: builtins.int = ...,
-        start_to_fire_timeout: google.protobuf.duration_pb2.Duration | None = ...,
-    ) -> None: ...
-    def HasField(
-        self,
-        field_name: typing_extensions.Literal[
-            "start_to_fire_timeout", b"start_to_fire_timeout"
-        ],
-    ) -> builtins.bool: ...
-    def ClearField(
-        self,
-        field_name: typing_extensions.Literal[
-            "seq", b"seq", "start_to_fire_timeout", b"start_to_fire_timeout"
-        ],
-    ) -> None: ...
-
-global___StartTimer = StartTimer
-
 class AddStreamMessages(google.protobuf.message.Message):
-    """Publish a batch of messages to a stream this workflow owns.
+    """Subscribe this workflow to a stream, so later Workflow Tasks carry the
+    ranges it has not consumed yet.
+
+    The stream's addressing is resolved by the server. A workflow cannot look it
+    up without doing I/O, and a value it carried would be a reading rather than a
+    fact, so it could differ on replay.
+    Publish a batch of messages to a stream this workflow owns.
 
     The bodies go to the stream's own log rather than into History, which gets
     one fixed-size event naming the offset range. That is what makes the batch
@@ -444,14 +420,6 @@ class AddStreamMessages(google.protobuf.message.Message):
 global___AddStreamMessages = AddStreamMessages
 
 class SubscribeStream(google.protobuf.message.Message):
-    """Subscribe this workflow to a stream, so later Workflow Tasks carry the
-    ranges it has not consumed yet.
-
-    The stream's addressing is resolved by the server. A workflow cannot look it
-    up without doing I/O, and a value it carried would be a reading rather than a
-    fact, so it could differ on replay.
-    """
-
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     STREAM_ID_FIELD_NUMBER: builtins.int
@@ -475,6 +443,36 @@ class SubscribeStream(google.protobuf.message.Message):
     ) -> None: ...
 
 global___SubscribeStream = SubscribeStream
+
+class StartTimer(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    SEQ_FIELD_NUMBER: builtins.int
+    START_TO_FIRE_TIMEOUT_FIELD_NUMBER: builtins.int
+    seq: builtins.int
+    """Lang's incremental sequence number, used as the operation identifier"""
+    @property
+    def start_to_fire_timeout(self) -> google.protobuf.duration_pb2.Duration: ...
+    def __init__(
+        self,
+        *,
+        seq: builtins.int = ...,
+        start_to_fire_timeout: google.protobuf.duration_pb2.Duration | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "start_to_fire_timeout", b"start_to_fire_timeout"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "seq", b"seq", "start_to_fire_timeout", b"start_to_fire_timeout"
+        ],
+    ) -> None: ...
+
+global___StartTimer = StartTimer
 
 class CancelTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
