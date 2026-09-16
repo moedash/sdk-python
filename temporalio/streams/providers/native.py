@@ -171,6 +171,7 @@ class NativeProducer:
         producer_id: str,
         attempt: int,
     ) -> None:
+        """Bind this producer to ``topic`` on the stream ``handle`` names."""
         self._handle = handle
         self._converter = converter
         self._topic = topic
@@ -255,6 +256,7 @@ class NativeConsumer:
     """Reads a stream from outside workflow code, resumably."""
 
     def __init__(self, handle: Any, converter: Any) -> None:
+        """Read the stream ``handle`` names, from anywhere."""
         self._handle = handle
         self._converter = converter
 
@@ -297,6 +299,7 @@ class NativeConsumer:
             )
 
     async def latest(self, *, topic: str | None = None) -> Cursor:
+        """The cursor of the last record written, for following from now."""
         del topic  # one server-side log per stream, whatever the topic
         try:
             state = await self._handle.describe()
@@ -320,9 +323,12 @@ class _NativeProvider:
     name = "native"
 
     def configure(self, **options: Any) -> None:
-        """Nothing to name: the streams are on the server the client is
-        already connected to. It exists so a process that switches providers
-        changes one call rather than its structure."""
+        """Take no options.
+
+        The streams are on the server the client is already connected to.
+        This exists so a process that switches providers changes one call
+        rather than its structure.
+        """
         if options:
             raise TypeError(
                 f"the native provider takes no options, got {sorted(options)}"
