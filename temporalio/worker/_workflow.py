@@ -249,7 +249,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         #: A sandboxed Workflow's `instance` is a proxy that exposes only the
         #: `WorkflowInstance` protocol, so reaching through it for the runtime
         #: silently found nothing -- and the jobs that must never reach
-        #: `activate()` quietly went to `_apply` instead.
+        #: `activate()` quietly went to ``_apply`` instead.
         self._external_stream_runtimes: dict[str, Any] = {}
         # Stages survive activations within the cached Run because Core may
         # defer the server completion behind a local activity. A marker can be
@@ -1252,7 +1252,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         to have re-created the subscription that would otherwise carry it.
 
         Bound from the Worker's own converter rather than from the runtime's,
-        which is already bound to this Run: a second `with_context` over the
+        which is already bound to this Run: a second ``with_context`` over the
         first would ask a user's component converter to rebind itself, and
         nothing in the protocol promises that composes.
 
