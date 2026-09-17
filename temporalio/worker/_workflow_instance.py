@@ -61,6 +61,13 @@ import temporalio.exceptions
 import temporalio.nexus.system
 import temporalio.workflow
 from temporalio.converter import StorageDriverStoreContext, StorageDriverWorkflowInfo
+from temporalio.converter._payload_converter import (
+    _TemporalTransferTypePayloadConverter,
+)
+from temporalio.nexus.system.workflow_service._system_nexus_interceptor import (
+    _start_system_nexus_operation,
+    _SystemNexusWorkflowOutboundInterceptorTerminal,
+)
 from temporalio.service import __version__
 
 from ..api.failure.v1.message_pb2 import Failure
@@ -1958,7 +1965,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         return use_patch
 
     def workflow_payload_converter(self) -> temporalio.converter.PayloadConverter:
-        return self._workflow_context_payload_converter
+        return _TemporalTransferTypePayloadConverter.unwrap(
+            self._workflow_context_payload_converter
+        )
 
     def workflow_random(self) -> random.Random:
         self._assert_not_read_only("random")
@@ -2226,7 +2235,23 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         headers: Mapping[str, str] | None,
         summary: str | None,
     ) -> temporalio.workflow.NexusOperationHandle[OutputT]:
-        # start_nexus_operation
+        if temporalio.nexus.system.is_system_endpoint(endpoint):
+            return await _start_system_nexus_operation(
+                self._outbound,
+                StartNexusOperationInput(
+                    endpoint=temporalio.nexus.system.TEMPORAL_SYSTEM_ENDPOINT,
+                    service=service,
+                    operation=operation,
+                    input=input,
+                    output_type=output_type,
+                    schedule_to_close_timeout=schedule_to_close_timeout,
+                    schedule_to_start_timeout=schedule_to_start_timeout,
+                    start_to_close_timeout=start_to_close_timeout,
+                    cancellation_type=cancellation_type,
+                    headers=None,
+                    summary=summary,
+                ),
+            )
         return await self._outbound.start_nexus_operation(
             StartNexusOperationInput(
                 endpoint=endpoint,
@@ -2509,7 +2534,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 try:
                     return await self._await_temporal_operation(
                         handle._result_fut,
-                        lambda _err, command: handle._apply_cancel_command(command),
+                        lambda _err: handle._request_cancel(),
                         completed_cancellation_flag=_WorkflowLogicFlag.RAISE_ON_CANCELLING_COMPLETED_ACTIVITY,
                     )
                 except _ActivityDoBackoffError as err:
@@ -2580,8 +2605,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         # Common code for handling cancel for start and run
         def apply_child_cancel_error(
             err: asyncio.CancelledError,
-            cancel_command: temporalio.bridge.proto.workflow_commands.WorkflowCommand,
         ) -> None:
+            cancel_command = self._add_command()
             # Send a cancel request to the child, forwarding the msg passed to
             # Task.cancel(msg) (if any) as the cancellation reason.
             reason = err.args[0] if err.args and isinstance(err.args[0], str) else ""
@@ -2645,33 +2670,69 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 OutputT,
                 await self._await_temporal_operation(
                     handle._result_fut,
-                    lambda _err, command: handle._apply_cancel_command(command),
+                    lambda _err: handle._apply_cancel_command(self._add_command()),
                 ),
             )
 
         if temporalio.nexus.system.is_system_endpoint(input.endpoint):
-            payload_converter = temporalio.nexus.system._get_payload_converter(
-                self._workflow_context_payload_converter,
-                self._workflow_context_failure_converter,
+            serialization_context = temporalio.nexus.system._get_serialization_context(
+                input.service,
+                input.operation_name,
+                input.input,
             )
+            user_payload_converter = self._workflow_context_payload_converter
+            user_failure_converter = self._workflow_context_failure_converter
+            if serialization_context is not None:
+                user_payload_converter = self._payload_converter_with_context(
+                    serialization_context
+                )
+                user_failure_converter = self._failure_converter_with_context(
+                    serialization_context
+                )
+            payload_converter = temporalio.nexus.system._get_payload_converter(
+                user_payload_converter,
+                user_failure_converter,
+            )
+            failure_converter = user_failure_converter
         else:
-            payload_converter = self._context_free_payload_converter
+            serialization_context = temporalio.converter.NexusSerializationContext(
+                endpoint=input.endpoint,
+                service=input.service,
+                operation=input.operation_name,
+            )
+            payload_converter = self._payload_converter_with_context(
+                serialization_context
+            )
+            failure_converter = self._failure_converter_with_context(
+                serialization_context
+            )
         handle = _NexusOperationHandle(
             self,
             self._next_seq("nexus_operation"),
             input,
             operation_handle_fn(),
             payload_converter,
+            failure_converter,
         )
         handle._apply_schedule_command()
         self._pending_nexus_operations[handle._seq] = handle
 
         await self._await_temporal_operation(
             handle._start_fut,
-            lambda _err, command: handle._apply_cancel_command(command),
+            lambda _err: handle._apply_cancel_command(self._add_command()),
             reraise_on_workflow_cancellation=True,
         )
         return handle
+
+    async def _intercept_system_nexus_operation(
+        self, input: StartNexusOperationInput[Any, OutputT]
+    ) -> temporalio.workflow.NexusOperationHandle[OutputT]:
+        return await self._outbound.start_system_nexus_operation(input)
+
+    async def _schedule_system_nexus_operation(
+        self, input: StartNexusOperationInput[Any, OutputT]
+    ) -> _NexusOperationHandle[OutputT]:
+        return await self._outbound_start_nexus_operation(input)
 
     #### Miscellaneous helpers ####
     # These are in alphabetical order.
@@ -2987,10 +3048,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self,
         fut: asyncio.Future[_T],
         apply_cancel: Callable[
-            [
-                asyncio.CancelledError,
-                temporalio.bridge.proto.workflow_commands.WorkflowCommand,
-            ],
+            [asyncio.CancelledError],
             None,
         ],
         *,
@@ -3018,7 +3076,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                         )
                         raise
 
-                apply_cancel(err, self._add_command())
+                apply_cancel(err)
 
                 # Clear the cancellation counter on Python 3.11+ so the next
                 # await does not immediately re-raise CancelledError.
@@ -3178,9 +3236,11 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     nexus_operation._input.operation_name,
                     nexus_operation._input.input,
                 )
-            # Other Nexus operations have no context because the caller workflow context is
-            # unavailable on the handler side for decryption.
-            return None
+            return temporalio.converter.NexusSerializationContext(
+                endpoint=nexus_operation._input.endpoint,
+                service=nexus_operation._input.service,
+                operation=nexus_operation._input.operation_name,
+            )
 
         else:
             # Use payload codec with workflow context for all other payloads
@@ -3547,8 +3607,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
         def apply_cancel(
             _err: asyncio.CancelledError,
-            command: temporalio.bridge.proto.workflow_commands.WorkflowCommand,
         ) -> None:
+            command = self._add_command()
             command.cancel_signal_workflow.seq = seq
 
         # Wait until completed or cancelled
@@ -3910,10 +3970,17 @@ class _WorkflowInboundImpl(WorkflowInboundInterceptor):
             return handler(*input.args)
 
 
-class _WorkflowOutboundImpl(WorkflowOutboundInterceptor):
+class _WorkflowOutboundImpl(
+    _SystemNexusWorkflowOutboundInterceptorTerminal, WorkflowOutboundInterceptor
+):
     def __init__(self, instance: _WorkflowInstanceImpl) -> None:  # type: ignore
         # We are intentionally not calling the base class's __init__ here
         self._instance = instance
+
+    async def _outbound_start_nexus_operation(
+        self, input: StartNexusOperationInput[InputT, OutputT]
+    ) -> temporalio.workflow.NexusOperationHandle[OutputT]:
+        return await self._instance._outbound_start_nexus_operation(input)
 
     def continue_as_new(self, input: ContinueAsNewInput) -> NoReturn:
         self._instance._outbound_continue_as_new(input)
@@ -3943,6 +4010,16 @@ class _WorkflowOutboundImpl(WorkflowOutboundInterceptor):
         self, input: StartNexusOperationInput[Any, OutputT]
     ) -> _NexusOperationHandle[OutputT]:
         return await self._instance._outbound_start_nexus_operation(input)
+
+    async def _intercept_system_nexus_operation(
+        self, input: StartNexusOperationInput[InputT, OutputT]
+    ) -> temporalio.workflow.NexusOperationHandle[OutputT]:
+        return await self._instance._intercept_system_nexus_operation(input)
+
+    async def start_system_nexus_operation(
+        self, input: StartNexusOperationInput[Any, OutputT]
+    ) -> _NexusOperationHandle[OutputT]:
+        return await self._instance._schedule_system_nexus_operation(input)
 
     def start_local_activity(
         self, input: StartLocalActivityInput
@@ -4013,6 +4090,7 @@ class _ActivityHandle(temporalio.workflow.ActivityHandle[Any]):
         self._input = input
         self._result_fut = instance.create_future()
         self._started = False
+        self._cancel_command_seq: int | None = None
         instance._register_task(self, name=f"activity: {input.activity}")
         self._payload_converter = self._instance._payload_converter_with_context(
             temporalio.converter.ActivitySerializationContext(
@@ -4039,8 +4117,14 @@ class _ActivityHandle(temporalio.workflow.ActivityHandle[Any]):
             # to send a cancel command because the async function won't run to trap
             # the cancel (i.e. cancelled before started)
             if not self._started and not self.done():
-                self._apply_cancel_command(self._instance._add_command())
+                self._request_cancel()
         return super().cancel(msg)
+
+    def _request_cancel(self) -> None:
+        if self._cancel_command_seq == self._seq:
+            return
+        self._cancel_command_seq = self._seq
+        self._apply_cancel_command(self._instance._add_command())
 
     def _resolve_success(self, result: Any) -> None:
         # We intentionally let this error if already done
@@ -4362,6 +4446,7 @@ class _NexusOperationHandle(temporalio.workflow.NexusOperationHandle[OutputT]):
         input: StartNexusOperationInput[Any, OutputT],
         fn: Coroutine[Any, Any, OutputT],
         payload_converter: temporalio.converter.PayloadConverter,
+        failure_converter: temporalio.converter.FailureConverter,
     ):
         self._instance = instance
         self._seq = seq
@@ -4370,7 +4455,7 @@ class _NexusOperationHandle(temporalio.workflow.NexusOperationHandle[OutputT]):
         self._start_fut: asyncio.Future[str | None] = instance.create_future()
         self._result_fut: asyncio.Future[OutputT | None] = instance.create_future()
         self._payload_converter = payload_converter
-        self._failure_converter = self._instance._context_free_failure_converter
+        self._failure_converter = failure_converter
 
     @property
     def operation_token(self) -> str | None:

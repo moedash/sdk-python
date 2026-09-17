@@ -10,6 +10,7 @@ from temporalio.converter._extstore import (
     StorageDriverActivityInfo,
     StorageDriverClaim,
     StorageDriverRetrieveContext,
+    StorageDriverSelectContext,
     StorageDriverStoreContext,
     StorageDriverWorkflowInfo,
     StorageWarning,
@@ -49,6 +50,7 @@ from temporalio.converter._search_attributes import (
 )
 from temporalio.converter._serialization_context import (
     ActivitySerializationContext,
+    NexusSerializationContext,
     SerializationContext,
     WithSerializationContext,
     WorkflowSerializationContext,
@@ -61,6 +63,7 @@ __all__ = [
     "StorageDriverActivityInfo",
     "StorageDriverClaim",
     "StorageDriverRetrieveContext",
+    "StorageDriverSelectContext",
     "StorageDriverStoreContext",
     "StorageDriverWorkflowInfo",
     "StorageWarning",
@@ -80,6 +83,7 @@ __all__ = [
     "JSONProtoPayloadConverter",
     "JSONTypeConverter",
     "JSONTypeConverterUnhandled",
+    "NexusSerializationContext",
     "PayloadCodec",
     "PayloadConverter",
     "SerializationContext",
