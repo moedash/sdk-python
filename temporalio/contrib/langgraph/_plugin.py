@@ -104,11 +104,13 @@ class LangGraphPlugin(SimplePlugin):
             inherited default of either form.
         streaming_topic: When set, ``langgraph.config.get_stream_writer()``
             inside a node publishes to this topic on the workflow's
-            :class:`WorkflowStream`. The workflow must construct
-            ``WorkflowStream()`` in its ``@workflow.init`` (the plugin's
+            :class:`temporalio.contrib.workflow_streams.WorkflowStream`. The
+            workflow must construct ``WorkflowStream()`` in its
+            ``@workflow.init`` (the plugin's
             interceptor verifies this on workflow start). Nodes with
             ``execute_in='activity'`` publish through
-            :class:`WorkflowStreamClient` (signal); nodes with
+            :class:`temporalio.contrib.workflow_streams.WorkflowStreamClient`
+            (signal); nodes with
             ``execute_in='workflow'`` publish synchronously to the
             in-workflow stream (no signal).
         streaming_batch_interval: How often the activity-side stream
