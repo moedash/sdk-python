@@ -276,7 +276,7 @@ class WorkflowStreamRuntime:
         #: the Worker that built this runtime, so `codec_for` hands Workflow
         #: code a converter carrying the same context every other payload in the
         #: activation was converted with. Bound out there rather than in here
-        #: because `with_context` runs user code, and this object lives on the
+        #: because ``with_context`` runs user code, and this object lives on the
         #: far side of the sandbox boundary.
         self._data_converter = data_converter
         self._default_idle_timeout = default_idle_timeout
@@ -332,7 +332,7 @@ class WorkflowStreamRuntime:
         self._unobserved_segments = 0
         self._segment_pending = True
         self._observed_this_activation = False
-        #: `wait_id -> Future`, awaited by Workflow code and resolved by the
+        #: ``wait_id -> Future``, awaited by Workflow code and resolved by the
         #: readiness activation. It lives here rather than on either side alone
         #: because the two halves are in different modules and a second map
         #: would mean the side that resolves is never the side that registered.
@@ -343,7 +343,7 @@ class WorkflowStreamRuntime:
         #: only for the length of one replay job, which is what makes a
         #: registration made during it checkable against what was recorded.
         self._replay_bindings: dict[int, StreamBinding] | None = None
-        #: `wait_id -> the converter a *recorded* wait's records convert with`.
+        #: ``wait_id -> the converter a *recorded* wait's records convert with``.
         #: Installed by the Worker before a replay job reaches this thread; see
         #: :meth:`install_replay_converters` for why it exists and why it is not
         #: torn down when the replay ends.
@@ -411,7 +411,7 @@ class WorkflowStreamRuntime:
         drain a full batch, consume one record and block elsewhere on every
         activation in turn, so n subscriptions arrive at an activation holding
         roughly n times the cap between them and hand all of it over in one
-        `activate()` call. Starting the count at the carry-over makes what an
+        ``activate()`` call. Starting the count at the carry-over makes what an
         activation may hand over -- carried-over plus newly delivered -- exactly
         the cap, whatever the schedule.
         """
@@ -1312,7 +1312,7 @@ class WorkflowStreamRuntime:
         Only the **stream name** is compared, not the whole key. The other three
         components -- namespace, Workflow id, first execution Run id -- are the
         Run's identity rather than anything the code chose, and a replay harness
-        legitimately supplies its own: `Replayer` runs under `ReplayNamespace`,
+        legitimately supplies its own: `Replayer` runs under ``ReplayNamespace``,
         so comparing the full key would report every replayed history as
         nondeterministic. The key is still *recorded* whole, because replay has
         to read the ranges it names.

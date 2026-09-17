@@ -73,7 +73,7 @@ and diverge from the live run.
 """
 
 #: Where per-Run subscription state hangs off the Workflow instance. Reserved,
-#: and deliberately not in the `__temporal_workflow_stream*` namespace the
+#: and deliberately not in the ``__temporal_workflow_stream*`` namespace the
 #: shipped contrib feature already owns.
 _RUN_STATE_ATTR = "__temporal_external_stream_state"
 
@@ -183,7 +183,7 @@ class _RunState:
 
     runtime: ExternalStreamRuntime | None = None
     next_wait_id: int = 1
-    #: `wait_id -> Future`, resolved by the readiness activation handler.
+    #: ``wait_id -> Future``, resolved by the readiness activation handler.
     pending: dict[int, Any] = field(default_factory=dict)
 
 
@@ -539,7 +539,7 @@ class ExternalStreamSubscription(Generic[AnyType]):
     **One consumer.** The cursor, the readiness future, and the blocked flag are
     all the subscription's rather than an iterator's, so two coroutines waiting on
     it at once is refused with
-    :class:`~temporalio.contrib.external_workflow_streams._errors.ConcurrentStreamConsumerError`
+    :class:`temporalio.contrib.external_workflow_streams.ConcurrentStreamConsumerError`
     rather than served -- see :meth:`_refuse_a_second_waiter` for what sharing
     them would do. Two consumers of the same *stream* is a supported shape and
     the way to ask for it is a second ``subscribe()``: delivery is a broadcast

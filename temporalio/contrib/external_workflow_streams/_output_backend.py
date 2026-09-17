@@ -286,7 +286,7 @@ class OutputStreamBackend(abc.ABC):
         input record's ``(session_id, sequence)`` and byte identity exactly as
         :meth:`StreamBackend.append`: an identical retry returns the original
         output record and offset; different bytes under the same key raise
-        :class:`~temporalio.contrib.external_workflow_streams._backend.AppendConflictError`.
+        :class:`temporalio.contrib.external_workflow_streams.AppendConflictError`.
         It may not pass an already-positioned pending stage in client reads.
         """
 
