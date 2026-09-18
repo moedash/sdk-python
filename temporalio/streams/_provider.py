@@ -48,8 +48,15 @@ class Producer(Protocol):
         """The generation this producer is writing."""
         ...
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append values and return where the first one landed."""
+    async def append(self, *values: Any) -> Cursor | None:
+        """Append values and return the cursor of the last one written.
+
+        The last rather than the first, so ``read(after=appended)`` yields
+        only what came later. ``None`` when nothing was written, because the
+        batch was empty or a repeat the provider dropped, and on a transport
+        that learns positions only at read time; a caller that needs to
+        position itself on such a transport asks :meth:`Consumer.latest`.
+        """
         ...
 
     async def finish(self) -> None:

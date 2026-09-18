@@ -98,17 +98,18 @@ async def test_retried_append_is_deduplicated():
     )
     await first.append({"id": "r1"})
     # The retry of the same attempt starts its sequence over and appends the
-    # same record. The provider must not store it twice.
+    # same record. The provider must not store it twice, and says so by
+    # returning no position for what it dropped.
     retry = await streams.producer(
         None, workflow_id="wf", stream="inputs", producer_id="model", attempt=1
     )
-    await retry.append({"id": "r1"})
+    assert await retry.append({"id": "r1"}) is None
 
     consumer = await streams.consumer(None, workflow_id="wf", stream="inputs")
     records = await take(consumer.read(type=dict), 1)
     assert records[0].value == {"id": "r1"}
-    with pytest.raises(asyncio.TimeoutError):
-        await take(consumer.read(type=dict), 2, timeout=0.2)
+    # The store holds exactly the one record: the newest position is its cursor.
+    assert await consumer.latest() == records[0].cursor
 
 
 async def test_new_attempt_supersedes_the_old_one():
@@ -159,6 +160,22 @@ async def test_cursor_resumes_where_it_points():
     resumed = await streams.consumer(None, workflow_id="wf", stream="inputs")
     again = await take(resumed.read(type=dict, after=checkpoint), 2)
     assert [r.value for r in again] == [{"n": 2}, {"n": 3}]
+
+
+async def test_append_cursor_names_the_last_record_of_the_batch():
+    producer = await streams.producer(
+        None, workflow_id="wf", stream="inputs", producer_id="model", attempt=1
+    )
+    appended = await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+    assert appended is not None
+    await producer.append({"n": 4})
+
+    # A producer that resumes a reader after its own append must see only
+    # what came later, not the tail of the batch it just wrote.
+    consumer = await streams.consumer(None, workflow_id="wf", stream="inputs")
+    records = await take(consumer.read(type=dict, after=appended), 1)
+    assert [r.value for r in records] == [{"n": 4}]
+    assert await producer.append() is None
 
 
 async def test_latest_positions_a_reader_at_the_end():
