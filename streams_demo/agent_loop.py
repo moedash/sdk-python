@@ -59,7 +59,7 @@ class AgentLoop:
         accepted = 0
         try:
             async for record in inputs:
-                if record.kind is streams.RecordKind.SUPERSEDED:
+                if isinstance(record.value, streams.Supersession):
                     # A newer attempt of the same producer started writing. The
                     # decisions already published stand, so the workflow says so
                     # rather than pretending they can be withdrawn.
@@ -82,6 +82,7 @@ class AgentLoop:
                     # still writing.
                     trace.append({"kind": "finish", "producer": record.producer})
                     break
+                assert isinstance(record.value, dict)
                 decision = decide(record.value)
                 await decisions.publish(decision)
                 receipt = await workflow.execute_activity(

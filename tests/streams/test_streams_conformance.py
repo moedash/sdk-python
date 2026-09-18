@@ -68,6 +68,7 @@ def test_supersession_is_synthesized_from_observations():
     superseded = attempts.note("model", 2, Cursor("1"))
     assert superseded is not None
     assert superseded.kind is RecordKind.SUPERSEDED
+    assert isinstance(superseded.value, streams.Supersession)
     assert superseded.value.previous_attempt == 1
     # The same attempt again is not a new generation.
     assert attempts.note("model", 2, Cursor("2")) is None
@@ -126,6 +127,7 @@ async def test_new_attempt_supersedes_the_old_one():
     records = await take(consumer.read(type=dict), 3)
     assert records[0].kind is RecordKind.DATA and records[0].attempt == 1
     assert records[1].kind is RecordKind.SUPERSEDED
+    assert isinstance(records[1].value, streams.Supersession)
     assert records[1].value.previous_attempt == 1
     assert records[2].kind is RecordKind.DATA and records[2].attempt == 2
 

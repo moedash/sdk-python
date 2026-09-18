@@ -10,9 +10,9 @@ exactly one provider is registered.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, TypeVar, overload
 
 from temporalio import activity
 from temporalio.streams._handles import ReadSource, WriteSink
@@ -35,6 +35,8 @@ __all__ = [
     "registered",
     "worker_options",
 ]
+
+T = TypeVar("T")
 
 
 class Producer(Protocol):
@@ -69,19 +71,41 @@ class Producer(Protocol):
 class Consumer(Protocol):
     """Reads a stream from outside workflow code, resumably."""
 
+    @overload
+    def read(
+        self,
+        *,
+        after: Cursor = ...,
+        topic: str | None = ...,
+        type: type[T],
+    ) -> AsyncGenerator[StreamRecord[T], None]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        after: Cursor = ...,
+        topic: str | None = ...,
+        type: None = None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]: ...
+
     def read(
         self,
         *,
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield the records after ``after`` as they arrive.
 
         ``BEGINNING`` yields everything the stream retains. Any other cursor
         came from a record this or another reader saw, and reading resumes
         just past it, so a reader that stores the last cursor it handled and
-        hands it back sees every record exactly once.
+        hands it back sees every record exactly once. ``topic`` filters the
+        stream the workflow publishes; an inbound stream has no topics, and
+        naming one there raises ``ValueError``. The result is a generator so
+        a caller that stops early can ``aclose()`` it and release whatever
+        the provider parked against the store.
         """
         ...
 
