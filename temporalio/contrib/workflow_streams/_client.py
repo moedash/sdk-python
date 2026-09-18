@@ -325,6 +325,20 @@ class WorkflowStreamClient:
         self._topic_types[name] = bound
         return TopicHandle(self, name, bound)
 
+    @property
+    def handle(self) -> WorkflowHandle[Any, Any]:
+        """The workflow handle this client publishes to and polls.
+
+        Re-targeted when :py:meth:`subscribe` follows a continue-as-new, so
+        read it when needed rather than caching it.
+        """
+        return self._handle
+
+    @property
+    def payload_converter(self) -> PayloadConverter:
+        """The sync payload converter used for per-item encode and decode."""
+        return self._payload_converter()
+
     async def flush(self) -> None:
         """Flush buffered (and pending) items and wait for server confirmation.
 
