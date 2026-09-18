@@ -13,7 +13,13 @@ _KNOWN = ("memory", "workflow_streams", "native", "redis", "nexus")
 for _name in _KNOWN:
     try:
         __import__(f"{__name__}.{_name}")
-    except ImportError:
-        # This tree does not carry that provider. The registry error message
-        # lists what is actually available.
-        pass
+    except ModuleNotFoundError as error:
+        # Two things may be missing: the provider module itself, or a
+        # dependency from outside this package. A name missing inside
+        # temporalio is a broken provider, and hiding that would turn its
+        # traceback into "no such provider".
+        missing = error.name or ""
+        if missing != f"{__name__}.{_name}" and (
+            not missing or missing.startswith("temporalio")
+        ):
+            raise
