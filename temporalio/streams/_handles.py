@@ -8,7 +8,7 @@ supersession; a binding only moves bytes.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic, Protocol, TypeVar, cast
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
@@ -161,7 +161,7 @@ class StreamReader(Generic[T]):
     async def _iterate(self) -> AsyncIterator[StreamRecord[T]]:
         while not self._closed:
             try:
-                record = await self.next()
+                record = await self._next()
             except StopAsyncIteration:
                 # The provider ended the subscription. Iteration stops rather
                 # than raising, so a workflow that reads to the end of a
@@ -173,14 +173,9 @@ class StreamReader(Generic[T]):
         """Iterate the data values, dropping control records."""
         async for record in self:
             if record.kind is RecordKind.DATA:
-                yield record.value
+                yield cast("T", record.value)
 
-    async def next(self) -> StreamRecord[T]:
-        """The next record, waiting for one if there is none buffered.
-
-        Raises:
-            StopAsyncIteration: The provider ended the subscription.
-        """
+    async def _next(self) -> StreamRecord[T]:
         while not self._pending:
             await self._fill()
         return self._pending.pop(0)

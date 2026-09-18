@@ -17,7 +17,8 @@ faithful, which is what the conformance tests lean on.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
@@ -240,7 +241,7 @@ class MemoryConsumer:
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records after ``after``, waiting for ones not written yet."""
         attempts = AttemptTracker()
         offset = int(after.token) + 1 if after.token else 0

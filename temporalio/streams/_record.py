@@ -76,9 +76,14 @@ class Supersession:
 
 @dataclass(frozen=True)
 class StreamRecord(Generic[T]):
-    """One record as workflow code sees it."""
+    """One record as workflow code sees it.
 
-    value: T
+    ``value`` follows ``kind``: a data record carries a ``T``, a supersession
+    carries the :class:`Supersession` it reports, and a finish marker carries
+    ``None``. Check ``kind`` before reading it.
+    """
+
+    value: T | Supersession | None
     cursor: Cursor
     kind: RecordKind = RecordKind.DATA
     topic: str = ""

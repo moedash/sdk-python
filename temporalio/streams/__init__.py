@@ -54,7 +54,7 @@ by name and chosen by :func:`configure`. Everything else is shared.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 from temporalio.streams._handles import (
     ReadSource,
@@ -113,6 +113,26 @@ __all__ = [
 T = TypeVar("T")
 
 
+@overload
+def reader(
+    stream: str,
+    *,
+    type: type[T],
+    after: Cursor = ...,
+    idle_timeout: timedelta | None = ...,
+) -> StreamReader[T]: ...
+
+
+@overload
+def reader(
+    stream: str,
+    *,
+    type: None = None,
+    after: Cursor = ...,
+    idle_timeout: timedelta | None = ...,
+) -> StreamReader[Any]: ...
+
+
 def reader(
     stream: str,
     *,
@@ -145,21 +165,16 @@ def reader(
     )
 
 
-def writer(topic: str, *, type: type | None = None) -> StreamWriter[Any]:
+def writer(topic: str) -> StreamWriter[Any]:
     """Publish to ``topic`` on the stream this workflow owns.
 
     Args:
-        topic: The topic name.
-        type: Declared for symmetry with :func:`reader` and for documentation.
-            Encoding follows the value.
+        topic: The topic name. Encoding follows each published value.
     """
-    del type
     return StreamWriter(open_write(topic), topic)
 
 
 # Importing the package registers every provider whose dependencies are
 # present in this tree. Import order matters: the registry above must exist
 # before a provider module can register with it.
-from temporalio.streams import (
-    providers as _providers,  # noqa: E402,F401  # pyright: ignore[reportUnusedImport]
-)
+from temporalio.streams import providers as providers  # noqa: E402
