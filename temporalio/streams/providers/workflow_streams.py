@@ -36,6 +36,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.common import RawValue
 from temporalio.contrib.workflow_streams import (
+    PUBLISH_SIGNAL_NAME,
     PublishEntry,
     PublishInput,
     WorkflowStream,
@@ -48,77 +49,63 @@ from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
-_RUN_ATTR = "__temporal_streams_ws_runtime"
 _TAIL_QUERY = "__temporal_streams_tail"
 _IN = "in:"
 _OUT = "out:"
 
 
 class _Runtime:
-    """Per-run holder for the shipped stream object.
+    """A view over the shipped stream object of the running workflow instance.
 
     A separate class because ``WorkflowStream`` insists on being constructed
-    from a method named ``__init__``, and the provider builds it lazily on
-    the first read or write of a run.
+    from a method named ``__init__``.
     """
 
-    def __init__(self) -> None:
-        self.stream = WorkflowStream()
-        # The poll Update stops answering once the workflow is closing, and a
-        # reader between polls at that moment would lose what the final task
-        # published. The log is workflow state, so a Query still serves it
-        # after completion.
-        workflow.set_query_handler(_TAIL_QUERY, self._tail)
+    def __init__(self, stream: WorkflowStream | None = None) -> None:
+        self.stream = WorkflowStream() if stream is None else stream
+        if workflow.get_query_handler(_TAIL_QUERY) is None:
+            # The poll Update stops answering once the workflow is closing,
+            # and a reader between polls at that moment would lose what the
+            # final task published. The log is workflow state, so a Query
+            # still serves it after completion.
+            workflow.set_query_handler(_TAIL_QUERY, self._tail)
 
     def _tail(self, from_offset: int) -> list[dict[str, Any]]:
-        base = self.stream._base_offset
         return [
             {
-                "offset": base + index,
-                "topic": item.topic,
-                "data": base64.b64encode(item.data.data).decode("ascii"),
+                "offset": offset,
+                "topic": topic,
+                "data": base64.b64encode(payload.data).decode("ascii"),
             }
-            for index, item in enumerate(self.stream._log)
-            if base + index >= from_offset
+            for offset, topic, payload in self.stream.items_from(from_offset)
         ]
 
 
-# Held per run rather than on the workflow instance, because the provider is
-# asked to install its handlers from the workflow's constructor, and the
-# instance is not registered with the runtime yet at that point.
-_runtimes: dict[str, _Runtime] = {}
+def _registered_stream() -> WorkflowStream | None:
+    handler = workflow.get_signal_handler(PUBLISH_SIGNAL_NAME)
+    if handler is None:
+        return None
+    stream = getattr(handler, "__self__", None)
+    if not isinstance(stream, WorkflowStream):
+        raise RuntimeError(
+            f"the {PUBLISH_SIGNAL_NAME!r} signal on this workflow is handled by "
+            "something other than a WorkflowStream, so the workflow_streams "
+            "provider cannot share its log"
+        )
+    return stream
 
 
 def _runtime() -> _Runtime:
-    key = workflow.info().run_id
-    runtime = _runtimes.get(key)
-    if runtime is None:
-        runtime = _Runtime()
-        _runtimes[key] = runtime
-    return runtime
-
-
-def drain() -> None:
-    """Release parked pollers so the workflow can return.
-
-    An Option 0 stream dies with its workflow, and a parked long-poll Update
-    would otherwise hold completion open. Call it right before the workflow
-    returns, the same obligation the shipped feature's ``detach_pollers``
-    documents. A storage provider has no such step, which is one of the
-    differences the comparison table charges this transport with.
-    """
-    runtime = _runtimes.pop(workflow.info().run_id, None)
-    if runtime is not None:
-        runtime.stream.detach_pollers()
+    # Found on the instance rather than in a process-level map keyed by run
+    # id: the SDK rebuilds an evicted workflow from history as a new object,
+    # and a map would hand that object the stale log with its unregistered
+    # handlers and the records of a task that failed.
+    stream = _registered_stream()
+    return _Runtime() if stream is None else _Runtime(stream)
 
 
 class _WSReadSource:
-    """Reads the signal-fed log the shipped feature keeps in workflow state.
-
-    Reaches into the stream's private log rather than ``get_state()``,
-    because the snapshot copies the whole log per call and drops offsets,
-    and this runs inside ``workflow.wait_condition``.
-    """
+    """Reads the signal-fed log the shipped feature keeps in workflow state."""
 
     def __init__(self, stream: WorkflowStream, shipped_topic: str, start: int) -> None:
         self._stream = stream
@@ -126,29 +113,21 @@ class _WSReadSource:
         self._cursor = start
         self._closed = False
 
-    def _end(self) -> int:
-        return self._stream._base_offset + len(self._stream._log)
-
     async def next_batch(self) -> list[tuple[Cursor, bytes]]:
         while True:
             if self._closed:
                 raise StopAsyncIteration
-            base = self._stream._base_offset
-            if self._cursor < base:
-                # Truncated below the cursor; resume at what remains.
-                self._cursor = base
             await workflow.wait_condition(
-                lambda: self._closed or self._end() > self._cursor
+                lambda: self._closed or self._stream.next_offset > self._cursor
             )
             if self._closed:
                 raise StopAsyncIteration
-            batch: list[tuple[Cursor, bytes]] = []
-            end = self._end()
-            for offset in range(self._cursor, end):
-                item = self._stream._log[offset - self._stream._base_offset]
-                if item.topic == self._shipped_topic:
-                    batch.append((Cursor(str(offset)), item.data.data))
-            self._cursor = end
+            batch = [
+                (Cursor(str(offset)), payload.data)
+                for offset, topic, payload in self._stream.items_from(self._cursor)
+                if topic == self._shipped_topic
+            ]
+            self._cursor = self._stream.next_offset
             if batch:
                 return batch
 
@@ -254,7 +233,7 @@ class WorkflowStreamsProducer:
     async def _send(self, entries: list[PublishEntry]) -> None:
         self._signal_sequence += 1
         await self._handle.signal(
-            _PUBLISH_SIGNAL,
+            PUBLISH_SIGNAL_NAME,
             PublishInput(
                 items=entries,
                 publisher_id=self._provider_id,
@@ -324,7 +303,7 @@ class WorkflowStreamsConsumer:
 
     async def _tail(self, from_offset: int) -> list[dict[str, Any]]:
         try:
-            return await self._client._handle.query(
+            wire = await self._client.handle.query(
                 _TAIL_QUERY, from_offset, result_type=list
             )
         except Exception:
@@ -378,7 +357,7 @@ class WorkflowStreamsConsumer:
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
         payload.ParseFromString(body)
-        converter = self._client._payload_converter()
+        converter = self._client.payload_converter
         if as_type is None:
             return converter.from_payloads([payload])[0]
         return converter.from_payloads([payload], [as_type])[0]
@@ -413,8 +392,16 @@ class _WorkflowStreamsProvider:
         _runtime()
 
     def drain(self) -> None:
-        """Release parked pollers so the workflow can return."""
-        drain()
+        """Release parked pollers so the workflow can return.
+
+        An Option 0 stream dies with its workflow, and a parked long-poll
+        Update would otherwise hold completion open. Call it right before
+        the workflow returns, the same obligation the shipped feature's
+        ``detach_pollers`` documents.
+        """
+        stream = _registered_stream()
+        if stream is not None:
+            stream.detach_pollers()
 
     def open_read(
         self,
