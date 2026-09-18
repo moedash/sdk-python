@@ -334,11 +334,6 @@ class _MemoryProvider:
         producer_id: str = "",
         attempt: int = 0,
     ) -> MemoryProducer:
-        if not producer_id:
-            from temporalio import activity
-
-            producer_id = activity.info().activity_id
-            attempt = attempt or activity.info().attempt
         # With no inbound stream named, the target is the store the workflow's
         # own writer appends to, and the frame carries the topic instead.
         return MemoryProducer(

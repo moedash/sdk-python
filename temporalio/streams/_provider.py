@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any, Callable, Protocol
 
+from temporalio import activity
 from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, StreamRecord
 
@@ -148,7 +149,9 @@ class StreamProvider(Protocol):
         ``stream`` names one of the workflow's inbound streams. With no
         ``stream``, ``topic`` names a topic on the stream the workflow itself
         publishes, which is how an activity puts its live output next to the
-        workflow's own records for the same outside reader.
+        workflow's own records for the same outside reader. ``producer_id``
+        is never empty here: the package resolved it, from the activity
+        context when the caller left it unset.
         """
         ...
 
@@ -312,6 +315,15 @@ async def producer(
             "name exactly one of stream (an inbound stream of the workflow) or "
             "topic (a topic on the stream the workflow publishes)"
         )
+    if not producer_id:
+        if not activity.in_activity():
+            raise ValueError(
+                "producer_id is required outside an activity; inside one it "
+                "defaults to the activity's id and attempt"
+            )
+        info = activity.info()
+        producer_id = info.activity_id
+        attempt = attempt or info.attempt
     return await _current().producer(
         client,
         workflow_id=workflow_id,
