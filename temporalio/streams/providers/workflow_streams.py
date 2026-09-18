@@ -27,7 +27,8 @@ The mapping, in one place:
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
@@ -51,6 +52,8 @@ from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamReco
 _TAIL_QUERY = "__temporal_streams_tail"
 _IN = "in:"
 _OUT = "out:"
+
+logger = logging.getLogger(__name__)
 
 
 class _Runtime:
@@ -280,12 +283,13 @@ class WorkflowStreamsConsumer:
     def __init__(
         self,
         stream_client: WorkflowStreamClient,
-        shipped_topic: str | None,
+        stream: str,
         poll_cooldown: timedelta,
     ) -> None:
         """Read what ``stream_client`` reaches, one long poll at a time."""
         self._client = stream_client
-        self._shipped_topic = shipped_topic
+        self._stream = stream
+        self._shipped_topic = f"{_IN}{stream}" if stream else None
         self._poll_cooldown = poll_cooldown
 
     async def read(
@@ -294,8 +298,9 @@ class WorkflowStreamsConsumer:
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records after ``after``, waiting for ones not written yet."""
+        _provider.check_topic(self._stream, topic)
         attempts = AttemptTracker()
         next_offset = int(after.token) + 1 if after.token else 0
         subscription = self._client.subscribe(
@@ -351,7 +356,9 @@ class WorkflowStreamsConsumer:
         cursor = Cursor(str(offset))
         try:
             kind, frame_topic, source, attempt, sequence, body = _frame.decode(frame)
-        except ValueError:
+        except ValueError as error:
+            # Same answer as the workflow-side reader: skip and say so.
+            logger.warning("skipping stream record at %s: %s", cursor, error)
             return []
         if topic is not None and frame_topic != topic:
             return []
@@ -456,11 +463,6 @@ class _WorkflowStreamsProvider:
         producer_id: str = "",
         attempt: int = 0,
     ) -> WorkflowStreamsProducer:
-        if not producer_id:
-            from temporalio import activity
-
-            producer_id = activity.info().activity_id
-            attempt = attempt or activity.info().attempt
         return WorkflowStreamsProducer(
             client.get_workflow_handle(workflow_id),
             client.data_converter.payload_converter,
@@ -475,7 +477,7 @@ class _WorkflowStreamsProvider:
     ) -> WorkflowStreamsConsumer:
         return WorkflowStreamsConsumer(
             WorkflowStreamClient.create(client, workflow_id),
-            f"{_IN}{stream}" if stream else None,
+            stream,
             self._poll_cooldown,
         )
 
