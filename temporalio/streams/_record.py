@@ -1,6 +1,6 @@
 """The value types the stream contract is expressed in.
 
-Nothing here touches Temporal or a provider, so both bindings share it
+Nothing here touches Temporal or a provider, so every provider shares it
 unchanged.
 """
 
@@ -39,8 +39,9 @@ class RecordKind(enum.IntEnum):
     SUPERSEDED = 3
     """A later attempt of the same producer started writing.
 
-    Synthesized by the reader from what it observed, so both providers deliver
-    it identically and replay reproduces it without the provider's help.
+    Synthesized by the reader from what it observed, so every provider
+    delivers it identically and replay reproduces it without the provider's
+    help.
     """
 
 

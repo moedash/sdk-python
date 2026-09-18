@@ -72,9 +72,9 @@ def _decode_value(body: bytes, as_type: type | None) -> Any:
 class StreamWriter(Generic[T]):
     """Publishes to a topic on the stream this workflow owns.
 
-    A workflow can only publish transactionally to a stream it owns, on both
-    providers. Writing to somebody else's stream is an activity's job, and it
-    gets the weaker guarantee that goes with doing I/O.
+    A workflow can only publish transactionally to a stream it owns, on
+    every provider. Writing to somebody else's stream is an activity's job,
+    and it gets the weaker guarantee that goes with doing I/O.
     """
 
     def __init__(self, sink: WriteSink, topic: str) -> None:
