@@ -210,6 +210,9 @@ async def test_producer_appends_onto_the_owners_topic():
 
     with pytest.raises(ValueError):
         await streams.producer(None, workflow_id="wf", producer_id="model", attempt=1)
+    # Outside an activity there is no identity to fall back on.
+    with pytest.raises(ValueError, match="producer_id is required"):
+        await streams.producer(None, workflow_id="wf", stream="inputs")
 
 
 def test_unknown_provider_is_a_clear_error():
