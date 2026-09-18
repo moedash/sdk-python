@@ -56,9 +56,8 @@ class _MemoryStream:
     ) -> int | None:
         """Store ``frames`` and return the first one's offset, or ``None`` for a repeat."""
         key = (producer_id, sequence)
-        already = self.seen.get(key)
-        if already is not None:
-            return already
+        if key in self.seen:
+            return None
         offset = len(self.frames)
         self.frames.extend(frames)
         self.seen[key] = offset
@@ -177,8 +176,10 @@ class MemoryProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append ``values`` and return the cursor of the last one."""
+    async def append(self, *values: Any) -> Cursor | None:
+        """Append ``values`` and return the last one's cursor, or ``None`` if nothing landed."""
+        if not values:
+            return None
         frames = []
         for value in values:
             frames.append(
@@ -197,7 +198,9 @@ class MemoryProducer:
             producer_id=self._provider_id,
             sequence=self._sequence - len(frames),
         )
-        return Cursor(str(offset))
+        if offset is None:
+            return None
+        return Cursor(str(offset + len(frames) - 1))
 
     async def finish(self) -> None:
         """Mark this producer done, so a reader stops waiting on it."""
