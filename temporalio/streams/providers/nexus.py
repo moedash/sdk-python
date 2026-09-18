@@ -231,7 +231,7 @@ class NexusProducer:
     def __init__(
         self,
         base_url: str,
-        converter: Any,
+        data_converter: temporalio.converter.DataConverter,
         workflow_id: str,
         stream: str,
         topic: str,
@@ -240,7 +240,8 @@ class NexusProducer:
     ) -> None:
         """Bind this producer to one stream or topic on the endpoint."""
         self._base_url = base_url
-        self._converter = converter
+        self._converter = data_converter.payload_converter
+        self._codec = data_converter.payload_codec
         self._workflow_id = workflow_id
         self._stream = stream
         self._topic = topic
@@ -255,15 +256,22 @@ class NexusProducer:
 
     async def append(self, *values: Any) -> Cursor:
         """Append ``values`` through the endpoint."""
-        payloads = []
-        for value in values:
-            payload = (
-                value
-                if isinstance(value, Payload)
-                else self._converter.to_payloads([value])[0]
-            )
-            payloads.append(base64.b64encode(payload.SerializeToString()).decode())
-        return Cursor((await self._call(payloads=payloads)).cursor or "")
+        payloads = [
+            value
+            if isinstance(value, Payload)
+            else self._converter.to_payloads([value])[0]
+            for value in values
+        ]
+        if self._codec is not None:
+            # The endpoint is the edge of this process, so a configured codec
+            # runs here rather than at the handler: whoever hosts the endpoint
+            # never holds the plaintext.
+            payloads = await self._codec.encode(payloads)
+        encoded = [
+            base64.b64encode(payload.SerializeToString()).decode()
+            for payload in payloads
+        ]
+        return Cursor((await self._call(payloads=encoded)).cursor or "")
 
     async def finish(self) -> None:
         """Mark this producer done, so a reader stops waiting on it."""
@@ -293,11 +301,16 @@ class NexusConsumer:
     """Reads batches from the stream endpoint, re-synthesizing supersession."""
 
     def __init__(
-        self, base_url: str, converter: Any, workflow_id: str, stream: str
+        self,
+        base_url: str,
+        data_converter: temporalio.converter.DataConverter,
+        workflow_id: str,
+        stream: str,
     ) -> None:
         """Read what ``workflow_id`` publishes, through the endpoint."""
         self._base_url = base_url
-        self._converter = converter
+        self._converter = data_converter.payload_converter
+        self._codec = data_converter.payload_codec
         self._workflow_id = workflow_id
         self._stream = stream
 
@@ -335,8 +348,11 @@ class NexusConsumer:
                 superseded = attempts.note(source, attempt, cursor)
                 if superseded is not None:
                     yield superseded
+                value = (
+                    await self._decode(body, type) if kind is RecordKind.DATA else None
+                )
                 yield StreamRecord(
-                    value=self._decode(body, type) if kind is RecordKind.DATA else None,
+                    value=value,
                     cursor=cursor,
                     kind=kind,
                     topic=frame_topic,
@@ -361,9 +377,11 @@ class NexusConsumer:
         token = answer.next_token or ""
         return Cursor(token) if token else BEGINNING
 
-    def _decode(self, body: bytes, as_type: type | None) -> Any:
+    async def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
         payload.ParseFromString(body)
+        if self._codec is not None:
+            payload = (await self._codec.decode([payload]))[0]
         if as_type is None:
             return self._converter.from_payloads([payload])[0]
         return self._converter.from_payloads([payload], [as_type])[0]
@@ -374,19 +392,22 @@ class _NexusProvider:
 
     def __init__(self) -> None:
         self._base_url: str | None = None
+        self._data_converter: temporalio.converter.DataConverter | None = None
 
     def configure(self, **options: Any) -> None:
         endpoint = options.pop("endpoint", None)
         http_address = options.pop("http_address", "http://127.0.0.1:7243")
         service = options.pop("service", _SERVICE_NAME)
+        data_converter = options.pop("data_converter", None)
         if options:
             raise TypeError(
-                "the nexus provider takes endpoint, http_address and service, "
-                f"got {sorted(options)}"
+                "the nexus provider takes endpoint, http_address, service and "
+                f"data_converter, got {sorted(options)}"
             )
         if not endpoint:
             raise TypeError("the nexus provider needs endpoint=<nexus endpoint name>")
         self._base_url = f"{http_address}/nexus/endpoints/{endpoint}/services/{service}"
+        self._data_converter = data_converter
 
     def worker_options(self) -> dict[str, Any]:
         raise RuntimeError(_WORKFLOW_SIDE_ERROR)
@@ -427,7 +448,7 @@ class _NexusProvider:
             attempt = attempt or activity.info().attempt
         return NexusProducer(
             self._url(),
-            _converter(client),
+            self._converter(client),
             workflow_id,
             stream,
             topic,
@@ -438,13 +459,14 @@ class _NexusProvider:
     async def consumer(
         self, client: Any, *, workflow_id: str, stream: str = ""
     ) -> NexusConsumer:
-        return NexusConsumer(self._url(), _converter(client), workflow_id, stream)
+        return NexusConsumer(self._url(), self._converter(client), workflow_id, stream)
 
-
-def _converter(client: Any) -> Any:
-    if client is None:
-        return temporalio.converter.DataConverter.default.payload_converter
-    return client.data_converter.payload_converter
+    def _converter(self, client: Any) -> temporalio.converter.DataConverter:
+        if self._data_converter is not None:
+            return self._data_converter
+        if client is None:
+            return temporalio.converter.DataConverter.default
+        return client.data_converter
 
 
 _provider.register("nexus", _NexusProvider)
