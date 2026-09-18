@@ -13,7 +13,10 @@ See :py:class:`WorkflowStream` for the workflow-side stream object and
 """
 
 from temporalio.contrib.workflow_streams._client import WorkflowStreamClient
-from temporalio.contrib.workflow_streams._stream import WorkflowStream
+from temporalio.contrib.workflow_streams._stream import (
+    PUBLISH_SIGNAL_NAME,
+    WorkflowStream,
+)
 from temporalio.contrib.workflow_streams._topic_handle import (
     TopicHandle,
     WorkflowTopicHandle,
@@ -29,6 +32,7 @@ from temporalio.contrib.workflow_streams._types import (
 )
 
 __all__ = [
+    "PUBLISH_SIGNAL_NAME",
     "PollInput",
     "PollResult",
     "PublishEntry",
