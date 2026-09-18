@@ -230,10 +230,11 @@ class MemoryProducer:
 class MemoryConsumer:
     """The outside reader, with the shared supersession rule."""
 
-    def __init__(self, store: _MemoryStream, converter: Any) -> None:
+    def __init__(self, store: _MemoryStream, converter: Any, stream: str) -> None:
         """Read whatever ``store`` holds, now and as it grows."""
         self._store = store
         self._converter = converter
+        self._stream = stream
 
     async def read(
         self,
@@ -243,6 +244,7 @@ class MemoryConsumer:
         type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records after ``after``, waiting for ones not written yet."""
+        _provider.check_topic(self._stream, topic)
         attempts = AttemptTracker()
         offset = int(after.token) + 1 if after.token else 0
         while True:
@@ -256,7 +258,9 @@ class MemoryConsumer:
                     kind, frame_topic, source, attempt, sequence, body = _frame.decode(
                         frame
                     )
-                except ValueError:
+                except ValueError as error:
+                    # Same answer as the workflow-side reader: skip and say so.
+                    logger.warning("skipping stream record at %s: %s", cursor, error)
                     continue
                 if topic is not None and frame_topic != topic:
                     continue
@@ -336,11 +340,12 @@ class _MemoryProvider:
         attempt: int = 0,
     ) -> MemoryProducer:
         # With no inbound stream named, the target is the store the workflow's
-        # own writer appends to, and the frame carries the topic instead.
+        # own writer appends to, and the frame carries the topic. An inbound
+        # record carries none: the stream's name is its whole address.
         return MemoryProducer(
             _stream(_inbound_id(workflow_id, stream)),
             _converter(client),
-            stream or topic,
+            topic,
             producer_id,
             attempt,
         )
@@ -349,7 +354,7 @@ class _MemoryProvider:
         self, client: Any, *, workflow_id: str, stream: str = ""
     ) -> MemoryConsumer:
         return MemoryConsumer(
-            _stream(_inbound_id(workflow_id, stream)), _converter(client)
+            _stream(_inbound_id(workflow_id, stream)), _converter(client), stream
         )
 
 

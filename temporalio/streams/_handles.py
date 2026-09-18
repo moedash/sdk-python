@@ -1,8 +1,8 @@
 """The handles workflow code holds.
 
 Everything provider-specific sits behind the two protocols at the top. A
-handle converts values, frames records, filters topics and synthesizes
-supersession; a binding only moves bytes.
+handle converts values, frames records and synthesizes supersession; a
+provider only moves bytes.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ class StreamWriter(Generic[T]):
 
 
 class StreamReader(Generic[T]):
-    """Reads a stream from inside workflow code.
+    """Reads an inbound stream from inside workflow code.
 
     Iterating yields every kind of record, including the supersession the
     reader synthesizes when a producer's newer attempt appears. Check
@@ -139,16 +139,9 @@ class StreamReader(Generic[T]):
     wants data.
     """
 
-    def __init__(
-        self,
-        source: ReadSource,
-        *,
-        topic: str | None = None,
-        type: type | None = None,
-    ) -> None:
+    def __init__(self, source: ReadSource, *, type: type | None = None) -> None:
         """Prefer :func:`temporalio.streams.reader`."""
         self._source = source
-        self._topic = topic
         self._type = type
         self._pending: list[StreamRecord[Any]] = []
         self._attempts = AttemptTracker()
@@ -182,8 +175,16 @@ class StreamReader(Generic[T]):
 
     async def _fill(self) -> None:
         for cursor, frame in await self._source.next_batch():
-            kind, topic, producer, attempt, sequence, body = _frame.decode(frame)
-            if self._topic is not None and topic != self._topic:
+            try:
+                kind, topic, producer, attempt, sequence, body = _frame.decode(frame)
+            except ValueError as error:
+                # Skipped rather than raised: a poisoned record would
+                # otherwise fail this task on every retry and pin the
+                # workflow, while an outside reader of the same stream
+                # skips it. The two readers agree on the answer.
+                workflow.logger.warning(
+                    "skipping stream record at %s: %s", cursor, error
+                )
                 continue
             superseded = self._attempts.note(producer, attempt, cursor)
             if superseded is not None:

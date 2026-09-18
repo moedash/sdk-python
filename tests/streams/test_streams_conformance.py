@@ -91,6 +91,8 @@ async def test_append_read_roundtrip():
     assert [r.value for r in records[:2]] == [{"id": "r1"}, {"id": "r2"}]
     assert all(r.producer == "model" and r.attempt == 1 for r in records)
     assert [r.sequence for r in records] == [0, 1, 2]
+    # An inbound stream has no topics; its name is the whole address.
+    assert all(r.topic == "" for r in records)
 
 
 async def test_retried_append_is_deduplicated():
@@ -132,19 +134,31 @@ async def test_new_attempt_supersedes_the_old_one():
     assert records[2].kind is RecordKind.DATA and records[2].attempt == 2
 
 
-async def test_topic_filter():
-    producer = await streams.producer(
-        None, workflow_id="wf", stream="inputs", producer_id="model", attempt=1
+async def test_topic_filter_on_the_owners_stream():
+    # Two producers on two topics of the stream the workflow publishes. The
+    # filter is only meaningful on a store that mixes topics, which is this
+    # one; an inbound stream carries none.
+    on_a = await streams.producer(
+        None, workflow_id="wf", topic="a", producer_id="tool-a", attempt=1
     )
-    await producer.append({"n": 1})
-    other = await streams.producer(
-        None, workflow_id="wf", stream="other", producer_id="model", attempt=1
+    await on_a.append({"n": 1})
+    on_b = await streams.producer(
+        None, workflow_id="wf", topic="b", producer_id="tool-b", attempt=1
     )
-    await other.append({"n": 2})
+    await on_b.append({"n": 2})
 
+    consumer = await streams.consumer(None, workflow_id="wf")
+    only_a = await take(consumer.read(type=dict, topic="a"), 1)
+    assert [r.value for r in only_a] == [{"n": 1}]
+
+    both = await take(consumer.read(type=dict), 2)
+    assert [(r.topic, r.value) for r in both] == [("a", {"n": 1}), ("b", {"n": 2})]
+
+
+async def test_inbound_streams_have_no_topics():
     consumer = await streams.consumer(None, workflow_id="wf", stream="inputs")
-    records = await take(consumer.read(type=dict, topic="inputs"), 1)
-    assert records[0].value == {"n": 1}
+    with pytest.raises(ValueError, match="inbound stream 'inputs' has no topics"):
+        await take(consumer.read(type=dict, topic="inputs"), 1)
 
 
 async def test_cursor_resumes_where_it_points():
