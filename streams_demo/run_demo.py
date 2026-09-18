@@ -1,6 +1,6 @@
 """Run the shared agent loop against whichever provider is configured.
 
-Three cases, the same on both providers:
+Three cases, the same on every provider:
 
 - read, decide, publish and an ordinary Activity in the same workflow task,
   with the smallest workflow cache the provider supports, so that as much of
@@ -9,7 +9,7 @@ Three cases, the same on both providers:
   to report and the workflow has to act on;
 - an outside consumer reading what the workflow published.
 
-Byte-identical in both trees. ``provider_setup`` is what differs, and it is
+Byte-identical in every tree. ``provider_setup`` is what differs, and it is
 the only import here that names a provider.
 """
 

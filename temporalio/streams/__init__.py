@@ -38,17 +38,17 @@ process default, such as a handler that serves one store while its process
 talks to another, holds one from :func:`instance`.
 
 Reading somebody else's stream is out of scope for the first release. It is
-the topology neither prototype has evidence for, and leaving it out is what
-lets both of them implement the rest.
+the topology no provider has evidence for, and leaving it out is what lets
+every provider implement the rest.
 
 What the contract does not promise: that a :attr:`RecordKind.FINISH` record
 means the writing activity succeeded, that a superseded attempt's records can
 be withdrawn, or that a stream outlives the retention its provider is
 configured for.
 
-Prototype support for AI-198. The public names are the proposal; providers
-live under :mod:`temporalio.streams.providers`, one module each, registered
-by name and chosen by :func:`configure`. Everything else is shared.
+The public names are the proposal; providers live under
+:mod:`temporalio.streams.providers`, one module each, registered by name and
+chosen by :func:`configure`. Everything else is shared.
 """
 
 from __future__ import annotations
