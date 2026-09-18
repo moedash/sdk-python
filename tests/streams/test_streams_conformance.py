@@ -1,10 +1,11 @@
-"""Conformance tests for the stream contract.
+"""Conformance tests for the stream contract's outside surface.
 
 Written against the public surface plus the in-memory reference provider, so
 they run with no server and no store. A storage provider reuses the same
 expectations through its own fixtures; what this file pins down is the
 contract: framing, producer identity, retry deduplication, supersession,
-topic filtering, and cursor resumption.
+topic filtering, and cursor resumption. The workflow-side handles and the
+two rules about workflow tasks live in ``test_streams_workflow``.
 """
 
 from __future__ import annotations
