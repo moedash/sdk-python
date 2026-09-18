@@ -42,8 +42,7 @@ from temporalio.contrib.workflow_streams import (
     WorkflowStream,
     WorkflowStreamClient,
 )
-from temporalio.contrib.workflow_streams._stream import _PUBLISH_SIGNAL
-from temporalio.contrib.workflow_streams._types import _encode_payload
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._policy import AttemptTracker
@@ -147,6 +146,11 @@ class _WSWriteSink:
         self._handle.publish(payload)
 
 
+def _entry_data(payload: Payload) -> str:
+    # The documented wire form of PublishEntry.data.
+    return base64.b64encode(payload.SerializeToString()).decode("ascii")
+
+
 class WorkflowStreamsProducer:
     """Appends by sending the shipped publish Signal directly.
 
@@ -154,6 +158,12 @@ class WorkflowStreamsProducer:
     owns the publisher identity: it must be ``producer#attempt`` for the
     shipped dedupe to drop a retry and pass a new generation, and the client
     would use its own random id.
+
+    Sequences are committed only after the server accepted the Signal. A
+    batch whose Signal raised stays pending and goes out again under the
+    same signal sequence, either when the caller retries the same values or
+    ahead of whatever the caller sends next, so an ambiguous failure writes
+    the batch once and loses nothing.
     """
 
     def __init__(
@@ -174,10 +184,7 @@ class WorkflowStreamsProducer:
         self._attempt = attempt
         self._sequence = 0
         self._signal_sequence = 0
-
-    @property
-    def _frame_topic(self) -> str:
-        return self._stream or self._topic
+        self._pending: tuple[list[PublishEntry], int] | None = None
 
     @property
     def _shipped_topic(self) -> str:
@@ -196,50 +203,67 @@ class WorkflowStreamsProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append ``values`` through the shipped publish Signal."""
-        entries = []
-        for value in values:
-            frame = _frame.encode(
-                topic=self._frame_topic,
-                kind=RecordKind.DATA,
-                producer=self._producer_id,
-                attempt=self._attempt,
-                sequence=self._sequence,
-                body=self._encode(value),
-            )
-            self._sequence += 1
-            entries.append(self._entry(frame))
-        await self._send(entries)
-        return Cursor("")
+    async def append(self, *values: Any) -> None:
+        """Append ``values`` through the shipped publish Signal.
+
+        Always ``None``: this transport learns positions at read time.
+        """
+        if not values:
+            return None
+        await self._send([(RecordKind.DATA, self._encode(value)) for value in values])
+        return None
 
     async def finish(self) -> None:
         """Mark this producer done, so a reader stops waiting on it."""
-        frame = _frame.encode(
-            topic=self._frame_topic,
-            kind=RecordKind.FINISH,
-            producer=self._producer_id,
-            attempt=self._attempt,
-            sequence=self._sequence,
-            body=b"",
-        )
-        self._sequence += 1
-        await self._send([self._entry(frame)])
+        await self._send([(RecordKind.FINISH, b"")])
 
-    def _entry(self, frame: bytes) -> PublishEntry:
-        payload = Payload(data=frame)
-        return PublishEntry(topic=self._shipped_topic, data=_encode_payload(payload))
+    def _frames(
+        self, bodies: list[tuple[RecordKind, bytes]]
+    ) -> tuple[list[PublishEntry], int]:
+        sequence = self._sequence
+        entries = []
+        for kind, body in bodies:
+            frame = _frame.encode(
+                topic=self._topic,
+                kind=kind,
+                producer=self._producer_id,
+                attempt=self._attempt,
+                sequence=sequence,
+                body=body,
+            )
+            sequence += 1
+            entries.append(
+                PublishEntry(
+                    topic=self._shipped_topic, data=_entry_data(Payload(data=frame))
+                )
+            )
+        return entries, sequence
 
-    async def _send(self, entries: list[PublishEntry]) -> None:
-        self._signal_sequence += 1
+    async def _send(self, bodies: list[tuple[RecordKind, bytes]]) -> None:
+        entries, next_sequence = self._frames(bodies)
+        if self._pending is not None and self._pending[0] != entries:
+            # The caller moved on from a batch whose Signal raised. It goes
+            # first, under the signal sequence it already had, so a copy the
+            # server did accept is dropped and one it never saw lands. The
+            # new batch is then renumbered behind it.
+            await self._signal(*self._pending)
+            entries, next_sequence = self._frames(bodies)
+        await self._signal(entries, next_sequence)
+
+    async def _signal(self, entries: list[PublishEntry], next_sequence: int) -> None:
+        signal_sequence = self._signal_sequence + 1
+        self._pending = (entries, next_sequence)
         await self._handle.signal(
             PUBLISH_SIGNAL_NAME,
             PublishInput(
                 items=entries,
                 publisher_id=self._provider_id,
-                sequence=self._signal_sequence,
+                sequence=signal_sequence,
             ),
         )
+        self._signal_sequence = signal_sequence
+        self._sequence = next_sequence
+        self._pending = None
 
     def _encode(self, value: Any) -> bytes:
         payload = (
