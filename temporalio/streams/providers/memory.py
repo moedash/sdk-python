@@ -31,6 +31,13 @@ from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamReco
 
 _DEFAULT_POLL = timedelta(milliseconds=100)
 
+logger = logging.getLogger(__name__)
+
+
+def _wake(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
+
 
 class _MemoryStream:
     def __init__(self) -> None:
@@ -38,9 +45,16 @@ class _MemoryStream:
         # Dedupe identity is (producer#attempt, first sequence of the append),
         # the same pair the storage providers use.
         self.seen: dict[tuple[str, int], int] = {}
-        self._arrival = asyncio.Event()
+        # Each waiter is parked with the loop it belongs to. A workflow's
+        # publish runs on the workflow thread, and waking a foreign loop's
+        # future from there needs call_soon_threadsafe or the loop stays
+        # blocked in select until unrelated I/O happens to wake it.
+        self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
 
-    def append(self, frames: list[bytes], *, producer_id: str, sequence: int) -> int:
+    def append(
+        self, frames: list[bytes], *, producer_id: str, sequence: int
+    ) -> int | None:
+        """Store ``frames`` and return the first one's offset, or ``None`` for a repeat."""
         key = (producer_id, sequence)
         already = self.seen.get(key)
         if already is not None:
@@ -48,13 +62,17 @@ class _MemoryStream:
         offset = len(self.frames)
         self.frames.extend(frames)
         self.seen[key] = offset
-        arrival, self._arrival = self._arrival, asyncio.Event()
-        arrival.set()
+        waiters, self._waiters = self._waiters, []
+        for loop, future in waiters:
+            loop.call_soon_threadsafe(_wake, future)
         return offset
 
     async def wait_past(self, offset: int) -> None:
         while len(self.frames) <= offset:
-            await self._arrival.wait()
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[None] = loop.create_future()
+            self._waiters.append((loop, future))
+            await future
 
 
 _streams: dict[str, _MemoryStream] = {}
@@ -290,11 +308,13 @@ class _MemoryProvider:
         after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
+        # Ignored: this provider never releases the worker, it polls. Reading
+        # idle_timeout as the poll period would give the parameter a second
+        # meaning that a port copying the reference would copy too.
+        del idle_timeout
         store = _stream(_inbound_id(workflow.info().workflow_id, stream))
         return _MemReadSource(
-            store,
-            int(after.token) + 1 if after.token else 0,
-            idle_timeout or self._poll,
+            store, int(after.token) + 1 if after.token else 0, self._poll
         )
 
     def open_write(self, topic: str) -> WriteSink:
