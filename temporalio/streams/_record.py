@@ -87,6 +87,7 @@ class StreamRecord(Generic[T]):
     cursor: Cursor
     kind: RecordKind = RecordKind.DATA
     topic: str = ""
+    """The topic on the owner's stream, or empty for an inbound record."""
     producer: str = ""
     """Who wrote it, or empty when the owning workflow wrote it itself."""
     attempt: int = 0

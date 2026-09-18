@@ -23,6 +23,7 @@ __all__ = [
     "Producer",
     "StreamProvider",
     "StreamProviderLifecycle",
+    "check_topic",
     "configure",
     "consumer",
     "drain",
@@ -326,6 +327,21 @@ def drain() -> None:
     release = getattr(provider, "drain", None)
     if release is not None:
         release()
+
+
+def check_topic(stream: str, topic: str | None) -> None:
+    """Reject a topic filter on an inbound stream.
+
+    An inbound record carries no topic; the stream's name is its whole
+    address, so a filter there could only ever match nothing. Every provider
+    calls this at the top of its ``read`` so the answer is the same on all
+    of them.
+    """
+    if stream and topic is not None:
+        raise ValueError(
+            f"inbound stream {stream!r} has no topics; topic= applies to the "
+            "stream the workflow publishes"
+        )
 
 
 async def producer(

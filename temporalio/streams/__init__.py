@@ -137,7 +137,6 @@ def reader(
     stream: str,
     *,
     type: type | None = None,
-    topic: str | None = None,
     after: Cursor = BEGINNING,
     idle_timeout: timedelta | None = None,
 ) -> StreamReader[Any]:
@@ -147,10 +146,13 @@ def reader(
     removing or reordering one renumbers the waits after it. Gate a change
     behind :func:`temporalio.workflow.patched` as you would for a timer.
 
+    An inbound stream has no topics: its name is the whole address, and
+    every record on it arrives with an empty ``topic``. Topics belong to the
+    stream the workflow publishes, which :func:`consumer` reads from outside.
+
     Args:
         stream: The inbound stream's name, relative to this workflow.
         type: The value type, used as the decode hint.
-        topic: Only records on this topic, or every topic when omitted.
         after: Resume after this record. Only honoured on the first
             subscription of a run, because after that the recorded cursor
             decides.
@@ -159,9 +161,7 @@ def reader(
             provider's default.
     """
     return StreamReader(
-        open_read(stream, after=after, idle_timeout=idle_timeout),
-        topic=topic,
-        type=type,
+        open_read(stream, after=after, idle_timeout=idle_timeout), type=type
     )
 
 
