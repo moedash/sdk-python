@@ -33,7 +33,9 @@ Outside a workflow there is no worker to carry the choice, so a process calls
 :func:`configure` once before it opens a :func:`producer` or a
 :func:`consumer`, and passes :func:`worker_options` to its ``Worker`` and
 ``Replayer``. Those two calls are where a provider is named. Nothing else in
-this module mentions one.
+this module mentions one. Code that needs a second provider next to the
+process default, such as a handler that serves one store while its process
+talks to another, holds one from :func:`instance`.
 
 Reading somebody else's stream is out of scope for the first release. It is
 the topology neither prototype has evidence for, and leaving it out is what
@@ -68,6 +70,7 @@ from temporalio.streams._provider import (
     configure,
     consumer,
     drain,
+    instance,
     open_read,
     open_write,
     prepare,
@@ -99,10 +102,11 @@ __all__ = [
     "configure",
     "consumer",
     "drain",
+    "instance",
     "prepare",
     "producer",
-    "worker_options",
     "reader",
+    "worker_options",
     "writer",
 ]
 

@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from temporalio import streams
-from temporalio.streams import _frame
+from temporalio.streams import _frame, _provider
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import Cursor, RecordKind
 from temporalio.streams.providers import memory
@@ -218,3 +218,13 @@ async def test_producer_appends_onto_the_owners_topic():
 def test_unknown_provider_is_a_clear_error():
     with pytest.raises(RuntimeError, match="no stream provider 'nope'"):
         streams.configure(provider="nope")
+
+
+async def test_opening_a_stream_needs_a_configured_provider():
+    # Building a provider is process setup, so the first workflow's thread
+    # is not allowed to do it as a side effect of opening a stream.
+    _provider._active = None
+    with pytest.raises(RuntimeError, match="streams.configure"):
+        await streams.consumer(None, workflow_id="wf")
+    streams.configure(provider="memory")
+    assert await streams.consumer(None, workflow_id="wf") is not None

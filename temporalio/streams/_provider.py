@@ -4,8 +4,8 @@ A provider only moves bytes. The handles, records, framing and supersession
 around it are shared, so every provider module is small: it implements
 :class:`StreamProvider` and registers a factory under a short name when it is
 imported. One :func:`configure` call decides which factory serves this
-process; when exactly one provider is registered, it is the default and the
-call can be omitted.
+process; :func:`worker_options` makes the same choice for a worker when
+exactly one provider is registered.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ __all__ = [
     "configure",
     "consumer",
     "drain",
+    "instance",
     "open_read",
     "open_write",
     "prepare",
@@ -158,7 +159,7 @@ class StreamProvider(Protocol):
     async def consumer(
         self, client: Any, *, workflow_id: str, stream: str = ""
     ) -> Consumer:
-        """Open a reader for what ``workflow_id`` publishes."""
+        """Open a reader on ``workflow_id``'s own stream, or its inbound ``stream``."""
         ...
 
 
@@ -240,16 +241,25 @@ def instance(provider: str | None = None, **options: Any) -> StreamProvider:
 
 
 def _current() -> StreamProvider:
-    global _active
     if _active is None:
-        chosen = _make(None)
-        chosen.configure()
-        _active = chosen
+        # Building a provider is process setup. Doing it on the first
+        # workflow's thread would race a second workflow thread for the
+        # global and hide the choice inside workflow code.
+        raise RuntimeError(
+            "no stream provider is configured; call streams.configure() or "
+            "streams.worker_options() before opening a stream"
+        )
     return _active
 
 
 def worker_options() -> dict[str, Any]:
-    """What a ``Worker`` or ``Replayer`` needs to serve this provider."""
+    """What a ``Worker`` or ``Replayer`` needs to serve this provider.
+
+    Every worker calls this, so it is where the default is resolved when
+    :func:`configure` was not called and exactly one provider is registered.
+    """
+    if _active is None:
+        configure()
     return _current().worker_options()
 
 
@@ -335,5 +345,10 @@ async def producer(
 
 
 async def consumer(client: Any, *, workflow_id: str, stream: str = "") -> Consumer:
-    """Open a reader for what ``workflow_id`` publishes."""
+    """Open a reader on ``workflow_id``'s own stream, or its inbound ``stream``.
+
+    With no ``stream`` the reader follows what the workflow publishes, topic
+    by topic. With one, it follows the inbound stream of that name, which is
+    how a process watches what producers hand the workflow.
+    """
     return await _current().consumer(client, workflow_id=workflow_id, stream=stream)
