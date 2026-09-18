@@ -20,8 +20,16 @@ The mapping, in one place:
 - Producer identity dedupes through the shipped publisher state: the
   publisher id is ``producer#attempt`` and every publish Signal carries a
   monotonic sequence, so a retried batch drops and a new attempt passes.
-- ``append`` returns an empty cursor. The Signal transport learns positions
-  at read time; that is this provider's stated deviation.
+- ``append`` returns ``None``. The Signal transport learns positions at read
+  time, so a caller that wants to follow from now asks ``Consumer.latest``.
+- The workflow-side stream object belongs to the workflow instance, found
+  through the handler the shipped class registers on it. An evicted and
+  rebuilt workflow gets its own, so a task that failed leaks nothing into
+  the next attempt's log and a replayed run does not see records twice.
+- An owner-stream read with a topic subscribes to that shipped topic alone.
+  Without one it has to take every shipped topic and drop the inbound
+  items client-side, which spends the poll response cap on records the
+  reader never sees; name a topic on a busy workflow.
 """
 
 from __future__ import annotations
@@ -34,7 +42,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowQueryFailedError
 from temporalio.common import RawValue
 from temporalio.contrib.workflow_streams import (
     PUBLISH_SIGNAL_NAME,
@@ -303,42 +311,63 @@ class WorkflowStreamsConsumer:
         _provider.check_topic(self._stream, topic)
         attempts = AttemptTracker()
         next_offset = int(after.token) + 1 if after.token else 0
+        if self._shipped_topic is not None:
+            shipped = [self._shipped_topic]
+        elif topic is not None:
+            shipped = [f"{_OUT}{topic}"]
+        else:
+            shipped = None
         subscription = self._client.subscribe(
-            self._shipped_topic,
+            shipped,
             from_offset=next_offset,
             result_type=RawValue,
             poll_cooldown=self._poll_cooldown,
         )
-        async for item in subscription:
-            next_offset = item.offset + 1
-            record = self._record(
-                attempts, item.offset, item.topic, item.data.payload.data, topic, type
-            )
-            for out in record:
-                yield out
+        try:
+            async for item in subscription:
+                next_offset = item.offset + 1
+                for out in self._record(
+                    attempts,
+                    item.offset,
+                    item.topic,
+                    item.data.payload.data,
+                    topic,
+                    type,
+                ):
+                    yield out
+        finally:
+            # Lets go of the parked poll when the caller stops early.
+            if isinstance(subscription, AsyncGenerator):
+                await subscription.aclose()
         # The subscription ends when the workflow is closing or closed. What
         # landed after the last poll is still in workflow state, so the tail
         # comes back by Query rather than being lost with the run.
-        for wire in await self._tail(next_offset):
+        for offset, shipped_topic, frame in await self._tail(next_offset):
             for out in self._record(
-                attempts,
-                wire["offset"],
-                wire["topic"],
-                base64.b64decode(wire["data"]),
-                topic,
-                type,
+                attempts, offset, shipped_topic, frame, topic, type
             ):
                 yield out
 
-    async def _tail(self, from_offset: int) -> list[dict[str, Any]]:
+    async def _tail(self, from_offset: int) -> list[tuple[int, str, bytes]]:
         try:
             wire = await self._client.handle.query(
                 _TAIL_QUERY, from_offset, result_type=list
             )
-        except Exception:
-            # A workflow that never opened a stream has no handler to ask, and
-            # one whose History is gone has nothing left to serve.
+        except WorkflowQueryFailedError as error:
+            if "expected but not found" not in str(error):
+                raise
+            # The workflow never opened a stream through this provider, so
+            # there is no tail to serve.
             return []
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+            # The History is gone; nothing is left to serve.
+            return []
+        return [
+            (item["offset"], item["topic"], base64.b64decode(item["data"]))
+            for item in wire
+        ]
 
     def _record(
         self,
