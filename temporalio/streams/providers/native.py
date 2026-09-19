@@ -13,10 +13,12 @@ from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
+import grpc
+
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
-from temporalio.client_stream import StreamClient
+from temporalio.client_stream import StreamClient, close_shared_clients, shared_client
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._ids import inbound_stream_id
@@ -126,24 +128,23 @@ def _reject_configured_codec(client: Client) -> None:
 # stream reuses the handle rather than asking the server to create it again.
 # The second create is answered correctly, and it is still a failed call the
 # server logs, which is noise an operator has to learn to ignore.
-_handles: dict[str, Any] = {}
-
-
-# One channel per target and namespace, shared by every handle in the process.
-# A channel is multiplexed and long lived, and callers open a handle per
-# subscription, which would otherwise be a connection per subscription.
-_channels: dict[tuple[int, str, str], StreamClient] = {}
+_handles: dict[tuple[str, str, str], Any] = {}
 
 
 def _stream_client(client: Client) -> StreamClient:
-    target = client.service_client.config.target_host
-    # Keyed on the loop as well: a gRPC channel belongs to the loop that made it.
-    key = (id(asyncio.get_event_loop()), target, client.namespace)
-    existing = _channels.get(key)
-    if existing is None:
-        existing = StreamClient.connect(target, client.namespace)
-        _channels[key] = existing
-    return existing
+    return shared_client(client.service_client.config.target_host, client.namespace)
+
+
+async def _owner_run(client: Client, workflow_id: str) -> str:
+    """The run whose stream a handle on ``workflow_id`` should address.
+
+    Resolved once, when the handle opens. Left to the server, a follower whose
+    workflow continued as new would be redirected to the successor, whose
+    stream starts empty, and its offset read as "caught up" rather than as a
+    position on the run it was watching. A producer is pinned for the same
+    reason: an activity's output belongs to the run that scheduled it.
+    """
+    return (await client.get_workflow_handle(workflow_id).describe()).run_id
 
 
 class NativeProducer:
@@ -310,9 +311,12 @@ class NativeConsumer:
         del topic  # one server-side log per stream, whatever the topic
         try:
             state = await self._handle.describe()
-        except Exception:
+        except grpc.aio.AioRpcError as error:
             # A stream nobody has published to does not exist yet, and that
-            # is the same answer as an empty one.
+            # is the same answer as an empty one. Any other failure is not:
+            # a reader that took it for "empty" would replay the whole stream.
+            if error.code() is not grpc.StatusCode.NOT_FOUND:
+                raise
             return BEGINNING
         return (
             Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
@@ -343,6 +347,10 @@ class _NativeProvider:
 
     def worker_options(self) -> dict[str, Any]:
         return {}
+
+    async def close(self) -> None:
+        """Close the channels this process opened to the stream service."""
+        await close_shared_clients()
 
     def open_read(
         self,
@@ -390,15 +398,13 @@ class _NativeProvider:
         streams = _stream_client(client)
         converter = client.data_converter.payload_converter
         if not stream:
-            return NativeProducer(
-                streams.workflow_stream(workflow_id),
-                converter,
-                topic,
-                producer_id,
-                attempt,
+            handle: Any = streams.workflow_stream(
+                workflow_id, owner_run_id=await _owner_run(client, workflow_id)
             )
+            return NativeProducer(handle, converter, topic, producer_id, attempt)
         stream_id = inbound_stream_id(workflow_id, stream)
-        handle = _handles.get(stream_id)
+        key = (client.service_client.config.target_host, client.namespace, stream_id)
+        handle = _handles.get(key)
         if handle is None:
             try:
                 handle = await streams.create(stream_id)
@@ -407,7 +413,7 @@ class _NativeProvider:
                 # stream it does not own is the ordinary case, not the
                 # exception.
                 handle = streams.get(stream_id)
-            _handles[stream_id] = handle
+            _handles[key] = handle
         return NativeProducer(handle, converter, topic, producer_id, attempt)
 
     async def consumer(
@@ -425,7 +431,9 @@ class _NativeProvider:
         if stream:
             handle: Any = streams.get(address)
         else:
-            handle = streams.workflow_stream(workflow_id)
+            handle = streams.workflow_stream(
+                workflow_id, owner_run_id=await _owner_run(client, workflow_id)
+            )
         return NativeConsumer(
             handle, client.data_converter.payload_converter, stream, address
         )
