@@ -1,9 +1,9 @@
-"""The record envelope both bindings put on the wire.
+"""The record envelope every provider puts on the wire.
 
 A provider stores an opaque body. The contract needs more than a body: which
 topic a record belongs to, whether it is data or a terminal marker, and which
-producer attempt wrote it. Neither prototype carries all of that in a channel
-of its own, so the interface carries it here and each binding stores the result
+producer attempt wrote it. No provider carries all of that in a channel of
+its own, so the interface carries it here and each provider stores the result
 as an ordinary body.
 
 Encoding is synchronous and deterministic because a workflow publishes on the

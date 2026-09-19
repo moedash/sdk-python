@@ -49,6 +49,7 @@ to include examples, links to docs, or any other relevant information.
   `temporalio.contrib.server_streams` reach the same stream from outside a
   workflow, and `temporalio.streams.providers.native` puts it behind the shared
   stream interface. Requires a server that serves the stream service.
+  reference provider the conformance tests run against.
 - **Experimental**: `temporalio.streams.providers.workflow_streams` serves the
   stream interface over the shipped Workflow Streams transport, so a workflow
   reads and publishes through `temporalio.contrib.workflow_streams` without

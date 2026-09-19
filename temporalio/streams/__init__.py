@@ -33,26 +33,36 @@ Outside a workflow there is no worker to carry the choice, so a process calls
 :func:`configure` once before it opens a :func:`producer` or a
 :func:`consumer`, and passes :func:`worker_options` to its ``Worker`` and
 ``Replayer``. Those two calls are where a provider is named. Nothing else in
-this module mentions one.
+this module mentions one. Code that needs a second provider next to the
+process default, such as a handler that serves one store while its process
+talks to another, holds one from :func:`instance`.
+
+Three lifecycle hooks let a provider borrow the caller's lifetime, and each
+is a no-op on a provider that needs nothing, so portable code calls all
+three unconditionally: :func:`prepare` from the workflow's constructor, for a
+transport that registers handlers on the workflow; :func:`drain` before the
+workflow returns, for one that parks readers against the run; and
+:func:`close`, awaited when the process is done with streams, for one that
+holds connections.
 
 Reading somebody else's stream is out of scope for the first release. It is
-the topology neither prototype has evidence for, and leaving it out is what
-lets both of them implement the rest.
+the topology no provider has evidence for, and leaving it out is what lets
+every provider implement the rest.
 
 What the contract does not promise: that a :attr:`RecordKind.FINISH` record
 means the writing activity succeeded, that a superseded attempt's records can
 be withdrawn, or that a stream outlives the retention its provider is
 configured for.
 
-Prototype support for AI-198. The public names are the proposal; providers
-live under :mod:`temporalio.streams.providers`, one module each, registered
-by name and chosen by :func:`configure`. Everything else is shared.
+The public names are the proposal; providers live under
+:mod:`temporalio.streams.providers`, one module each, registered by name and
+chosen by :func:`configure`. Everything else is shared.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 from temporalio.streams._handles import (
     ReadSource,
@@ -65,9 +75,11 @@ from temporalio.streams._provider import (
     Producer,
     StreamProvider,
     StreamProviderLifecycle,
+    close,
     configure,
     consumer,
     drain,
+    instance,
     open_read,
     open_write,
     prepare,
@@ -96,24 +108,45 @@ __all__ = [
     "StreamWriter",
     "Supersession",
     "WriteSink",
+    "close",
     "configure",
     "consumer",
     "drain",
+    "instance",
     "prepare",
     "producer",
-    "worker_options",
     "reader",
+    "worker_options",
     "writer",
 ]
 
 T = TypeVar("T")
 
 
+@overload
+def reader(
+    stream: str,
+    *,
+    type: type[T],
+    after: Cursor = ...,
+    idle_timeout: timedelta | None = ...,
+) -> StreamReader[T]: ...
+
+
+@overload
+def reader(
+    stream: str,
+    *,
+    type: None = None,
+    after: Cursor = ...,
+    idle_timeout: timedelta | None = ...,
+) -> StreamReader[Any]: ...
+
+
 def reader(
     stream: str,
     *,
     type: type | None = None,
-    topic: str | None = None,
     after: Cursor = BEGINNING,
     idle_timeout: timedelta | None = None,
 ) -> StreamReader[Any]:
@@ -123,10 +156,13 @@ def reader(
     removing or reordering one renumbers the waits after it. Gate a change
     behind :func:`temporalio.workflow.patched` as you would for a timer.
 
+    An inbound stream has no topics: its name is the whole address, and
+    every record on it arrives with an empty ``topic``. Topics belong to the
+    stream the workflow publishes, which :func:`consumer` reads from outside.
+
     Args:
         stream: The inbound stream's name, relative to this workflow.
         type: The value type, used as the decode hint.
-        topic: Only records on this topic, or every topic when omitted.
         after: Resume after this record. Only honoured on the first
             subscription of a run, because after that the recorded cursor
             decides.
@@ -135,27 +171,20 @@ def reader(
             provider's default.
     """
     return StreamReader(
-        open_read(stream, after=after, idle_timeout=idle_timeout),
-        topic=topic,
-        type=type,
+        open_read(stream, after=after, idle_timeout=idle_timeout), type=type
     )
 
 
-def writer(topic: str, *, type: type | None = None) -> StreamWriter[Any]:
+def writer(topic: str) -> StreamWriter[Any]:
     """Publish to ``topic`` on the stream this workflow owns.
 
     Args:
-        topic: The topic name.
-        type: Declared for symmetry with :func:`reader` and for documentation.
-            Encoding follows the value.
+        topic: The topic name. Encoding follows each published value.
     """
-    del type
     return StreamWriter(open_write(topic), topic)
 
 
 # Importing the package registers every provider whose dependencies are
 # present in this tree. Import order matters: the registry above must exist
 # before a provider module can register with it.
-from temporalio.streams import (
-    providers as _providers,  # noqa: E402,F401  # pyright: ignore[reportUnusedImport]
-)
+from temporalio.streams import providers as providers  # noqa: E402

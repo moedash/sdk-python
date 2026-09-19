@@ -1,4 +1,4 @@
-"""One agent loop, written once, run on both stream providers.
+"""One agent loop, written once, run on every stream provider.
 
 Reads input, decides on it, publishes the decision, and runs an ordinary
 Activity in the same workflow task. Also handles the two control records the
@@ -20,7 +20,7 @@ DECISIONS = "decisions"
 INPUTS = "inputs"
 
 
-@activity.defn(name="AI198RecordDecision")
+@activity.defn(name="RecordDecision")
 async def record_decision(decision: dict[str, Any]) -> str:
     """An ordinary command in the same task as the publish."""
     return f"recorded:{decision['source']}:{decision['branch']}"
@@ -37,7 +37,7 @@ def decide(token: dict[str, Any]) -> dict[str, Any]:
     return {"source": token["id"], "branch": "odd", "computed": token["value"] + 100}
 
 
-@workflow.defn(name="AI198StreamContractDemo", sandboxed=False)
+@workflow.defn(name="StreamContractDemo", sandboxed=False)
 class AgentLoop:
     """Read, decide, write, until the producer says it has finished."""
 
@@ -59,7 +59,7 @@ class AgentLoop:
         accepted = 0
         try:
             async for record in inputs:
-                if record.kind is streams.RecordKind.SUPERSEDED:
+                if isinstance(record.value, streams.Supersession):
                     # A newer attempt of the same producer started writing. The
                     # decisions already published stand, so the workflow says so
                     # rather than pretending they can be withdrawn.
@@ -82,6 +82,7 @@ class AgentLoop:
                     # still writing.
                     trace.append({"kind": "finish", "producer": record.producer})
                     break
+                assert isinstance(record.value, dict)
                 decision = decide(record.value)
                 await decisions.publish(decision)
                 receipt = await workflow.execute_activity(

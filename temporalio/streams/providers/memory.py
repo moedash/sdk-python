@@ -17,7 +17,8 @@ faithful, which is what the conformance tests lean on.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
@@ -26,10 +27,18 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
+from temporalio.streams._ids import inbound_stream_id
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
 _DEFAULT_POLL = timedelta(milliseconds=100)
+
+logger = logging.getLogger(__name__)
+
+
+def _wake(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
 
 
 class _MemoryStream:
@@ -38,23 +47,33 @@ class _MemoryStream:
         # Dedupe identity is (producer#attempt, first sequence of the append),
         # the same pair the storage providers use.
         self.seen: dict[tuple[str, int], int] = {}
-        self._arrival = asyncio.Event()
+        # Each waiter is parked with the loop it belongs to. A workflow's
+        # publish runs on the workflow thread, and waking a foreign loop's
+        # future from there needs call_soon_threadsafe or the loop stays
+        # blocked in select until unrelated I/O happens to wake it.
+        self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
 
-    def append(self, frames: list[bytes], *, producer_id: str, sequence: int) -> int:
+    def append(
+        self, frames: list[bytes], *, producer_id: str, sequence: int
+    ) -> int | None:
+        """Store ``frames`` and return the first one's offset, or ``None`` for a repeat."""
         key = (producer_id, sequence)
-        already = self.seen.get(key)
-        if already is not None:
-            return already
+        if key in self.seen:
+            return None
         offset = len(self.frames)
         self.frames.extend(frames)
         self.seen[key] = offset
-        arrival, self._arrival = self._arrival, asyncio.Event()
-        arrival.set()
+        waiters, self._waiters = self._waiters, []
+        for loop, future in waiters:
+            loop.call_soon_threadsafe(_wake, future)
         return offset
 
     async def wait_past(self, offset: int) -> None:
         while len(self.frames) <= offset:
-            await self._arrival.wait()
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[None] = loop.create_future()
+            self._waiters.append((loop, future))
+            await future
 
 
 _streams: dict[str, _MemoryStream] = {}
@@ -70,10 +89,6 @@ def _stream(stream_id: str) -> _MemoryStream:
 def reset() -> None:
     """Drop every stream. For tests."""
     _streams.clear()
-
-
-def _inbound_id(workflow_id: str, stream: str) -> str:
-    return f"{workflow_id}:{stream}" if stream else workflow_id
 
 
 def _converter(client: Any) -> Any:
@@ -159,8 +174,10 @@ class MemoryProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append ``values`` and return the cursor of the last one."""
+    async def append(self, *values: Any) -> Cursor | None:
+        """Append ``values`` and return the last one's cursor, or ``None`` if nothing landed."""
+        if not values:
+            return None
         frames = []
         for value in values:
             frames.append(
@@ -179,7 +196,9 @@ class MemoryProducer:
             producer_id=self._provider_id,
             sequence=self._sequence - len(frames),
         )
-        return Cursor(str(offset))
+        if offset is None:
+            return None
+        return Cursor(str(offset + len(frames) - 1))
 
     async def finish(self) -> None:
         """Mark this producer done, so a reader stops waiting on it."""
@@ -208,10 +227,11 @@ class MemoryProducer:
 class MemoryConsumer:
     """The outside reader, with the shared supersession rule."""
 
-    def __init__(self, store: _MemoryStream, converter: Any) -> None:
+    def __init__(self, store: _MemoryStream, converter: Any, stream: str) -> None:
         """Read whatever ``store`` holds, now and as it grows."""
         self._store = store
         self._converter = converter
+        self._stream = stream
 
     async def read(
         self,
@@ -219,8 +239,9 @@ class MemoryConsumer:
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records after ``after``, waiting for ones not written yet."""
+        _provider.check_topic(self._stream, topic)
         attempts = AttemptTracker()
         offset = int(after.token) + 1 if after.token else 0
         while True:
@@ -234,7 +255,9 @@ class MemoryConsumer:
                     kind, frame_topic, source, attempt, sequence, body = _frame.decode(
                         frame
                     )
-                except ValueError:
+                except ValueError as error:
+                    # Same answer as the workflow-side reader: skip and say so.
+                    logger.warning("skipping stream record at %s: %s", cursor, error)
                     continue
                 if topic is not None and frame_topic != topic:
                     continue
@@ -290,15 +313,17 @@ class _MemoryProvider:
         after: Cursor = BEGINNING,
         idle_timeout: timedelta | None = None,
     ) -> ReadSource:
-        store = _stream(_inbound_id(workflow.info().workflow_id, stream))
+        # Ignored: this provider never releases the worker, it polls. Reading
+        # idle_timeout as the poll period would give the parameter a second
+        # meaning that a port copying the reference would copy too.
+        del idle_timeout
+        store = _stream(inbound_stream_id(workflow.info().workflow_id, stream))
         return _MemReadSource(
-            store,
-            int(after.token) + 1 if after.token else 0,
-            idle_timeout or self._poll,
+            store, int(after.token) + 1 if after.token else 0, self._poll
         )
 
     def open_write(self, topic: str) -> WriteSink:
-        store = _stream(_inbound_id(workflow.info().workflow_id, ""))
+        store = _stream(inbound_stream_id(workflow.info().workflow_id, ""))
         return _MemWriteSink(store, topic)
 
     async def producer(
@@ -311,17 +336,13 @@ class _MemoryProvider:
         producer_id: str = "",
         attempt: int = 0,
     ) -> MemoryProducer:
-        if not producer_id:
-            from temporalio import activity
-
-            producer_id = activity.info().activity_id
-            attempt = attempt or activity.info().attempt
         # With no inbound stream named, the target is the store the workflow's
-        # own writer appends to, and the frame carries the topic instead.
+        # own writer appends to, and the frame carries the topic. An inbound
+        # record carries none: the stream's name is its whole address.
         return MemoryProducer(
-            _stream(_inbound_id(workflow_id, stream)),
+            _stream(inbound_stream_id(workflow_id, stream)),
             _converter(client),
-            stream or topic,
+            topic,
             producer_id,
             attempt,
         )
@@ -330,7 +351,7 @@ class _MemoryProvider:
         self, client: Any, *, workflow_id: str, stream: str = ""
     ) -> MemoryConsumer:
         return MemoryConsumer(
-            _stream(_inbound_id(workflow_id, stream)), _converter(client)
+            _stream(inbound_stream_id(workflow_id, stream)), _converter(client), stream
         )
 
 

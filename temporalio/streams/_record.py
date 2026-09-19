@@ -1,6 +1,6 @@
 """The value types the stream contract is expressed in.
 
-Nothing here touches Temporal or a provider, so both bindings share it
+Nothing here touches Temporal or a provider, so every provider shares it
 unchanged.
 """
 
@@ -39,8 +39,9 @@ class RecordKind(enum.IntEnum):
     SUPERSEDED = 3
     """A later attempt of the same producer started writing.
 
-    Synthesized by the reader from what it observed, so both providers deliver
-    it identically and replay reproduces it without the provider's help.
+    Synthesized by the reader from what it observed, so every provider
+    delivers it identically and replay reproduces it without the provider's
+    help.
     """
 
 
@@ -76,12 +77,18 @@ class Supersession:
 
 @dataclass(frozen=True)
 class StreamRecord(Generic[T]):
-    """One record as workflow code sees it."""
+    """One record as workflow code sees it.
 
-    value: T
+    ``value`` follows ``kind``: a data record carries a ``T``, a supersession
+    carries the :class:`Supersession` it reports, and a finish marker carries
+    ``None``. Check ``kind`` before reading it.
+    """
+
+    value: T | Supersession | None
     cursor: Cursor
     kind: RecordKind = RecordKind.DATA
     topic: str = ""
+    """The topic on the owner's stream, or empty for an inbound record."""
     producer: str = ""
     """Who wrote it, or empty when the owning workflow wrote it itself."""
     attempt: int = 0

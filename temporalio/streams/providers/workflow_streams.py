@@ -20,105 +20,102 @@ The mapping, in one place:
 - Producer identity dedupes through the shipped publisher state: the
   publisher id is ``producer#attempt`` and every publish Signal carries a
   monotonic sequence, so a retried batch drops and a new attempt passes.
-- ``append`` returns an empty cursor. The Signal transport learns positions
-  at read time; that is this provider's stated deviation.
+- ``append`` returns ``None``. The Signal transport learns positions at read
+  time, so a caller that wants to follow from now asks ``Consumer.latest``.
+- The workflow-side stream object belongs to the workflow instance, found
+  through the handler the shipped class registers on it. An evicted and
+  rebuilt workflow gets its own, so a task that failed leaks nothing into
+  the next attempt's log and a replayed run does not see records twice.
+- An owner-stream read with a topic subscribes to that shipped topic alone.
+  Without one it has to take every shipped topic and drop the inbound
+  items client-side, which spends the poll response cap on records the
+  reader never sees; name a topic on a busy workflow.
 """
 
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowQueryFailedError
 from temporalio.common import RawValue
 from temporalio.contrib.workflow_streams import (
+    PUBLISH_SIGNAL_NAME,
     PublishEntry,
     PublishInput,
     WorkflowStream,
     WorkflowStreamClient,
 )
-from temporalio.contrib.workflow_streams._stream import _PUBLISH_SIGNAL
-from temporalio.contrib.workflow_streams._types import _encode_payload
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
-_RUN_ATTR = "__temporal_streams_ws_runtime"
 _TAIL_QUERY = "__temporal_streams_tail"
 _IN = "in:"
 _OUT = "out:"
 
+logger = logging.getLogger(__name__)
+
 
 class _Runtime:
-    """Per-run holder for the shipped stream object.
+    """A view over the shipped stream object of the running workflow instance.
 
     A separate class because ``WorkflowStream`` insists on being constructed
-    from a method named ``__init__``, and the provider builds it lazily on
-    the first read or write of a run.
+    from a method named ``__init__``.
     """
 
-    def __init__(self) -> None:
-        self.stream = WorkflowStream()
-        # The poll Update stops answering once the workflow is closing, and a
-        # reader between polls at that moment would lose what the final task
-        # published. The log is workflow state, so a Query still serves it
-        # after completion.
-        workflow.set_query_handler(_TAIL_QUERY, self._tail)
+    def __init__(self, stream: WorkflowStream | None = None) -> None:
+        self.stream = WorkflowStream() if stream is None else stream
+        if workflow.get_query_handler(_TAIL_QUERY) is None:
+            # The poll Update stops answering once the workflow is closing,
+            # and a reader between polls at that moment would lose what the
+            # final task published. The log is workflow state, so a Query
+            # still serves it after completion.
+            workflow.set_query_handler(_TAIL_QUERY, self._tail)
 
     def _tail(self, from_offset: int) -> list[dict[str, Any]]:
-        base = self.stream._base_offset
         return [
             {
-                "offset": base + index,
-                "topic": item.topic,
-                "data": base64.b64encode(item.data.data).decode("ascii"),
+                "offset": offset,
+                "topic": topic,
+                "data": base64.b64encode(payload.data).decode("ascii"),
             }
-            for index, item in enumerate(self.stream._log)
-            if base + index >= from_offset
+            for offset, topic, payload in self.stream.items_from(from_offset)
         ]
 
 
-# Held per run rather than on the workflow instance, because the provider is
-# asked to install its handlers from the workflow's constructor, and the
-# instance is not registered with the runtime yet at that point.
-_runtimes: dict[str, _Runtime] = {}
+def _registered_stream() -> WorkflowStream | None:
+    handler = workflow.get_signal_handler(PUBLISH_SIGNAL_NAME)
+    if handler is None:
+        return None
+    stream = getattr(handler, "__self__", None)
+    if not isinstance(stream, WorkflowStream):
+        raise RuntimeError(
+            f"the {PUBLISH_SIGNAL_NAME!r} signal on this workflow is handled by "
+            "something other than a WorkflowStream, so the workflow_streams "
+            "provider cannot share its log"
+        )
+    return stream
 
 
 def _runtime() -> _Runtime:
-    key = workflow.info().run_id
-    runtime = _runtimes.get(key)
-    if runtime is None:
-        runtime = _Runtime()
-        _runtimes[key] = runtime
-    return runtime
-
-
-def drain() -> None:
-    """Release parked pollers so the workflow can return.
-
-    An Option 0 stream dies with its workflow, and a parked long-poll Update
-    would otherwise hold completion open. Call it right before the workflow
-    returns, the same obligation the shipped feature's ``detach_pollers``
-    documents. A storage provider has no such step, which is one of the
-    differences the comparison table charges this transport with.
-    """
-    runtime = _runtimes.pop(workflow.info().run_id, None)
-    if runtime is not None:
-        runtime.stream.detach_pollers()
+    # Found on the instance rather than in a process-level map keyed by run
+    # id: the SDK rebuilds an evicted workflow from history as a new object,
+    # and a map would hand that object the stale log with its unregistered
+    # handlers and the records of a task that failed.
+    stream = _registered_stream()
+    return _Runtime() if stream is None else _Runtime(stream)
 
 
 class _WSReadSource:
-    """Reads the signal-fed log the shipped feature keeps in workflow state.
-
-    Reaches into the stream's private log rather than ``get_state()``,
-    because the snapshot copies the whole log per call and drops offsets,
-    and this runs inside ``workflow.wait_condition``.
-    """
+    """Reads the signal-fed log the shipped feature keeps in workflow state."""
 
     def __init__(self, stream: WorkflowStream, shipped_topic: str, start: int) -> None:
         self._stream = stream
@@ -126,29 +123,21 @@ class _WSReadSource:
         self._cursor = start
         self._closed = False
 
-    def _end(self) -> int:
-        return self._stream._base_offset + len(self._stream._log)
-
     async def next_batch(self) -> list[tuple[Cursor, bytes]]:
         while True:
             if self._closed:
                 raise StopAsyncIteration
-            base = self._stream._base_offset
-            if self._cursor < base:
-                # Truncated below the cursor; resume at what remains.
-                self._cursor = base
             await workflow.wait_condition(
-                lambda: self._closed or self._end() > self._cursor
+                lambda: self._closed or self._stream.next_offset > self._cursor
             )
             if self._closed:
                 raise StopAsyncIteration
-            batch: list[tuple[Cursor, bytes]] = []
-            end = self._end()
-            for offset in range(self._cursor, end):
-                item = self._stream._log[offset - self._stream._base_offset]
-                if item.topic == self._shipped_topic:
-                    batch.append((Cursor(str(offset)), item.data.data))
-            self._cursor = end
+            batch = [
+                (Cursor(str(offset)), payload.data)
+                for offset, topic, payload in self._stream.items_from(self._cursor)
+                if topic == self._shipped_topic
+            ]
+            self._cursor = self._stream.next_offset
             if batch:
                 return batch
 
@@ -168,6 +157,11 @@ class _WSWriteSink:
         self._handle.publish(payload)
 
 
+def _entry_data(payload: Payload) -> str:
+    # The documented wire form of PublishEntry.data.
+    return base64.b64encode(payload.SerializeToString()).decode("ascii")
+
+
 class WorkflowStreamsProducer:
     """Appends by sending the shipped publish Signal directly.
 
@@ -175,6 +169,12 @@ class WorkflowStreamsProducer:
     owns the publisher identity: it must be ``producer#attempt`` for the
     shipped dedupe to drop a retry and pass a new generation, and the client
     would use its own random id.
+
+    Sequences are committed only after the server accepted the Signal. A
+    batch whose Signal raised stays pending and goes out again under the
+    same signal sequence, either when the caller retries the same values or
+    ahead of whatever the caller sends next, so an ambiguous failure writes
+    the batch once and loses nothing.
     """
 
     def __init__(
@@ -195,10 +195,7 @@ class WorkflowStreamsProducer:
         self._attempt = attempt
         self._sequence = 0
         self._signal_sequence = 0
-
-    @property
-    def _frame_topic(self) -> str:
-        return self._stream or self._topic
+        self._pending: tuple[list[PublishEntry], int] | None = None
 
     @property
     def _shipped_topic(self) -> str:
@@ -217,50 +214,67 @@ class WorkflowStreamsProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append ``values`` through the shipped publish Signal."""
-        entries = []
-        for value in values:
-            frame = _frame.encode(
-                topic=self._frame_topic,
-                kind=RecordKind.DATA,
-                producer=self._producer_id,
-                attempt=self._attempt,
-                sequence=self._sequence,
-                body=self._encode(value),
-            )
-            self._sequence += 1
-            entries.append(self._entry(frame))
-        await self._send(entries)
-        return Cursor("")
+    async def append(self, *values: Any) -> None:
+        """Append ``values`` through the shipped publish Signal.
+
+        Always ``None``: this transport learns positions at read time.
+        """
+        if not values:
+            return None
+        await self._send([(RecordKind.DATA, self._encode(value)) for value in values])
+        return None
 
     async def finish(self) -> None:
         """Mark this producer done, so a reader stops waiting on it."""
-        frame = _frame.encode(
-            topic=self._frame_topic,
-            kind=RecordKind.FINISH,
-            producer=self._producer_id,
-            attempt=self._attempt,
-            sequence=self._sequence,
-            body=b"",
-        )
-        self._sequence += 1
-        await self._send([self._entry(frame)])
+        await self._send([(RecordKind.FINISH, b"")])
 
-    def _entry(self, frame: bytes) -> PublishEntry:
-        payload = Payload(data=frame)
-        return PublishEntry(topic=self._shipped_topic, data=_encode_payload(payload))
+    def _frames(
+        self, bodies: list[tuple[RecordKind, bytes]]
+    ) -> tuple[list[PublishEntry], int]:
+        sequence = self._sequence
+        entries = []
+        for kind, body in bodies:
+            frame = _frame.encode(
+                topic=self._topic,
+                kind=kind,
+                producer=self._producer_id,
+                attempt=self._attempt,
+                sequence=sequence,
+                body=body,
+            )
+            sequence += 1
+            entries.append(
+                PublishEntry(
+                    topic=self._shipped_topic, data=_entry_data(Payload(data=frame))
+                )
+            )
+        return entries, sequence
 
-    async def _send(self, entries: list[PublishEntry]) -> None:
-        self._signal_sequence += 1
+    async def _send(self, bodies: list[tuple[RecordKind, bytes]]) -> None:
+        entries, next_sequence = self._frames(bodies)
+        if self._pending is not None and self._pending[0] != entries:
+            # The caller moved on from a batch whose Signal raised. It goes
+            # first, under the signal sequence it already had, so a copy the
+            # server did accept is dropped and one it never saw lands. The
+            # new batch is then renumbered behind it.
+            await self._signal(*self._pending)
+            entries, next_sequence = self._frames(bodies)
+        await self._signal(entries, next_sequence)
+
+    async def _signal(self, entries: list[PublishEntry], next_sequence: int) -> None:
+        signal_sequence = self._signal_sequence + 1
+        self._pending = (entries, next_sequence)
         await self._handle.signal(
-            _PUBLISH_SIGNAL,
+            PUBLISH_SIGNAL_NAME,
             PublishInput(
                 items=entries,
                 publisher_id=self._provider_id,
-                sequence=self._signal_sequence,
+                sequence=signal_sequence,
             ),
         )
+        self._signal_sequence = signal_sequence
+        self._sequence = next_sequence
+        self._pending = None
 
     def _encode(self, value: Any) -> bytes:
         payload = (
@@ -277,12 +291,13 @@ class WorkflowStreamsConsumer:
     def __init__(
         self,
         stream_client: WorkflowStreamClient,
-        shipped_topic: str | None,
+        stream: str,
         poll_cooldown: timedelta,
     ) -> None:
         """Read what ``stream_client`` reaches, one long poll at a time."""
         self._client = stream_client
-        self._shipped_topic = shipped_topic
+        self._stream = stream
+        self._shipped_topic = f"{_IN}{stream}" if stream else None
         self._poll_cooldown = poll_cooldown
 
     async def read(
@@ -291,46 +306,68 @@ class WorkflowStreamsConsumer:
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records after ``after``, waiting for ones not written yet."""
+        _provider.check_topic(self._stream, topic)
         attempts = AttemptTracker()
         next_offset = int(after.token) + 1 if after.token else 0
+        if self._shipped_topic is not None:
+            shipped = [self._shipped_topic]
+        elif topic is not None:
+            shipped = [f"{_OUT}{topic}"]
+        else:
+            shipped = None
         subscription = self._client.subscribe(
-            self._shipped_topic,
+            shipped,
             from_offset=next_offset,
             result_type=RawValue,
             poll_cooldown=self._poll_cooldown,
         )
-        async for item in subscription:
-            next_offset = item.offset + 1
-            record = self._record(
-                attempts, item.offset, item.topic, item.data.payload.data, topic, type
-            )
-            for out in record:
-                yield out
+        try:
+            async for item in subscription:
+                next_offset = item.offset + 1
+                for out in self._record(
+                    attempts,
+                    item.offset,
+                    item.topic,
+                    item.data.payload.data,
+                    topic,
+                    type,
+                ):
+                    yield out
+        finally:
+            # Lets go of the parked poll when the caller stops early.
+            if isinstance(subscription, AsyncGenerator):
+                await subscription.aclose()
         # The subscription ends when the workflow is closing or closed. What
         # landed after the last poll is still in workflow state, so the tail
         # comes back by Query rather than being lost with the run.
-        for wire in await self._tail(next_offset):
+        for offset, shipped_topic, frame in await self._tail(next_offset):
             for out in self._record(
-                attempts,
-                wire["offset"],
-                wire["topic"],
-                base64.b64decode(wire["data"]),
-                topic,
-                type,
+                attempts, offset, shipped_topic, frame, topic, type
             ):
                 yield out
 
-    async def _tail(self, from_offset: int) -> list[dict[str, Any]]:
+    async def _tail(self, from_offset: int) -> list[tuple[int, str, bytes]]:
         try:
-            return await self._client._handle.query(
+            wire = await self._client.handle.query(
                 _TAIL_QUERY, from_offset, result_type=list
             )
-        except Exception:
-            # A workflow that never opened a stream has no handler to ask, and
-            # one whose History is gone has nothing left to serve.
+        except WorkflowQueryFailedError as error:
+            if "expected but not found" not in str(error):
+                raise
+            # The workflow never opened a stream through this provider, so
+            # there is no tail to serve.
             return []
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+            # The History is gone; nothing is left to serve.
+            return []
+        return [
+            (item["offset"], item["topic"], base64.b64decode(item["data"]))
+            for item in wire
+        ]
 
     def _record(
         self,
@@ -348,7 +385,9 @@ class WorkflowStreamsConsumer:
         cursor = Cursor(str(offset))
         try:
             kind, frame_topic, source, attempt, sequence, body = _frame.decode(frame)
-        except ValueError:
+        except ValueError as error:
+            # Same answer as the workflow-side reader: skip and say so.
+            logger.warning("skipping stream record at %s: %s", cursor, error)
             return []
         if topic is not None and frame_topic != topic:
             return []
@@ -378,7 +417,7 @@ class WorkflowStreamsConsumer:
     def _decode(self, body: bytes, as_type: type | None) -> Any:
         payload = Payload()
         payload.ParseFromString(body)
-        converter = self._client._payload_converter()
+        converter = self._client.payload_converter
         if as_type is None:
             return converter.from_payloads([payload])[0]
         return converter.from_payloads([payload], [as_type])[0]
@@ -413,8 +452,16 @@ class _WorkflowStreamsProvider:
         _runtime()
 
     def drain(self) -> None:
-        """Release parked pollers so the workflow can return."""
-        drain()
+        """Release parked pollers so the workflow can return.
+
+        An Option 0 stream dies with its workflow, and a parked long-poll
+        Update would otherwise hold completion open. Call it right before
+        the workflow returns, the same obligation the shipped feature's
+        ``detach_pollers`` documents.
+        """
+        stream = _registered_stream()
+        if stream is not None:
+            stream.detach_pollers()
 
     def open_read(
         self,
@@ -445,11 +492,6 @@ class _WorkflowStreamsProvider:
         producer_id: str = "",
         attempt: int = 0,
     ) -> WorkflowStreamsProducer:
-        if not producer_id:
-            from temporalio import activity
-
-            producer_id = activity.info().activity_id
-            attempt = attempt or activity.info().attempt
         return WorkflowStreamsProducer(
             client.get_workflow_handle(workflow_id),
             client.data_converter.payload_converter,
@@ -464,7 +506,7 @@ class _WorkflowStreamsProvider:
     ) -> WorkflowStreamsConsumer:
         return WorkflowStreamsConsumer(
             WorkflowStreamClient.create(client, workflow_id),
-            f"{_IN}{stream}" if stream else None,
+            stream,
             self._poll_cooldown,
         )
 
