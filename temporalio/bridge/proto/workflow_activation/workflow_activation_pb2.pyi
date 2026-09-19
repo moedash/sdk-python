@@ -327,7 +327,11 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         """
     @property
     def deliver_stream_messages(self) -> global___DeliverStreamMessages:
-        """A range of a stream the workflow subscribed to."""
+        """The number below is shared with the native stream tree, which leaves 17
+        to 20 to the jobs above, and must not be reused.
+
+        A range of a stream the workflow subscribed to.
+        """
     @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
