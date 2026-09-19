@@ -36,11 +36,26 @@ def nex_gen_command() -> list[str]:
     return ["nexgen"]
 
 
+def check_version(command: list[str]) -> None:
+    # A different release on PATH would regenerate different code locally
+    # and the drift would only show in CI, so refuse before writing anything.
+    reported = subprocess.check_output([*command, "--version"], text=True).strip()
+    found = reported.split()[-1] if reported else ""
+    if found != NEX_GEN_VERSION:
+        raise SystemExit(
+            f"found nexgen {found or '?'} at {command[0]}, but the stream contract is "
+            f"generated with {NEX_GEN_VERSION}. Install it with `cargo install --locked "
+            f"nexgen --version {NEX_GEN_VERSION} --features advanced` or point "
+            "NEX_GEN_BIN at that binary."
+        )
+
+
 def generate_streams_nexus_api() -> None:
     if not contract_path.exists():
         raise RuntimeError(f"missing stream contract: {contract_path}")
 
     command = nex_gen_command()
+    check_version(command)
     shutil.rmtree(output_dir, ignore_errors=True)
     subprocess.check_call(
         [
