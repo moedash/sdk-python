@@ -13,9 +13,19 @@ import temporalio.exceptions
 from ._definitions import (
     Violation,
     _collect,
+    _format_base64,
+    _parse_base64,
     _parse_spec_integer,
     _transfer_type_convertible,
 )
+
+_APPEND_OUTPUT_DECLARED: frozenset[str] = frozenset({"cursor"})
+
+
+_READ_OUTPUT_DECLARED: frozenset[str] = frozenset({"records", "next_token"})
+
+
+_RECORD_WIRE_DECLARED: frozenset[str] = frozenset({"token", "frame"})
 
 
 class _AppendInputTransferTypeConverter(
@@ -87,6 +97,13 @@ class _AppendInputTransferTypeConverter(
             )
             if batch_index_value_parsed is not None:
                 batch_index_value = batch_index_value_parsed
+                if batch_index_value < 1:
+                    violations.append(
+                        Violation(
+                            path="batch_index",
+                            reason=f"must be >= 1, got {batch_index_value}",
+                        )
+                    )
 
         topic_value: str | None = None
         if "topic" in raw:
@@ -101,7 +118,7 @@ class _AppendInputTransferTypeConverter(
                 else:
                     topic_value = topic_value_raw
 
-        payloads_value: list[str] | None = None
+        payloads_value: list[bytes] | None = None
         if "payloads" in raw:
             payloads_value_raw = raw["payloads"]
             if payloads_value_raw is None:
@@ -114,13 +131,13 @@ class _AppendInputTransferTypeConverter(
                         Violation(path="payloads", reason="expected array")
                     )
                 else:
-                    payloads_value_list: list[str] = []
+                    payloads_value_list: list[bytes] = []
                     for payloads_value_index, payloads_value_element in enumerate(
                         typing.cast("list[typing.Any]", payloads_value_raw)
                     ):
                         payloads_value_item_path = f"payloads[{payloads_value_index}]"
                         payloads_value_item_violation_count = len(violations)
-                        payloads_value_item: str = typing.cast("typing.Any", None)
+                        payloads_value_item: bytes = typing.cast("typing.Any", None)
                         if not isinstance(payloads_value_element, str):
                             violations.append(
                                 Violation(
@@ -129,7 +146,13 @@ class _AppendInputTransferTypeConverter(
                                 )
                             )
                         else:
-                            payloads_value_item = payloads_value_element
+                            payloads_value_item_parsed = _parse_base64(
+                                payloads_value_element,
+                                payloads_value_item_path,
+                                violations,
+                            )
+                            if payloads_value_item_parsed is not None:
+                                payloads_value_item = payloads_value_item_parsed
                         if len(violations) == payloads_value_item_violation_count:
                             payloads_value_list.append(payloads_value_item)
                     payloads_value = payloads_value_list
@@ -190,11 +213,17 @@ class _AppendInputTransferTypeConverter(
             violations.append(
                 Violation(path="batch_index", reason="exceeds ±(2^53-1) integer cap")
             )
+        if value.batch_index < 1:
+            violations.append(
+                Violation(
+                    path="batch_index", reason=f"must be >= 1, got {value.batch_index}"
+                )
+            )
         out["batch_index"] = value.batch_index
         if value.topic is not None:
             out["topic"] = value.topic
         if value.payloads is not None:
-            out["payloads"] = value.payloads
+            out["payloads"] = [_format_base64(element) for element in value.payloads]
         if value.finish is not None:
             out["finish"] = value.finish
         if violations:
@@ -221,15 +250,16 @@ class AppendInput:
 
     batch_index: int
     """Counts this producer's batches from 1. The handler drops an index it has already
-    written for this producer attempt.
+    written for this producer attempt, and rejects one that skips ahead or that resumes
+    an attempt it never saw start.
     """
 
     topic: str | None = None
     """The topic to append to, when stream is empty."""
 
-    payloads: list[str] | None = None
-    """The records to write, each a base64-encoded serialized Temporal Payload. Empty on a
-    call that only finishes.
+    payloads: list[bytes] | None = None
+    """The records to write, each a serialized Temporal Payload. Empty on a call that only
+    finishes.
     """
 
     finish: bool | None = None
@@ -265,32 +295,52 @@ class _AppendOutputTransferTypeConverter(
                 else:
                     cursor_value = cursor_value_raw
 
+        additional_properties: dict[str, typing.Any] = {}
         for key in raw:
-            if key != "cursor":
-                violations.append(Violation(path=key, reason="unknown field"))
+            if key not in _APPEND_OUTPUT_DECLARED:
+                additional_properties[key] = raw[key]
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return AppendOutput(
             cursor=cursor_value,
+            additional_properties=additional_properties,
         )
 
     @typing_extensions.override
     def to_transfer_type(self, value: "AppendOutput") -> typing.Any:
+        violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
         if value.cursor is not None:
             out["cursor"] = value.cursor
+        for key, entry in value.additional_properties.items():
+            if key in _APPEND_OUTPUT_DECLARED:
+                violations.append(
+                    Violation(
+                        path=key,
+                        reason="additional property collides with declared property",
+                    )
+                )
+            else:
+                out[key] = entry
+        if violations:
+            raise temporalio.converter.create_payload_validation_error(violations)
         return out
 
 
 @_transfer_type_convertible(_AppendOutputTransferTypeConverter)
 @dataclasses.dataclass(slots=True, kw_only=True)
 class AppendOutput:
-    """Where the append landed, empty when it wrote nothing."""
+    """Where the append landed, when the store can say."""
 
     cursor: str | None = None
-    """Opaque token naming the last record written by this call. Empty when the call
-    carried no payloads.
+    """Opaque token naming the last record written by this call. Absent when the call
+    carried no payloads, when the batch was a repeat the handler dropped, or when the
+    store learns positions only at read time.
     """
+
+    additional_properties: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 class _ReadInputTransferTypeConverter(
@@ -375,6 +425,20 @@ class _ReadInputTransferTypeConverter(
                 )
                 if max_records_value_parsed is not None:
                     max_records_value = max_records_value_parsed
+                    if max_records_value < 1:
+                        violations.append(
+                            Violation(
+                                path="max_records",
+                                reason=f"must be >= 1, got {max_records_value}",
+                            )
+                        )
+                    if max_records_value > 1000:
+                        violations.append(
+                            Violation(
+                                path="max_records",
+                                reason=f"must be <= 1000, got {max_records_value}",
+                            )
+                        )
 
         wait_ms_value: int | None = None
         if "wait_ms" in raw:
@@ -389,6 +453,20 @@ class _ReadInputTransferTypeConverter(
                 )
                 if wait_ms_value_parsed is not None:
                     wait_ms_value = wait_ms_value_parsed
+                    if wait_ms_value < 0:
+                        violations.append(
+                            Violation(
+                                path="wait_ms",
+                                reason=f"must be >= 0, got {wait_ms_value}",
+                            )
+                        )
+                    if wait_ms_value > 60000:
+                        violations.append(
+                            Violation(
+                                path="wait_ms",
+                                reason=f"must be <= 60000, got {wait_ms_value}",
+                            )
+                        )
 
         latest_only_value: bool | None = None
         if "latest_only" in raw:
@@ -446,11 +524,37 @@ class _ReadInputTransferTypeConverter(
                         path="max_records", reason="exceeds ±(2^53-1) integer cap"
                     )
                 )
+            if value.max_records < 1:
+                violations.append(
+                    Violation(
+                        path="max_records",
+                        reason=f"must be >= 1, got {value.max_records}",
+                    )
+                )
+            if value.max_records > 1000:
+                violations.append(
+                    Violation(
+                        path="max_records",
+                        reason=f"must be <= 1000, got {value.max_records}",
+                    )
+                )
             out["max_records"] = value.max_records
         if value.wait_ms is not None:
             if abs(value.wait_ms) > 9007199254740991:
                 violations.append(
                     Violation(path="wait_ms", reason="exceeds ±(2^53-1) integer cap")
+                )
+            if value.wait_ms < 0:
+                violations.append(
+                    Violation(
+                        path="wait_ms", reason=f"must be >= 0, got {value.wait_ms}"
+                    )
+                )
+            if value.wait_ms > 60000:
+                violations.append(
+                    Violation(
+                        path="wait_ms", reason=f"must be <= 60000, got {value.wait_ms}"
+                    )
                 )
             out["wait_ms"] = value.wait_ms
         if value.latest_only is not None:
@@ -472,7 +576,9 @@ class ReadInput:
     """The named stream to read. Empty reads every stream the workflow publishes."""
 
     topic: str | None = None
-    """Yield only records on this topic. Empty yields every topic."""
+    """Yield only records on this topic. Empty yields every topic. Only meaningful when
+    stream is empty, because an inbound stream has no topics.
+    """
 
     after_token: str | None = None
     """Opaque cursor from an earlier record or append. The read resumes strictly after the
@@ -485,9 +591,9 @@ class ReadInput:
     """Return at most this many records. Defaults to 100 when omitted."""
 
     wait_ms: int | None = None
-    """Wait at most this long for records to arrive before answering. Defaults to 5000 when
-    omitted. A call that collects nothing answers with no records and the caller's own
-    token.
+    """Wait at most this long for records to arrive before answering. The handler shortens
+    it to fit the request deadline. A call that collects nothing answers with no records
+    and the caller's own token.
     """
 
     latest_only: bool | None = None
@@ -557,14 +663,16 @@ class _ReadOutputTransferTypeConverter(
                 else:
                     next_token_value = next_token_value_raw
 
+        additional_properties: dict[str, typing.Any] = {}
         for key in raw:
-            if key != "records" and key != "next_token":
-                violations.append(Violation(path=key, reason="unknown field"))
+            if key not in _READ_OUTPUT_DECLARED:
+                additional_properties[key] = raw[key]
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return ReadOutput(
             records=records_value,
             next_token=next_token_value,
+            additional_properties=additional_properties,
         )
 
     @typing_extensions.override
@@ -585,6 +693,16 @@ class _ReadOutputTransferTypeConverter(
             out["records"] = records_out
         if value.next_token is not None:
             out["next_token"] = value.next_token
+        for key, entry in value.additional_properties.items():
+            if key in _READ_OUTPUT_DECLARED:
+                violations.append(
+                    Violation(
+                        path=key,
+                        reason="additional property collides with declared property",
+                    )
+                )
+            else:
+                out[key] = entry
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return out
@@ -602,6 +720,10 @@ class ReadOutput:
     """Opaque cursor to pass as after_token on the following call. Echoes the caller's own
     token when the call collected nothing.
     """
+
+    additional_properties: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 class _RecordWireTransferTypeConverter(
@@ -628,7 +750,7 @@ class _RecordWireTransferTypeConverter(
             else:
                 token_value = token_value_raw
 
-        frame_value: str = typing.cast("typing.Any", None)
+        frame_value: bytes = typing.cast("typing.Any", None)
         if "frame" not in raw or raw["frame"] is None:
             violations.append(Violation(path="frame", reason="required"))
         else:
@@ -636,35 +758,54 @@ class _RecordWireTransferTypeConverter(
             if not isinstance(frame_value_raw, str):
                 violations.append(Violation(path="frame", reason="expected string"))
             else:
-                frame_value = frame_value_raw
+                frame_value_parsed = _parse_base64(frame_value_raw, "frame", violations)
+                if frame_value_parsed is not None:
+                    frame_value = frame_value_parsed
 
+        additional_properties: dict[str, typing.Any] = {}
         for key in raw:
-            if key != "token" and key != "frame":
-                violations.append(Violation(path=key, reason="unknown field"))
+            if key not in _RECORD_WIRE_DECLARED:
+                additional_properties[key] = raw[key]
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return RecordWire(
             token=token_value,
             frame=frame_value,
+            additional_properties=additional_properties,
         )
 
     @typing_extensions.override
     def to_transfer_type(self, value: "RecordWire") -> typing.Any:
+        violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
         out["token"] = value.token
-        out["frame"] = value.frame
+        out["frame"] = _format_base64(value.frame)
+        for key, entry in value.additional_properties.items():
+            if key in _RECORD_WIRE_DECLARED:
+                violations.append(
+                    Violation(
+                        path=key,
+                        reason="additional property collides with declared property",
+                    )
+                )
+            else:
+                out[key] = entry
+        if violations:
+            raise temporalio.converter.create_payload_validation_error(violations)
         return out
 
 
 @_transfer_type_convertible(_RecordWireTransferTypeConverter)
 @dataclasses.dataclass(slots=True, kw_only=True)
 class RecordWire:
-    """One record on the wire: its cursor and its base64 frame."""
+    """One record on the wire: its cursor and its frame."""
 
     token: str
     """Opaque cursor naming this record. Pass it as after_token to resume just past it."""
 
-    frame: str
-    """The base64-encoded record frame, carrying the topic, kind, producer, attempt,
-    sequence and body.
-    """
+    frame: bytes
+    """The record frame, carrying the topic, kind, producer, attempt, sequence and body."""
+
+    additional_properties: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict
+    )

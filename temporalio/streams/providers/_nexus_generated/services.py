@@ -24,9 +24,11 @@ class TemporalStreams:
         AppendInput,
         AppendOutput,
     ] = Operation(name="append")
-    """Append one batch on the caller's account. A repeated batch_index for the same
-    producer attempt is dropped, so a retried call writes once. Supersession records are
-    not transported: a reader re-synthesizes them from the attempts it observes.
+    """Append one batch on the caller's account. The handler drops a batch_index it has
+    already written for this producer attempt, so a retried call writes once, and
+    rejects an index that skips ahead or a producer attempt it has no state for.
+    Supersession records are not transported: a reader re-synthesizes them from the
+    attempts it observes.
     """
 
     read: Operation[
