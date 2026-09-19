@@ -8,20 +8,24 @@ consumes ranges the server attaches to the workflow task it dispatches.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, workflow
+from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.client_stream import StreamClient
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
+from temporalio.streams._ids import inbound_stream_id
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
 _RUN_STATE = "__temporal_streams_state"
+
+logger = logging.getLogger(__name__)
 
 
 class _Fanout:
@@ -102,18 +106,6 @@ class _NativeWriteSink:
         # to pay for. The signature is awaitable because the contract allows a
         # provider that does hold a publisher back.
         workflow.add_stream_messages([frame], stream_id="", topic=self._topic)
-
-
-def inbound_stream_id(workflow_id: str, stream: str) -> str:
-    """The server-side id of a workflow's inbound stream.
-
-    A workflow names its streams relative to itself, so every provider can
-    address the same thing without workflow code knowing how it is stored.
-    Here that is a namespace-level stream id built from the pair, and the
-    workflow id rather than the run id because the stream has to survive
-    continue-as-new and reset.
-    """
-    return f"{workflow_id}:{stream}"
 
 
 def _reject_configured_codec(client: Client) -> None:
@@ -200,8 +192,10 @@ class NativeProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append values and return where the first one landed."""
+    async def append(self, *values: Any) -> Cursor | None:
+        """Append ``values`` and return the last one's cursor, or ``None`` if nothing landed."""
+        if not values:
+            return None
         frames = []
         for value in values:
             frames.append(
@@ -215,7 +209,7 @@ class NativeProducer:
                 )
             )
             self._sequence += 1
-        offset = await self._handle.append(
+        appended = await self._handle.append(
             *frames,
             topic=self._topic,
             producer_id=self._provider_id,
@@ -223,7 +217,9 @@ class NativeProducer:
             # different job from telling readers that a new generation started.
             sequence=self._sequence - len(frames),
         )
-        return Cursor(str(offset))
+        if appended.deduplicated:
+            return None
+        return Cursor(str(appended.next_offset - 1))
 
     async def finish(self) -> None:
         """Declare this stream complete."""
@@ -255,10 +251,16 @@ class NativeProducer:
 class NativeConsumer:
     """Reads a stream from outside workflow code, resumably."""
 
-    def __init__(self, handle: Any, converter: Any) -> None:
-        """Read the stream ``handle`` names, from anywhere."""
+    def __init__(self, handle: Any, converter: Any, stream: str, address: str) -> None:
+        """Read the stream ``handle`` names, from anywhere.
+
+        ``stream`` is the inbound name the caller used, empty for the owner's
+        stream; ``address`` is what the server calls it, for log lines.
+        """
         self._handle = handle
         self._converter = converter
+        self._stream = stream
+        self._address = address
 
     async def read(
         self,
@@ -266,12 +268,13 @@ class NativeConsumer:
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield the records after ``after`` as they arrive.
 
         Applies the same supersession rule as a workflow reader, so a browser
         and a workflow watching one activity agree on which attempt is current.
         """
+        _provider.check_topic(self._stream, topic)
         attempts = AttemptTracker()
         async for message in self._handle.follow(
             from_offset=int(after.token) + 1 if after.token else 0
@@ -281,7 +284,11 @@ class NativeConsumer:
                 kind, frame_topic, source, attempt, sequence, body = _frame.decode(
                     message.data
                 )
-            except ValueError:
+            except ValueError as error:
+                # Same answer as the workflow-side reader: skip and say so.
+                logger.warning(
+                    "skipping record %s of stream %s: %s", cursor, self._address, error
+                )
                 continue
             if topic is not None and frame_topic != topic:
                 continue
@@ -373,22 +380,19 @@ class _NativeProvider:
     ) -> NativeProducer:
         """Open a producer on ``workflow_id``'s account.
 
-        ``stream`` names an inbound stream; with none, ``topic`` names a topic
-        on the stream the workflow publishes, which the server lets any
-        producer append to. Inside an activity, leave ``producer_id`` and
-        ``attempt`` unset: the activity's own id and attempt are the right
-        answer and are what let a reader tell a retry from a new generation.
+        ``stream`` names an inbound stream, a namespace-level stream the
+        server keys by the pair. With none, ``topic`` names a topic on the
+        stream the workflow publishes, which the server lets any producer
+        append to. An inbound record carries no topic: the stream's name is
+        its whole address.
         """
         _reject_configured_codec(client)
-        if not producer_id:
-            producer_id = activity.info().activity_id
-        if not attempt:
-            attempt = activity.info().attempt
         streams = _stream_client(client)
+        converter = client.data_converter.payload_converter
         if not stream:
             return NativeProducer(
                 streams.workflow_stream(workflow_id),
-                client.data_converter.payload_converter,
+                converter,
                 topic,
                 producer_id,
                 attempt,
@@ -404,13 +408,7 @@ class _NativeProvider:
                 # exception.
                 handle = streams.get(stream_id)
             _handles[stream_id] = handle
-        return NativeProducer(
-            handle,
-            client.data_converter.payload_converter,
-            stream,
-            producer_id,
-            attempt,
-        )
+        return NativeProducer(handle, converter, topic, producer_id, attempt)
 
     async def consumer(
         self, client: Client, *, workflow_id: str, stream: str = ""
@@ -423,11 +421,14 @@ class _NativeProvider:
         """
         _reject_configured_codec(client)
         streams = _stream_client(client)
+        address = inbound_stream_id(workflow_id, stream)
         if stream:
-            handle: Any = streams.get(inbound_stream_id(workflow_id, stream))
+            handle: Any = streams.get(address)
         else:
             handle = streams.workflow_stream(workflow_id)
-        return NativeConsumer(handle, client.data_converter.payload_converter)
+        return NativeConsumer(
+            handle, client.data_converter.payload_converter, stream, address
+        )
 
 
 _provider.register("native", _NativeProvider)

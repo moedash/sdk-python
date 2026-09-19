@@ -40,8 +40,10 @@ async def stream() -> AsyncIterator[StreamHandle]:
 
 
 async def test_append_returns_the_offset_it_landed_at(stream: StreamHandle) -> None:
-    assert await stream.append(b"alpha", b"beta") == 0
-    assert await stream.append(b"gamma") == 2
+    first = await stream.append(b"alpha", b"beta")
+    assert (first.first_offset, first.next_offset, first.count) == (0, 2, 2)
+    assert not first.deduplicated
+    assert (await stream.append(b"gamma")).first_offset == 2
 
 
 async def test_read_from_an_offset(stream: StreamHandle) -> None:
@@ -69,7 +71,10 @@ async def test_read_past_the_end_returns_nothing(stream: StreamHandle) -> None:
 async def test_append_is_idempotent_for_a_named_producer(stream: StreamHandle) -> None:
     first = await stream.append(b"once", producer_id="p1", sequence=1)
     retry = await stream.append(b"once", producer_id="p1", sequence=1)
-    assert first == retry == 0
+    assert first.first_offset == retry.first_offset == 0
+    assert not first.deduplicated
+    # The retry is told it wrote nothing, so a producer can report no position.
+    assert retry.deduplicated
 
     messages, _ = await stream.read()
     assert [m.data for m in messages] == [b"once"]
