@@ -61,6 +61,13 @@ to include examples, links to docs, or any other relevant information.
   Configure it with `data_converter=` to run a payload codec on the caller
   side, so records are encoded before they leave the process.
 - Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
+- **Experimental**: server-side streams. A workflow reads a stream the server
+  delivers on its Workflow Tasks and publishes with a command, through
+  `temporalio.workflow.read_stream`, `subscribe_stream` and
+  `add_stream_messages`. `temporalio.client_stream` and
+  `temporalio.contrib.server_streams` reach the same stream from outside a
+  workflow, and `temporalio.streams.providers.native` puts it behind the shared
+  stream interface. Requires a server that serves the stream service.
 
 ### Changed
 

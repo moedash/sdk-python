@@ -23,6 +23,8 @@ change before this is a real feature:
 
 from __future__ import annotations
 
+import asyncio
+import weakref
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -33,7 +35,30 @@ import temporalio.api.common.v1
 import temporalio.api.streamservice.v1 as stream
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 
-__all__ = ["Message", "Page", "StreamClient", "StreamHandle", "WorkflowStreamHandle"]
+__all__ = [
+    "Appended",
+    "Message",
+    "Page",
+    "StreamClient",
+    "StreamHandle",
+    "WorkflowStreamHandle",
+    "close_shared_clients",
+    "shared_client",
+]
+
+
+@dataclass(frozen=True)
+class Appended:
+    """Where one append landed.
+
+    ``deduplicated`` says the server already held this producer's batch at
+    this sequence and wrote nothing; the offsets are then the original ones.
+    """
+
+    first_offset: int
+    next_offset: int
+    count: int
+    deduplicated: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,7 +168,7 @@ class StreamClient:
         return StreamHandle(self._stub, self._namespace, stream_id)
 
     def workflow_stream(
-        self, workflow_id: str, name: str = ""
+        self, workflow_id: str, name: str = "", *, owner_run_id: str = ""
     ) -> "WorkflowStreamHandle":
         """Open a stream a workflow publishes to.
 
@@ -156,8 +181,13 @@ class StreamClient:
         does not exist yet is not an error: it reads as empty and a
         :meth:`WorkflowStreamHandle.follow` parked on it wakes when the
         workflow publishes.
+
+        ``owner_run_id`` pins the handle to one run of the workflow; see
+        :meth:`WorkflowStreamHandle.pin` for why a follower wants that.
         """
-        return WorkflowStreamHandle(self._stub, self._namespace, workflow_id, name)
+        return WorkflowStreamHandle(
+            self._stub, self._namespace, workflow_id, name, owner_run_id
+        )
 
 
 class StreamHandle:
@@ -185,13 +215,14 @@ class StreamHandle:
         topic: str = "",
         producer_id: str = "",
         sequence: int = 0,
-    ) -> int:
-        """Append messages and return the offset the first one landed at.
+    ) -> Appended:
+        """Append messages and return where they landed.
 
         Supplying ``producer_id`` and ``sequence`` makes the append idempotent:
         a retry with the same pair returns the original offsets rather than
-        appending twice. Without them the append is at-least-once, which is
-        only the right trade when duplicates are harmless.
+        appending twice, and says so. Without them the append is
+        at-least-once, which is only the right trade when duplicates are
+        harmless.
         """
         response = await self._stub.AddMessages(
             stream.AddMessagesRequest(
@@ -214,7 +245,7 @@ class StreamHandle:
                 )
             )
         )
-        return response.frontend_response.first_offset
+        return _appended(response.frontend_response)
 
     async def read(
         self,
@@ -328,13 +359,19 @@ class WorkflowStreamHandle:
     """
 
     def __init__(
-        self, stub: Any, namespace: str, workflow_id: str, name: str = ""
+        self,
+        stub: Any,
+        namespace: str,
+        workflow_id: str,
+        name: str = "",
+        owner_run_id: str = "",
     ) -> None:
         """Prefer :meth:`StreamClient.workflow_stream`."""
         self._stub = stub
         self._namespace = namespace
         self._workflow_id = workflow_id
         self._name = name
+        self._owner_run_id = owner_run_id
 
     @property
     def workflow_id(self) -> str:
@@ -346,13 +383,32 @@ class WorkflowStreamHandle:
         """Name the owner publishes under, empty for its default stream."""
         return self._name
 
+    @property
+    def owner_run_id(self) -> str:
+        """The run this handle is pinned to, empty while it follows the current run."""
+        return self._owner_run_id
+
+    def pin(self, run_id: str) -> None:
+        """Address one run of the workflow from now on.
+
+        Unpinned, every call resolves to whichever run is current. A follower
+        holding an offset from one run would then be redirected when the
+        workflow continues as new: the successor's stream starts empty at
+        offset zero, so the server reads the follower's offset as "caught up",
+        parks it until the successor has published that many records, and
+        then skips exactly that many. Pinned, the run's end shows up as
+        ``closed`` on the page, and the caller decides whether to follow the
+        successor from the beginning.
+        """
+        self._owner_run_id = run_id
+
     async def append(
         self,
         *messages: bytes,
         topic: str = "",
         producer_id: str = "",
         sequence: int = 0,
-    ) -> int:
+    ) -> Appended:
         """Append from outside the workflow, as :meth:`StreamHandle.append`.
 
         Batch where you can. The append costs one transition on the owning
@@ -364,6 +420,7 @@ class WorkflowStreamHandle:
                 frontend_request=stream.AddWorkflowMessagesInput(
                     namespace=self._namespace,
                     workflow_id=self._workflow_id,
+                    owner_run_id=self._owner_run_id,
                     stream_name=self._name,
                     messages=[
                         stream.StreamMessage(
@@ -380,7 +437,7 @@ class WorkflowStreamHandle:
                 )
             )
         )
-        return response.frontend_response.first_offset
+        return _appended(response.frontend_response)
 
     async def read(
         self,
@@ -396,6 +453,7 @@ class WorkflowStreamHandle:
                 frontend_request=stream.PollWorkflowMessagesInput(
                     namespace=self._namespace,
                     workflow_id=self._workflow_id,
+                    owner_run_id=self._owner_run_id,
                     stream_name=self._name,
                     from_offset=from_offset,
                     max_messages=max_messages,
@@ -438,12 +496,14 @@ class WorkflowStreamHandle:
 
         :meth:`read` is the same call without the frontier and the closed flag.
         A caller that has to tell "nothing yet" from "nothing ever" needs both.
+        On a pinned handle ``closed`` also says the run has ended.
         """
         response = await self._stub.PollWorkflowMessages(
             stream.PollWorkflowMessagesRequest(
                 frontend_request=stream.PollWorkflowMessagesInput(
                     namespace=self._namespace,
                     workflow_id=self._workflow_id,
+                    owner_run_id=self._owner_run_id,
                     stream_name=self._name,
                     from_offset=from_offset,
                     max_messages=max_messages,
@@ -474,8 +534,50 @@ class WorkflowStreamHandle:
                 frontend_request=stream.DescribeWorkflowStreamInput(
                     namespace=self._namespace,
                     workflow_id=self._workflow_id,
+                    owner_run_id=self._owner_run_id,
                     stream_name=self._name,
                 )
             )
         )
         return response.frontend_response.state
+
+
+def _appended(out: stream.AddMessagesOutput) -> Appended:
+    return Appended(
+        first_offset=out.first_offset,
+        next_offset=out.next_offset,
+        count=out.count,
+        deduplicated=out.deduplicated,
+    )
+
+
+# One channel per loop, target and namespace, shared by every handle in the
+# process. A channel is multiplexed and long lived, and callers open a handle
+# per subscription, which would otherwise be a connection per subscription. The
+# loop is the key because a grpc.aio channel belongs to the loop that made it,
+# and it is held weakly so a loop that is gone cannot lend its channel to a
+# successor that happens to reuse its id.
+_shared: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[str, str], StreamClient]
+] = weakref.WeakKeyDictionary()
+
+
+def shared_client(target_host: str, namespace: str) -> StreamClient:
+    """The process-wide client for ``target_host`` and ``namespace`` on this loop."""
+    per_loop = _shared.setdefault(asyncio.get_running_loop(), {})
+    key = (target_host, namespace)
+    existing = per_loop.get(key)
+    if existing is None:
+        existing = per_loop[key] = StreamClient.connect(target_host, namespace)
+    return existing
+
+
+async def close_shared_clients() -> None:
+    """Close every shared client this loop opened.
+
+    For a process that is done with streams, and for tests, which open a
+    loop per case and would otherwise leave a channel behind on each.
+    """
+    per_loop = _shared.pop(asyncio.get_running_loop(), {})
+    for client in per_loop.values():
+        await client.close()
