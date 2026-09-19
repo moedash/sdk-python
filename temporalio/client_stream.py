@@ -33,7 +33,28 @@ import temporalio.api.common.v1
 import temporalio.api.streamservice.v1 as stream
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 
-__all__ = ["Message", "Page", "StreamClient", "StreamHandle", "WorkflowStreamHandle"]
+__all__ = [
+    "Appended",
+    "Message",
+    "Page",
+    "StreamClient",
+    "StreamHandle",
+    "WorkflowStreamHandle",
+]
+
+
+@dataclass(frozen=True)
+class Appended:
+    """Where one append landed.
+
+    ``deduplicated`` says the server already held this producer's batch at
+    this sequence and wrote nothing; the offsets are then the original ones.
+    """
+
+    first_offset: int
+    next_offset: int
+    count: int
+    deduplicated: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,13 +206,14 @@ class StreamHandle:
         topic: str = "",
         producer_id: str = "",
         sequence: int = 0,
-    ) -> int:
-        """Append messages and return the offset the first one landed at.
+    ) -> Appended:
+        """Append messages and return where they landed.
 
         Supplying ``producer_id`` and ``sequence`` makes the append idempotent:
         a retry with the same pair returns the original offsets rather than
-        appending twice. Without them the append is at-least-once, which is
-        only the right trade when duplicates are harmless.
+        appending twice, and says so. Without them the append is
+        at-least-once, which is only the right trade when duplicates are
+        harmless.
         """
         response = await self._stub.AddMessages(
             stream.AddMessagesRequest(
@@ -214,7 +236,7 @@ class StreamHandle:
                 )
             )
         )
-        return response.frontend_response.first_offset
+        return _appended(response.frontend_response)
 
     async def read(
         self,
@@ -352,7 +374,7 @@ class WorkflowStreamHandle:
         topic: str = "",
         producer_id: str = "",
         sequence: int = 0,
-    ) -> int:
+    ) -> Appended:
         """Append from outside the workflow, as :meth:`StreamHandle.append`.
 
         Batch where you can. The append costs one transition on the owning
@@ -380,7 +402,7 @@ class WorkflowStreamHandle:
                 )
             )
         )
-        return response.frontend_response.first_offset
+        return _appended(response.frontend_response)
 
     async def read(
         self,
@@ -479,3 +501,12 @@ class WorkflowStreamHandle:
             )
         )
         return response.frontend_response.state
+
+
+def _appended(out: stream.AddMessagesOutput) -> Appended:
+    return Appended(
+        first_offset=out.first_offset,
+        next_offset=out.next_offset,
+        count=out.count,
+        deduplicated=out.deduplicated,
+    )
