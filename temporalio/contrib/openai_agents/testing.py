@@ -74,8 +74,8 @@ class ResponseBuilders:
         return ResponseBuilders.model_response(
             ResponseFunctionToolCall(
                 arguments=arguments,
-                # A script that calls two tools hands the same completed id to
-                # two invocations, which the Agents SDK now rejects.
+                # The Agents SDK rejects two invocations sharing one completed
+                # call id, and a script that calls two tools would hand them one.
                 call_id=f"call-{uuid.uuid4()}",
                 name=name,
                 type="function_call",

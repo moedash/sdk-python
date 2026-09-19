@@ -1,9 +1,8 @@
 """Pick the provider for a demo run from the environment.
 
-``STREAMS_PROVIDER`` names any registered provider; this base tree carries
-only ``memory``, and each provider branch adds its own name. The demo needs a
-Temporal server to run the workflow either way; ``TEMPORAL_ADDRESS`` points
-at it.
+``STREAMS_PROVIDER`` names any registered provider; this tree carries
+``memory`` and ``redis``. The demo needs a Temporal server to run the
+workflow either way; ``TEMPORAL_ADDRESS`` points at it.
 """
 
 from __future__ import annotations
