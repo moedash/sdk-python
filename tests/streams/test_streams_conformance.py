@@ -19,6 +19,7 @@ workflow tasks live in ``test_streams_workflow``.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from typing import Any
 import pytest
 
 from temporalio import streams
+from temporalio.client import Client
 from temporalio.streams import _frame, _ids, _provider
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import Cursor, RecordKind
@@ -58,7 +60,27 @@ async def _memory_case() -> AsyncIterator[ProviderCase]:
     memory.reset()
 
 
+async def _native_case() -> AsyncIterator[ProviderCase]:
+    streams.configure(provider="native")
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
+    # The execution only has to exist for the server to attach a stream to
+    # it; no worker ever picks the task up, and the case terminates it.
+    owner = await client.start_workflow(
+        "StreamOwner",
+        id=new_workflow_id(),
+        task_queue="streams-conformance-unserved",
+    )
+    try:
+        yield ProviderCase("native", client, workflow_id=owner.id)
+    finally:
+        await owner.terminate("conformance case finished")
+        await streams.close()
+
+
 SETUPS: dict[str, Callable[[], AsyncIterator[ProviderCase]]] = {"memory": _memory_case}
+if os.environ.get("STREAMS_LIVE") == "native":
+    # Needs a server built from the stream-carrying branch at TEMPORAL_ADDRESS.
+    SETUPS["native"] = _native_case
 
 _CAPABILITIES = {
     "inbound_stream": lambda case: case.inbound_streams,
