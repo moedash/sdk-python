@@ -29,6 +29,12 @@ to include examples, links to docs, or any other relevant information.
   stream interface over the shipped Workflow Streams transport, so a workflow
   reads and publishes through `temporalio.contrib.workflow_streams` without
   naming it.
+- **Experimental**: `temporalio.streams.providers.nexus` puts one Nexus
+  endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store. Its contract is defined in
+  `temporal_streams.nexusrpc.yaml` and the bindings are generated from it.
+  Configure it with `data_converter=` to run a payload codec on the caller
+  side, so records are encoded before they leave the process.
 
 ### Changed
 
