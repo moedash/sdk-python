@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from temporalio import activity, streams, workflow
+from temporalio.common import RetryPolicy
 
 
 @activity.defn
@@ -63,20 +64,25 @@ class Agent:
         inputs = streams.reader("inputs", type=dict, idle_timeout=timedelta(seconds=1))
         decisions = streams.writer("decisions")
 
-        await workflow.start_activity(
+        generating = workflow.start_activity(
             generate,
             args=[workflow.info().workflow_id, count],
             start_to_close_timeout=timedelta(minutes=1),
+            # Bounded, so a generator that cannot finish gives up instead of
+            # retrying forever while every attempt streams from the start.
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
         seen = 0
         async for record in inputs:
             if record.kind is streams.RecordKind.FINISH:
                 break
-            if record.kind is streams.RecordKind.SUPERSEDED:
+            if isinstance(record.value, streams.Supersession):
                 await decisions.publish(
                     {"retracting_attempt": record.value.previous_attempt}
                 )
+                continue
+            if not isinstance(record.value, dict):
                 continue
             seen += 1
             decision = {"echo": record.value["n"]}
@@ -86,6 +92,11 @@ class Agent:
                 decision,
                 start_to_close_timeout=timedelta(minutes=1),
             )
+            if seen >= count:
+                break
+        # A generator that exhausted its attempts fails the run with its cause
+        # here, rather than being forgotten once the loop has what it wanted.
+        await generating
 
         await decisions.finish()
         await workflow.wait_condition(lambda: self._done)
