@@ -19,6 +19,7 @@ workflow tasks live in ``test_streams_workflow``.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from typing import Any
 import pytest
 
 from temporalio import streams
+from temporalio.client import Client
 from temporalio.streams import _frame, _ids, _provider
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import Cursor, RecordKind
@@ -65,7 +67,40 @@ async def _memory_case() -> AsyncIterator[ProviderCase]:
     memory.reset()
 
 
+async def _redis_case() -> AsyncIterator[ProviderCase]:
+    # A prefix per case, because the store keeps what earlier cases wrote.
+    streams.configure(
+        provider="redis", key_prefix=f"streams-conformance-{uuid.uuid4().hex}"
+    )
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
+    # The store keys a workflow's streams under its chain, which is read from
+    # the execution, so one has to exist; no worker ever picks its task up.
+    owner = await client.start_workflow(
+        "StreamOwner",
+        id=new_workflow_id(),
+        task_queue="streams-conformance-unserved",
+    )
+    try:
+        yield ProviderCase(
+            "redis",
+            client,
+            workflow_id=owner.id,
+            # Each topic is its own store, and an inbound stream is not
+            # readable from outside; a dropped repeat answers with the
+            # original position because the store's seam does not say.
+            inbound_streams=False,
+            unfiltered_reads=False,
+            reports_dropped_repeats=False,
+        )
+    finally:
+        await owner.terminate("conformance case finished")
+        await streams.close()
+
+
 SETUPS: dict[str, Callable[[], AsyncIterator[ProviderCase]]] = {"memory": _memory_case}
+if os.environ.get("STREAMS_LIVE") == "redis":
+    # Needs a dev server at TEMPORAL_ADDRESS and a Redis at TEMPORAL_TEST_REDIS_URL.
+    SETUPS["redis"] = _redis_case
 
 _CAPABILITIES = {
     "inbound_stream": lambda case: case.inbound_streams,
