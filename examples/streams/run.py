@@ -1,9 +1,16 @@
-"""Run the same agent on whichever provider is configured.
+r"""Run the same agent on whichever provider is configured.
 
     python -m examples.streams.run workflow_streams
-    python -m examples.streams.run redis     --redis redis://127.0.0.1:6399
+    python -m examples.streams.run redis     --redis redis://127.0.0.1:6379
     python -m examples.streams.run native    --address 127.0.0.1:7233
     python -m examples.streams.run nexus     --endpoint <endpoint-id>
+
+The Nexus mode needs an endpoint that routes to the handler worker's task
+queue, and the flag takes the endpoint's id, not its name::
+
+    temporal operator nexus endpoint create --name streams-e2e \
+        --target-task-queue streams-handlers-e2e
+    temporal operator nexus endpoint get --name streams-e2e -o json | jq -r .id
 
 The only provider-specific code in this file is :func:`configure_provider`,
 which turns a name into one ``streams.configure`` call. Everything below it,
@@ -14,11 +21,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import uuid
 
 from examples.streams.agent import Agent, generate, record_decision
 from temporalio import streams
 from temporalio.client import Client
+from temporalio.streams import instance
 from temporalio.worker import Worker
 
 
@@ -55,7 +64,7 @@ async def ensure_stream(
     if args.provider != "native":
         return
     from temporalio.client_stream import StreamClient
-    from temporalio.streams.providers.native import inbound_stream_id
+    from temporalio.streams._ids import inbound_stream_id
 
     streams_client = StreamClient.connect(args.address, client.namespace)
     await streams_client.create(inbound_stream_id(workflow_id, "inputs"))
@@ -68,8 +77,6 @@ def outside_surface(args: argparse.Namespace):
     one, otherwise straight at the configured provider.
     """
     if args.provider == "nexus":
-        from temporalio.streams._provider import instance
-
         return instance("nexus", endpoint=args.endpoint, http_address=args.http)
     return streams
 
@@ -81,8 +88,12 @@ async def main() -> None:
         "provider", choices=["workflow_streams", "redis", "native", "nexus"]
     )
     parser.add_argument("--address", default="localhost:7233")
-    parser.add_argument("--redis", default="redis://127.0.0.1:6399")
-    parser.add_argument("--endpoint", default="", help="nexus endpoint id")
+    parser.add_argument("--redis", default="redis://127.0.0.1:6379")
+    parser.add_argument(
+        "--endpoint",
+        default="",
+        help="nexus endpoint id, not its name; see streams_demo/README.md",
+    )
     parser.add_argument("--http", default="http://127.0.0.1:7243")
     parser.add_argument(
         "--behind",
@@ -129,45 +140,49 @@ async def main() -> None:
             )
         )
 
-    async with workers[0]:
-        async with workers[-1] if len(workers) > 1 else _null():
-            await ensure_stream(args, client, workflow_id)
-            handle = await client.start_workflow(
-                Agent.run, args.records, id=workflow_id, task_queue=task_queue
-            )
-            print(f"provider={args.provider} workflow={workflow_id}")
+    async with contextlib.AsyncExitStack() as running:
+        for worker in workers:
+            await running.enter_async_context(worker)
+        await ensure_stream(args, client, workflow_id)
+        handle = await client.start_workflow(
+            Agent.run, args.records, id=workflow_id, task_queue=task_queue
+        )
+        print(f"provider={args.provider} workflow={workflow_id}")
 
-            reader = await outside_surface(args).consumer(
-                client if args.provider != "nexus" else None,
-                workflow_id=workflow_id,
-            )
-            seen = 0
-            records = reader.read(type=dict, topic="decisions")
-            try:
-                async for record in records:
-                    print(
-                        f"  {record.kind.name:11} {record.value} at {record.cursor.token}"
-                    )
-                    if record.kind is streams.RecordKind.FINISH:
-                        break
-                    seen += 1
-            finally:
-                # Closed before the workflow is released, because a reader
-                # still polling this run would have its in-flight poll
-                # cancelled when the workflow lets its readers go.
-                await records.aclose()
+        reader = await outside_surface(args).consumer(
+            client if args.provider != "nexus" else None,
+            workflow_id=workflow_id,
+        )
+        # Counted apart: a retried generator makes the workflow retract the
+        # earlier attempt, and those records are correct output rather than
+        # echoes that the workflow's own count would have to agree with.
+        echoes = retractions = 0
+        records = reader.read(type=dict, topic="decisions")
+        try:
+            async for record in records:
+                print(
+                    f"  {record.kind.name:11} {record.value} at {record.cursor.token}"
+                )
+                if record.kind is streams.RecordKind.FINISH:
+                    break
+                if record.kind is not streams.RecordKind.DATA:
+                    continue
+                if isinstance(record.value, dict) and "echo" in record.value:
+                    echoes += 1
+                else:
+                    retractions += 1
+        finally:
+            # Closed before the workflow is released, because a reader
+            # still polling this run would have its in-flight poll
+            # cancelled when the workflow lets its readers go.
+            await records.aclose()
 
-            await handle.signal(Agent.release)
-            decided = await handle.result()
-            print(f"workflow decided {decided}, reader saw {seen}")
-
-
-class _null:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
+        await handle.signal(Agent.release)
+        decided = await handle.result()
+        print(
+            f"workflow decided {decided}; reader saw {echoes} echoes and "
+            f"{retractions} retractions"
+        )
 
 
 if __name__ == "__main__":
