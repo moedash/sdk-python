@@ -32,11 +32,8 @@ pytestmark = pytest.mark.skipif(
 
 STREAM = "output"
 
-# Event type numbers rather than names: this SDK's api protos predate both
-# events, so the attributes arrive as unknown fields and only the type is
-# readable here. The server's own tests are where the offsets are asserted.
-EVENT_STREAM_SUBSCRIBED = 61
-EVENT_STREAM_MESSAGES_ADDED = 62
+EVENT_STREAM_SUBSCRIBED = EventType.EVENT_TYPE_WORKFLOW_STREAM_SUBSCRIBED
+EVENT_STREAM_MESSAGES_ADDED = EventType.EVENT_TYPE_WORKFLOW_STREAM_MESSAGES_ADDED
 
 
 @workflow.defn
