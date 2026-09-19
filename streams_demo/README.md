@@ -51,14 +51,30 @@ provider it is configured with. Workers still configure a storage provider,
 because workflow reads and writes ride the Workflow Task.
 
 ```python
-front = streams._provider.instance("nexus", endpoint=endpoint_id)
+front = streams.instance("nexus", endpoint=endpoint_id)
 producer = await front.producer(None, workflow_id=wid, stream="inputs",
                                 producer_id="model", attempt=1)
 ```
 
-See `tests/streams/test_nexus_provider.py` for the endpoint setup and the
-handler worker.
+The endpoint has to exist and route to the handler worker's task queue, and
+the provider takes its id rather than its name:
+
+```sh
+temporal operator nexus endpoint create --name streams-e2e \
+    --target-task-queue streams-handlers-e2e
+temporal operator nexus endpoint get --name streams-e2e -o json | jq -r .id
+```
+
+See `tests/streams/test_nexus_provider.py` for the handler worker, and
+`examples/streams/run.py nexus --endpoint <id>` for the whole loop behind it.
 
 The conformance suite runs the same expectations on every provider:
 `pytest tests/streams/` (in-memory, no server), plus
 `STREAMS_LIVE=workflow_streams|nexus` for the live suites.
+
+## The examples
+
+`examples/streams/` is the same thing written as a worked example rather than
+a measurement run: `agent.py` holds the workflow and activities, identical on
+every provider, and `run.py` picks one. See its `configure_provider`, which
+is the whole difference between the options.

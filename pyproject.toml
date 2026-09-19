@@ -272,7 +272,7 @@ reportUnnecessaryIsInstance = "none"
 reportUnnecessaryTypeIgnoreComment = "none"
 reportUnusedCallResult = "none"
 reportUnknownLambdaType = "none"
-include = ["temporalio", "tests"]
+include = ["temporalio", "tests", "examples"]
 exclude = [
   # Exclude auto generated files
   "temporalio/api",
