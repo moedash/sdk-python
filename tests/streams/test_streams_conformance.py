@@ -119,12 +119,12 @@ def test_supersession_is_synthesized_from_observations():
     assert attempts.note("model", 2, Cursor("2")) is None
 
 
-def test_stream_keys_cannot_collide():
+def test_inbound_stream_ids_cannot_collide():
     # A colon in a workflow id must not make two addresses one key.
-    assert _ids.stream_key("a:b", "c") != _ids.stream_key("a", "b:c")
-    assert _ids.stream_key("a:b", "") != _ids.stream_key("a", "b")
-    assert _ids.stream_key("a%3Ab", "c") != _ids.stream_key("a:b", "c")
-    assert _ids.stream_key("wf", "inputs") == "wf:inputs"
+    assert _ids.inbound_stream_id("a:b", "c") != _ids.inbound_stream_id("a", "b:c")
+    assert _ids.inbound_stream_id("a:b", "") != _ids.inbound_stream_id("a", "b")
+    assert _ids.inbound_stream_id("a%3Ab", "c") != _ids.inbound_stream_id("a:b", "c")
+    assert _ids.inbound_stream_id("wf", "inputs") == "wf:inputs"
 
 
 async def test_append_read_roundtrip(provider: ProviderCase):

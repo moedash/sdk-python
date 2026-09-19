@@ -27,7 +27,7 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
-from temporalio.streams._ids import stream_key
+from temporalio.streams._ids import inbound_stream_id
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
@@ -317,13 +317,13 @@ class _MemoryProvider:
         # idle_timeout as the poll period would give the parameter a second
         # meaning that a port copying the reference would copy too.
         del idle_timeout
-        store = _stream(stream_key(workflow.info().workflow_id, stream))
+        store = _stream(inbound_stream_id(workflow.info().workflow_id, stream))
         return _MemReadSource(
             store, int(after.token) + 1 if after.token else 0, self._poll
         )
 
     def open_write(self, topic: str) -> WriteSink:
-        store = _stream(stream_key(workflow.info().workflow_id, ""))
+        store = _stream(inbound_stream_id(workflow.info().workflow_id, ""))
         return _MemWriteSink(store, topic)
 
     async def producer(
@@ -340,7 +340,7 @@ class _MemoryProvider:
         # own writer appends to, and the frame carries the topic. An inbound
         # record carries none: the stream's name is its whole address.
         return MemoryProducer(
-            _stream(stream_key(workflow_id, stream)),
+            _stream(inbound_stream_id(workflow_id, stream)),
             _converter(client),
             topic,
             producer_id,
@@ -351,7 +351,7 @@ class _MemoryProvider:
         self, client: Any, *, workflow_id: str, stream: str = ""
     ) -> MemoryConsumer:
         return MemoryConsumer(
-            _stream(stream_key(workflow_id, stream)), _converter(client), stream
+            _stream(inbound_stream_id(workflow_id, stream)), _converter(client), stream
         )
 
 
