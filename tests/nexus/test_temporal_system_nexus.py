@@ -14,6 +14,7 @@ import temporalio.api.common.v1
 import temporalio.api.workflowservice.v1.request_response_pb2 as workflowservice_pb2
 import temporalio.converter
 import temporalio.nexus.system as nexus_system
+import temporalio.nexus.system.workflow_service.models as workflow_service_models
 from temporalio import workflow
 from temporalio.bridge._visitor import PayloadVisitor
 from temporalio.bridge._visitor_functions import VisitorFunctions
@@ -137,12 +138,12 @@ def _assert_start_nexus_operation_interceptor_trace() -> None:
     assert trace_name == "workflow.start_nexus_operation"
     trace_input = cast(StartNexusOperationInput[Any, Any], trace_value)
     request = cast(
-        workflowservice_pb2.SignalWithStartWorkflowExecutionRequest,
+        workflow_service_models.SignalWithStartWorkflowRequest,
         trace_input.input,
     )
-    assert request.workflow_id == "system-nexus-workflow-id"
-    assert request.signal_name == "test-signal"
-    assert request.workflow_type.name == "test-workflow"
+    assert request.id == "system-nexus-workflow-id"
+    assert request.signal == "test-signal"
+    assert request.workflow == "test-workflow"
 
 
 class _MarkingPayloadVisitor(VisitorFunctions):
@@ -343,13 +344,10 @@ def _proto_scalar_sample(field: FieldDescriptor, *, path: str) -> Any:
 
 
 def _field_is_repeated(field: FieldDescriptor) -> bool:
-    return bool(
-        getattr(
-            field,
-            "is_repeated",
-            getattr(field, "label") == FieldDescriptor.LABEL_REPEATED,
-        )
-    )
+    is_repeated = getattr(field, "is_repeated", None)
+    if is_repeated is not None:
+        return bool(is_repeated)
+    return getattr(field, "label") == FieldDescriptor.LABEL_REPEATED
 
 
 @pytest.mark.parametrize(

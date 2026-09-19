@@ -71,7 +71,7 @@ DEFAULT_KEY_PREFIX: Final = "temporal-external-stream"
 
 #: Redis' beginning-of-stream sentinel for `XREAD`. Not an offset: no record
 #: ever has this id, which is why `BEGINNING` is a distinct cursor form rather
-#: than `AFTER(Offset("0-0"))`.
+#: than ``AFTER(Offset("0-0"))``.
 _BEGINNING_SENTINEL: Final = "0-0"
 _OUTPUT_STAGE_FIELD: Final = "__tes_output_stage"
 
@@ -99,7 +99,7 @@ def _content_hash(record: StreamRecord) -> str:
 
 #: Append-if-new-or-identical, atomically.
 #:
-#: Split across two commands without a script, a crash between `XADD` and the
+#: Split across two commands without a script, a crash between ``XADD`` and the
 #: idempotency write would leave a record no retry could recognise as its own,
 #: so the retry would append a duplicate.
 _APPEND_LUA: Final = """
@@ -201,7 +201,7 @@ class RedisStreamBackend(StreamBackend, OutputStreamBackend):
     """Redis Streams as an external workflow stream provider."""
 
     guarantees_immutability: ClassVar[bool | None] = True
-    """`XADD` entries cannot be rewritten in place -- only deleted or trimmed."""
+    """``XADD`` entries cannot be rewritten in place -- only deleted or trimmed."""
 
     provider_id = "redis-streams"
     provider_format_version = 1
@@ -738,14 +738,14 @@ class RedisStreamBackend(StreamBackend, OutputStreamBackend):
         await self._client.xdel(self.stream_key(key), offset.serialize())
 
 
-#: What Redis' glob matcher treats as more than itself. `]` and `^` are special
+#: What Redis' glob matcher treats as more than itself. ``]`` and ``^`` are special
 #: only inside a class, but escaping them too costs nothing and keeps the rule
 #: one line long.
 _GLOB_METACHARACTERS: Final = frozenset("*?[]\\")
 
 
 def _as_glob_literal(text: str) -> str:
-    """A literal string, made safe to embed in a `SCAN MATCH` pattern."""
+    """A literal string, made safe to embed in a ``SCAN MATCH`` pattern."""
     return "".join(
         f"\\{character}" if character in _GLOB_METACHARACTERS else character
         for character in text
@@ -756,25 +756,25 @@ def _escaped(key: StreamKey) -> str:
     r"""One stream identity as a single, unambiguous key component.
 
     Percent-encoded per field, then joined -- **not** joined raw. A Workflow ID
-    and a stream name are user-chosen strings in which `:` is an ordinary
+    and a stream name are user-chosen strings in which ``:`` is an ordinary
     character, so joining the raw fields is not injective:
 
         ("ns", "wf", r1, f"{r2}:tokens")   and   ("ns", f"wf:{r1}", r2, "tokens")
 
-    both render as `ns:wf:r1:r2:tokens`. Two unrelated Workflows would then share
+    both render as ``ns:wf:r1:r2:tokens``. Two unrelated Workflows would then share
     one stream, one idempotency hash, one park intent and one claim -- delivering
     each other's records, and each concluding the other's claim had already taken
-    its wake. Same reasoning as `_wake.py`'s length-prefixed request-ID material,
+    its wake. Same reasoning as ``_wake.py``'s length-prefixed request-ID material,
     applied to a key rather than to a digest.
 
     Percent-encoding rather than length prefixes because a key is read by humans:
-    an ordinary identity still renders verbatim in `redis-cli`, and only a field
+    an ordinary identity still renders verbatim in ``redis-cli``, and only a field
     that actually contains a delimiter pays for it. It buys one property the
-    length prefix does not -- the encoded form contains no `:`, `*`, `?`, `[` or
-    `\`, so the derived `:idem`, `:park:<id>` and `:claim:<id>` suffixes stay
-    unambiguous and `parked_wait_ids`' pattern cannot be widened by a stream name.
+    length prefix does not -- the encoded form contains no ``:``, ``*``, ``?``, ``[`` or
+    ``\``, so the derived ``:idem``, ``:park:<id>`` and ``:claim:<id>`` suffixes stay
+    unambiguous and ``parked_wait_ids``' pattern cannot be widened by a stream name.
 
-    Not reversible in practice, and not meant to be: `key_prefix` is
+    Not reversible in practice, and not meant to be: ``key_prefix`` is
     operator-supplied and unescaped, so only the identity half round-trips.
     """
     components: tuple[str, ...] = (

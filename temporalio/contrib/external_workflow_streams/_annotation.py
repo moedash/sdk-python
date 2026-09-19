@@ -154,7 +154,7 @@ class AnnotationBudgetExceeded(temporalio.exceptions.ApplicationError):
       terminal could not fit an empty annotation, at the point the Workflow makes
       it.
 
-    An :py:class:`~temporalio.exceptions.ApplicationError` marked
+    An :py:class:`temporalio.exceptions.ApplicationError` marked
     non-retryable, and that is the substance of this class rather than a detail.
     A plain exception here fails the *Workflow Task*, and the server retries
     Workflow Task failures forever: the encoding that overflowed overflows again

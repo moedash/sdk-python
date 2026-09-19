@@ -18,7 +18,31 @@ to include examples, links to docs, or any other relevant information.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve empty activations in the shared External Workflow Streams input and
+  output replay schedule. Workflows that read input, publish decisions, and
+  schedule Activities now reproduce that schedule during replay. Inconsistent
+  prerelease markers are rejected explicitly rather than guessing where omitted
+  activations belonged.
+- Resume external input waits when cold replay encounters a wake in an already
+  loaded History page, including Workers with workflow caching disabled.
+- Avoid an unnecessary output replacement Workflow Task after stream input has
+  resumed the Workflow and it is waiting on an Activity or timer.
+- Keep an incomplete retained external stream task alive when workflow caching
+  is disabled; evict it after its normal task boundary instead of repeatedly
+  interrupting input readiness with shutdown markers.
+
 ### Added
+
+- **Experimental**: `temporalio.streams` defines one stream interface a workflow
+  can read, decide on, and write, with a registry that picks the provider when
+  the worker is built. `temporalio.streams.providers.memory` is the in-memory
+  reference provider the conformance tests run against, and
+  `temporalio.streams.providers.redis` serves the same interface over External
+  Workflow Streams.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
 
 - Added experimental External Workflow Streams in
   `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
@@ -33,6 +57,84 @@ to include examples, links to docs, or any other relevant information.
   through `ExternalOutputStreamClient`. Workflow output is staged outside
   History and becomes readable only after its compact Workflow Task marker is
   committed.
+### Changed
+
+- Standalone Activities are now generally available (GA). (Standalone Activities as Nexus operations
+  and Standalone Activities operator commands remain experimental. Operator commands are `pause`,
+  `unpause`, `updateOptions`, `restoreOriginal`.)
+- System Nexus Signal-with-Start Workflow operations now use the typed
+  `WorkflowOutboundInterceptor.start_signal_with_start_workflow` interception point instead of
+  the generic `WorkflowOutboundInterceptor.start_nexus_operation` method.
+- System Nexus Signal-with-Start Workflow operations now invoke
+  `WorkflowOutboundInterceptor.start_system_nexus_operation` after their typed interception
+  point. They continue not to invoke `WorkflowOutboundInterceptor.start_nexus_operation`.
+- The experimental `GetNexusOperationResultInput` now includes the Nexus endpoint, service, and
+  operation.
+
+### :boom: Breaking Changes
+
+- Experimental external storage: `ExternalStorage.driver_selector` is now called with a
+  `StorageDriverSelectContext` instead of a `StorageDriverStoreContext`. Update the annotation;
+  the new type carries the same `target` field. Since selectors are plain callables, a stale
+  annotation fails type checking rather than at runtime.
+- `client.ActivityExecution` and `client.ActivityExecutionDescription` had some fields removed or renamed
+  to match RPC API.
+  - Dataclass parameters for these types were changed to `frozen=True, eq=False, kw_only=True`.
+  - `scheduled_time` was renamed `schedule_time`.
+  - `last_failure` was changed from field to method that runs data converter on demand.
+  - `state_transition_count`, `eager_execution_requested`, `paused` and `long_poll_token`  were removed.
+- ActivityHandle.describe() long-poll token was removed.  The functionality can still be used manually
+  through raw gRPC API.
+
+### Fixed
+
+- `temporalio.contrib.google_genai` now requires `google-genai` 2.21.0 or later
+  and supports its file download API, including video inputs and download
+  destinations.
+- `temporalio.contrib.deepagents` no longer dedups repeated identical tool,
+  model, and backend-op calls: each dispatch runs its own Activity, and the
+  continue-as-new result cache is retired for new executions (a continued run
+  resumes from the carried transcript and never re-executes prior dispatches,
+  so a carried cache entry could only serve stale results). Patch-gated
+  (`deepagents.retire-result-cache`), so histories recorded before this change
+  replay unchanged; note that deferring the patch keeps the full legacy dedup
+  cache — including the stale-result behavior this entry describes — and that
+  a chain upgraded mid-continue-as-new re-executes rather than reuses a
+  repeated identical call (the conservative direction).
+- `contrib.deepagents`: summarization middleware configured with a model name string now routes its LLM calls through Activities instead of running them in the Workflow.
+
+- **Experimental**: External storage metrics now report the wall-clock time storage was in flight.
+  Previously each batch's duration was summed, over-reporting the time whenever storage operations
+  ran concurrently.
+- System Nexus Signal-with-Start workflow operations now give custom payload
+  converters the target workflow's serialization context when encoding their
+  inner request payloads.
+- Cancelling an activity from a signal while the workflow itself is cancelled
+  no longer causes a nondeterminism error from duplicate activity-cancellation
+  commands.
+- `StrandsPlugin` now disables Botocore retries for its default Bedrock model so
+  model request retries are handled exclusively by Temporal.
+- `temporalio.contrib.openai_agents` now honors the `retry-after-ms` and
+  `retry-after` headers when OpenAI returns `x-should-retry: true`. Previously
+  the delay the server asked for was discarded on that path and the activity
+  retried on its configured interval instead.
+- Nexus-context workflow/activity starts no longer set `on_conflict_options` when there are no links
+  or callbacks to attach.
+- The workflow sandbox now passes `pydantic_core` through by default, alongside `pydantic`.
+
+## [1.32.0] - 2026-08-24
+
+### Added
+
+- Added `temporalio.converter.create_payload_validation_error` to create the
+  non-retryable application error used when a converted payload fails validation.
+- Added experimental `temporalio.contrib.opentelemetry.ReplaySafeMeterProvider` and
+  `ReplaySafeLoggerProvider` (and exported `ReplaySafeTracerProvider`): wrap an
+  OpenTelemetry provider so metrics and log events recorded from workflow code (e.g. by
+  Google ADK) are not duplicated on replay. `GoogleAdkPlugin` warns when a global OTel
+  provider is not replay-safe.
+- Added `LoggingConfig.format` to select compact, pretty, or newline-delimited JSON output for
+  Core logs written to the console.
 
 - Added the `Runtime(disable_environment_info=...)` option to control whether
   runtime, hosting, and platform information is included in worker heartbeats.

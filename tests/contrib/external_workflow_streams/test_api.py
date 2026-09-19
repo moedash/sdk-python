@@ -30,6 +30,7 @@ from temporalio.contrib.external_workflow_streams._errors import (
 )
 from temporalio.contrib.external_workflow_streams._manager import PreparedRecord
 from temporalio.contrib.external_workflow_streams._record import (
+    Offset,
     RecordKind,
     StreamRecord,
 )
@@ -58,6 +59,9 @@ class FakeRuntime:
         #: Overrides what `codec_for` hands back, so a test can control when --
         #: and whether -- decoding a record succeeds.
         self.codec: Any = None
+        #: Offsets handed out by `drain`, so buffered records come back in the
+        #: read-path shape whatever a test put in.
+        self._placed = 0
 
     def stream_key(self, stream_name: str) -> StreamKey:
         return StreamKey("ns", "wf", "first-run", stream_name)
@@ -81,7 +85,22 @@ class FakeRuntime:
             )
         else:
             self.buffers[wait_id] = []
-        return buffered
+        # A provider places a record when it appends it, so nothing without an
+        # offset ever reaches a reader. Place what a test left bare rather than
+        # let the fake deliver a shape the real path cannot produce.
+        placed = []
+        for record in buffered:
+            if record.offset is not None:
+                placed.append(record)
+                continue
+            self._placed += 1
+            at = record.placed_at(Offset(f"{self._placed:020d}"))
+            if isinstance(record, PreparedRecord):
+                at = PreparedRecord.of(
+                    at, record.prepared_payload, record.prepare_error
+                )
+            placed.append(at)
+        return placed
 
     def delivery_budget_remaining(self) -> int:
         return self.budget

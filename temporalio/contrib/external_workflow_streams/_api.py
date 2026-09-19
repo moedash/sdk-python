@@ -35,6 +35,7 @@ from temporalio.contrib.external_workflow_streams._errors import (
     classify_read_failure,
 )
 from temporalio.contrib.external_workflow_streams._record import (
+    Offset,
     StreamRecord,
 )
 from temporalio.types import AnyType
@@ -72,7 +73,7 @@ and diverge from the live run.
 """
 
 #: Where per-Run subscription state hangs off the Workflow instance. Reserved,
-#: and deliberately not in the `__temporal_workflow_stream*` namespace the
+#: and deliberately not in the ``__temporal_workflow_stream*`` namespace the
 #: shipped contrib feature already owns.
 _RUN_STATE_ATTR = "__temporal_external_stream_state"
 
@@ -182,7 +183,7 @@ class _RunState:
 
     runtime: ExternalStreamRuntime | None = None
     next_wait_id: int = 1
-    #: `wait_id -> Future`, resolved by the readiness activation handler.
+    #: ``wait_id -> Future``, resolved by the readiness activation handler.
     pending: dict[int, Any] = field(default_factory=dict)
 
 
@@ -538,7 +539,7 @@ class ExternalStreamSubscription(Generic[AnyType]):
     **One consumer.** The cursor, the readiness future, and the blocked flag are
     all the subscription's rather than an iterator's, so two coroutines waiting on
     it at once is refused with
-    :class:`~temporalio.contrib.external_workflow_streams._errors.ConcurrentStreamConsumerError`
+    :class:`temporalio.contrib.external_workflow_streams.ConcurrentStreamConsumerError`
     rather than served -- see :meth:`_refuse_a_second_waiter` for what sharing
     them would do. Two consumers of the same *stream* is a supported shape and
     the way to ask for it is a second ``subscribe()``: delivery is a broadcast
@@ -594,6 +595,16 @@ class ExternalStreamSubscription(Generic[AnyType]):
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[AnyType]:
+        async for _offset, value in self.records():
+            yield value
+
+    async def records(self) -> AsyncIterator[tuple[Offset, AnyType]]:
+        """Each value with the provider offset it was read from.
+
+        Same delivery, same consumption, same commit order as iterating values.
+        A reader that has to name where it got to, or hand a position to
+        something outside the Workflow, cannot do it from the values alone.
+        """
         while not self._finished:
             # Re-filled before *every* record rather than once per batch. A
             # record buffered while Workflow code was doing something else -- a
@@ -623,8 +634,10 @@ class ExternalStreamSubscription(Generic[AnyType]):
                 # becomes a value or raises, and neither outcome can leave the
                 # ready list half-consumed.
                 value = self._decode(record)
+                offset = record.offset
                 self._commit(record)
-                yield value
+                assert offset is not None
+                yield offset, value
                 continue
             await self._await_readiness()
 
