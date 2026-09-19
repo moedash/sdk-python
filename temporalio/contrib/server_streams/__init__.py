@@ -21,15 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import builtins
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Generic, TypeVar, overload
 
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
-from temporalio.client_stream import StreamClient, WorkflowStreamHandle
+from temporalio.client import Client, WorkflowExecutionDescription
+from temporalio.client_stream import StreamClient, WorkflowStreamHandle, shared_client
 from temporalio.converter import PayloadConverter
 
 __all__ = [
@@ -78,16 +78,15 @@ def _encode(converter: PayloadConverter, value: Any) -> bytes:
     The payload rather than the bare bytes, so the encoding metadata the
     consumer needs to decode into a type travels with it.
 
-    The codec chain is not applied. It cannot be applied here: a codec is async
-    and a Workflow publishing to a stream is not, so running one inside Workflow
-    code would be I/O on the Workflow thread. Regular payloads solve this in the
-    Worker, encoding on the way out and decoding on the way in, and a stream
-    needs the same plumbing before a codec can be honoured.
-
-    It is not applied on the client path either, deliberately. Encoding one side
-    and not the other is worse than encoding neither: an Activity's messages
-    would reach a consuming Workflow as ciphertext it has no way to decode.
-    :func:`_reject_configured_codec` is what keeps that from happening quietly.
+    The codec chain is not applied here. Inside a Workflow it does not have to
+    be: the Worker runs the payload visitor with its codec over the commands
+    and activations, so a body that rides ``add_stream_messages`` is encoded
+    on the way out and one that arrives on ``deliver_stream_messages`` is
+    decoded on the way in, as every other payload is. The client path has no
+    such pass, and encoding one side but not the other is worse than encoding
+    neither: an Activity's messages would reach a consuming Workflow as
+    ciphertext it has no way to decode. :func:`_reject_configured_codec`
+    refuses a client with a codec until the client path applies one too.
     """
     payload = value if isinstance(value, Payload) else converter.to_payloads([value])[0]
     return payload.SerializeToString()
@@ -232,14 +231,22 @@ class WorkflowStreamClient:
         handle: WorkflowStreamHandle,
         converter: PayloadConverter,
         batch_interval: timedelta = DEFAULT_BATCH_INTERVAL,
+        *,
+        describe: Callable[[], Awaitable[WorkflowExecutionDescription]] | None = None,
     ) -> None:
-        """Prefer :meth:`create` or :meth:`from_within_activity`."""
+        """Prefer :meth:`create` or :meth:`from_within_activity`.
+
+        ``describe`` is how an unpinned handle learns which run it follows;
+        see :meth:`WorkflowStreamHandle.pin`.
+        """
         self._handle = handle
         self._converter = converter
         self._batch_interval = batch_interval
+        self._describe = describe
         self._buffered: list[tuple[str, Any]] = []
         self._flusher: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
+        self._closed = False
 
     @classmethod
     def create(
@@ -247,14 +254,24 @@ class WorkflowStreamClient:
         client: Client,
         workflow_id: str,
         *,
+        owner_run_id: str = "",
         batch_interval: timedelta = DEFAULT_BATCH_INTERVAL,
     ) -> "WorkflowStreamClient":
-        """Open the stream owned by ``workflow_id``."""
+        """Open the stream owned by ``workflow_id``.
+
+        Without ``owner_run_id`` the current run is looked up on the first
+        call and the handle pinned to it, so a reader following across a
+        continue-as-new sees the run end rather than being moved to the
+        successor's stream at a stale offset.
+        """
         _reject_configured_codec(client)
         return cls(
-            _stream_client(client).workflow_stream(workflow_id),
+            _stream_client(client).workflow_stream(
+                workflow_id, owner_run_id=owner_run_id
+            ),
             client.data_converter.payload_converter,
             batch_interval,
+            describe=client.get_workflow_handle(workflow_id).describe,
         )
 
     @classmethod
@@ -262,13 +279,20 @@ class WorkflowStreamClient:
         cls, *, batch_interval: timedelta = DEFAULT_BATCH_INTERVAL
     ) -> "WorkflowStreamClient":
         """Open the stream owned by the Workflow that scheduled this Activity."""
-        workflow_id = activity.info().workflow_id
-        if workflow_id is None:
+        info = activity.info()
+        if info.workflow_id is None:
             raise RuntimeError(
                 "no Workflow stream to open: this Activity was not started by a "
                 "Workflow"
             )
-        return cls.create(activity.client(), workflow_id, batch_interval=batch_interval)
+        # The Activity's output belongs to the run that scheduled it, and the
+        # Activity already knows which run that is.
+        return cls.create(
+            activity.client(),
+            info.workflow_id,
+            owner_run_id=info.workflow_run_id or "",
+            batch_interval=batch_interval,
+        )
 
     async def __aenter__(self) -> "WorkflowStreamClient":
         """Start the background flusher."""
@@ -279,16 +303,21 @@ class WorkflowStreamClient:
         """Drain what is buffered before letting the caller go.
 
         An Activity that returned with a batch still buffered would have
-        reported work its readers never saw.
+        reported work its readers never saw. The flusher is asked to stop
+        rather than cancelled: a cancel landing inside its append would
+        unwind with the batch it had already taken off the buffer.
         """
+        self._closed = True
+        self._wake.set()
         if self._flusher is not None:
-            self._flusher.cancel()
-            try:
-                await self._flusher
-            except asyncio.CancelledError:
-                pass
+            await self._flusher
             self._flusher = None
         await self.flush()
+
+    async def _pin(self) -> None:
+        if self._handle.owner_run_id or self._describe is None:
+            return
+        self._handle.pin((await self._describe()).run_id)
 
     @overload
     def topic(self, name: str) -> TopicHandle[Any]: ...
@@ -305,6 +334,7 @@ class WorkflowStreamClient:
 
         A reader that wants only what comes next starts here.
         """
+        await self._pin()
         return (await self._handle.describe()).head_offset
 
     async def subscribe(
@@ -321,6 +351,7 @@ class WorkflowStreamClient:
         to re-ask; the server parks this read until something arrives.
         """
         del poll_cooldown
+        await self._pin()
         async for message in self._handle.follow(
             from_offset=from_offset, topics=topics
         ):
@@ -342,6 +373,7 @@ class WorkflowStreamClient:
         For a caller that forwards items on rather than using them. A gateway
         would only have to encode again what this decoded.
         """
+        await self._pin()
         page = await self._handle.poll(
             from_offset=from_offset, topics=topics, wait=wait
         )
@@ -360,6 +392,7 @@ class WorkflowStreamClient:
         pending, self._buffered = self._buffered, []
         if not pending:
             return
+        await self._pin()
         # One append per topic, because a batch carries a single topic. The
         # harness case is one topic, so this is one append.
         by_topic: dict[str, list[bytes]] = {}
@@ -376,7 +409,7 @@ class WorkflowStreamClient:
 
     async def _run_flusher(self) -> None:
         """Append on a fixed cadence, so a slow producer still gets delivered."""
-        while True:
+        while not self._closed:
             try:
                 await asyncio.wait_for(
                     self._wake.wait(), self._batch_interval.total_seconds()
@@ -387,18 +420,5 @@ class WorkflowStreamClient:
             await self.flush()
 
 
-# One channel per target, shared by every handle in the process. The channel is
-# multiplexed and long-lived, and callers here open a client per subscription,
-# which would otherwise be a connection per subscription.
-_clients: dict[tuple[int, str, str], StreamClient] = {}
-
-
 def _stream_client(client: Client) -> StreamClient:
-    target = client.service_client.config.target_host
-    # Keyed on the loop too: a gRPC channel belongs to the loop that made it.
-    key = (id(asyncio.get_event_loop()), target, client.namespace)
-    existing = _clients.get(key)
-    if existing is None:
-        existing = StreamClient.connect(target, client.namespace)
-        _clients[key] = existing
-    return existing
+    return shared_client(client.service_client.config.target_host, client.namespace)
