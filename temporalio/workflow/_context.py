@@ -971,9 +971,10 @@ def subscribe_stream(stream_id: str, *, start_offset: int = 0) -> None:
     """Subscribe this workflow to a stream.
 
     From here on its Workflow Tasks carry the ranges it has not consumed yet,
-    and :func:`read_stream` returns them. Safe to call again: the server treats
-    a second subscription to the same stream as a no-op, which is what makes
-    calling it on every replay harmless.
+    and :func:`read_stream` returns them. Safe to call again: a second
+    subscription to a stream this run already consumes does not move its
+    cursor, though it does write one event. Calling it on every replay is
+    harmless because replay matches the command to the event already recorded.
 
     Only the stream id and start offset go to the server. The rest of the
     stream's addressing is resolved there, because a workflow cannot look it up
