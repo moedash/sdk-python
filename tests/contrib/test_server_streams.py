@@ -84,8 +84,6 @@ async def test_both_producers_reach_one_subscriber() -> None:
 
         # Subscribed before the Workflow has published anything, which is what
         # a consumer attaching to a session does.
-        # Subscribed before the Workflow has published anything, which is what
-        # a consumer attaching to a session does.
         stream = WorkflowStreamClient.create(client, wf_id)
 
         async def read() -> None:
