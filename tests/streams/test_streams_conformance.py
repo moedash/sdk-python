@@ -51,6 +51,13 @@ class ProviderCase:
     """Outside producers may write a workflow's inbound stream."""
     unfiltered_reads: bool = True
     """A consumer may read the owner's stream without naming a topic."""
+    reports_dropped_repeats: bool = True
+    """``append`` returns ``None`` for a repeat it dropped.
+
+    A store that answers a repeat with the original position instead still
+    holds the record once; it just cannot say at append time that this call
+    wrote nothing.
+    """
 
 
 async def _memory_case() -> AsyncIterator[ProviderCase]:
@@ -218,7 +225,8 @@ async def test_retried_append_is_deduplicated(provider: ProviderCase):
     await first.append({"id": "r1"})
     # The retry of the same attempt starts its sequence over and appends the
     # same record. The provider must not store it twice, and says so by
-    # returning no position for what it dropped.
+    # returning no position for what it dropped, or the original one when
+    # its store cannot tell the two apart at append time.
     retry = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -226,11 +234,15 @@ async def test_retried_append_is_deduplicated(provider: ProviderCase):
         producer_id="model",
         attempt=1,
     )
-    assert await retry.append({"id": "r1"}) is None
+    dropped = await retry.append({"id": "r1"})
 
     consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
     records = await take(consumer.read(type=dict, topic="out"), 1)
     assert records[0].value == {"id": "r1"}
+    if provider.reports_dropped_repeats:
+        assert dropped is None
+    else:
+        assert dropped == records[0].cursor
     # The store holds exactly the one record: the newest position is its cursor.
     assert await consumer.latest(topic="out") == records[0].cursor
 
