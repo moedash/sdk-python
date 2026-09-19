@@ -24,6 +24,7 @@ __all__ = [
     "StreamProvider",
     "StreamProviderLifecycle",
     "check_topic",
+    "close",
     "configure",
     "consumer",
     "drain",
@@ -191,9 +192,10 @@ class StreamProvider(Protocol):
 class StreamProviderLifecycle(Protocol):
     """The hooks a provider adds when it needs the workflow's own lifetime.
 
-    Separate from :class:`StreamProvider` because most transports need
-    neither, and a provider is not asked to carry a pair of empty methods to
-    say so. :func:`prepare` and :func:`drain` call whichever half is present.
+    Separate from :class:`StreamProvider` because most transports need none
+    of them, and a provider is not asked to carry empty methods to say so.
+    :func:`prepare`, :func:`drain` and :func:`close` each call the hook when
+    the provider defines it.
     """
 
     def prepare(self) -> None:
@@ -211,6 +213,14 @@ class StreamProviderLifecycle(Protocol):
         A provider that parks an outside reader against the running workflow,
         as the Workflow Streams transport does with its long-poll update, has
         to let go before the workflow can return.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Release what this provider holds for the process.
+
+        A provider that keeps a connection pool or an HTTP session open needs
+        a moment where the process says it is done; this is it.
         """
         ...
 
@@ -327,6 +337,20 @@ def drain() -> None:
     release = getattr(provider, "drain", None)
     if release is not None:
         release()
+
+
+async def close() -> None:
+    """Release what the provider holds for this process.
+
+    Await it when the process is done with streams. It is a no-op on
+    providers that hold nothing, and on a process that never configured one,
+    so a shutdown path can call it unconditionally.
+    """
+    if _active is None:
+        return
+    release = getattr(_active, "close", None)
+    if release is not None:
+        await release()
 
 
 def check_topic(stream: str, topic: str | None) -> None:

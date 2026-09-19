@@ -37,6 +37,14 @@ this module mentions one. Code that needs a second provider next to the
 process default, such as a handler that serves one store while its process
 talks to another, holds one from :func:`instance`.
 
+Three lifecycle hooks let a provider borrow the caller's lifetime, and each
+is a no-op on a provider that needs nothing, so portable code calls all
+three unconditionally: :func:`prepare` from the workflow's constructor, for a
+transport that registers handlers on the workflow; :func:`drain` before the
+workflow returns, for one that parks readers against the run; and
+:func:`close`, awaited when the process is done with streams, for one that
+holds connections.
+
 Reading somebody else's stream is out of scope for the first release. It is
 the topology no provider has evidence for, and leaving it out is what lets
 every provider implement the rest.
@@ -67,6 +75,7 @@ from temporalio.streams._provider import (
     Producer,
     StreamProvider,
     StreamProviderLifecycle,
+    close,
     configure,
     consumer,
     drain,
@@ -99,6 +108,7 @@ __all__ = [
     "StreamWriter",
     "Supersession",
     "WriteSink",
+    "close",
     "configure",
     "consumer",
     "drain",
