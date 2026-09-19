@@ -1,7 +1,8 @@
-"""Live conformance for the server-side (native) provider.
+"""Live interface loop over the server-side (native) provider.
 
-Runs the same interface loop the other providers run, against a Temporal
-server that carries the stream service. Gated behind ``STREAMS_LIVE=native``;
+Runs the interface loop the other providers run, inside a workflow, against
+a Temporal server that carries the stream service; the conformance suite
+covers the outside surface under the same gate. Gated behind ``STREAMS_LIVE=native``;
 ``TEMPORAL_ADDRESS`` must point at a server built from ``moedash/temporal``
 ``moe/AI-198-server-side-streams``.
 """
