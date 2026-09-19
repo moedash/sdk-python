@@ -21,11 +21,14 @@ import google.protobuf.timestamp_pb2
 import temporalio.api.common.v1.message_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.bridge.proto.activity_result.activity_result_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
+import temporalio.bridge.proto.external_data.external_data_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
+import temporalio.bridge.proto.workflow_commands.workflow_commands_pb2
 
 if sys.version_info >= (3, 10):
     import typing as typing_extensions
@@ -95,6 +98,7 @@ class WorkflowActivation(google.protobuf.message.Message):
     LAST_SDK_VERSION_FIELD_NUMBER: builtins.int
     SUGGEST_CONTINUE_AS_NEW_REASONS_FIELD_NUMBER: builtins.int
     TARGET_WORKER_DEPLOYMENT_VERSION_CHANGED_FIELD_NUMBER: builtins.int
+    HISTORY_FLOOR_EVENT_ID_FIELD_NUMBER: builtins.int
     run_id: builtins.str
     """The id of the currently active run of the workflow. Also used as a cache key. There may
     only ever be one active workflow task (and hence activation) of a run at one time.
@@ -156,6 +160,11 @@ class WorkflowActivation(google.protobuf.message.Message):
     the workflow is Pinned.
     Experimental.
     """
+    history_floor_event_id: builtins.int
+    """The event immediately preceding this Workflow Task's WorkflowTaskScheduled event in the
+    ordered History view Core used to build the activation. Zero means Core could not identify
+    that exact predecessor, in which case output must not be staged for this task.
+    """
     def __init__(
         self,
         *,
@@ -175,6 +184,7 @@ class WorkflowActivation(google.protobuf.message.Message):
         ]
         | None = ...,
         target_worker_deployment_version_changed: builtins.bool = ...,
+        history_floor_event_id: builtins.int = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -194,6 +204,8 @@ class WorkflowActivation(google.protobuf.message.Message):
             b"continue_as_new_suggested",
             "deployment_version_for_current_task",
             b"deployment_version_for_current_task",
+            "history_floor_event_id",
+            b"history_floor_event_id",
             "history_length",
             b"history_length",
             "history_size_bytes",
@@ -235,6 +247,11 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     DO_UPDATE_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    RESOLVE_EXTERNAL_STREAM_WAITS_FIELD_NUMBER: builtins.int
+    PREPARE_EXTERNAL_STREAM_PARK_FIELD_NUMBER: builtins.int
+    REPLAY_EXTERNAL_STREAMS_FIELD_NUMBER: builtins.int
+    FINALIZE_EXTERNAL_STREAMS_FIELD_NUMBER: builtins.int
+    DELIVER_STREAM_MESSAGES_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -295,6 +312,27 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     def resolve_nexus_operation(self) -> global___ResolveNexusOperation:
         """A nexus operation resolved."""
     @property
+    def resolve_external_stream_waits(self) -> global___ResolveExternalStreamWaits:
+        """One or more external stream waits may have data buffered. Runs user workflow code."""
+    @property
+    def prepare_external_stream_park(self) -> global___PrepareExternalStreamPark:
+        """Runtime-internal: install park intents and recheck every stream. Runs no user code."""
+    @property
+    def replay_external_streams(self) -> global___ReplayExternalStreams:
+        """Replay: deliver the recorded external stream observations from a marker."""
+    @property
+    def finalize_external_streams(self) -> global___FinalizeExternalStreams:
+        """Runtime-internal: encode the terminal boundary for a marker Core is about to write.
+        Runs no user code.
+        """
+    @property
+    def deliver_stream_messages(self) -> global___DeliverStreamMessages:
+        """The number below is shared with the native stream tree, which leaves 17
+        to 20 to the jobs above, and must not be reused.
+
+        A range of a stream the workflow subscribed to.
+        """
+    @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
         cache after performing the activation. It is guaranteed that this will be the only job
@@ -322,6 +360,11 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         do_update: global___DoUpdate | None = ...,
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
+        resolve_external_stream_waits: global___ResolveExternalStreamWaits | None = ...,
+        prepare_external_stream_park: global___PrepareExternalStreamPark | None = ...,
+        replay_external_streams: global___ReplayExternalStreams | None = ...,
+        finalize_external_streams: global___FinalizeExternalStreams | None = ...,
+        deliver_stream_messages: global___DeliverStreamMessages | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -329,24 +372,34 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
+            "deliver_stream_messages",
+            b"deliver_stream_messages",
             "do_update",
             b"do_update",
+            "finalize_external_streams",
+            b"finalize_external_streams",
             "fire_timer",
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
             "notify_has_patch",
             b"notify_has_patch",
+            "prepare_external_stream_park",
+            b"prepare_external_stream_park",
             "query_workflow",
             b"query_workflow",
             "remove_from_cache",
             b"remove_from_cache",
+            "replay_external_streams",
+            b"replay_external_streams",
             "resolve_activity",
             b"resolve_activity",
             "resolve_child_workflow_execution",
             b"resolve_child_workflow_execution",
             "resolve_child_workflow_execution_start",
             b"resolve_child_workflow_execution_start",
+            "resolve_external_stream_waits",
+            b"resolve_external_stream_waits",
             "resolve_nexus_operation",
             b"resolve_nexus_operation",
             "resolve_nexus_operation_start",
@@ -368,24 +421,34 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
+            "deliver_stream_messages",
+            b"deliver_stream_messages",
             "do_update",
             b"do_update",
+            "finalize_external_streams",
+            b"finalize_external_streams",
             "fire_timer",
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
             "notify_has_patch",
             b"notify_has_patch",
+            "prepare_external_stream_park",
+            b"prepare_external_stream_park",
             "query_workflow",
             b"query_workflow",
             "remove_from_cache",
             b"remove_from_cache",
+            "replay_external_streams",
+            b"replay_external_streams",
             "resolve_activity",
             b"resolve_activity",
             "resolve_child_workflow_execution",
             b"resolve_child_workflow_execution",
             "resolve_child_workflow_execution_start",
             b"resolve_child_workflow_execution_start",
+            "resolve_external_stream_waits",
+            b"resolve_external_stream_waits",
             "resolve_nexus_operation",
             b"resolve_nexus_operation",
             "resolve_nexus_operation_start",
@@ -421,12 +484,280 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "do_update",
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
+            "resolve_external_stream_waits",
+            "prepare_external_stream_park",
+            "replay_external_streams",
+            "finalize_external_streams",
+            "deliver_stream_messages",
             "remove_from_cache",
         ]
         | None
     ): ...
 
 global___WorkflowActivationJob = WorkflowActivationJob
+
+class ResolveExternalStreamWaits(google.protobuf.message.Message):
+    """Tells lang that one or more external stream waits may now have data.
+
+    This job contains no records. The listed waits are readiness *hints*, not an exhaustive
+    availability claim: on receipt lang probes every active wait, drains all currently available
+    inputs, and only then resumes Workflow futures.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    QUIESCENCE_GENERATION_FIELD_NUMBER: builtins.int
+    READY_HINTS_FIELD_NUMBER: builtins.int
+    quiescence_generation: builtins.int
+    @property
+    def ready_hints(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+    ]: ...
+    def __init__(
+        self,
+        *,
+        quiescence_generation: builtins.int = ...,
+        ready_hints: collections.abc.Iterable[
+            temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "quiescence_generation",
+            b"quiescence_generation",
+            "ready_hints",
+            b"ready_hints",
+        ],
+    ) -> None: ...
+
+global___ResolveExternalStreamWaits = ResolveExternalStreamWaits
+
+class PrepareExternalStreamPark(google.protobuf.message.Message):
+    """Asks lang to park the complete active wait set through the backend handshake.
+
+    Runtime-internal: no user Workflow code runs. Lang installs a park intent per subscription,
+    rechecks every stream, and answers with ExternalStreamParkResult. A recheck that finds records
+    answers `became_ready` instead, and Core issues a normal resolve activation next.
+
+    Requires backend I/O, so lang must not handle this on the synchronous Workflow thread.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    QUIESCENCE_GENERATION_FIELD_NUMBER: builtins.int
+    WAITS_FIELD_NUMBER: builtins.int
+    REASON_FIELD_NUMBER: builtins.int
+    quiescence_generation: builtins.int
+    @property
+    def waits(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+    ]:
+        """Always the complete active wait set."""
+    reason: temporalio.bridge.proto.external_data.external_data_pb2.ParkReason.ValueType
+    """One of PARK_REASON_IDLE, PARK_REASON_ALL_WRITE_FENCED, or PARK_REASON_SHUTDOWN."""
+    def __init__(
+        self,
+        *,
+        quiescence_generation: builtins.int = ...,
+        waits: collections.abc.Iterable[
+            temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+        ]
+        | None = ...,
+        reason: temporalio.bridge.proto.external_data.external_data_pb2.ParkReason.ValueType = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "quiescence_generation",
+            b"quiescence_generation",
+            "reason",
+            b"reason",
+            "waits",
+            b"waits",
+        ],
+    ) -> None: ...
+
+global___PrepareExternalStreamPark = PrepareExternalStreamPark
+
+class ReplayExternalStreams(google.protobuf.message.Message):
+    """Carries a recorded marker's annotation back to lang during replay.
+
+    Core issues exactly one of these per marker. Lang's replay driver walks the annotation's
+    segments in order, performing one event-loop drain per segment, so the live run's k
+    activations become k drains inside this one activation and condition evaluation matches.
+
+    Requires backend I/O (the recorded range reads and their integrity validation), so lang must
+    prepare it off the Workflow thread and deliver from memory once it is on it.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    QUIESCENCE_GENERATION_FIELD_NUMBER: builtins.int
+    WAITS_FIELD_NUMBER: builtins.int
+    REPLAY_ANNOTATION_FIELD_NUMBER: builtins.int
+    TERMINAL_BOUNDARY_FIELD_NUMBER: builtins.int
+    OUTPUT_FIELD_NUMBER: builtins.int
+    quiescence_generation: builtins.int
+    @property
+    def waits(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+    ]: ...
+    replay_annotation: builtins.bytes
+    """Opaque to Core."""
+    terminal_boundary: (
+        temporalio.bridge.proto.external_data.external_data_pb2.ParkReason.ValueType
+    )
+    @property
+    def output(
+        self,
+    ) -> temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest:
+        """The output manifest recorded in the same marker, if this Workflow Task published output."""
+    def __init__(
+        self,
+        *,
+        quiescence_generation: builtins.int = ...,
+        waits: collections.abc.Iterable[
+            temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+        ]
+        | None = ...,
+        replay_annotation: builtins.bytes = ...,
+        terminal_boundary: temporalio.bridge.proto.external_data.external_data_pb2.ParkReason.ValueType = ...,
+        output: temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest
+        | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["output", b"output"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "output",
+            b"output",
+            "quiescence_generation",
+            b"quiescence_generation",
+            "replay_annotation",
+            b"replay_annotation",
+            "terminal_boundary",
+            b"terminal_boundary",
+            "waits",
+            b"waits",
+        ],
+    ) -> None: ...
+
+global___ReplayExternalStreams = ReplayExternalStreams
+
+class FinalizeExternalStreams(google.protobuf.message.Message):
+    """Issued before Core writes a marker for a boundary Core itself decided and no park handshake
+    will run: rollover-deadline expiry, and shutdown or eviction with a Workflow Task open.
+
+    Runs no user Workflow code, cannot resolve futures, and its only legal responses are
+    ExternalStreamFinalized or an activation failure. It requires *no* backend I/O: lang reads the
+    blocked cursor snapshot from its own in-memory manager state. If lang cannot answer, Core
+    writes no marker and the Workflow Task fails for retry -- there is no best-effort path.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    QUIESCENCE_GENERATION_FIELD_NUMBER: builtins.int
+    WAITS_FIELD_NUMBER: builtins.int
+    REASON_FIELD_NUMBER: builtins.int
+    quiescence_generation: builtins.int
+    @property
+    def waits(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+    ]: ...
+    reason: temporalio.bridge.proto.external_data.external_data_pb2.ParkReason.ValueType
+    """One of PARK_REASON_ROLLOVER or PARK_REASON_SHUTDOWN."""
+    def __init__(
+        self,
+        *,
+        quiescence_generation: builtins.int = ...,
+        waits: collections.abc.Iterable[
+            temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.ExternalStreamWait
+        ]
+        | None = ...,
+        reason: temporalio.bridge.proto.external_data.external_data_pb2.ParkReason.ValueType = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "quiescence_generation",
+            b"quiescence_generation",
+            "reason",
+            b"reason",
+            "waits",
+            b"waits",
+        ],
+    ) -> None: ...
+
+global___FinalizeExternalStreams = FinalizeExternalStreams
+
+class DeliverStreamMessages(google.protobuf.message.Message):
+    """Hand a workflow the next range of a stream it subscribed to.
+
+    The range is delivered once, on the task the server decided it belongs to,
+    and the offsets it covered are recorded in History rather than the payloads.
+    On replay the server re-supplies the same range by reading the stream again,
+    so this job appears at the same point with the same contents both times.
+
+    An empty range is still delivered: a task where the subscription saw nothing
+    is a fact replay has to reproduce, not an absence of one.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    FROM_OFFSET_FIELD_NUMBER: builtins.int
+    TO_OFFSET_FIELD_NUMBER: builtins.int
+    MESSAGES_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """Id of the stream this range came from."""
+    from_offset: builtins.int
+    """Inclusive."""
+    to_offset: builtins.int
+    """Exclusive. Equal to from_offset when the subscription saw nothing."""
+    @property
+    def messages(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamMessage
+    ]: ...
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        from_offset: builtins.int = ...,
+        to_offset: builtins.int = ...,
+        messages: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamMessage
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "from_offset",
+            b"from_offset",
+            "messages",
+            b"messages",
+            "stream_id",
+            b"stream_id",
+            "to_offset",
+            b"to_offset",
+        ],
+    ) -> None: ...
+
+global___DeliverStreamMessages = DeliverStreamMessages
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""

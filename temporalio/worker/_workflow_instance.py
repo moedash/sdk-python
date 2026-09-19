@@ -47,6 +47,7 @@ import temporalio.activity
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.api.sdk.v1
+import temporalio.api.stream.v1
 import temporalio.bridge.proto.activity_result
 import temporalio.bridge.proto.child_workflow
 import temporalio.bridge.proto.common
@@ -91,6 +92,18 @@ logger = logging.getLogger(__name__)
 
 # Set to true to log all cases where we're ignoring things during delete
 LOG_IGNORE_DURING_DELETE = False
+
+
+def _is_workflow_terminal_command(
+    command: temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.WorkflowCommand,
+) -> bool:
+    """Whether a command ends the current Workflow Run."""
+    return (
+        command.HasField("complete_workflow_execution")
+        or command.HasField("continue_as_new_workflow_execution")
+        or command.HasField("fail_workflow_execution")
+        or command.HasField("cancel_workflow_execution")
+    )
 
 
 async def _shield_await(fut: asyncio.Future[Any]) -> Any:
@@ -179,6 +192,20 @@ class WorkflowInstanceDetails:
     default_workflow_logic_flags: frozenset[_WorkflowLogicFlag] = field(
         default_factory=lambda: _DEFAULT_ENABLED_WORKFLOW_LOGIC_FLAGS
     )
+    external_stream_runtime: Any = None
+    """Opaque per-Run handle to the Worker's External Workflow Stream manager.
+
+    Crosses into the sandbox by reference, like the rest of these details, which
+    is the whole point: the manager owns the Worker's backend connections and
+    watcher tasks, and a copy re-created inside the sandbox would watch nothing.
+    Workflow code only ever sees this handle -- never a provider instance.
+
+    Present for validation even when no ``external_stream_backend`` was
+    configured on the Worker, because recorded state must be handled based on
+    History rather than current Worker configuration.
+    """
+    external_streams_configured: bool = False
+    """Whether Workflow code may use the runtime for new subscriptions."""
 
 
 class WorkflowInstance(ABC):
@@ -269,6 +296,96 @@ _Context: TypeAlias = dict[str, Any]
 _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], Any]
 
 
+# Match the server's per-batch limits. Rejecting here turns a wedged workflow,
+# which would replay and re-issue the same rejected command forever, into an
+# error the workflow author can see.
+_MAX_STREAM_MESSAGES_PER_BATCH = 1000
+_MAX_STREAM_MESSAGE_BYTES = 1 << 20
+_MAX_STREAM_BATCH_BYTES = 2 << 20
+
+
+class _StreamBuffer:
+    """Holds the stream ranges delivered to a workflow so far.
+
+    Delivery is driven by the server, not by whether workflow code happens to be
+    reading. A range arrives once, is recorded in History as consumed, and is
+    never sent again, so anything not yet read has to be kept here rather than
+    dropped.
+    """
+
+    def __init__(self, stream_id: str = "") -> None:
+        self._stream_id = stream_id
+        self._messages: list[temporalio.workflow.DeliveredStreamMessage] = []
+        self._waiters: list[asyncio.Future] = []
+        # Where the next range has to start. Unknown until the first one
+        # arrives, because a subscription may start wherever the stream is and
+        # the server is the one that resolves that.
+        self._next_offset: int | None = None
+
+    def extend(
+        self,
+        messages: Sequence[temporalio.api.stream.v1.StreamMessage],
+        from_offset: int = 0,
+        to_offset: int | None = None,
+    ) -> None:
+        if to_offset is None:
+            to_offset = from_offset + len(messages)
+        # A range is recorded as consumed once and never resent, so one that
+        # repeats, skips or mis-sizes would hand the workflow duplicate or
+        # shifted bodies with nothing to say so. Failing the task is what makes
+        # the fault visible.
+        if to_offset - from_offset != len(messages):
+            raise RuntimeError(
+                f"stream {self._stream_id!r} delivered {len(messages)} messages "
+                f"for offsets [{from_offset}, {to_offset})"
+            )
+        if self._next_offset is not None and from_offset != self._next_offset:
+            raise RuntimeError(
+                f"stream {self._stream_id!r} delivered offsets [{from_offset}, "
+                f"{to_offset}) but the last range ended at {self._next_offset}"
+            )
+        self._next_offset = to_offset
+        # An empty range still counts as a delivery, but there is nothing to
+        # hand a reader, so only a non-empty one wakes anyone.
+        if not messages:
+            return
+        # Offsets are dense inside a delivered range and the range arrives in
+        # order, so counting from its start is the position rather than an
+        # estimate of it. The per-message field is not on the activation, and a
+        # reader that has to resume elsewhere needs a position it can name.
+        self._messages.extend(
+            temporalio.workflow.DeliveredStreamMessage(
+                body=message.body.data,
+                topic=message.topic,
+                offset=from_offset + index,
+            )
+            for index, message in enumerate(messages)
+        )
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def take(self) -> list[temporalio.workflow.DeliveredStreamMessage]:
+        taken, self._messages = self._messages, []
+        return taken
+
+    def put_back(
+        self, messages: Sequence[temporalio.workflow.DeliveredStreamMessage]
+    ) -> None:
+        """Return an unread tail to the front of the buffer."""
+        self._messages[:0] = messages
+
+    def wait_future(self) -> asyncio.Future:
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self._waiters.append(fut)
+        return fut
+
+    def __len__(self) -> int:
+        return len(self._messages)
+
+
 class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     WorkflowInstance, temporalio.workflow._Runtime, asyncio.AbstractEventLoop
 ):
@@ -293,6 +410,17 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         )
 
         self._extern_functions = det.extern_functions
+        self._external_stream_runtime = det.external_stream_runtime
+        self._external_streams_configured = det.external_streams_configured
+        self._pending_replay_finish: Any = None
+        """A marker replay whose last segment the activation's own drain serves.
+
+        Set by ``_apply_replay_external_streams`` and consumed by
+        ``_finish_replay_external_streams``, which the activation calls once that
+        drain has run. Held here rather than on the runtime because what it
+        defers is a step of the *activation*, not of the stream runtime.
+        """
+        self._pending_output_replay_finish = False
         self._disable_eager_activity_execution = det.disable_eager_activity_execution
         self._worker_level_failure_exception_types = (
             det.worker_level_failure_exception_types
@@ -396,6 +524,11 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             str, list[temporalio.bridge.proto.workflow_activation.SignalWorkflow]
         ] = {}
 
+        # Stream ranges delivered to this workflow, keyed by stream id. Ranges
+        # arrive whether or not anything is reading yet, because the server has
+        # already recorded them as consumed and will not send them again.
+        self._stream_buffers: dict[str, _StreamBuffer] = {}
+
         # When we evict, we have to mark the workflow as deleting so we don't
         # add any commands and we swallow exceptions on tear down
         self._deleting = False
@@ -469,6 +602,22 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         )
         self._time_ns = act.timestamp.ToNanoseconds()
         self._is_replaying = act.is_replaying
+        if self._external_stream_runtime is not None and not any(
+            job.HasField("remove_from_cache") for job in act.jobs
+        ):
+            # Re-arms the per-activation delivery budget. It has to be reset here
+            # rather than anywhere later: a producer that keeps a subscription's
+            # buffer non-empty would otherwise keep the iterator fed for the
+            # whole of this call, and this call runs on a thread-pool executor
+            # under a 2-second deadlock timeout that every retry would hit again.
+            #
+            # A cache-removal activation is not a Workflow Task. In particular,
+            # it must still be able to tear down a runtime whose output staging
+            # failed: treating the eviction's (empty) history floor as a new task
+            # would reject the still-uncommitted batch and poison eviction.
+            self._external_stream_runtime.begin_activation(
+                getattr(act, "history_floor_event_id", None)
+            )
         self._current_thread_id = threading.get_ident()
         self._current_internal_flags = act.available_internal_flags
         self._single_batch_activation = self._workflow_logic_flag_enabled(
@@ -482,11 +631,21 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             job_sets: list[
                 list[temporalio.bridge.proto.workflow_activation.WorkflowActivationJob]
             ] = [[], [], [], []]
+            # An external stream replay marker is what this Workflow Task recorded,
+            # so it has to be installed before any of the task's code runs and
+            # publishes, or the install wipes those publishes and the manifest
+            # check fails them. It is applied right before the first drain of the
+            # activation, after every job that drain will act on.
+            replay_jobs: list[
+                temporalio.bridge.proto.workflow_activation.WorkflowActivationJob
+            ] = []
             for job in act.jobs:
                 if job.HasField("notify_has_patch"):
                     job_sets[0].append(job)
                 elif job.HasField("signal_workflow") or job.HasField("do_update"):
                     job_sets[1].append(job)
+                elif job.HasField("replay_external_streams"):
+                    replay_jobs.append(job)
                 elif not job.HasField("query_workflow"):
                     if job.HasField("initialize_workflow"):
                         start_job = job.initialize_workflow
@@ -503,30 +662,74 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             if start_job:
                 self._workflow_input = self._make_workflow_input(start_job)
 
-            if self._single_batch_activation:
-                # Applying every job before giving workflow tasks a chance to
-                # run prevents their order in the activation from hiding state
-                # that arrived in the same workflow task.
-                for job_set in job_sets:
-                    for job in job_set:
-                        # Let errors bubble out of these to the caller to fail the task
+            try:
+                if self._single_batch_activation:
+                    # Applying every job before giving workflow tasks a chance to
+                    # run prevents their order in the activation from hiding state
+                    # that arrived in the same workflow task.
+                    for job_set in job_sets:
+                        for job in job_set:
+                            # Let errors bubble out of these to the caller to fail the task
+                            self._apply(job)
+                    for job in replay_jobs:
                         self._apply(job)
-                if any(job_sets):
-                    self._run_once(check_conditions=bool(job_sets[1] or job_sets[2]))
-            else:
-                # Preserve the legacy scheduling order for histories which do
-                # not contain the single-batch workflow logic flag.
-                for index, job_set in enumerate(job_sets):
-                    if not job_set:
-                        continue
-                    for job in job_set:
-                        # Let errors bubble out of these to the caller to fail the task
-                        self._apply(job)
+                    if any(job_sets) or replay_jobs:
+                        self._run_once(
+                            check_conditions=bool(job_sets[1] or job_sets[2])
+                        )
+                else:
+                    # Preserve the legacy scheduling order for histories which do
+                    # not contain the single-batch workflow logic flag.
+                    replay_pending = bool(replay_jobs)
+                    for index, job_set in enumerate(job_sets):
+                        if not job_set:
+                            continue
+                        for job in job_set:
+                            # Let errors bubble out of these to the caller to fail the task
+                            self._apply(job)
+                        if replay_pending and index >= 1:
+                            for job in replay_jobs:
+                                self._apply(job)
+                            replay_pending = False
 
-                    # Run one iteration of the loop. We do not allow conditions to
-                    # be checked in patch jobs (first index) or query jobs (last
-                    # index).
-                    self._run_once(check_conditions=index == 1 or index == 2)
+                        # Run one iteration of the loop. We do not allow conditions to
+                        # be checked in patch jobs (first index) or query jobs (last
+                        # index).
+                        self._run_once(check_conditions=index == 1 or index == 2)
+                    if replay_pending:
+                        for job in replay_jobs:
+                            self._apply(job)
+                        self._run_once(check_conditions=True)
+            except BaseException:
+                # An error is already on its way out, so the replay is *abandoned*
+                # rather than closed. Closing runs `verify_replay_consumed`, which
+                # raises whenever a recorded delivery is still armed -- which it is,
+                # since the drain that would have taken it is the one that just
+                # failed -- and an exception raised while another is propagating
+                # **replaces** it. A user's failure, or an unrelated nondeterminism
+                # error, would reach the completion path as a nondeterminism error
+                # blaming a `subscribe()` call nobody touched: the wrong diagnosis,
+                # and the wrong classification with it, since a workflow-failing
+                # error would be retried as a task failure instead.
+                #
+                # Replay mode is still left, because a Run stuck in it has every
+                # later drain return nothing at all. Only the checks and the
+                # cursor move are skipped -- and the reposition must be skipped
+                # here in any case: an activation that failed committed nothing.
+                self._abandon_replay_external_streams()
+                raise
+            else:
+                # A replay marker's last recorded segment is drained by the
+                # activation's *own* drain above, not by the replay driver, so
+                # what closes the replay -- the consumed check, the cursor
+                # reposition, and leaving replay mode -- can only happen here.
+                self._finish_replay_external_streams()
+
+            # Detected *after* the drain, not during it: `_run_once` already
+            # drains `self._ready` until empty, so "no coroutine is runnable" is
+            # its post-condition and quiescence is a registry check rather than
+            # an event-loop change.
+            self._emit_external_stream_commands()
         except Exception as err:
             # We want some errors during activation, like those that can happen
             # during payload conversion, to be able to fail the workflow not the
@@ -591,17 +794,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 )
                 self._current_completion.failed.failure.application_failure_info.SetInParent()
 
-        def is_completion(
-            command: temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.WorkflowCommand,
-        ):
-            return (
-                command.HasField("complete_workflow_execution")
-                or command.HasField("continue_as_new_workflow_execution")
-                or command.HasField("fail_workflow_execution")
-                or command.HasField("cancel_workflow_execution")
+        if any(
+            map(
+                _is_workflow_terminal_command,
+                self._current_completion.successful.commands,
             )
-
-        if any(map(is_completion, self._current_completion.successful.commands)):
+        ):
             self._warn_if_unfinished_handlers()
 
         return self._current_completion
@@ -611,6 +809,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     ) -> None:
         if job.HasField("cancel_workflow"):
             self._apply_cancel_workflow(job.cancel_workflow)
+        elif job.HasField("deliver_stream_messages"):
+            self._apply_deliver_stream_messages(job.deliver_stream_messages)
         elif job.HasField("do_update"):
             self._apply_do_update(job.do_update)
         elif job.HasField("fire_timer"):
@@ -623,6 +823,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._apply_remove_from_cache(job.remove_from_cache)
         elif job.HasField("resolve_activity"):
             self._apply_resolve_activity(job.resolve_activity)
+        elif job.HasField("resolve_external_stream_waits"):
+            self._apply_resolve_external_stream_waits(job.resolve_external_stream_waits)
+        elif job.HasField("replay_external_streams"):
+            self._apply_replay_external_streams(job.replay_external_streams)
         elif job.HasField("resolve_child_workflow_execution"):
             self._apply_resolve_child_workflow_execution(
                 job.resolve_child_workflow_execution
@@ -801,6 +1005,246 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         if handle:
             self._ready.append(handle)
 
+    def _apply_resolve_external_stream_waits(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.ResolveExternalStreamWaits,
+    ) -> None:
+        """Resumes every wait that has something buffered.
+
+        **Performs no I/O.** Everything this touches is already in memory: the
+        manager reported readiness only once a record was buffered, so the drain
+        that follows is bounded and cannot block. Reading the backend here would
+        put a multi-second transaction inside a synchronous activation running
+        under a 2-second deadlock timeout.
+
+        The job's ``ready_hints`` are hints, not an exhaustive availability
+        claim, so *every* active wait is resolved and left to find out for
+        itself whether anything arrived. Resolving only the hinted ones would
+        strand a record whose readiness notification was coalesced away.
+        """
+        del job  # The hints are deliberately unused; see above.
+        if self._external_stream_runtime is not None:
+            self._external_stream_runtime.resolve_all_pending()
+
+    def _apply_replay_external_streams(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.ReplayExternalStreams,
+    ) -> None:
+        """Delivers a recorded marker's observations, from memory only.
+
+        The recorded ranges were read and validated before this activation was
+        handed to the Workflow thread, so this performs no I/O at all.
+
+        The live run's *k* activations become *k* drains inside this one
+        activation. Segments are walked in order with one event-loop drain each,
+        rather than delivered all at once, because reproducing the record order
+        while changing how many drains occurred would make ``wait_condition``
+        predicates fire a different number of times than they did live
+        (ADR-018).
+
+        *k*, not *k + 1*: the activation runs a drain of its own for the job set
+        this job arrived in, so only the first *k - 1* segments are drained here
+        and the last is left to that one. Closing the replay therefore also
+        moves to after it, in :meth:`_finish_replay_external_streams`.
+
+        This is safe with respect to Workflow time: every segment of a marker
+        belongs to one Workflow Task, so ``workflow.now()`` is constant across
+        them in both directions.
+        """
+        runtime = self._external_stream_runtime
+        if runtime is None:
+            raise RuntimeError(
+                "received an external stream replay job without the per-Run "
+                "validation runtime"
+            )
+        has_field = getattr(job, "HasField", None)
+        try:
+            has_output = bool(has_field and has_field("output"))
+        except ValueError:
+            # Compatible with a generated binding from before the additive
+            # output field (and with input-only replay driver test doubles).
+            has_output = False
+        output = cast(Any, job).output if has_output else None
+        output_segments = output.segments if output is not None else ()
+        if has_output:
+            runtime.begin_output_replay(output)
+            self._pending_output_replay_finish = True
+        plan = runtime.take_replay_plan()
+        if (
+            has_output
+            and plan is not None
+            and len(plan.segments) != len(output_segments)
+        ):
+            raise temporalio.workflow.NondeterminismError(
+                "External stream History has incompatible input and output "
+                "activation schedules. This prerelease marker omitted empty "
+                "input activations, whose positions cannot be recovered safely."
+            )
+        if plan is None:
+            if has_output:
+                # An output-only marker deliberately has no input ReplayPlan.
+                # Its segment list is still the shared activation schedule: run
+                # the first k - 1 drains here and leave the last to activate()'s
+                # ordinary trailing drain, exactly as the input-driven path
+                # below does. Treating all output-only markers as one segment
+                # collapsed retained multi-activation Workflow Tasks on replay.
+                for _segment in output_segments[:-1]:
+                    runtime.begin_output_replay_segment()
+                    runtime.resolve_all_pending()
+                    self._run_once(check_conditions=True)
+                if output_segments:
+                    runtime.begin_output_replay_segment()
+                runtime.resolve_all_pending()
+                return
+
+            # Nothing was prepared -- the input replay job reached the Workflow
+            # thread without its ranges being read, which would mean delivering
+            # from a buffer that live watching filled. Better to deliver nothing
+            # than to deliver something replay did not record.
+            runtime.resolve_all_pending()
+            return
+
+        deferred = False
+        closed = False
+        try:
+            # The bindings first, and before any delivery. A recorded run is
+            # joined to a subscription by `wait_id`, which is an integer and
+            # therefore says nothing about what that wait was subscribed to;
+            # without checking the binding, wait 1 moved from one stream to
+            # another delivers the first stream's recorded bytes through the
+            # second's subscription rather than failing as nondeterminism.
+            runtime.begin_replay(plan.annotation.header.streams)
+            # Every segment but the **last** is drained here. The last one is
+            # armed and left to the drain the activation runs for the job set
+            # this job arrived in, because that drain happens whatever this
+            # method does: a driver that drained all *k* segments itself
+            # produced *k + 1* drains for the *k* the marker records, and
+            # ADR-018 requires exactly *k*. Leaving the last one to the
+            # activation is also what the live run did -- there each
+            # activation's single trailing drain served the records that
+            # activation had just been handed.
+            for segment in plan.segments[:-1]:
+                if has_output:
+                    runtime.begin_output_replay_segment()
+                runtime.begin_replay_segment(list(segment.deliveries))
+                runtime.resolve_all_pending()
+                self._run_once(check_conditions=True)
+            # Reached only once every segment but the last has been drained.
+            if plan.segments:
+                if has_output:
+                    runtime.begin_output_replay_segment()
+                runtime.begin_replay_segment(list(plan.segments[-1].deliveries))
+                runtime.resolve_all_pending()
+                # Closing the replay here would end replay mode before the drain
+                # that delivers this final segment, so it is handed to
+                # `_finish_replay_external_streams` -- which the activation calls
+                # once that drain has run, and which is what leaves replay mode
+                # from then on.
+                self._pending_replay_finish = plan
+                deferred = True
+            else:
+                if has_output:
+                    runtime.begin_output_replay_segment()
+                # A marker that recorded no activation of its own -- a Workflow
+                # Task that bound a wait and blocked with the stream never
+                # delivering. **Nothing is deferred, and that is not asymmetry
+                # for its own sake.** With no recorded segment for the
+                # activation's drain to serve, that drain is a *live* one:
+                # records that arrived while this Run was evicted are already in
+                # the buffer and it would hand them over. Repositioning after it
+                # would then retract exactly what it had just delivered -- cursor
+                # back to the marker's boundary, buffer cleared -- and the
+                # watcher would re-read and re-deliver records Workflow code
+                # already had. Closing first retracts the buffer *before* the
+                # drain, so the drain finds nothing and the watcher re-reads from
+                # the boundary the marker committed. The records are not lost;
+                # they arrive on the activation the re-read announces.
+                self._pending_replay_finish = plan
+                closed = True
+                if has_output:
+                    # Input has no recorded drain and must reposition before the
+                    # activation's live drain. Output, however, is produced by
+                    # that drain and is validated after it.
+                    self._pending_output_replay_finish = False
+                    self._finish_replay_external_streams()
+                    self._pending_output_replay_finish = True
+                else:
+                    self._finish_replay_external_streams()
+        finally:
+            if not deferred and not closed:
+                # The walk raised part-way. Leaving replay mode set would make
+                # every later drain on this Run return nothing at all, turning
+                # one marker's failure into a Workflow that silently never
+                # receives again -- and the checks the close performs must not
+                # run here, where they would replace the error that got us here
+                # with one of their own.
+                self._pending_replay_finish = None
+                self._pending_output_replay_finish = False
+                if has_output:
+                    runtime.abandon_output_replay()
+                runtime.end_replay()
+
+    def _abandon_replay_external_streams(self) -> None:
+        """Leaves replay mode without running any of the checks a close runs.
+
+        For the path where an activation is already failing. See the caller.
+        """
+        self._pending_replay_finish = None
+        self._pending_output_replay_finish = False
+        runtime = self._external_stream_runtime
+        if runtime is not None:
+            runtime.abandon_output_replay()
+            runtime.end_replay()
+
+    def _finish_replay_external_streams(self) -> None:
+        """Closes the replay whose last segment the activation's drain served.
+
+        Called from the activation's ``finally`` so that a drain which raised
+        still leaves replay mode, for the reason
+        :meth:`_apply_replay_external_streams` gives.
+        """
+        plan = self._pending_replay_finish
+        output_pending = getattr(self, "_pending_output_replay_finish", False)
+        if plan is None and not output_pending:
+            return
+        self._pending_replay_finish = None
+        self._pending_output_replay_finish = False
+        runtime = self._external_stream_runtime
+        if runtime is None:
+            return
+        try:
+            # Nothing recorded may be left over. Each of these records was handed
+            # to Workflow code in the activation its run was recorded in, so a
+            # replay that ends holding one has run code that consumes less than
+            # History says was consumed -- what a removed `subscribe()` call
+            # looks like from here.
+            if plan is not None:
+                runtime.verify_replay_consumed()
+            # The manager knew nothing about this marker while replay was
+            # running: its watcher has been reading the very same records from
+            # the subscription's start cursor into the live buffer. The next live
+            # drain would hand them over again -- observed end-to-end as one
+            # marker's record delivered twice. Moving the cursors to what the
+            # marker committed is what makes live delivery resume *after* those
+            # records rather than in front of them.
+            #
+            # After every segment's drain, not inside the walk: a replay that
+            # raised part-way committed nothing, and advancing a committed cursor
+            # for records this Workflow may never have received would lose them
+            # outright.
+            if plan is not None:
+                runtime.reposition_after_replay(plan.committed_boundaries)
+            if output_pending:
+                runtime.verify_output_replay()
+        finally:
+            if output_pending:
+                # Successful verification already cleared the manifest, so
+                # this is a no-op on success and cleanup of partial output on
+                # every validation/input-reposition failure path.
+                runtime.abandon_output_replay()
+            if plan is not None:
+                runtime.end_replay()
+
     def _apply_query_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.QueryWorkflow
     ) -> None:
@@ -871,6 +1315,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         # We consider eviction to be under replay so that certain code like
         # logging that avoids replaying doesn't run during eviction either
         self._is_replaying = True
+        # Drop the stream readiness futures before cancelling tasks. Nothing
+        # will ever resolve them now, and a coroutine cancelled while awaiting
+        # one would otherwise be woken by the cancellation and then find its
+        # future still registered.
+        if self._external_stream_runtime is not None:
+            self._external_stream_runtime.clear_pending()
         # Cancel everything
         for task in self._tasks:
             task.cancel()
@@ -1136,6 +1586,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         else:
             fut.set_result(None)
 
+    def _apply_deliver_stream_messages(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.DeliverStreamMessages,
+    ) -> None:
+        buffer = self._stream_buffers.get(job.stream_id)
+        if buffer is None:
+            # Nothing subscribed. The range is already recorded as consumed and
+            # will not be sent again, so buffering it is the only way a
+            # subscription made later in the same task still sees it.
+            buffer = _StreamBuffer(job.stream_id)
+            self._stream_buffers[job.stream_id] = buffer
+        buffer.extend(job.messages, job.from_offset, job.to_offset)
+
     def _apply_signal_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.SignalWorkflow
     ) -> None:
@@ -1299,6 +1762,74 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
+
+    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None:
+        # Reissued on every replay, so the buffer has to exist before the first
+        # range arrives and the command has to be harmless the second time. A
+        # repeat subscription leaves the server-side cursor where it is.
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
+        command = self._add_command()
+        command.subscribe_stream.stream_id = stream_id
+        command.subscribe_stream.start_offset = start_offset
+
+    def workflow_add_stream_messages(
+        self, stream_id: str, messages: Sequence[bytes], topic: str
+    ) -> None:
+        if not messages:
+            raise ValueError("add_stream_messages needs at least one message")
+        if len(messages) > _MAX_STREAM_MESSAGES_PER_BATCH:
+            raise ValueError(
+                f"a batch is limited to {_MAX_STREAM_MESSAGES_PER_BATCH} messages, "
+                f"got {len(messages)}"
+            )
+        total = 0
+        for body in messages:
+            if len(body) > _MAX_STREAM_MESSAGE_BYTES:
+                raise ValueError(
+                    f"a stream message is limited to {_MAX_STREAM_MESSAGE_BYTES} "
+                    f"bytes, got {len(body)}"
+                )
+            total += len(body)
+        if total > _MAX_STREAM_BATCH_BYTES:
+            raise ValueError(
+                f"a batch is limited to {_MAX_STREAM_BATCH_BYTES} bytes, got {total}"
+            )
+        command = self._add_command()
+        command.add_stream_messages.stream_id = stream_id
+        for body in messages:
+            # The bodies ride the command and never enter History, so the event
+            # this produces stays the same size whatever is published here.
+            message = command.add_stream_messages.messages.add()
+            message.body.data = body
+            # Every other Temporal payload names its encoding, and the UI, the
+            # CLI and any codec server rely on that to decode what they read.
+            message.body.metadata["encoding"] = b"binary/plain"
+            message.topic = topic
+
+    async def workflow_read_stream(
+        self, stream_id: str, max_messages: int
+    ) -> list[bytes]:
+        return [
+            m.body
+            for m in await self.workflow_read_stream_messages(stream_id, max_messages)
+        ]
+
+    async def workflow_read_stream_messages(
+        self, stream_id: str, max_messages: int
+    ) -> list[temporalio.workflow.DeliveredStreamMessage]:
+        # Ranges arrive on Workflow Tasks, and a query activation carries none,
+        # so without this the read waits on a future nothing can resolve and the
+        # query times out with nothing to say why.
+        self._assert_not_read_only("read stream")
+        buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
+        while not len(buffer):
+            await buffer.wait_future()
+        taken = buffer.take()
+        if max_messages and len(taken) > max_messages:
+            # Put the tail back rather than dropping it: nothing will resend it.
+            buffer.put_back(taken[max_messages:])
+            taken = taken[:max_messages]
+        return taken
 
     def workflow_get_current_history_length(self) -> int:
         return self._current_history_length
@@ -2247,6 +2778,277 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._assert_not_read_only("add command")
         return self._current_completion.successful.commands.add()
 
+    def _attach_external_stream_continuation(self, command: Any) -> None:
+        """Puts each subscription's position on the Continue-As-New command.
+
+        The successor Run restores it from its own ``WorkflowExecutionStarted``
+        rather than reading the backend, so replay sees the boundary the Run
+        actually started from instead of wherever the stream has since got to
+        (ADR-022).
+
+        Written when the command is created and again once the activation has
+        quiesced -- see :meth:`_refresh_external_stream_continuations`, which is
+        what makes the second write the one that counts.
+
+        Nothing is attached when the Run held no subscriptions -- an empty header
+        on every Continue-As-New in every Workflow would be pure overhead.
+        """
+        runtime = self._external_stream_runtime
+        if runtime is None:
+            return
+        continuation = runtime.continuation()
+        if continuation.cursors:
+            from temporalio.contrib.external_workflow_streams._continuation import (
+                CONTINUATION_HEADER,
+                write_continuation_header,
+            )
+
+            command.headers[CONTINUATION_HEADER].CopyFrom(
+                write_continuation_header(continuation)
+            )
+        output_continuation = runtime.output_continuation()
+        if output_continuation is not None:
+            from temporalio.contrib.external_workflow_streams._output_continuation import (
+                OUTPUT_CONTINUATION_HEADER,
+                write_output_continuation_header,
+            )
+
+            command.headers[OUTPUT_CONTINUATION_HEADER].CopyFrom(
+                write_output_continuation_header(output_continuation)
+            )
+
+    def _refresh_external_stream_continuations(self) -> None:
+        """Re-takes the continuation snapshot now the activation has quiesced.
+
+        Creating the Continue-As-New command does not end the activation.
+        :meth:`_run_once` drains ``self._ready`` until it is empty and then
+        re-checks conditions, so a stream consumer scheduled -- or unblocked --
+        before the terminal command still gets its turn afterwards, and every
+        record it takes calls ``record_consumption`` after the header was
+        serialized. Those consumptions do reach the predecessor's final stream
+        marker, which is closed on the way out; a header left at the earlier
+        boundary would therefore describe a different boundary than History
+        does, and the successor would be handed the record a second time.
+
+        No Workflow code runs from here on, so this is the first point at which
+        the consumption boundary is stable for the activation.
+
+        Every Continue-As-New command is refreshed rather than the last one,
+        because two top-level functions can each raise one and only Core decides
+        which terminal survives.
+
+        **Not gated behind an internal flag.** Core matches a Continue-As-New
+        command to its ``WorkflowExecutionContinuedAsNew`` event by command type
+        alone and never compares the command's headers against the recorded ones
+        (``continue_as_new_workflow_state_machine.rs``), so a replay that
+        regenerates the header at the later boundary cannot disagree with a
+        History written at the earlier one. What the successor resumes from is
+        the copy in its own ``WorkflowExecutionStarted``, which is durable and
+        which replaying the predecessor does not rewrite -- so a chain already in
+        flight keeps the boundary it started with.
+        """
+        for command in self._current_completion.successful.commands:
+            if command.HasField("continue_as_new_workflow_execution"):
+                self._attach_external_stream_continuation(
+                    command.continue_as_new_workflow_execution
+                )
+
+    def _emit_external_stream_commands(self) -> None:
+        """Answers the two independent questions every activation return poses.
+
+        1. **Did replay-visible stream state change?** If so a
+           ``WorkflowStreamProgress`` carries the observation delta, on *every*
+           completion path. This is what commits the cursor boundary, and it is
+           not conditional on why the Workflow Task ended: if a consumed record
+           influenced a command that lands in History while the consumption
+           itself is never marked, replay re-delivers that record while the
+           command it produced is already durable.
+        2. **Should the Workflow Task be retained?** If so a
+           ``WorkflowStreamQuiescent`` asks Core to hold it open. It carries no
+           annotation data; the two questions are genuinely separate.
+
+        The progress command is emitted **first**, because it must precede every
+        command whose value could depend on the consumed data -- on replay that
+        is what guarantees a record is validated before the command derived from
+        it is matched.
+
+        The two are separate in *time* as well, which is why replay answers only
+        the second: the annotation is already in History, but the wait set the
+        quiescent command registers is per-Worker runtime state that a replayed
+        Run has to rebuild.
+
+        Quiescence is also what a Continue-As-New header has been waiting for, so
+        :meth:`_refresh_external_stream_continuations` runs from here too -- the
+        boundary it records and the boundary the delta below commits have to be
+        the same one.
+        """
+        runtime = self._external_stream_runtime
+        if runtime is None or self._deleting:
+            return
+
+        # First, because the boundary a Continue-As-New header has to carry is
+        # the one this activation is about to commit, and it only stops moving
+        # here.
+        self._refresh_external_stream_continuations()
+
+        # Read before anything is added below, so "what the Workflow itself
+        # produced this activation" stays answerable. A terminal command also
+        # determines whether buffered readiness can ever be useful again.
+        commands = self._current_completion.successful.commands
+        produced_commands = len(commands) > 0
+        terminal = any(map(_is_workflow_terminal_command, commands))
+
+        # Records still buffered when a non-terminal activation ends have no readiness
+        # notification coming: the watcher moved its prefetch cursor past them
+        # when it buffered them, and it only reports again after a *new* non-empty
+        # read. Re-reporting is what brings the next activation in, and it is the
+        # only thing that can.
+        #
+        # **Asked of every completion, not only of one a delivery budget
+        # stopped.** The budget is the obvious way to end an activation with a
+        # full buffer and it is not the only one. Readiness accepted while an
+        # activation was open is kept by Core only if the quiescent snapshot that
+        # follows reports the *same* wait generation: same generation means the
+        # Workflow never saw the record, a bumped one means it drained and
+        # re-blocked. So a record that arrives after this activation's last drain
+        # is accepted at generation G, the wait re-blocks to G+1 on the way out,
+        # and the snapshot legitimately drops a readiness that now refers to a
+        # resolved block. Nothing else announces it, and the Workflow waits
+        # forever on data it is already holding -- until an unrelated later event.
+        # Gating this on the budget left that hole open, and it is a race, so it
+        # showed up as an occasional stall rather than a reproducible one.
+        #
+        # Cheap where it is not needed: the manager skips every subscription whose
+        # buffer is empty, which is the ordinary case, and a redundant report is
+        # answered `Accepted` or `Stale` and retried against the current
+        # generation.
+        #
+        # A terminal completion is the exception. This Run cannot consume a
+        # later activation, and re-arming after its terminal command reports the
+        # buffer into the Workflow's closing window. Core answers
+        # `NoOpenWorkflowTask`, which turns that report into a follow-up Signal
+        # that can race the terminal report and make the same task replay.
+        #
+        # Before every early return below: the waits involved are marked blocked,
+        # so they are in the quiescent snapshot, and a snapshot is what lets Core
+        # start the idle timer and eventually park. Parking a Workflow Task whose
+        # records are already in the local buffer would be wrong, and this is what
+        # makes Core resolve instead of park.
+        if not terminal:
+            runtime.rearm_readiness()
+
+        # The snapshot goes out whether or not this completion retains the task.
+        # A completion carrying a timer, activity, child workflow, or signal must
+        # be reported so the server can act on it, so it cannot ask for
+        # retention -- but the subscriptions stay registered, and the wake Signal
+        # covers the window that leaves.
+        #
+        # "Stay registered" is the load-bearing phrase, and it is Core that
+        # decides how to read this: it registers the waits and, when the
+        # completion cannot be retained for, arms no timer. Withholding the
+        # snapshot here instead is what left a Workflow whose very first block
+        # rode such a completion registered nowhere, unresumable by any wake --
+        # a deadlock in ordinary user code.
+        snapshot = runtime.quiescent_snapshot()
+
+        retaining = bool(snapshot) and not produced_commands
+
+        if self._is_replaying:
+            # Every marker for a replayed Workflow Task is already in History,
+            # so there is nothing here for Core to write. Re-deriving the
+            # annotation is not merely redundant: the command would be matched
+            # against the very event it was read from, and Core would see a
+            # marker arriving for a machine already resolved from lookahead.
+            #
+            # What lang accumulated while replaying is dropped rather than
+            # carried, because otherwise it rides the *next* completion -- which
+            # is live, and would write a second marker for observations the
+            # first one already recorded. A registration alone is enough to
+            # trigger that, so it happens even for a stream that never delivered
+            # anything.
+            #
+            # The *quiescent* command below is emitted all the same, because it
+            # is not about the annotation at all: it is the only thing that
+            # registers a wait set with Core, and Core's wait set is runtime
+            # state that a replayed Run rebuilds from nothing. A Run handed over
+            # and replayed that reported no snapshot would finish replay with an
+            # empty wait set -- every later readiness answered as though the Run
+            # had no subscriptions, every wake Signal marking nothing ready, and
+            # every Workflow Task it created completing with no activation in
+            # it. That Run is unresumable, with its records sitting in the
+            # stream.
+            #
+            # The cost is that Core starts its idle timer here too, and on
+            # replay it should not run one at all: a replay slower than the idle
+            # timeout can therefore queue a park handshake between two replay
+            # activations. That is a rare timing hazard against a certain and
+            # total failure, so it is the right trade to make from this side --
+            # but removing it needs Core either to hold its timers while
+            # `replaying` or to register the wait set from the marker lookahead
+            # it already reads.
+            runtime.start_new_annotation()
+        else:
+            parts: list[bytes] = []
+            # The delta first. `take_observation_delta` is what *closes* this
+            # activation's segment, so a rollover decision read before it is a
+            # decision about the annotation as it stood one activation ago: the
+            # segment that crossed the high-water mark went out with
+            # `request_rollover = false`, and the following activation was then
+            # free to add another frame and overflow before Core had ever been
+            # asked to roll over. Reading it after also picks up the runtime
+            # having stopped delivering because the annotation could afford no
+            # more, which is decided while this same segment is being closed.
+            delta = runtime.take_observation_delta()
+            if delta is not None:
+                parts.append(delta)
+            # And before the terminal is added: closing the annotation starts a
+            # fresh one, whose accumulator is nowhere near the high-water mark.
+            request_rollover = runtime.request_rollover
+            # Both of these end the Workflow Task. Retention is refused outright
+            # for the first; for the second Core takes the rollover as
+            # authoritative *over* a retention request, because the annotation
+            # is the thing that has to stop growing.
+            if runtime.annotation_started and (not retaining or request_rollover):
+                # This completion ends the Workflow Task, so Core writes the
+                # marker for everything accumulated and clears it. Two things
+                # follow, and neither is optional.
+                #
+                # The terminal has to ride *this* delta. Core is
+                # annotation-blind and never manufactures one, and it asks for
+                # one only on the boundaries it decides itself -- so on a
+                # completion Python decided, a marker whose annotation has no
+                # terminal is what gets written, and that is durable and wrong
+                # (ADR-008).
+                #
+                # And the next annotation has to begin from a fresh header. Core
+                # accumulates by byte append, so an accumulator that kept the
+                # header it already emitted would start the *next* marker at
+                # whatever frame came first -- the observed failure is an
+                # annotation beginning with a terminal frame, read back as
+                # "schema version 3".
+                parts.append(runtime.add_terminal())
+
+            if parts:
+                progress = temporalio.bridge.proto.workflow_commands.WorkflowCommand()
+                progress.workflow_stream_progress.observation_delta = b"".join(parts)
+                progress.workflow_stream_progress.request_rollover = request_rollover
+                # Inserted at the front rather than appended: the progress
+                # command must precede every command whose value could depend on
+                # the consumed data.
+                commands.insert(0, progress)
+
+        if not snapshot:
+            return
+
+        quiescent = self._add_command().workflow_stream_quiescent
+        quiescent.quiescence_generation = 0
+        quiescent.idle_timeout.FromTimedelta(runtime.effective_idle_timeout())
+        for wait in snapshot:
+            entry = quiescent.waits.add()
+            entry.wait_id = wait.wait_id
+            entry.generation = wait.generation
+            entry.immediately_parkable = wait.immediately_parkable
+
     def _workflow_logic_flag_enabled(self, flag: _WorkflowLogicFlag) -> bool:
         if flag in self._current_internal_flags:
             return True
@@ -2560,6 +3362,20 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             workflow_instance = self._defn.cls(*self._workflow_input.args)
         else:
             workflow_instance = self._defn.cls()
+
+        # Hand the workflow object its External Stream handle. It goes on the
+        # object rather than in a module global because per-Run state must share
+        # the Run's lifetime exactly -- a global would outlive an evicted Run and
+        # hand its wait ids to the next one.
+        if (
+            self._external_stream_runtime is not None
+            and self._external_streams_configured
+        ):
+            from temporalio.contrib.external_workflow_streams._api import (
+                _install_runtime,
+            )
+
+            _install_runtime(workflow_instance, self._external_stream_runtime)
 
         if self._defn.versioning_behavior:
             self._versioning_behavior = self._defn.versioning_behavior
@@ -3793,6 +4609,7 @@ class _ContinueAsNewError(temporalio.workflow.ContinueAsNewError):
             v.backoff_start_interval.FromTimedelta(self._input.backoff_start_interval)
         if self._input.headers:
             temporalio.common._apply_headers(self._input.headers, v.headers)
+        self._instance._attach_external_stream_continuation(v)
         if self._input.retry_policy:
             self._input.retry_policy.apply_to_proto(v.retry_policy)
         if memo_payloads:

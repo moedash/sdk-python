@@ -1,0 +1,185 @@
+# The stream endpoint's wire contract. Inputs reject unknown fields so a typo
+# fails loudly at the handler; outputs accept them so a handler can add a
+# field before every caller has been rebuilt from the newer contract.
+nexusrpc: "1.0.0"
+
+services:
+  TemporalStreams:
+    fqn: TemporalStreams
+    description: >-
+      The stream endpoint's two operations. One Temporal-authenticated endpoint
+      hides the store behind it, so an operator switches storage without
+      touching callers. Reads hand out batches and an append carries one batch
+      per call, because a Nexus operation per record costs too much for token
+      streams.
+    operations:
+      append:
+        fqn: append
+        description: >-
+          Append one batch on the caller's account. The handler drops a
+          batch_index it has already written for this producer attempt, so a
+          retried call writes once, and rejects an index that skips ahead or a
+          producer attempt it has no state for. Supersession records are not
+          transported: a reader re-synthesizes them from the attempts it
+          observes.
+        input: { $ref: "#/$defs/AppendInput" }
+        output: { $ref: "#/$defs/AppendOutput" }
+      read:
+        fqn: read
+        description: >-
+          Answer with the records after the caller's token, or time out. The
+          call parks until it has max_records records or wait_ms elapses,
+          whichever comes first, and returns whatever it collected.
+        input: { $ref: "#/$defs/ReadInput" }
+        output: { $ref: "#/$defs/ReadOutput" }
+
+$defs:
+  AppendInput:
+    type: object
+    description: "One append call: who is writing, where, and what."
+    properties:
+      workflow_id:
+        type: string
+        description: "The workflow whose stream is being written."
+      stream:
+        type: string
+        description: >-
+          The named stream to append to. Empty when the producer writes to a
+          topic instead.
+      producer_id:
+        type: string
+        description: >-
+          Identifies the writer across its retries, so its attempts can be
+          ordered.
+      attempt:
+        type: integer
+        description: >-
+          The generation this producer is writing. A later attempt supersedes
+          an earlier one.
+      batch_index:
+        type: integer
+        minimum: 1
+        description: >-
+          Counts this producer's batches from 1. The handler drops an index it
+          has already written for this producer attempt, and rejects one that
+          skips ahead or that resumes an attempt it never saw start.
+      topic:
+        type: string
+        description: "The topic to append to, when stream is empty."
+      payloads:
+        type: array
+        items:
+          type: string
+          contentEncoding: base64
+        description: >-
+          The records to write, each a serialized Temporal Payload. Empty on a
+          call that only finishes.
+      finish:
+        type: boolean
+        description: >-
+          Mark this producer done after writing the batch, so a reader stops
+          waiting on it.
+    required:
+      - workflow_id
+      - stream
+      - producer_id
+      - attempt
+      - batch_index
+    additionalProperties: false
+
+  AppendOutput:
+    type: object
+    description: "Where the append landed, when the store can say."
+    properties:
+      cursor:
+        type: string
+        description: >-
+          Opaque token naming the last record written by this call. Absent
+          when the call carried no payloads, when the batch was a repeat the
+          handler dropped, or when the store learns positions only at read
+          time.
+    additionalProperties: true
+
+  ReadInput:
+    type: object
+    description: "One read call: where to resume from and how long to wait."
+    properties:
+      workflow_id:
+        type: string
+        description: "The workflow whose stream is being read."
+      stream:
+        type: string
+        description: >-
+          The named stream to read. Empty reads every stream the workflow
+          publishes.
+      topic:
+        type: string
+        description: >-
+          Yield only records on this topic. Empty yields every topic. Only
+          meaningful when stream is empty, because an inbound stream has no
+          topics.
+      after_token:
+        type: string
+        description: >-
+          Opaque cursor from an earlier record or append. The read resumes
+          strictly after the record it names, so a caller never sees that
+          record twice. Empty starts at the beginning. The token is produced by
+          whichever store sits behind the endpoint, so a caller cannot tell
+          which one that is.
+      max_records:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        description: "Return at most this many records. Defaults to 100 when omitted."
+      wait_ms:
+        type: integer
+        minimum: 0
+        maximum: 60000
+        description: >-
+          Wait at most this long for records to arrive before answering. The
+          handler shortens it to fit the request deadline. A call that collects
+          nothing answers with no records and the caller's own token.
+      latest_only:
+        type: boolean
+        description: >-
+          Answer with the newest position and no records, for a reader that
+          wants to follow from now.
+    required:
+      - workflow_id
+    additionalProperties: false
+
+  RecordWire:
+    type: object
+    description: "One record on the wire: its cursor and its frame."
+    properties:
+      token:
+        type: string
+        description: >-
+          Opaque cursor naming this record. Pass it as after_token to resume
+          just past it.
+      frame:
+        type: string
+        contentEncoding: base64
+        description: >-
+          The record frame, carrying the topic, kind, producer, attempt,
+          sequence and body.
+    required:
+      - token
+      - frame
+    additionalProperties: true
+
+  ReadOutput:
+    type: object
+    description: "What one read call answered, and where to resume."
+    properties:
+      records:
+        type: array
+        items:
+          $ref: "#/$defs/RecordWire"
+        description: "The records after the caller's token, in stream order."
+      next_token:
+        type: string
+        description: >-
+          Opaque cursor to pass as after_token on the following call. Echoes
+          the caller's own token when the call collected nothing.
+    additionalProperties: true

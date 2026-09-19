@@ -95,6 +95,7 @@ dev = [
   "pytest-rerunfailures>=16.1",
   "pytest-xdist>=3.6,<4",
   "moto[s3,server]>=5",
+  "redis>=5,<9",
   "langgraph>=1.1.0",
   "langsmith>=0.7.34,<0.9",
   "deepagents>=0.6.12,<0.7; python_version >= '3.11'",
@@ -125,9 +126,11 @@ format = [
 ]
 gen-docs = "uv run scripts/gen_docs.py"
 gen-nexus-system-api = "uv run scripts/gen_nexus_system_api.py"
+gen-streams-nexus-api = "uv run scripts/gen_streams_nexus_api.py"
 gen-protos = [
   { cmd = "uv run scripts/gen_protos.py" },
   { ref = "gen-nexus-system-api" },
+  { ref = "gen-streams-nexus-api" },
   { cmd = "uv run scripts/gen_payload_visitor.py" },
   { cmd = "uv run scripts/gen_bridge_client.py" },
   { ref = "format" },
@@ -135,6 +138,7 @@ gen-protos = [
 gen-protos-docker = [
   { cmd = "uv run scripts/gen_protos_docker.py" },
   { ref = "gen-nexus-system-api" },
+  { ref = "gen-streams-nexus-api" },
   { cmd = "uv run scripts/gen_payload_visitor.py" },
   { cmd = "uv run scripts/gen_bridge_client.py" },
   { ref = "format" },
@@ -207,7 +211,7 @@ ignore_errors = true
 [tool.pydocstyle]
 convention = "google"
 # https://github.com/PyCQA/pydocstyle/issues/363#issuecomment-625563088
-match_dir = "^(?!(docs|scripts|tests|api|proto|system|\\.)).*"
+match_dir = "^(?!(docs|scripts|tests|api|proto|system|_nexus_generated|\\.)).*"
 add_ignore = [
   # We like to wrap at a certain number of chars, even long summary sentences.
   # https://github.com/PyCQA/pydocstyle/issues/184
@@ -241,6 +245,7 @@ privacy = [
   "HIDDEN:temporalio.worker.workflow_sandbox.importer",
   "HIDDEN:temporalio.worker.workflow_sandbox.in_sandbox",
   "HIDDEN:**.*_pb2*",
+  "HIDDEN:temporalio.streams.providers._nexus_generated._definitions",
 ]
 project-name = "Temporal Python"
 sidebar-expand-depth = 2

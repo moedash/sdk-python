@@ -34,18 +34,24 @@ from temporalio.api.sdk.v1 import (
 from temporalio.api.sdk.v1 import (
     user_metadata_pb2 as temporal_dot_api_dot_sdk_dot_v1_dot_user__metadata__pb2,
 )
+from temporalio.api.stream.v1 import (
+    message_pb2 as temporal_dot_api_dot_stream_dot_v1_dot_message__pb2,
+)
 from temporalio.bridge.proto.child_workflow import (
     child_workflow_pb2 as temporal_dot_sdk_dot_core_dot_child__workflow_dot_child__workflow__pb2,
 )
 from temporalio.bridge.proto.common import (
     common_pb2 as temporal_dot_sdk_dot_core_dot_common_dot_common__pb2,
 )
+from temporalio.bridge.proto.external_data import (
+    external_data_pb2 as temporal_dot_sdk_dot_core_dot_external__data_dot_external__data__pb2,
+)
 from temporalio.bridge.proto.nexus import (
     nexus_pb2 as temporal_dot_sdk_dot_core_dot_nexus_dot_nexus__pb2,
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n;temporal/sdk/core/workflow_commands/workflow_commands.proto\x12\x19\x63oresdk.workflow_commands\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a$temporal/api/common/v1/message.proto\x1a$temporal/api/enums/v1/workflow.proto\x1a%temporal/api/failure/v1/message.proto\x1a\'temporal/api/sdk/v1/user_metadata.proto\x1a,temporal/api/sdk/v1/event_group_marker.proto\x1a\x35temporal/sdk/core/child_workflow/child_workflow.proto\x1a#temporal/sdk/core/nexus/nexus.proto\x1a%temporal/sdk/core/common/common.proto"\xa9\x10\n\x0fWorkflowCommand\x12\x38\n\ruser_metadata\x18\x64 \x01(\x0b\x32!.temporal.api.sdk.v1.UserMetadata\x12\x42\n\x13\x65vent_group_markers\x18\x65 \x03(\x0b\x32%.temporal.api.sdk.v1.EventGroupMarker\x12<\n\x0bstart_timer\x18\x01 \x01(\x0b\x32%.coresdk.workflow_commands.StartTimerH\x00\x12H\n\x11schedule_activity\x18\x02 \x01(\x0b\x32+.coresdk.workflow_commands.ScheduleActivityH\x00\x12\x42\n\x10respond_to_query\x18\x03 \x01(\x0b\x32&.coresdk.workflow_commands.QueryResultH\x00\x12S\n\x17request_cancel_activity\x18\x04 \x01(\x0b\x32\x30.coresdk.workflow_commands.RequestCancelActivityH\x00\x12>\n\x0c\x63\x61ncel_timer\x18\x05 \x01(\x0b\x32&.coresdk.workflow_commands.CancelTimerH\x00\x12[\n\x1b\x63omplete_workflow_execution\x18\x06 \x01(\x0b\x32\x34.coresdk.workflow_commands.CompleteWorkflowExecutionH\x00\x12S\n\x17\x66\x61il_workflow_execution\x18\x07 \x01(\x0b\x32\x30.coresdk.workflow_commands.FailWorkflowExecutionH\x00\x12g\n"continue_as_new_workflow_execution\x18\x08 \x01(\x0b\x32\x39.coresdk.workflow_commands.ContinueAsNewWorkflowExecutionH\x00\x12W\n\x19\x63\x61ncel_workflow_execution\x18\t \x01(\x0b\x32\x32.coresdk.workflow_commands.CancelWorkflowExecutionH\x00\x12\x45\n\x10set_patch_marker\x18\n \x01(\x0b\x32).coresdk.workflow_commands.SetPatchMarkerH\x00\x12`\n\x1estart_child_workflow_execution\x18\x0b \x01(\x0b\x32\x36.coresdk.workflow_commands.StartChildWorkflowExecutionH\x00\x12\x62\n\x1f\x63\x61ncel_child_workflow_execution\x18\x0c \x01(\x0b\x32\x37.coresdk.workflow_commands.CancelChildWorkflowExecutionH\x00\x12w\n*request_cancel_external_workflow_execution\x18\r \x01(\x0b\x32\x41.coresdk.workflow_commands.RequestCancelExternalWorkflowExecutionH\x00\x12h\n"signal_external_workflow_execution\x18\x0e \x01(\x0b\x32:.coresdk.workflow_commands.SignalExternalWorkflowExecutionH\x00\x12Q\n\x16\x63\x61ncel_signal_workflow\x18\x0f \x01(\x0b\x32/.coresdk.workflow_commands.CancelSignalWorkflowH\x00\x12S\n\x17schedule_local_activity\x18\x10 \x01(\x0b\x32\x30.coresdk.workflow_commands.ScheduleLocalActivityH\x00\x12^\n\x1drequest_cancel_local_activity\x18\x11 \x01(\x0b\x32\x35.coresdk.workflow_commands.RequestCancelLocalActivityH\x00\x12\x66\n!upsert_workflow_search_attributes\x18\x12 \x01(\x0b\x32\x39.coresdk.workflow_commands.UpsertWorkflowSearchAttributesH\x00\x12Y\n\x1amodify_workflow_properties\x18\x13 \x01(\x0b\x32\x33.coresdk.workflow_commands.ModifyWorkflowPropertiesH\x00\x12\x44\n\x0fupdate_response\x18\x14 \x01(\x0b\x32).coresdk.workflow_commands.UpdateResponseH\x00\x12U\n\x18schedule_nexus_operation\x18\x15 \x01(\x0b\x32\x31.coresdk.workflow_commands.ScheduleNexusOperationH\x00\x12`\n\x1erequest_cancel_nexus_operation\x18\x16 \x01(\x0b\x32\x36.coresdk.workflow_commands.RequestCancelNexusOperationH\x00\x42\t\n\x07variant"S\n\nStartTimer\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x38\n\x15start_to_fire_timeout\x18\x02 \x01(\x0b\x32\x19.google.protobuf.Duration"\x1a\n\x0b\x43\x61ncelTimer\x12\x0b\n\x03seq\x18\x01 \x01(\r"\xb8\x06\n\x10ScheduleActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x13\n\x0b\x61\x63tivity_id\x18\x02 \x01(\t\x12\x15\n\ractivity_type\x18\x03 \x01(\t\x12\x12\n\ntask_queue\x18\x05 \x01(\t\x12I\n\x07headers\x18\x06 \x03(\x0b\x32\x38.coresdk.workflow_commands.ScheduleActivity.HeadersEntry\x12\x32\n\targuments\x18\x07 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12<\n\x19schedule_to_close_timeout\x18\x08 \x01(\x0b\x32\x19.google.protobuf.Duration\x12<\n\x19schedule_to_start_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x16start_to_close_timeout\x18\n \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x34\n\x11heartbeat_timeout\x18\x0b \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x0cretry_policy\x18\x0c \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12N\n\x11\x63\x61ncellation_type\x18\r \x01(\x0e\x32\x33.coresdk.workflow_commands.ActivityCancellationType\x12\x1e\n\x16\x64o_not_eagerly_execute\x18\x0e \x01(\x08\x12;\n\x11versioning_intent\x18\x0f \x01(\x0e\x32 .coresdk.common.VersioningIntent\x12\x32\n\x08priority\x18\x10 \x01(\x0b\x32 .temporal.api.common.v1.Priority\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\x95\x06\n\x15ScheduleLocalActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x13\n\x0b\x61\x63tivity_id\x18\x02 \x01(\t\x12\x15\n\ractivity_type\x18\x03 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x04 \x01(\r\x12:\n\x16original_schedule_time\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12N\n\x07headers\x18\x06 \x03(\x0b\x32=.coresdk.workflow_commands.ScheduleLocalActivity.HeadersEntry\x12\x32\n\targuments\x18\x07 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12<\n\x19schedule_to_close_timeout\x18\x08 \x01(\x0b\x32\x19.google.protobuf.Duration\x12<\n\x19schedule_to_start_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x16start_to_close_timeout\x18\n \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x0cretry_policy\x18\x0b \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12\x38\n\x15local_retry_threshold\x18\x0c \x01(\x0b\x32\x19.google.protobuf.Duration\x12N\n\x11\x63\x61ncellation_type\x18\r \x01(\x0e\x32\x33.coresdk.workflow_commands.ActivityCancellationType\x12%\n\x1dinclude_arguments_into_marker\x18\x0e \x01(\x08\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"$\n\x15RequestCancelActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r")\n\x1aRequestCancelLocalActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r"\x9c\x01\n\x0bQueryResult\x12\x10\n\x08query_id\x18\x01 \x01(\t\x12<\n\tsucceeded\x18\x02 \x01(\x0b\x32\'.coresdk.workflow_commands.QuerySuccessH\x00\x12\x32\n\x06\x66\x61iled\x18\x03 \x01(\x0b\x32 .temporal.api.failure.v1.FailureH\x00\x42\t\n\x07variant"A\n\x0cQuerySuccess\x12\x31\n\x08response\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload"L\n\x19\x43ompleteWorkflowExecution\x12/\n\x06result\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload"J\n\x15\x46\x61ilWorkflowExecution\x12\x31\n\x07\x66\x61ilure\x18\x01 \x01(\x0b\x32 .temporal.api.failure.v1.Failure"\x92\x07\n\x1e\x43ontinueAsNewWorkflowExecution\x12\x15\n\rworkflow_type\x18\x01 \x01(\t\x12\x12\n\ntask_queue\x18\x02 \x01(\t\x12\x32\n\targuments\x18\x03 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x37\n\x14workflow_run_timeout\x18\x04 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x38\n\x15workflow_task_timeout\x18\x05 \x01(\x0b\x32\x19.google.protobuf.Duration\x12Q\n\x04memo\x18\x06 \x03(\x0b\x32\x43.coresdk.workflow_commands.ContinueAsNewWorkflowExecution.MemoEntry\x12W\n\x07headers\x18\x07 \x03(\x0b\x32\x46.coresdk.workflow_commands.ContinueAsNewWorkflowExecution.HeadersEntry\x12\x43\n\x11search_attributes\x18\x08 \x01(\x0b\x32(.temporal.api.common.v1.SearchAttributes\x12\x39\n\x0cretry_policy\x18\t \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12;\n\x11versioning_intent\x18\n \x01(\x0e\x32 .coresdk.common.VersioningIntent\x12[\n\x1binitial_versioning_behavior\x18\x0b \x01(\x0e\x32\x36.temporal.api.enums.v1.ContinueAsNewVersioningBehavior\x12\x39\n\x16\x62\x61\x63koff_start_interval\x18\x0c \x01(\x0b\x32\x19.google.protobuf.Duration\x1aL\n\tMemoEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"L\n\x17\x43\x61ncelWorkflowExecution\x12\x31\n\x07\x64\x65tails\x18\x01 \x01(\x0b\x32 .temporal.api.common.v1.Payloads"6\n\x0eSetPatchMarker\x12\x10\n\x08patch_id\x18\x01 \x01(\t\x12\x12\n\ndeprecated\x18\x02 \x01(\x08"\x96\t\n\x1bStartChildWorkflowExecution\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x11\n\tnamespace\x18\x02 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x03 \x01(\t\x12\x15\n\rworkflow_type\x18\x04 \x01(\t\x12\x12\n\ntask_queue\x18\x05 \x01(\t\x12.\n\x05input\x18\x06 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12=\n\x1aworkflow_execution_timeout\x18\x07 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x37\n\x14workflow_run_timeout\x18\x08 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x38\n\x15workflow_task_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x46\n\x13parent_close_policy\x18\n \x01(\x0e\x32).coresdk.child_workflow.ParentClosePolicy\x12N\n\x18workflow_id_reuse_policy\x18\x0c \x01(\x0e\x32,.temporal.api.enums.v1.WorkflowIdReusePolicy\x12\x39\n\x0cretry_policy\x18\r \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12\x15\n\rcron_schedule\x18\x0e \x01(\t\x12T\n\x07headers\x18\x0f \x03(\x0b\x32\x43.coresdk.workflow_commands.StartChildWorkflowExecution.HeadersEntry\x12N\n\x04memo\x18\x10 \x03(\x0b\x32@.coresdk.workflow_commands.StartChildWorkflowExecution.MemoEntry\x12\x43\n\x11search_attributes\x18\x11 \x01(\x0b\x32(.temporal.api.common.v1.SearchAttributes\x12P\n\x11\x63\x61ncellation_type\x18\x12 \x01(\x0e\x32\x35.coresdk.child_workflow.ChildWorkflowCancellationType\x12;\n\x11versioning_intent\x18\x13 \x01(\x0e\x32 .coresdk.common.VersioningIntent\x12\x32\n\x08priority\x18\x14 \x01(\x0b\x32 .temporal.api.common.v1.Priority\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\x1aL\n\tMemoEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"J\n\x1c\x43\x61ncelChildWorkflowExecution\x12\x1a\n\x12\x63hild_workflow_seq\x18\x01 \x01(\r\x12\x0e\n\x06reason\x18\x02 \x01(\t"\x8e\x01\n&RequestCancelExternalWorkflowExecution\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12G\n\x12workflow_execution\x18\x02 \x01(\x0b\x32+.coresdk.common.NamespacedWorkflowExecution\x12\x0e\n\x06reason\x18\x03 \x01(\t"\x8f\x03\n\x1fSignalExternalWorkflowExecution\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12I\n\x12workflow_execution\x18\x02 \x01(\x0b\x32+.coresdk.common.NamespacedWorkflowExecutionH\x00\x12\x1b\n\x11\x63hild_workflow_id\x18\x03 \x01(\tH\x00\x12\x13\n\x0bsignal_name\x18\x04 \x01(\t\x12-\n\x04\x61rgs\x18\x05 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12X\n\x07headers\x18\x06 \x03(\x0b\x32G.coresdk.workflow_commands.SignalExternalWorkflowExecution.HeadersEntry\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\x42\x08\n\x06target"#\n\x14\x43\x61ncelSignalWorkflow\x12\x0b\n\x03seq\x18\x01 \x01(\r"e\n\x1eUpsertWorkflowSearchAttributes\x12\x43\n\x11search_attributes\x18\x01 \x01(\x0b\x32(.temporal.api.common.v1.SearchAttributes"O\n\x18ModifyWorkflowProperties\x12\x33\n\rupserted_memo\x18\x01 \x01(\x0b\x32\x1c.temporal.api.common.v1.Memo"\xd2\x01\n\x0eUpdateResponse\x12\x1c\n\x14protocol_instance_id\x18\x01 \x01(\t\x12*\n\x08\x61\x63\x63\x65pted\x18\x02 \x01(\x0b\x32\x16.google.protobuf.EmptyH\x00\x12\x34\n\x08rejected\x18\x03 \x01(\x0b\x32 .temporal.api.failure.v1.FailureH\x00\x12\x34\n\tcompleted\x18\x04 \x01(\x0b\x32\x1f.temporal.api.common.v1.PayloadH\x00\x42\n\n\x08response"\x9a\x04\n\x16ScheduleNexusOperation\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x10\n\x08\x65ndpoint\x18\x02 \x01(\t\x12\x0f\n\x07service\x18\x03 \x01(\t\x12\x11\n\toperation\x18\x04 \x01(\t\x12.\n\x05input\x18\x05 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12<\n\x19schedule_to_close_timeout\x18\x06 \x01(\x0b\x32\x19.google.protobuf.Duration\x12X\n\x0cnexus_header\x18\x07 \x03(\x0b\x32\x42.coresdk.workflow_commands.ScheduleNexusOperation.NexusHeaderEntry\x12H\n\x11\x63\x61ncellation_type\x18\x08 \x01(\x0e\x32-.coresdk.nexus.NexusOperationCancellationType\x12<\n\x19schedule_to_start_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x16start_to_close_timeout\x18\n \x01(\x0b\x32\x19.google.protobuf.Duration\x1a\x32\n\x10NexusHeaderEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01"*\n\x1bRequestCancelNexusOperation\x12\x0b\n\x03seq\x18\x01 \x01(\r*X\n\x18\x41\x63tivityCancellationType\x12\x0e\n\nTRY_CANCEL\x10\x00\x12\x1f\n\x1bWAIT_CANCELLATION_COMPLETED\x10\x01\x12\x0b\n\x07\x41\x42\x41NDON\x10\x02\x42\x36\xea\x02\x33Temporalio::Internal::Bridge::Api::WorkflowCommandsb\x06proto3'
+    b'\n;temporal/sdk/core/workflow_commands/workflow_commands.proto\x12\x19\x63oresdk.workflow_commands\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a$temporal/api/common/v1/message.proto\x1a$temporal/api/enums/v1/workflow.proto\x1a%temporal/api/failure/v1/message.proto\x1a\'temporal/api/sdk/v1/user_metadata.proto\x1a$temporal/api/stream/v1/message.proto\x1a,temporal/api/sdk/v1/event_group_marker.proto\x1a\x35temporal/sdk/core/child_workflow/child_workflow.proto\x1a#temporal/sdk/core/nexus/nexus.proto\x1a%temporal/sdk/core/common/common.proto\x1a\x33temporal/sdk/core/external_data/external_data.proto"\xe7\x15\n\x0fWorkflowCommand\x12\x38\n\ruser_metadata\x18\x64 \x01(\x0b\x32!.temporal.api.sdk.v1.UserMetadata\x12\x42\n\x13\x65vent_group_markers\x18\x65 \x03(\x0b\x32%.temporal.api.sdk.v1.EventGroupMarker\x12<\n\x0bstart_timer\x18\x01 \x01(\x0b\x32%.coresdk.workflow_commands.StartTimerH\x00\x12H\n\x11schedule_activity\x18\x02 \x01(\x0b\x32+.coresdk.workflow_commands.ScheduleActivityH\x00\x12\x42\n\x10respond_to_query\x18\x03 \x01(\x0b\x32&.coresdk.workflow_commands.QueryResultH\x00\x12S\n\x17request_cancel_activity\x18\x04 \x01(\x0b\x32\x30.coresdk.workflow_commands.RequestCancelActivityH\x00\x12>\n\x0c\x63\x61ncel_timer\x18\x05 \x01(\x0b\x32&.coresdk.workflow_commands.CancelTimerH\x00\x12[\n\x1b\x63omplete_workflow_execution\x18\x06 \x01(\x0b\x32\x34.coresdk.workflow_commands.CompleteWorkflowExecutionH\x00\x12S\n\x17\x66\x61il_workflow_execution\x18\x07 \x01(\x0b\x32\x30.coresdk.workflow_commands.FailWorkflowExecutionH\x00\x12g\n"continue_as_new_workflow_execution\x18\x08 \x01(\x0b\x32\x39.coresdk.workflow_commands.ContinueAsNewWorkflowExecutionH\x00\x12W\n\x19\x63\x61ncel_workflow_execution\x18\t \x01(\x0b\x32\x32.coresdk.workflow_commands.CancelWorkflowExecutionH\x00\x12\x45\n\x10set_patch_marker\x18\n \x01(\x0b\x32).coresdk.workflow_commands.SetPatchMarkerH\x00\x12`\n\x1estart_child_workflow_execution\x18\x0b \x01(\x0b\x32\x36.coresdk.workflow_commands.StartChildWorkflowExecutionH\x00\x12\x62\n\x1f\x63\x61ncel_child_workflow_execution\x18\x0c \x01(\x0b\x32\x37.coresdk.workflow_commands.CancelChildWorkflowExecutionH\x00\x12w\n*request_cancel_external_workflow_execution\x18\r \x01(\x0b\x32\x41.coresdk.workflow_commands.RequestCancelExternalWorkflowExecutionH\x00\x12h\n"signal_external_workflow_execution\x18\x0e \x01(\x0b\x32:.coresdk.workflow_commands.SignalExternalWorkflowExecutionH\x00\x12Q\n\x16\x63\x61ncel_signal_workflow\x18\x0f \x01(\x0b\x32/.coresdk.workflow_commands.CancelSignalWorkflowH\x00\x12S\n\x17schedule_local_activity\x18\x10 \x01(\x0b\x32\x30.coresdk.workflow_commands.ScheduleLocalActivityH\x00\x12^\n\x1drequest_cancel_local_activity\x18\x11 \x01(\x0b\x32\x35.coresdk.workflow_commands.RequestCancelLocalActivityH\x00\x12\x66\n!upsert_workflow_search_attributes\x18\x12 \x01(\x0b\x32\x39.coresdk.workflow_commands.UpsertWorkflowSearchAttributesH\x00\x12Y\n\x1amodify_workflow_properties\x18\x13 \x01(\x0b\x32\x33.coresdk.workflow_commands.ModifyWorkflowPropertiesH\x00\x12\x44\n\x0fupdate_response\x18\x14 \x01(\x0b\x32).coresdk.workflow_commands.UpdateResponseH\x00\x12U\n\x18schedule_nexus_operation\x18\x15 \x01(\x0b\x32\x31.coresdk.workflow_commands.ScheduleNexusOperationH\x00\x12`\n\x1erequest_cancel_nexus_operation\x18\x16 \x01(\x0b\x32\x36.coresdk.workflow_commands.RequestCancelNexusOperationH\x00\x12U\n\x18workflow_stream_progress\x18\x17 \x01(\x0b\x32\x31.coresdk.workflow_commands.WorkflowStreamProgressH\x00\x12W\n\x19workflow_stream_quiescent\x18\x18 \x01(\x0b\x32\x32.coresdk.workflow_commands.WorkflowStreamQuiescentH\x00\x12Z\n\x1b\x65xternal_stream_park_result\x18\x19 \x01(\x0b\x32\x33.coresdk.workflow_commands.ExternalStreamParkResultH\x00\x12W\n\x19\x65xternal_stream_finalized\x18\x1a \x01(\x0b\x32\x32.coresdk.workflow_commands.ExternalStreamFinalizedH\x00\x12^\n\x1dworkflow_output_stream_commit\x18\x1b \x01(\x0b\x32\x35.coresdk.workflow_commands.WorkflowOutputStreamCommitH\x00\x12\x62\n\x1fworkflow_output_stream_buffered\x18\x1c \x01(\x0b\x32\x37.coresdk.workflow_commands.WorkflowOutputStreamBufferedH\x00\x12\x46\n\x10subscribe_stream\x18\x1d \x01(\x0b\x32*.coresdk.workflow_commands.SubscribeStreamH\x00\x12K\n\x13\x61\x64\x64_stream_messages\x18\x1e \x01(\x0b\x32,.coresdk.workflow_commands.AddStreamMessagesH\x00\x42\t\n\x07variant"M\n\x16WorkflowStreamProgress\x12\x19\n\x11observation_delta\x18\x01 \x01(\x0c\x12\x18\n\x10request_rollover\x18\x02 \x01(\x08"\xa7\x01\n\x17WorkflowStreamQuiescent\x12\x1d\n\x15quiescence_generation\x18\x01 \x01(\x04\x12<\n\x05waits\x18\x02 \x03(\x0b\x32-.coresdk.workflow_commands.ExternalStreamWait\x12/\n\x0cidle_timeout\x18\x03 \x01(\x0b\x32\x19.google.protobuf.Duration"W\n\x12\x45xternalStreamWait\x12\x0f\n\x07wait_id\x18\x01 \x01(\r\x12\x12\n\ngeneration\x18\x02 \x01(\x04\x12\x1c\n\x14immediately_parkable\x18\x03 \x01(\x08"\xf0\x01\n\x18\x45xternalStreamParkResult\x12\x1d\n\x15quiescence_generation\x18\x01 \x01(\x04\x12@\n\tconfirmed\x18\x02 \x01(\x0b\x32+.coresdk.workflow_commands.ParkSetConfirmedH\x00\x12G\n\x0c\x62\x65\x63\x61me_ready\x18\x03 \x01(\x0b\x32/.coresdk.workflow_commands.StreamSetBecameReadyH\x00\x12\x1f\n\x17\x66inal_observation_delta\x18\x04 \x01(\x0c\x42\t\n\x07outcome"\x12\n\x10ParkSetConfirmed"\x16\n\x14StreamSetBecameReady"Y\n\x17\x45xternalStreamFinalized\x12\x1d\n\x15quiescence_generation\x18\x01 \x01(\x04\x12\x1f\n\x17\x66inal_observation_delta\x18\x02 \x01(\x0c"}\n\x1aWorkflowOutputStreamCommit\x12\x45\n\x08manifest\x18\x01 \x01(\x0b\x32\x33.coresdk.external_data.ExternalOutputStreamManifest\x12\x18\n\x10request_rollover\x18\x02 \x01(\x08"V\n\x1cWorkflowOutputStreamBuffered\x12\x36\n\x13max_publish_latency\x18\x01 \x01(\x0b\x32\x19.google.protobuf.Duration"_\n\x11\x41\x64\x64StreamMessages\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x37\n\x08messages\x18\x02 \x03(\x0b\x32%.temporal.api.stream.v1.StreamMessage":\n\x0fSubscribeStream\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x14\n\x0cstart_offset\x18\x02 \x01(\x03"S\n\nStartTimer\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x38\n\x15start_to_fire_timeout\x18\x02 \x01(\x0b\x32\x19.google.protobuf.Duration"\x1a\n\x0b\x43\x61ncelTimer\x12\x0b\n\x03seq\x18\x01 \x01(\r"\xb8\x06\n\x10ScheduleActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x13\n\x0b\x61\x63tivity_id\x18\x02 \x01(\t\x12\x15\n\ractivity_type\x18\x03 \x01(\t\x12\x12\n\ntask_queue\x18\x05 \x01(\t\x12I\n\x07headers\x18\x06 \x03(\x0b\x32\x38.coresdk.workflow_commands.ScheduleActivity.HeadersEntry\x12\x32\n\targuments\x18\x07 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12<\n\x19schedule_to_close_timeout\x18\x08 \x01(\x0b\x32\x19.google.protobuf.Duration\x12<\n\x19schedule_to_start_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x16start_to_close_timeout\x18\n \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x34\n\x11heartbeat_timeout\x18\x0b \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x0cretry_policy\x18\x0c \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12N\n\x11\x63\x61ncellation_type\x18\r \x01(\x0e\x32\x33.coresdk.workflow_commands.ActivityCancellationType\x12\x1e\n\x16\x64o_not_eagerly_execute\x18\x0e \x01(\x08\x12;\n\x11versioning_intent\x18\x0f \x01(\x0e\x32 .coresdk.common.VersioningIntent\x12\x32\n\x08priority\x18\x10 \x01(\x0b\x32 .temporal.api.common.v1.Priority\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\x95\x06\n\x15ScheduleLocalActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x13\n\x0b\x61\x63tivity_id\x18\x02 \x01(\t\x12\x15\n\ractivity_type\x18\x03 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x04 \x01(\r\x12:\n\x16original_schedule_time\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12N\n\x07headers\x18\x06 \x03(\x0b\x32=.coresdk.workflow_commands.ScheduleLocalActivity.HeadersEntry\x12\x32\n\targuments\x18\x07 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12<\n\x19schedule_to_close_timeout\x18\x08 \x01(\x0b\x32\x19.google.protobuf.Duration\x12<\n\x19schedule_to_start_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x16start_to_close_timeout\x18\n \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x0cretry_policy\x18\x0b \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12\x38\n\x15local_retry_threshold\x18\x0c \x01(\x0b\x32\x19.google.protobuf.Duration\x12N\n\x11\x63\x61ncellation_type\x18\r \x01(\x0e\x32\x33.coresdk.workflow_commands.ActivityCancellationType\x12%\n\x1dinclude_arguments_into_marker\x18\x0e \x01(\x08\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"$\n\x15RequestCancelActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r")\n\x1aRequestCancelLocalActivity\x12\x0b\n\x03seq\x18\x01 \x01(\r"\x9c\x01\n\x0bQueryResult\x12\x10\n\x08query_id\x18\x01 \x01(\t\x12<\n\tsucceeded\x18\x02 \x01(\x0b\x32\'.coresdk.workflow_commands.QuerySuccessH\x00\x12\x32\n\x06\x66\x61iled\x18\x03 \x01(\x0b\x32 .temporal.api.failure.v1.FailureH\x00\x42\t\n\x07variant"A\n\x0cQuerySuccess\x12\x31\n\x08response\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload"L\n\x19\x43ompleteWorkflowExecution\x12/\n\x06result\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload"J\n\x15\x46\x61ilWorkflowExecution\x12\x31\n\x07\x66\x61ilure\x18\x01 \x01(\x0b\x32 .temporal.api.failure.v1.Failure"\x92\x07\n\x1e\x43ontinueAsNewWorkflowExecution\x12\x15\n\rworkflow_type\x18\x01 \x01(\t\x12\x12\n\ntask_queue\x18\x02 \x01(\t\x12\x32\n\targuments\x18\x03 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x37\n\x14workflow_run_timeout\x18\x04 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x38\n\x15workflow_task_timeout\x18\x05 \x01(\x0b\x32\x19.google.protobuf.Duration\x12Q\n\x04memo\x18\x06 \x03(\x0b\x32\x43.coresdk.workflow_commands.ContinueAsNewWorkflowExecution.MemoEntry\x12W\n\x07headers\x18\x07 \x03(\x0b\x32\x46.coresdk.workflow_commands.ContinueAsNewWorkflowExecution.HeadersEntry\x12\x43\n\x11search_attributes\x18\x08 \x01(\x0b\x32(.temporal.api.common.v1.SearchAttributes\x12\x39\n\x0cretry_policy\x18\t \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12;\n\x11versioning_intent\x18\n \x01(\x0e\x32 .coresdk.common.VersioningIntent\x12[\n\x1binitial_versioning_behavior\x18\x0b \x01(\x0e\x32\x36.temporal.api.enums.v1.ContinueAsNewVersioningBehavior\x12\x39\n\x16\x62\x61\x63koff_start_interval\x18\x0c \x01(\x0b\x32\x19.google.protobuf.Duration\x1aL\n\tMemoEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"L\n\x17\x43\x61ncelWorkflowExecution\x12\x31\n\x07\x64\x65tails\x18\x01 \x01(\x0b\x32 .temporal.api.common.v1.Payloads"6\n\x0eSetPatchMarker\x12\x10\n\x08patch_id\x18\x01 \x01(\t\x12\x12\n\ndeprecated\x18\x02 \x01(\x08"\x96\t\n\x1bStartChildWorkflowExecution\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x11\n\tnamespace\x18\x02 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x03 \x01(\t\x12\x15\n\rworkflow_type\x18\x04 \x01(\t\x12\x12\n\ntask_queue\x18\x05 \x01(\t\x12.\n\x05input\x18\x06 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12=\n\x1aworkflow_execution_timeout\x18\x07 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x37\n\x14workflow_run_timeout\x18\x08 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x38\n\x15workflow_task_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x46\n\x13parent_close_policy\x18\n \x01(\x0e\x32).coresdk.child_workflow.ParentClosePolicy\x12N\n\x18workflow_id_reuse_policy\x18\x0c \x01(\x0e\x32,.temporal.api.enums.v1.WorkflowIdReusePolicy\x12\x39\n\x0cretry_policy\x18\r \x01(\x0b\x32#.temporal.api.common.v1.RetryPolicy\x12\x15\n\rcron_schedule\x18\x0e \x01(\t\x12T\n\x07headers\x18\x0f \x03(\x0b\x32\x43.coresdk.workflow_commands.StartChildWorkflowExecution.HeadersEntry\x12N\n\x04memo\x18\x10 \x03(\x0b\x32@.coresdk.workflow_commands.StartChildWorkflowExecution.MemoEntry\x12\x43\n\x11search_attributes\x18\x11 \x01(\x0b\x32(.temporal.api.common.v1.SearchAttributes\x12P\n\x11\x63\x61ncellation_type\x18\x12 \x01(\x0e\x32\x35.coresdk.child_workflow.ChildWorkflowCancellationType\x12;\n\x11versioning_intent\x18\x13 \x01(\x0e\x32 .coresdk.common.VersioningIntent\x12\x32\n\x08priority\x18\x14 \x01(\x0b\x32 .temporal.api.common.v1.Priority\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\x1aL\n\tMemoEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"J\n\x1c\x43\x61ncelChildWorkflowExecution\x12\x1a\n\x12\x63hild_workflow_seq\x18\x01 \x01(\r\x12\x0e\n\x06reason\x18\x02 \x01(\t"\x8e\x01\n&RequestCancelExternalWorkflowExecution\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12G\n\x12workflow_execution\x18\x02 \x01(\x0b\x32+.coresdk.common.NamespacedWorkflowExecution\x12\x0e\n\x06reason\x18\x03 \x01(\t"\x8f\x03\n\x1fSignalExternalWorkflowExecution\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12I\n\x12workflow_execution\x18\x02 \x01(\x0b\x32+.coresdk.common.NamespacedWorkflowExecutionH\x00\x12\x1b\n\x11\x63hild_workflow_id\x18\x03 \x01(\tH\x00\x12\x13\n\x0bsignal_name\x18\x04 \x01(\t\x12-\n\x04\x61rgs\x18\x05 \x03(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12X\n\x07headers\x18\x06 \x03(\x0b\x32G.coresdk.workflow_commands.SignalExternalWorkflowExecution.HeadersEntry\x1aO\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01\x42\x08\n\x06target"#\n\x14\x43\x61ncelSignalWorkflow\x12\x0b\n\x03seq\x18\x01 \x01(\r"e\n\x1eUpsertWorkflowSearchAttributes\x12\x43\n\x11search_attributes\x18\x01 \x01(\x0b\x32(.temporal.api.common.v1.SearchAttributes"O\n\x18ModifyWorkflowProperties\x12\x33\n\rupserted_memo\x18\x01 \x01(\x0b\x32\x1c.temporal.api.common.v1.Memo"\xd2\x01\n\x0eUpdateResponse\x12\x1c\n\x14protocol_instance_id\x18\x01 \x01(\t\x12*\n\x08\x61\x63\x63\x65pted\x18\x02 \x01(\x0b\x32\x16.google.protobuf.EmptyH\x00\x12\x34\n\x08rejected\x18\x03 \x01(\x0b\x32 .temporal.api.failure.v1.FailureH\x00\x12\x34\n\tcompleted\x18\x04 \x01(\x0b\x32\x1f.temporal.api.common.v1.PayloadH\x00\x42\n\n\x08response"\x9a\x04\n\x16ScheduleNexusOperation\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x10\n\x08\x65ndpoint\x18\x02 \x01(\t\x12\x0f\n\x07service\x18\x03 \x01(\t\x12\x11\n\toperation\x18\x04 \x01(\t\x12.\n\x05input\x18\x05 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12<\n\x19schedule_to_close_timeout\x18\x06 \x01(\x0b\x32\x19.google.protobuf.Duration\x12X\n\x0cnexus_header\x18\x07 \x03(\x0b\x32\x42.coresdk.workflow_commands.ScheduleNexusOperation.NexusHeaderEntry\x12H\n\x11\x63\x61ncellation_type\x18\x08 \x01(\x0e\x32-.coresdk.nexus.NexusOperationCancellationType\x12<\n\x19schedule_to_start_timeout\x18\t \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x39\n\x16start_to_close_timeout\x18\n \x01(\x0b\x32\x19.google.protobuf.Duration\x1a\x32\n\x10NexusHeaderEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01"*\n\x1bRequestCancelNexusOperation\x12\x0b\n\x03seq\x18\x01 \x01(\r*X\n\x18\x41\x63tivityCancellationType\x12\x0e\n\nTRY_CANCEL\x10\x00\x12\x1f\n\x1bWAIT_CANCELLATION_COMPLETED\x10\x01\x12\x0b\n\x07\x41\x42\x41NDON\x10\x02\x42\x36\xea\x02\x33Temporalio::Internal::Bridge::Api::WorkflowCommandsb\x06proto3'
 )
 
 _ACTIVITYCANCELLATIONTYPE = DESCRIPTOR.enum_types_by_name["ActivityCancellationType"]
@@ -56,6 +62,21 @@ ABANDON = 2
 
 
 _WORKFLOWCOMMAND = DESCRIPTOR.message_types_by_name["WorkflowCommand"]
+_WORKFLOWSTREAMPROGRESS = DESCRIPTOR.message_types_by_name["WorkflowStreamProgress"]
+_WORKFLOWSTREAMQUIESCENT = DESCRIPTOR.message_types_by_name["WorkflowStreamQuiescent"]
+_EXTERNALSTREAMWAIT = DESCRIPTOR.message_types_by_name["ExternalStreamWait"]
+_EXTERNALSTREAMPARKRESULT = DESCRIPTOR.message_types_by_name["ExternalStreamParkResult"]
+_PARKSETCONFIRMED = DESCRIPTOR.message_types_by_name["ParkSetConfirmed"]
+_STREAMSETBECAMEREADY = DESCRIPTOR.message_types_by_name["StreamSetBecameReady"]
+_EXTERNALSTREAMFINALIZED = DESCRIPTOR.message_types_by_name["ExternalStreamFinalized"]
+_WORKFLOWOUTPUTSTREAMCOMMIT = DESCRIPTOR.message_types_by_name[
+    "WorkflowOutputStreamCommit"
+]
+_WORKFLOWOUTPUTSTREAMBUFFERED = DESCRIPTOR.message_types_by_name[
+    "WorkflowOutputStreamBuffered"
+]
+_ADDSTREAMMESSAGES = DESCRIPTOR.message_types_by_name["AddStreamMessages"]
+_SUBSCRIBESTREAM = DESCRIPTOR.message_types_by_name["SubscribeStream"]
 _STARTTIMER = DESCRIPTOR.message_types_by_name["StartTimer"]
 _CANCELTIMER = DESCRIPTOR.message_types_by_name["CancelTimer"]
 _SCHEDULEACTIVITY = DESCRIPTOR.message_types_by_name["ScheduleActivity"]
@@ -129,6 +150,127 @@ WorkflowCommand = _reflection.GeneratedProtocolMessageType(
     },
 )
 _sym_db.RegisterMessage(WorkflowCommand)
+
+WorkflowStreamProgress = _reflection.GeneratedProtocolMessageType(
+    "WorkflowStreamProgress",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _WORKFLOWSTREAMPROGRESS,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.WorkflowStreamProgress)
+    },
+)
+_sym_db.RegisterMessage(WorkflowStreamProgress)
+
+WorkflowStreamQuiescent = _reflection.GeneratedProtocolMessageType(
+    "WorkflowStreamQuiescent",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _WORKFLOWSTREAMQUIESCENT,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.WorkflowStreamQuiescent)
+    },
+)
+_sym_db.RegisterMessage(WorkflowStreamQuiescent)
+
+ExternalStreamWait = _reflection.GeneratedProtocolMessageType(
+    "ExternalStreamWait",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALSTREAMWAIT,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.ExternalStreamWait)
+    },
+)
+_sym_db.RegisterMessage(ExternalStreamWait)
+
+ExternalStreamParkResult = _reflection.GeneratedProtocolMessageType(
+    "ExternalStreamParkResult",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALSTREAMPARKRESULT,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.ExternalStreamParkResult)
+    },
+)
+_sym_db.RegisterMessage(ExternalStreamParkResult)
+
+ParkSetConfirmed = _reflection.GeneratedProtocolMessageType(
+    "ParkSetConfirmed",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _PARKSETCONFIRMED,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.ParkSetConfirmed)
+    },
+)
+_sym_db.RegisterMessage(ParkSetConfirmed)
+
+StreamSetBecameReady = _reflection.GeneratedProtocolMessageType(
+    "StreamSetBecameReady",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _STREAMSETBECAMEREADY,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.StreamSetBecameReady)
+    },
+)
+_sym_db.RegisterMessage(StreamSetBecameReady)
+
+ExternalStreamFinalized = _reflection.GeneratedProtocolMessageType(
+    "ExternalStreamFinalized",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALSTREAMFINALIZED,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.ExternalStreamFinalized)
+    },
+)
+_sym_db.RegisterMessage(ExternalStreamFinalized)
+
+WorkflowOutputStreamCommit = _reflection.GeneratedProtocolMessageType(
+    "WorkflowOutputStreamCommit",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _WORKFLOWOUTPUTSTREAMCOMMIT,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.WorkflowOutputStreamCommit)
+    },
+)
+_sym_db.RegisterMessage(WorkflowOutputStreamCommit)
+
+WorkflowOutputStreamBuffered = _reflection.GeneratedProtocolMessageType(
+    "WorkflowOutputStreamBuffered",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _WORKFLOWOUTPUTSTREAMBUFFERED,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.WorkflowOutputStreamBuffered)
+    },
+)
+_sym_db.RegisterMessage(WorkflowOutputStreamBuffered)
+
+AddStreamMessages = _reflection.GeneratedProtocolMessageType(
+    "AddStreamMessages",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _ADDSTREAMMESSAGES,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.AddStreamMessages)
+    },
+)
+_sym_db.RegisterMessage(AddStreamMessages)
+
+SubscribeStream = _reflection.GeneratedProtocolMessageType(
+    "SubscribeStream",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _SUBSCRIBESTREAM,
+        "__module__": "temporal.sdk.core.workflow_commands.workflow_commands_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.workflow_commands.SubscribeStream)
+    },
+)
+_sym_db.RegisterMessage(SubscribeStream)
 
 StartTimer = _reflection.GeneratedProtocolMessageType(
     "StartTimer",
@@ -484,70 +626,92 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     _SIGNALEXTERNALWORKFLOWEXECUTION_HEADERSENTRY._serialized_options = b"8\001"
     _SCHEDULENEXUSOPERATION_NEXUSHEADERENTRY._options = None
     _SCHEDULENEXUSOPERATION_NEXUSHEADERENTRY._serialized_options = b"8\001"
-    _ACTIVITYCANCELLATIONTYPE._serialized_start = 8672
-    _ACTIVITYCANCELLATIONTYPE._serialized_end = 8760
-    _WORKFLOWCOMMAND._serialized_start = 518
-    _WORKFLOWCOMMAND._serialized_end = 2607
-    _STARTTIMER._serialized_start = 2609
-    _STARTTIMER._serialized_end = 2692
-    _CANCELTIMER._serialized_start = 2694
-    _CANCELTIMER._serialized_end = 2720
-    _SCHEDULEACTIVITY._serialized_start = 2723
-    _SCHEDULEACTIVITY._serialized_end = 3547
-    _SCHEDULEACTIVITY_HEADERSENTRY._serialized_start = 3468
-    _SCHEDULEACTIVITY_HEADERSENTRY._serialized_end = 3547
-    _SCHEDULELOCALACTIVITY._serialized_start = 3550
-    _SCHEDULELOCALACTIVITY._serialized_end = 4339
-    _SCHEDULELOCALACTIVITY_HEADERSENTRY._serialized_start = 3468
-    _SCHEDULELOCALACTIVITY_HEADERSENTRY._serialized_end = 3547
-    _REQUESTCANCELACTIVITY._serialized_start = 4341
-    _REQUESTCANCELACTIVITY._serialized_end = 4377
-    _REQUESTCANCELLOCALACTIVITY._serialized_start = 4379
-    _REQUESTCANCELLOCALACTIVITY._serialized_end = 4420
-    _QUERYRESULT._serialized_start = 4423
-    _QUERYRESULT._serialized_end = 4579
-    _QUERYSUCCESS._serialized_start = 4581
-    _QUERYSUCCESS._serialized_end = 4646
-    _COMPLETEWORKFLOWEXECUTION._serialized_start = 4648
-    _COMPLETEWORKFLOWEXECUTION._serialized_end = 4724
-    _FAILWORKFLOWEXECUTION._serialized_start = 4726
-    _FAILWORKFLOWEXECUTION._serialized_end = 4800
-    _CONTINUEASNEWWORKFLOWEXECUTION._serialized_start = 4803
-    _CONTINUEASNEWWORKFLOWEXECUTION._serialized_end = 5717
-    _CONTINUEASNEWWORKFLOWEXECUTION_MEMOENTRY._serialized_start = 5560
-    _CONTINUEASNEWWORKFLOWEXECUTION_MEMOENTRY._serialized_end = 5636
-    _CONTINUEASNEWWORKFLOWEXECUTION_HEADERSENTRY._serialized_start = 3468
-    _CONTINUEASNEWWORKFLOWEXECUTION_HEADERSENTRY._serialized_end = 3547
-    _CANCELWORKFLOWEXECUTION._serialized_start = 5719
-    _CANCELWORKFLOWEXECUTION._serialized_end = 5795
-    _SETPATCHMARKER._serialized_start = 5797
-    _SETPATCHMARKER._serialized_end = 5851
-    _STARTCHILDWORKFLOWEXECUTION._serialized_start = 5854
-    _STARTCHILDWORKFLOWEXECUTION._serialized_end = 7028
-    _STARTCHILDWORKFLOWEXECUTION_HEADERSENTRY._serialized_start = 3468
-    _STARTCHILDWORKFLOWEXECUTION_HEADERSENTRY._serialized_end = 3547
-    _STARTCHILDWORKFLOWEXECUTION_MEMOENTRY._serialized_start = 5560
-    _STARTCHILDWORKFLOWEXECUTION_MEMOENTRY._serialized_end = 5636
-    _CANCELCHILDWORKFLOWEXECUTION._serialized_start = 7030
-    _CANCELCHILDWORKFLOWEXECUTION._serialized_end = 7104
-    _REQUESTCANCELEXTERNALWORKFLOWEXECUTION._serialized_start = 7107
-    _REQUESTCANCELEXTERNALWORKFLOWEXECUTION._serialized_end = 7249
-    _SIGNALEXTERNALWORKFLOWEXECUTION._serialized_start = 7252
-    _SIGNALEXTERNALWORKFLOWEXECUTION._serialized_end = 7651
-    _SIGNALEXTERNALWORKFLOWEXECUTION_HEADERSENTRY._serialized_start = 3468
-    _SIGNALEXTERNALWORKFLOWEXECUTION_HEADERSENTRY._serialized_end = 3547
-    _CANCELSIGNALWORKFLOW._serialized_start = 7653
-    _CANCELSIGNALWORKFLOW._serialized_end = 7688
-    _UPSERTWORKFLOWSEARCHATTRIBUTES._serialized_start = 7690
-    _UPSERTWORKFLOWSEARCHATTRIBUTES._serialized_end = 7791
-    _MODIFYWORKFLOWPROPERTIES._serialized_start = 7793
-    _MODIFYWORKFLOWPROPERTIES._serialized_end = 7872
-    _UPDATERESPONSE._serialized_start = 7875
-    _UPDATERESPONSE._serialized_end = 8085
-    _SCHEDULENEXUSOPERATION._serialized_start = 8088
-    _SCHEDULENEXUSOPERATION._serialized_end = 8626
-    _SCHEDULENEXUSOPERATION_NEXUSHEADERENTRY._serialized_start = 8576
-    _SCHEDULENEXUSOPERATION_NEXUSHEADERENTRY._serialized_end = 8626
-    _REQUESTCANCELNEXUSOPERATION._serialized_start = 8628
-    _REQUESTCANCELNEXUSOPERATION._serialized_end = 8670
+    _ACTIVITYCANCELLATIONTYPE._serialized_start = 10553
+    _ACTIVITYCANCELLATIONTYPE._serialized_end = 10641
+    _WORKFLOWCOMMAND._serialized_start = 609
+    _WORKFLOWCOMMAND._serialized_end = 3400
+    _WORKFLOWSTREAMPROGRESS._serialized_start = 3402
+    _WORKFLOWSTREAMPROGRESS._serialized_end = 3479
+    _WORKFLOWSTREAMQUIESCENT._serialized_start = 3482
+    _WORKFLOWSTREAMQUIESCENT._serialized_end = 3649
+    _EXTERNALSTREAMWAIT._serialized_start = 3651
+    _EXTERNALSTREAMWAIT._serialized_end = 3738
+    _EXTERNALSTREAMPARKRESULT._serialized_start = 3741
+    _EXTERNALSTREAMPARKRESULT._serialized_end = 3981
+    _PARKSETCONFIRMED._serialized_start = 3983
+    _PARKSETCONFIRMED._serialized_end = 4001
+    _STREAMSETBECAMEREADY._serialized_start = 4003
+    _STREAMSETBECAMEREADY._serialized_end = 4025
+    _EXTERNALSTREAMFINALIZED._serialized_start = 4027
+    _EXTERNALSTREAMFINALIZED._serialized_end = 4116
+    _WORKFLOWOUTPUTSTREAMCOMMIT._serialized_start = 4118
+    _WORKFLOWOUTPUTSTREAMCOMMIT._serialized_end = 4243
+    _WORKFLOWOUTPUTSTREAMBUFFERED._serialized_start = 4245
+    _WORKFLOWOUTPUTSTREAMBUFFERED._serialized_end = 4331
+    _ADDSTREAMMESSAGES._serialized_start = 4333
+    _ADDSTREAMMESSAGES._serialized_end = 4428
+    _SUBSCRIBESTREAM._serialized_start = 4430
+    _SUBSCRIBESTREAM._serialized_end = 4488
+    _STARTTIMER._serialized_start = 4490
+    _STARTTIMER._serialized_end = 4573
+    _CANCELTIMER._serialized_start = 4575
+    _CANCELTIMER._serialized_end = 4601
+    _SCHEDULEACTIVITY._serialized_start = 4604
+    _SCHEDULEACTIVITY._serialized_end = 5428
+    _SCHEDULEACTIVITY_HEADERSENTRY._serialized_start = 5349
+    _SCHEDULEACTIVITY_HEADERSENTRY._serialized_end = 5428
+    _SCHEDULELOCALACTIVITY._serialized_start = 5431
+    _SCHEDULELOCALACTIVITY._serialized_end = 6220
+    _SCHEDULELOCALACTIVITY_HEADERSENTRY._serialized_start = 5349
+    _SCHEDULELOCALACTIVITY_HEADERSENTRY._serialized_end = 5428
+    _REQUESTCANCELACTIVITY._serialized_start = 6222
+    _REQUESTCANCELACTIVITY._serialized_end = 6258
+    _REQUESTCANCELLOCALACTIVITY._serialized_start = 6260
+    _REQUESTCANCELLOCALACTIVITY._serialized_end = 6301
+    _QUERYRESULT._serialized_start = 6304
+    _QUERYRESULT._serialized_end = 6460
+    _QUERYSUCCESS._serialized_start = 6462
+    _QUERYSUCCESS._serialized_end = 6527
+    _COMPLETEWORKFLOWEXECUTION._serialized_start = 6529
+    _COMPLETEWORKFLOWEXECUTION._serialized_end = 6605
+    _FAILWORKFLOWEXECUTION._serialized_start = 6607
+    _FAILWORKFLOWEXECUTION._serialized_end = 6681
+    _CONTINUEASNEWWORKFLOWEXECUTION._serialized_start = 6684
+    _CONTINUEASNEWWORKFLOWEXECUTION._serialized_end = 7598
+    _CONTINUEASNEWWORKFLOWEXECUTION_MEMOENTRY._serialized_start = 7441
+    _CONTINUEASNEWWORKFLOWEXECUTION_MEMOENTRY._serialized_end = 7517
+    _CONTINUEASNEWWORKFLOWEXECUTION_HEADERSENTRY._serialized_start = 5349
+    _CONTINUEASNEWWORKFLOWEXECUTION_HEADERSENTRY._serialized_end = 5428
+    _CANCELWORKFLOWEXECUTION._serialized_start = 7600
+    _CANCELWORKFLOWEXECUTION._serialized_end = 7676
+    _SETPATCHMARKER._serialized_start = 7678
+    _SETPATCHMARKER._serialized_end = 7732
+    _STARTCHILDWORKFLOWEXECUTION._serialized_start = 7735
+    _STARTCHILDWORKFLOWEXECUTION._serialized_end = 8909
+    _STARTCHILDWORKFLOWEXECUTION_HEADERSENTRY._serialized_start = 5349
+    _STARTCHILDWORKFLOWEXECUTION_HEADERSENTRY._serialized_end = 5428
+    _STARTCHILDWORKFLOWEXECUTION_MEMOENTRY._serialized_start = 7441
+    _STARTCHILDWORKFLOWEXECUTION_MEMOENTRY._serialized_end = 7517
+    _CANCELCHILDWORKFLOWEXECUTION._serialized_start = 8911
+    _CANCELCHILDWORKFLOWEXECUTION._serialized_end = 8985
+    _REQUESTCANCELEXTERNALWORKFLOWEXECUTION._serialized_start = 8988
+    _REQUESTCANCELEXTERNALWORKFLOWEXECUTION._serialized_end = 9130
+    _SIGNALEXTERNALWORKFLOWEXECUTION._serialized_start = 9133
+    _SIGNALEXTERNALWORKFLOWEXECUTION._serialized_end = 9532
+    _SIGNALEXTERNALWORKFLOWEXECUTION_HEADERSENTRY._serialized_start = 5349
+    _SIGNALEXTERNALWORKFLOWEXECUTION_HEADERSENTRY._serialized_end = 5428
+    _CANCELSIGNALWORKFLOW._serialized_start = 9534
+    _CANCELSIGNALWORKFLOW._serialized_end = 9569
+    _UPSERTWORKFLOWSEARCHATTRIBUTES._serialized_start = 9571
+    _UPSERTWORKFLOWSEARCHATTRIBUTES._serialized_end = 9672
+    _MODIFYWORKFLOWPROPERTIES._serialized_start = 9674
+    _MODIFYWORKFLOWPROPERTIES._serialized_end = 9753
+    _UPDATERESPONSE._serialized_start = 9756
+    _UPDATERESPONSE._serialized_end = 9966
+    _SCHEDULENEXUSOPERATION._serialized_start = 9969
+    _SCHEDULENEXUSOPERATION._serialized_end = 10507
+    _SCHEDULENEXUSOPERATION_NEXUSHEADERENTRY._serialized_start = 10457
+    _SCHEDULENEXUSOPERATION_NEXUSHEADERENTRY._serialized_end = 10507
+    _REQUESTCANCELNEXUSOPERATION._serialized_start = 10509
+    _REQUESTCANCELNEXUSOPERATION._serialized_end = 10551
 # @@protoc_insertion_point(module_scope)

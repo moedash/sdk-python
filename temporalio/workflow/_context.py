@@ -313,6 +313,24 @@ class _Runtime(ABC):
     ) -> temporalio.common.WorkerDeploymentVersion | None: ...
 
     @abstractmethod
+    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None: ...
+
+    @abstractmethod
+    def workflow_add_stream_messages(
+        self, stream_id: str, messages: Sequence[bytes], topic: str
+    ) -> None: ...
+
+    @abstractmethod
+    async def workflow_read_stream(
+        self, stream_id: str, max_messages: int
+    ) -> list[bytes]: ...
+
+    @abstractmethod
+    async def workflow_read_stream_messages(
+        self, stream_id: str, max_messages: int
+    ) -> list[DeliveredStreamMessage]: ...
+
+    @abstractmethod
     def workflow_get_current_history_length(self) -> int: ...
 
     @abstractmethod
@@ -943,6 +961,108 @@ async def sleep(duration: float | timedelta, *, summary: str | None = None) -> N
         ),
         summary=summary,
     )
+
+
+def subscribe_stream(stream_id: str, *, start_offset: int = 0) -> None:
+    """Subscribe this workflow to a stream.
+
+    From here on its Workflow Tasks carry the ranges it has not consumed yet,
+    and :func:`read_stream` returns them. Safe to call again: a second
+    subscription to a stream this run already consumes does not move its
+    cursor, though it does write one event. Calling it on every replay is
+    harmless because replay matches the command to the event already recorded.
+
+    Only the stream id and start offset go to the server. The rest of the
+    stream's addressing is resolved there, because a workflow cannot look it up
+    without doing I/O and a value it carried would be a reading rather than a
+    fact.
+
+    Args:
+        stream_id: Stream to consume.
+        start_offset: Where to start. Negative means from wherever the stream is
+            when the subscription is registered; the server resolves that once
+            and records it, so replay does not resolve it again.
+    """
+    _Runtime.current().workflow_subscribe_stream(stream_id, start_offset)
+
+
+def add_stream_messages(
+    messages: Sequence[bytes],
+    *,
+    stream_id: str = "",
+    topic: str = "",
+) -> None:
+    """Publish a batch of messages to a stream this workflow owns.
+
+    Returns as soon as the command is issued. The bodies go to the stream's own
+    log rather than into History, which gets one fixed-size event naming the
+    offset range, so a batch of a thousand costs History the same as a batch of
+    one. Readers do not have to exist yet, and adding one costs the writer
+    nothing.
+
+    Batch where you can. The event is per call, and a workflow is bounded by the
+    history event count, so one call with a hundred messages leaves far more
+    room than a hundred calls with one.
+
+    Args:
+        messages: Bodies to append, in order.
+        stream_id: Stream to publish to. Empty means the workflow's default
+            output stream.
+        topic: Optional topic, which readers can filter on. Offsets are still
+            assigned over the unfiltered stream.
+    """
+    _Runtime.current().workflow_add_stream_messages(stream_id, messages, topic)
+
+
+@dataclass(frozen=True)
+class DeliveredStreamMessage:
+    """One message a consuming workflow was given, with where it sat."""
+
+    body: bytes
+    topic: str
+    offset: int
+    """Its position in the whole stream, which is what a reader resumes from."""
+
+
+async def read_stream_messages(
+    stream_id: str, *, max_messages: int = 0
+) -> list[DeliveredStreamMessage]:
+    """Read the next messages, keeping their topic and position.
+
+    Same delivery as :func:`read_stream`. A reader that has to name where it
+    got to, filter a topic, or hand a position to something outside the
+    workflow needs more than the bodies.
+
+    Args:
+        stream_id: Stream to read from.
+        max_messages: Most messages to return at once, or 0 for everything
+            available.
+    """
+    return await _Runtime.current().workflow_read_stream_messages(
+        stream_id, max_messages
+    )
+
+
+async def read_stream(stream_id: str, *, max_messages: int = 0) -> list[bytes]:
+    """Read the next messages of a stream this workflow consumes.
+
+    Waits until at least one message is available. Ranges arrive on Workflow
+    Tasks, and only the offsets they covered are written to History, so this is
+    deterministic on replay: the server re-supplies the same ranges by reading
+    the stream again.
+
+    Subscribe out of band with the stream client. This only reads what has
+    already been delivered to this workflow.
+
+    Args:
+        stream_id: Stream to read from.
+        max_messages: Most messages to return at once, or 0 for everything
+            available.
+
+    Returns:
+        The message bodies, in stream order.
+    """
+    return await _Runtime.current().workflow_read_stream(stream_id, max_messages)
 
 
 async def wait_condition(
