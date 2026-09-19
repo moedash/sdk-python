@@ -298,7 +298,12 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         """A nexus operation resolved."""
     @property
     def deliver_stream_messages(self) -> global___DeliverStreamMessages:
-        """A range of a stream the workflow subscribed to."""
+        """17 to 20 are taken by the external stream jobs, which are developed
+        alongside this one and share this message. The number below is fixed
+        with that family and must not be reused.
+
+        A range of a stream the workflow subscribed to.
+        """
     @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
