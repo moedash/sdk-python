@@ -181,7 +181,11 @@ class WorkflowCommand(google.protobuf.message.Message):
         self,
     ) -> global___RequestCancelNexusOperation: ...
     @property
-    def subscribe_stream(self) -> global___SubscribeStream: ...
+    def subscribe_stream(self) -> global___SubscribeStream:
+        """23 to 28 are taken by the external stream commands, which are developed
+        alongside these and share this message. The two numbers below are fixed
+        with that family and must not be reused.
+        """
     @property
     def add_stream_messages(self) -> global___AddStreamMessages: ...
     def __init__(
@@ -376,13 +380,7 @@ class WorkflowCommand(google.protobuf.message.Message):
 global___WorkflowCommand = WorkflowCommand
 
 class AddStreamMessages(google.protobuf.message.Message):
-    """Subscribe this workflow to a stream, so later Workflow Tasks carry the
-    ranges it has not consumed yet.
-
-    The stream's addressing is resolved by the server. A workflow cannot look it
-    up without doing I/O, and a value it carried would be a reading rather than a
-    fact, so it could differ on replay.
-    Publish a batch of messages to a stream this workflow owns.
+    """Publish a batch of messages to a stream this workflow owns.
 
     The bodies go to the stream's own log rather than into History, which gets
     one fixed-size event naming the offset range. That is what makes the batch
@@ -420,6 +418,14 @@ class AddStreamMessages(google.protobuf.message.Message):
 global___AddStreamMessages = AddStreamMessages
 
 class SubscribeStream(google.protobuf.message.Message):
+    """Subscribe this workflow to a stream, so later Workflow Tasks carry the
+    ranges it has not consumed yet.
+
+    The stream's addressing is resolved by the server. A workflow cannot look it
+    up without doing I/O, and a value it carried would be a reading rather than a
+    fact, so it could differ on replay.
+    """
+
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     STREAM_ID_FIELD_NUMBER: builtins.int
