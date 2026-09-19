@@ -4,10 +4,11 @@ Written against the public surface, parametrised over the providers this
 tree can stand up. The memory provider always runs, with no server and no
 store. A storage provider adds itself to ``SETUPS`` behind its own
 ``STREAMS_LIVE`` gate: its setup configures the provider, hands back the
-client the cases should use, and says which capabilities it lacks, so the
-cases marked ``inbound_stream`` or ``unfiltered_read`` are skipped with a
-reason on a provider that cannot do them. Every other case reads with a
-topic, which is what a store that keys by topic needs.
+client the cases should use and a workflow that exists for the case to
+address, and says which capabilities it lacks, so the cases marked
+``inbound_stream`` or ``unfiltered_read`` are skipped with a reason on a
+provider that cannot do them. Every other case reads with a topic, which is
+what a store that keys by topic needs.
 
 What this file pins down is the contract: framing, producer identity, retry
 deduplication, supersession, topic filtering, cursor resumption, and store
@@ -38,6 +39,12 @@ class ProviderCase:
 
     name: str
     client: Any = None
+    workflow_id: str = ""
+    """The workflow whose streams the case addresses.
+
+    A store keeps a workflow's stream with the workflow, so the setup makes
+    the execution exist before the case opens a producer on its account.
+    """
     inbound_streams: bool = True
     """Outside producers may write a workflow's inbound stream."""
     unfiltered_reads: bool = True
@@ -47,7 +54,7 @@ class ProviderCase:
 async def _memory_case() -> AsyncIterator[ProviderCase]:
     memory.reset()
     streams.configure(provider="memory")
-    yield ProviderCase("memory")
+    yield ProviderCase("memory", workflow_id=new_workflow_id())
     memory.reset()
 
 
@@ -128,7 +135,7 @@ def test_inbound_stream_ids_cannot_collide():
 
 
 async def test_append_read_roundtrip(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     producer = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -154,7 +161,7 @@ async def test_append_read_roundtrip(provider: ProviderCase):
 
 @pytest.mark.inbound_stream
 async def test_inbound_records_carry_no_topic(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     producer = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -178,7 +185,7 @@ async def test_inbound_records_carry_no_topic(provider: ProviderCase):
 
 
 async def test_retried_append_is_deduplicated(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     first = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -207,7 +214,7 @@ async def test_retried_append_is_deduplicated(provider: ProviderCase):
 
 
 async def test_new_attempt_supersedes_the_old_one(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     first = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -238,7 +245,7 @@ async def test_topic_filter_on_the_owners_stream(provider: ProviderCase):
     # Two producers on two topics of the stream the workflow publishes. The
     # filter is only meaningful on a store that mixes topics, which is this
     # one; an inbound stream carries none.
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     on_a = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -265,7 +272,7 @@ async def test_topic_filter_on_the_owners_stream(provider: ProviderCase):
 
 @pytest.mark.unfiltered_read
 async def test_a_read_without_a_topic_sees_every_topic(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     on_a = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -289,7 +296,7 @@ async def test_a_read_without_a_topic_sees_every_topic(provider: ProviderCase):
 
 
 async def test_cursor_resumes_where_it_points(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     producer = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -313,7 +320,7 @@ async def test_cursor_resumes_where_it_points(provider: ProviderCase):
 async def test_append_cursor_names_the_last_record_of_the_batch(
     provider: ProviderCase,
 ):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     producer = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -335,7 +342,7 @@ async def test_append_cursor_names_the_last_record_of_the_batch(
 
 
 async def test_latest_positions_a_reader_at_the_end(provider: ProviderCase):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     producer = await streams.producer(
         provider.client,
         workflow_id=workflow_id,
@@ -361,7 +368,7 @@ async def test_stream_addresses_with_colons_do_not_share_a_store(
     provider: ProviderCase,
 ):
     # ("wf:x", "y") and ("wf", "x:y") differ only in where the colon sits.
-    base = new_workflow_id()
+    base = provider.workflow_id
     left = await streams.producer(
         provider.client, workflow_id=f"{base}:x", stream="y", producer_id="l", attempt=1
     )
@@ -386,7 +393,7 @@ async def test_stream_addresses_with_colons_do_not_share_a_store(
 async def test_producer_needs_exactly_one_address_and_an_identity(
     provider: ProviderCase,
 ):
-    workflow_id = new_workflow_id()
+    workflow_id = provider.workflow_id
     with pytest.raises(ValueError):
         await streams.producer(
             provider.client, workflow_id=workflow_id, producer_id="model", attempt=1
