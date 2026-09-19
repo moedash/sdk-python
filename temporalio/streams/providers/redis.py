@@ -5,21 +5,23 @@ buffered by the worker, staged invisibly under a token, and promoted only once
 a marker in History proves the workflow task that produced it was accepted.
 Consumption is recorded the same way, as ranges and boundaries in History.
 
-``configure`` builds the backend from ``url`` and ``key_prefix`` (defaulting
-to ``AI198_REDIS_URL`` and ``AI198_REDIS_PREFIX``), or takes a constructed
-``backend`` when the caller wants to own its lifecycle.
+``configure`` takes ``url`` and ``key_prefix`` (defaulting to
+``TEMPORAL_TEST_REDIS_URL``, then ``AI198_REDIS_URL``, and
+``AI198_REDIS_PREFIX``), or a constructed ``backend`` when the caller wants to
+own its lifecycle. The Redis client is opened on first use, so it belongs to
+the loop that uses it, and released by ``close``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.external_workflow_streams import (
@@ -28,6 +30,7 @@ from temporalio.contrib.external_workflow_streams import (
     ExternalOutputStreamProducer,
     ExternalStreamProducer,
     Offset,
+    OutputStreamRecord,
     WakeNotAcknowledgedError,
     WorkflowChainKey,
     external_output_stream,
@@ -36,10 +39,13 @@ from temporalio.contrib.external_workflow_streams import (
 from temporalio.contrib.external_workflow_streams import (
     BEGINNING as PROVIDER_BEGINNING,
 )
+from temporalio.contrib.external_workflow_streams._backend import DEFAULT_WATCH_BLOCK
 from temporalio.streams import _frame, _provider
 from temporalio.streams._handles import ReadSource, WriteSink
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+
+logger = logging.getLogger(__name__)
 
 
 class _ExternalReadSource:
@@ -77,6 +83,12 @@ async def _chain_key(client: Client, workflow_id: str) -> WorkflowChainKey:
     )
 
 
+def _placed(result: Any) -> Offset:
+    # An inbound topic answers a publish with the offset. The owner's output
+    # stream answers with the whole record, whose text form is not a position.
+    return result.offset if isinstance(result, OutputStreamRecord) else result
+
+
 class RedisProducer:
     """Appends to a stream from outside workflow code.
 
@@ -90,16 +102,20 @@ class RedisProducer:
         self,
         topic: Any,
         converter: Any,
-        stream: str,
+        frame_topic: str,
         producer_id: str,
         attempt: int,
         client: Client | None = None,
         workflow_id: str = "",
     ) -> None:
-        """Bind this producer to ``topic`` on the external store."""
+        """Bind this producer to ``topic`` on the external store.
+
+        ``frame_topic`` is what each record carries: the topic name on the
+        owner's stream, empty on an inbound stream.
+        """
         self._topic = topic
         self._converter = converter
-        self._stream = stream
+        self._frame_topic = frame_topic
         self._producer_id = producer_id
         self._attempt = attempt
         self._client = client
@@ -111,12 +127,17 @@ class RedisProducer:
         """The generation this producer is writing."""
         return self._attempt
 
-    async def append(self, *values: Any) -> Cursor:
-        """Append values and return where the first one landed."""
-        first: Any = None
+    async def append(self, *values: Any) -> Cursor | None:
+        """Append ``values`` and return the last one's cursor, or ``None`` for none.
+
+        A repeat of an earlier append comes back with the original position.
+        The store drops the duplicate, but this seam does not say so, and a
+        reader resuming after that position still sees only what came later.
+        """
+        last: Offset | None = None
         for value in values:
             frame = _frame.encode(
-                topic=self._stream,
+                topic=self._frame_topic,
                 kind=RecordKind.DATA,
                 producer=self._producer_id,
                 attempt=self._attempt,
@@ -124,15 +145,13 @@ class RedisProducer:
                 body=self._encode(value),
             )
             self._sequence += 1
-            offset = await self._topic.publish(frame)
-            if first is None:
-                first = offset
-        return Cursor(str(first))
+            last = _placed(await self._topic.publish(frame))
+        return None if last is None else Cursor(last.token)
 
     async def finish(self) -> None:
         """Declare this stream complete."""
         frame = _frame.encode(
-            topic=self._stream,
+            topic=self._frame_topic,
             kind=RecordKind.FINISH,
             producer=self._producer_id,
             attempt=self._attempt,
@@ -183,10 +202,11 @@ class RedisProducer:
 class RedisConsumer:
     """Reads a stream from outside workflow code, resumably."""
 
-    def __init__(self, client: Any, converter: Any) -> None:
+    def __init__(self, client: Any, converter: Any, workflow_id: str) -> None:
         """Read what ``client`` reaches in the external store."""
         self._client = client
         self._converter = converter
+        self._workflow_id = workflow_id
 
     async def read(
         self,
@@ -194,22 +214,34 @@ class RedisConsumer:
         after: Cursor = BEGINNING,
         topic: str | None = None,
         type: type | None = None,
-    ) -> AsyncIterator[StreamRecord[Any]]:
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield the records after ``after`` as they arrive.
 
         Applies the same supersession rule as a workflow reader, so a browser
         and a workflow watching one activity agree on which attempt is current.
         """
+        # Only the owner's stream is readable from here, so the inbound check
+        # can never fire; it runs so every provider answers a topic the same way.
+        _provider.check_topic("", topic)
+        name = self._require_topic(topic)
         attempts = AttemptTracker()
         boundary = AFTER(Offset(after.token)) if after.token else PROVIDER_BEGINNING
-        handle = self._client.topic(self._require_topic(topic), type=bytes)
+        handle = self._client.topic(name, type=bytes)
         async for item in handle.subscribe(after=boundary):
             cursor = Cursor(str(item.offset))
             try:
                 kind, frame_topic, source, attempt, sequence, body = _frame.decode(
                     item.data
                 )
-            except ValueError:
+            except ValueError as error:
+                # Same answer as the workflow-side reader: skip and say so.
+                logger.warning(
+                    "skipping record %s of %s topic %s: %s",
+                    cursor,
+                    self._workflow_id,
+                    name,
+                    error,
+                )
                 continue
             superseded = attempts.note(source, attempt, cursor)
             if superseded is not None:
@@ -253,6 +285,9 @@ class _RedisProvider:
 
     def __init__(self) -> None:
         self._backend: Any = None
+        self._owned_client: Any = None
+        self._url = ""
+        self._key_prefix = ""
 
     def configure(self, **options: Any) -> None:
         backend = options.pop("backend", None)
@@ -263,35 +298,46 @@ class _RedisProvider:
                 "the redis provider takes backend, url and key_prefix, got "
                 f"{sorted(options)}"
             )
-        if backend is not None:
-            self._backend = backend
-            return
-        import redis.asyncio
-
-        from temporalio.contrib.external_workflow_streams._redis import (
-            RedisStreamBackend,
+        self._backend = backend
+        self._url = (
+            url
+            or os.environ.get("TEMPORAL_TEST_REDIS_URL")
+            or os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6379")
         )
-
-        # redis-py defaults to a socket timeout equal to this provider's own
-        # blocking read, so an idle read would abandon a healthy socket.
-        self._backend = RedisStreamBackend(
-            client=redis.asyncio.from_url(
-                url or os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6399"),
-                decode_responses=False,
-                socket_timeout=30,
-            ),
-            key_prefix=key_prefix
-            or os.environ.get("AI198_REDIS_PREFIX", "ai198-contract"),
+        self._key_prefix = key_prefix or os.environ.get(
+            "AI198_REDIS_PREFIX", "ai198-contract"
         )
 
     def _require_backend(self) -> Any:
         if self._backend is None:
-            raise RuntimeError(
-                "no store configured; call temporalio.streams.configure("
-                'provider="redis", ...) before opening a producer, a consumer '
-                "or a worker"
+            import redis.asyncio
+
+            from temporalio.contrib.external_workflow_streams._redis import (
+                RedisStreamBackend,
+            )
+
+            # A dead peer would otherwise hold a blocking read open forever.
+            # Several block periods, so a healthy socket that is merely idle
+            # inside one XREAD window is never abandoned.
+            self._owned_client = redis.asyncio.from_url(
+                self._url,
+                decode_responses=False,
+                socket_timeout=DEFAULT_WATCH_BLOCK.total_seconds() * 6,
+            )
+            self._backend = RedisStreamBackend(
+                client=self._owned_client, key_prefix=self._key_prefix
             )
         return self._backend
+
+    async def close(self) -> None:
+        """Release the Redis connections this provider opened.
+
+        A backend the caller handed in stays the caller's to close.
+        """
+        client, self._owned_client = self._owned_client, None
+        if client is not None:
+            self._backend = None
+            await client.aclose()
 
     def worker_options(self) -> dict[str, Any]:
         return {"external_stream_backend": self._require_backend()}
@@ -335,14 +381,9 @@ class _RedisProvider:
 
         ``stream`` names an inbound stream; with none, ``topic`` names a topic
         on the workflow's output stream, appended directly rather than through
-        the workflow's staged commit. Inside an activity, leave ``producer_id``
-        and ``attempt`` unset: the activity's own id and attempt are the right
-        answer and are what let a reader tell a retry from a new generation.
+        the workflow's staged commit. An inbound record carries no topic: the
+        stream's name is its whole address.
         """
-        if not producer_id:
-            producer_id = activity.info().activity_id
-        if not attempt:
-            attempt = activity.info().attempt
         # The attempt is part of it. Deduplication answers "is this the
         # same append again", and a second attempt writing different words
         # at the same sequence is not: this provider rejects that outright.
@@ -367,7 +408,7 @@ class _RedisProvider:
         return RedisProducer(
             session.topic(stream or topic, type=bytes),
             client.data_converter.payload_converter,
-            stream or topic,
+            topic,
             producer_id,
             attempt,
             client,
@@ -396,6 +437,7 @@ class _RedisProvider:
                 client=client,
             ),
             client.data_converter.payload_converter,
+            workflow_id,
         )
 
 
