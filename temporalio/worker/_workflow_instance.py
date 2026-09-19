@@ -270,10 +270,12 @@ _Context: TypeAlias = dict[str, Any]
 _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], Any]
 
 
-# Matches the server's per-batch limit. Rejecting here turns a wedged workflow,
+# Match the server's per-batch limits. Rejecting here turns a wedged workflow,
 # which would replay and re-issue the same rejected command forever, into an
 # error the workflow author can see.
 _MAX_STREAM_MESSAGES_PER_BATCH = 1000
+_MAX_STREAM_MESSAGE_BYTES = 1 << 20
+_MAX_STREAM_BATCH_BYTES = 2 << 20
 
 
 class _StreamBuffer:
@@ -285,15 +287,38 @@ class _StreamBuffer:
     dropped.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, stream_id: str = "") -> None:
+        self._stream_id = stream_id
         self._messages: list[temporalio.workflow.DeliveredStreamMessage] = []
         self._waiters: list[asyncio.Future] = []
+        # Where the next range has to start. Unknown until the first one
+        # arrives, because a subscription may start wherever the stream is and
+        # the server is the one that resolves that.
+        self._next_offset: int | None = None
 
     def extend(
         self,
         messages: Sequence[temporalio.api.stream.v1.StreamMessage],
         from_offset: int = 0,
+        to_offset: int | None = None,
     ) -> None:
+        if to_offset is None:
+            to_offset = from_offset + len(messages)
+        # A range is recorded as consumed once and never resent, so one that
+        # repeats, skips or mis-sizes would hand the workflow duplicate or
+        # shifted bodies with nothing to say so. Failing the task is what makes
+        # the fault visible.
+        if to_offset - from_offset != len(messages):
+            raise RuntimeError(
+                f"stream {self._stream_id!r} delivered {len(messages)} messages "
+                f"for offsets [{from_offset}, {to_offset})"
+            )
+        if self._next_offset is not None and from_offset != self._next_offset:
+            raise RuntimeError(
+                f"stream {self._stream_id!r} delivered offsets [{from_offset}, "
+                f"{to_offset}) but the last range ended at {self._next_offset}"
+            )
+        self._next_offset = to_offset
         # An empty range still counts as a delivery, but there is nothing to
         # hand a reader, so only a non-empty one wakes anyone.
         if not messages:
@@ -1218,9 +1243,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             # Nothing subscribed. The range is already recorded as consumed and
             # will not be sent again, so buffering it is the only way a
             # subscription made later in the same task still sees it.
-            buffer = _StreamBuffer()
+            buffer = _StreamBuffer(job.stream_id)
             self._stream_buffers[job.stream_id] = buffer
-        buffer.extend(job.messages, job.from_offset)
+        buffer.extend(job.messages, job.from_offset, job.to_offset)
 
     def _apply_signal_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.SignalWorkflow
@@ -1388,9 +1413,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
     def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None:
         # Reissued on every replay, so the buffer has to exist before the first
-        # range arrives and the command has to be harmless the second time. The
-        # server treats a repeat subscription to the same stream as a no-op.
-        self._stream_buffers.setdefault(stream_id, _StreamBuffer())
+        # range arrives and the command has to be harmless the second time. A
+        # repeat subscription leaves the server-side cursor where it is.
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
         command = self._add_command()
         command.subscribe_stream.stream_id = stream_id
         command.subscribe_stream.start_offset = start_offset
@@ -1404,6 +1429,18 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             raise ValueError(
                 f"a batch is limited to {_MAX_STREAM_MESSAGES_PER_BATCH} messages, "
                 f"got {len(messages)}"
+            )
+        total = 0
+        for body in messages:
+            if len(body) > _MAX_STREAM_MESSAGE_BYTES:
+                raise ValueError(
+                    f"a stream message is limited to {_MAX_STREAM_MESSAGE_BYTES} "
+                    f"bytes, got {len(body)}"
+                )
+            total += len(body)
+        if total > _MAX_STREAM_BATCH_BYTES:
+            raise ValueError(
+                f"a batch is limited to {_MAX_STREAM_BATCH_BYTES} bytes, got {total}"
             )
         command = self._add_command()
         command.add_stream_messages.stream_id = stream_id
@@ -1432,7 +1469,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         # so without this the read waits on a future nothing can resolve and the
         # query times out with nothing to say why.
         self._assert_not_read_only("read stream")
-        buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer())
+        buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
         while not len(buffer):
             await buffer.wait_future()
         taken = buffer.take()
