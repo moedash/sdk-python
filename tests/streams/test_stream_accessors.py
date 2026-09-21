@@ -18,13 +18,13 @@ import pytest
 
 from temporalio import activity, workflow
 from temporalio.client import Client
-from temporalio.streams import RecordKind, StreamUnsupportedError
+from temporalio.streams import RecordKind, StreamUnsupportedError, topic
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from tests.helpers import new_worker
 
-INPUTS = "inputs"
-DECISIONS = "decisions"
+INPUTS = topic("inputs", dict)
+DECISIONS = topic("decisions", dict)
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ class Echo:
 
     @workflow.run
     async def run(self, count: int) -> list[Any]:
-        inputs = workflow.stream_reader(INPUTS, result_type=dict)
+        inputs = workflow.stream_reader(INPUTS)
         decisions = workflow.stream_writer(DECISIONS)
         emitting = workflow.start_activity(
             emit, count, start_to_close_timeout=timedelta(seconds=30)
@@ -100,10 +100,7 @@ async def test_one_registration_on_the_client_serves_every_context(
         stream = registered.get_stream_handle(workflow_id)
 
         async def read_everything() -> list[Any]:
-            return [
-                (r.kind, r.value)
-                async for r in stream.read(topic=DECISIONS, result_type=dict)
-            ]
+            return [(r.kind, r.value) async for r in stream.read(topic=DECISIONS)]
 
         assert await asyncio.wait_for(read_everything(), 30) == [
             (RecordKind.DATA, {"echo": 0}),

@@ -16,12 +16,14 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, workflow
+from temporalio import activity, streams, workflow
 from temporalio.streams import RecordKind
 
-DECISIONS = "decisions"
-INPUTS = "inputs"
-RECEIPTS = "receipts"
+# Defined once and shared by the workflow, the Activity and the demo's
+# reader, so the type each topic carries is stated in one place.
+DECISIONS = streams.topic("decisions", dict[str, Any])
+INPUTS = streams.topic("inputs", dict[str, Any])
+RECEIPTS = streams.topic("receipts", dict[str, Any])
 
 
 @activity.defn(name="RecordDecision")
@@ -55,7 +57,7 @@ class AgentLoop:
     @workflow.run
     async def run(self, limit: int) -> list[dict[str, Any]]:
         """Decide on at most ``limit`` inputs, then return the trace."""
-        inputs = workflow.stream_reader(INPUTS, result_type=dict)
+        inputs = workflow.stream_reader(INPUTS)
         decisions = workflow.stream_writer(DECISIONS)
         trace: list[dict[str, Any]] = []
         accepted = 0
