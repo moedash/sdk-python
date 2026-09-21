@@ -63,17 +63,36 @@ class _StreamHooksInterceptor(WorkflowInboundInterceptor):
 
     Installed by the worker when it has a stream provider, so no workflow
     code has to call anything before it runs or before it returns. The finish
-    hook runs however the function ends, continue-as-new included, because
+    hook runs when the function returns, raises or continues as new, because
     a provider that parked a reader against the run has to let go either way.
+    It does not run when the run is being evicted from the cache or when the
+    abandoned coroutine is collected: neither is the workflow ending, the
+    instance's state is not to be touched during eviction, and at collection
+    time the runtime on the thread belongs to whichever workflow happens to
+    be running, so the hook would act on that one.
     """
 
     async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
-        provider = temporalio.workflow._Runtime.current().workflow_streams().provider
+        runtime = temporalio.workflow._Runtime.current()
+        provider = runtime.workflow_streams().provider
         provider.on_workflow_start()
         try:
-            return await self.next.execute_workflow(input)
-        finally:
-            await provider.on_workflow_finish()
+            result = await self.next.execute_workflow(input)
+        except GeneratorExit:
+            raise
+        except BaseException:
+            if not _evicting(runtime):
+                await provider.on_workflow_finish()
+            raise
+        await provider.on_workflow_finish()
+        return result
+
+
+def _evicting(runtime: temporalio.workflow._Runtime) -> bool:
+    # Eviction cancels the primary task the same way a workflow cancellation
+    # does; the flag the instance sets before cancelling is what tells them
+    # apart, and only the cancellation is a run ending.
+    return bool(getattr(runtime, "_deleting", False))
 
 
 # Value was chosen abitrarily as a small number that allows some concurrency and prevents
