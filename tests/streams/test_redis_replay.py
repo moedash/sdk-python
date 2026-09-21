@@ -81,7 +81,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         await producer.append({"n": 3})
         await producer.finish()
 
-        records = await take(stream.read(topic=DECISIONS, result_type=dict), 4, 60)
+        records = await take(stream.read(topic=DECISIONS), 4, 60)
         assert [r.kind for r in records] == [
             RecordKind.DATA,
             RecordKind.DATA,
@@ -89,7 +89,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
             RecordKind.FINISH,
         ]
         assert [r.value["decided"] for r in records[:3]] == [1, 2, 3]
-        assert all(r.producer_id == "" and r.topic == DECISIONS for r in records)
+        assert all(r.producer_id == "" and r.topic == DECISIONS.name for r in records)
         assert await handle.result() == [
             {"kind": "decision", "n": 1, "attempt": 1},
             {"kind": "decision", "n": 2, "attempt": 1},
@@ -101,7 +101,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         # promoted record has been handed over.
         async def read_everything() -> list[Any]:
             return [
-                r.value async for r in stream.read(topic=DECISIONS, result_type=dict)
+                r.value async for r in stream.read(topic=DECISIONS)
             ]
 
         assert await asyncio.wait_for(read_everything(), 60) == [
@@ -112,7 +112,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         ]
         # The producer's own records are readable from outside as well, on
         # the topic it wrote.
-        inputs = await take(stream.read(topic=INPUTS, result_type=dict), 4, 60)
+        inputs = await take(stream.read(topic=INPUTS), 4, 60)
         assert [r.value for r in inputs[:3]] == [{"n": 1}, {"n": 2}, {"n": 3}]
         assert inputs[3].kind is RecordKind.FINISH
         assert all(r.producer_id == "model" and r.attempt == 1 for r in inputs)
@@ -138,7 +138,7 @@ async def test_an_outside_producer_and_the_workflow_share_a_topic(
         await handle.result()
 
         async def read_everything() -> list[Any]:
-            return [r async for r in stream.read(topic=DECISIONS, result_type=dict)]
+            return [r async for r in stream.read(topic=DECISIONS)]
 
         records = await asyncio.wait_for(read_everything(), 60)
     # Both writers land on one topic, each under its own identity. The order
