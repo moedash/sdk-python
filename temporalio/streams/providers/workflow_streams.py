@@ -37,7 +37,7 @@ import base64
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -70,6 +70,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
     WireRecord,
@@ -85,6 +86,8 @@ __all__ = [
     "WorkflowStreamsProducer",
     "WorkflowStreamsProvider",
 ]
+
+T = TypeVar("T")
 
 _PROVIDER = "workflow_streams"
 _TAIL_QUERY = "__temporal_streams_tail"
@@ -288,7 +291,7 @@ class _WSWorkflowProvider:
         await workflow.wait_condition(workflow.all_handlers_finished)
 
 
-class WorkflowStreamsProducer:
+class WorkflowStreamsProducer(Generic[T]):
     """Appends by sending the shipped publish Signal directly.
 
     Direct rather than through ``WorkflowStreamClient`` because the interface
@@ -339,7 +342,7 @@ class WorkflowStreamsProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor | None:
+    async def append(self, *values: T) -> Cursor | None:
         """Append ``values`` through the shipped publish Signal.
 
         Always ``None``: this transport learns positions at read time, so a
@@ -431,12 +434,12 @@ class WorkflowStreamsHandle:
     def read(
         self,
         *,
-        topic: str,
+        topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
-        _require_topic(topic)
+        topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         named = _position(after)
@@ -643,13 +646,13 @@ class WorkflowStreamsHandle:
             for item in wire
         ]
 
-    async def latest(self, *, topic: str) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The newest position in the log, which orders every topic of this workflow.
 
         The log is one per run, so the cursor names the run it was read from:
         the pinned run, or the latest run of the chain.
         """
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         handle = self._handle(self._run_id)
         try:
             description = await handle.describe()
@@ -672,10 +675,14 @@ class WorkflowStreamsHandle:
         return _cursor(run_id, -1)
 
     def producer(
-        self, *, topic: str, producer_id: str = "", attempt: int = 0
-    ) -> WorkflowStreamsProducer:
+        self,
+        *,
+        topic: str | StreamTopic[Any],
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> WorkflowStreamsProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return WorkflowStreamsProducer(
             self._handle(self._run_id), self._converter, topic, producer_id, attempt
