@@ -25,13 +25,15 @@ import pytest
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
-from temporalio.api.stream.v1 import StreamRecord
+from temporalio.api.history.v1 import HistoryEvent
+from temporalio.api.stream.v1 import StreamRange, StreamRecord
 from temporalio.client import Client, WorkflowHistory
 from temporalio.client_stream import StreamClient
 from temporalio.converter import DataConverter, PayloadCodec
-from temporalio.streams import RecordKind
+from temporalio.streams import RecordKind, StreamNotFoundError
 from temporalio.streams.providers.native import NativeStreams
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
+from temporalio.workflow import NondeterminismError
 from tests.streams.test_streams_conformance import take
 
 TARGET = os.environ.get("TEMPORAL_STREAM_TARGET")
@@ -499,3 +501,151 @@ async def test_a_codec_encodes_records_on_both_halves() -> None:
     finally:
         await raw.close()
         await provider.close()
+
+
+def _consumed_ranges(history: WorkflowHistory) -> list[StreamRange]:
+    return [
+        consumed
+        for event in history.events
+        if event.HasField("workflow_task_completed_event_attributes")
+        for consumed in event.workflow_task_completed_event_attributes.consumed_stream_ranges
+    ]
+
+
+def _copy_of(
+    history: WorkflowHistory, workflow_id: str | None = None
+) -> WorkflowHistory:
+    events: list[HistoryEvent] = []
+    for event in history.events:
+        copied = HistoryEvent()
+        copied.CopyFrom(event)
+        events.append(copied)
+    return WorkflowHistory(workflow_id or history.workflow_id, events)
+
+
+async def test_a_replayer_with_a_client_replays_a_consuming_workflow() -> None:
+    """Rule 2 through the ``Replayer``: the records come back from the stream service.
+
+    History holds the offsets each task consumed and never the records, so the
+    replayer is given a client to the server that still holds the streams and
+    fetches every recorded range before pushing the history. The same delivery
+    path as a live cache miss then hands each range to the task that consumed
+    it, and the reissued publishes match their events.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    try:
+        history = await _drive_contract_loop(client)
+        # Something was consumed, or the replay would prove nothing.
+        assert any(r.to_offset > r.from_offset for r in _consumed_ranges(history))
+
+        replayer = Replayer(
+            workflows=[ContractLoop], plugins=[provider], stream_client=client
+        )
+        result = await replayer.replay_workflow(history)
+        assert result.replay_failure is None
+    finally:
+        await provider.close()
+
+
+async def test_a_replayer_fails_a_tampered_range_as_nondeterministic() -> None:
+    """A history whose recorded ranges were changed replays on other input and fails.
+
+    Every recorded range is emptied. The task that read two records and
+    published two decisions is replayed with nothing to read, so it issues no
+    publish, and Core finds the recorded publish event with no command for it.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    try:
+        history = await _drive_contract_loop(client)
+        tampered = _copy_of(history)
+        for consumed in _consumed_ranges(tampered):
+            consumed.to_offset = consumed.from_offset
+
+        replayer = Replayer(
+            workflows=[ContractLoop], plugins=[provider], stream_client=client
+        )
+        with pytest.raises(NondeterminismError):
+            await replayer.replay_workflow(tampered)
+    finally:
+        await provider.close()
+
+
+async def test_a_replayer_fails_loudly_when_the_stream_is_gone() -> None:
+    """A range the stream service no longer serves is a ``StreamNotFoundError``, not a replay."""
+    provider = NativeStreams()
+    client = await _connect(provider)
+    try:
+        history = await _drive_contract_loop(client)
+        # The same history under a workflow id that owns no stream: the
+        # records it consumed are nowhere to be fetched from.
+        gone = _copy_of(history, workflow_id="gone-wf-" + uuid.uuid4().hex[:8])
+
+        replayer = Replayer(
+            workflows=[ContractLoop], plugins=[provider], stream_client=client
+        )
+        with pytest.raises(StreamNotFoundError, match="cannot be replayed"):
+            await replayer.replay_workflow(gone)
+    finally:
+        await provider.close()
+
+
+async def test_a_replayer_without_a_client_says_what_it_needs() -> None:
+    """Without a stream client a consuming workflow's history is refused, with the remedy."""
+    provider = NativeStreams()
+    client = await _connect(provider)
+    try:
+        history = await _drive_contract_loop(client)
+        replayer = Replayer(workflows=[ContractLoop], plugins=[provider])
+
+        with pytest.raises(RuntimeError, match="stream_client=") as raised:
+            await replayer.replay_workflow(history)
+        assert f"'{INPUTS}'" in str(raised.value)
+
+        # The aggregating call reports it per run rather than aborting.
+        async def histories():
+            yield history
+
+        results = await replayer.replay_workflows(
+            histories(), raise_on_replay_failure=False
+        )
+        assert isinstance(results.replay_failures[history.run_id], RuntimeError)
+    finally:
+        await provider.close()
+
+
+async def test_a_replayer_fetches_a_standalone_stream_by_its_id() -> None:
+    """A subscribed name that is no stream of the workflow's is a standalone stream's id.
+
+    The server resolves a subscription the same way, an owned stream by that
+    name first, so the replayer has to look in both places to hand the replay
+    the records the workflow actually read.
+    """
+    client = await _connect()
+    streams = StreamClient.connect(TARGET or "")
+    task_queue = "replay-src-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "replay-src-wf-" + uuid.uuid4().hex[:8]
+    stream_id = "replay-src-" + uuid.uuid4().hex[:8]
+    tokens = ["a1", "a2", "b1"]
+    try:
+        await streams.create(stream_id)
+        async with Worker(
+            client, task_queue=task_queue, workflows=[ConsumeAcrossTasks]
+        ):
+            handle = await client.start_workflow(
+                ConsumeAcrossTasks.run,
+                args=[stream_id, len(tokens)],
+                id=workflow_id,
+                task_queue=task_queue,
+            )
+            await streams.get(stream_id).append(*[_record(t.encode()) for t in tokens])
+            assert await asyncio.wait_for(handle.result(), timeout=60) == tokens
+        history = await handle.fetch_history()
+
+        result = await Replayer(
+            workflows=[ConsumeAcrossTasks], stream_client=client
+        ).replay_workflow(history)
+        assert result.replay_failure is None
+    finally:
+        await streams.close()
