@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
 from temporalio.streams.providers.redis import (
+    RedisStreams,
     _drive,
     _outside_position,
     _workflow_position,
@@ -61,3 +63,14 @@ def test_workflow_cursors_name_input_positions():
         _workflow_position(Cursor("memory:3"))
     with pytest.raises(StreamCursorError):
         _workflow_position(Cursor("redis:in:not-an-id"))
+
+
+def test_retention_options_are_checked_at_construction():
+    with pytest.raises(ValueError, match="retention"):
+        RedisStreams(retention=timedelta(0))
+    with pytest.raises(ValueError, match="max_len"):
+        RedisStreams(max_len=0)
+    # A backend the caller owns is the caller's to trim.
+    with pytest.raises(ValueError, match="trimmed by its owner"):
+        RedisStreams(backend=object(), max_len=10)
+    RedisStreams(retention=timedelta(hours=1), max_len=10)

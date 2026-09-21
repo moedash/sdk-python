@@ -34,6 +34,11 @@ The mapping, in one place:
   batch limits are lifted for this provider, because a synchronous publish
   cannot wait for the worker to stage a full batch; a batch it cannot stage
   fails the task.
+- Retention is trimming, with no consumer floor. When ``retention`` or
+  ``max_len`` is set, every append the provider makes trims the key it wrote,
+  whatever any reader has reached. A replay that reaches a recorded range the
+  trim removed fails its Workflow Task, an outside cursor below the trim is
+  refused, and a fully trimmed topic reads as empty.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator, Coroutine, Sequence
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
 
@@ -74,11 +79,21 @@ from temporalio.contrib.external_workflow_streams import (
 from temporalio.contrib.external_workflow_streams import (
     StreamError as TransportStreamError,
 )
-from temporalio.contrib.external_workflow_streams._backend import DEFAULT_WATCH_BLOCK
+from temporalio.contrib.external_workflow_streams._backend import (
+    DEFAULT_WATCH_BLOCK,
+    StreamKey,
+)
 from temporalio.contrib.external_workflow_streams._codec import StreamPayloadCodec
+from temporalio.contrib.external_workflow_streams._errors import StreamIntegrityError
+from temporalio.contrib.external_workflow_streams._output_backend import (
+    OutputStage,
+    OutputStageManifest,
+    StagedOutputRecord,
+)
 from temporalio.contrib.external_workflow_streams._output_client import (
     _reconcile_output_stage,
 )
+from temporalio.contrib.external_workflow_streams._redis import RedisStreamBackend
 from temporalio.converter import WorkflowSerializationContext
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import (
@@ -160,6 +175,101 @@ def _workflow_position(after: Cursor) -> Offset | None:
     raise StreamCursorError(
         f"cursor {after.token!r} does not name a Redis stream position"
     )
+
+
+def _entry_id(token: str | bytes) -> tuple[int, int]:
+    """A Redis entry id as the ``(ms, seq)`` pair it orders by."""
+    text = token.decode() if isinstance(token, bytes) else token
+    ms, _, seq = text.partition("-")
+    return int(ms), int(seq or 0)
+
+
+class _RetainingBackend(RedisStreamBackend):
+    """The transport's Redis backend, trimming the key behind every append it makes.
+
+    Trims are exact rather than approximate: Redis's approximate trim drops
+    whole macro nodes only, so a stream shorter than one node, a hundred
+    entries by default, would never trim and the window would not mean what
+    it says. Only the streams are trimmed; the idempotency and stage hashes
+    beside them keep one entry per record and stage.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        key_prefix: str,
+        retention: timedelta | None,
+        max_len: int | None,
+    ) -> None:
+        super().__init__(client=client, key_prefix=key_prefix)
+        self._retention = retention
+        self._max_len = max_len
+
+    def describe_window(self) -> str:
+        """The configured window, for messages."""
+        parts = []
+        if self._retention is not None:
+            parts.append(f"retention={self._retention}")
+        if self._max_len is not None:
+            parts.append(f"max_len={self._max_len}")
+        return ", ".join(parts) or "no retention"
+
+    async def append(self, key: StreamKey, record: Any) -> Any:
+        placed = await super().append(key, record)
+        await self._trim(key)
+        return placed
+
+    async def stage_output(
+        self, manifest: OutputStageManifest, records: Sequence[StagedOutputRecord]
+    ) -> OutputStage:
+        stage = await super().stage_output(manifest, records)
+        await self._trim(manifest.stream_key)
+        return stage
+
+    async def read_range(self, key: StreamKey, first: Offset, last: Offset) -> Any:
+        # The replay read. Said here, where the trim is known, rather than left
+        # to the range checks, which can only report the record as missing.
+        if not await self.retains(key, first):
+            raise StreamIntegrityError(
+                f"the recorded range [{first}, {last}] on topic "
+                f"{key.stream_name!r} is past the redis provider's retention "
+                f"({self.describe_window()}): the records were trimmed, so this "
+                "run cannot be replayed"
+            )
+        return await super().read_range(key, first, last)
+
+    async def retains(self, key: StreamKey, offset: Offset) -> bool:
+        """Whether the record at ``offset`` survived trimming.
+
+        A record at or after the first retained entry is there. On an emptied
+        stream the last id Redis generated says whether the record ever was.
+        """
+        from redis.exceptions import ResponseError
+
+        try:
+            info = await self._client.xinfo_stream(self.stream_key(key))
+        except ResponseError as error:
+            if "no such key" in str(error).lower():
+                return True
+            raise
+        wanted = _entry_id(offset.token)
+        first = info.get("first-entry")
+        if first:
+            return _entry_id(first[0]) <= wanted
+        return wanted > _entry_id(info["last-generated-id"])
+
+    async def _trim(self, key: StreamKey) -> None:
+        name = self.stream_key(key)
+        if self._retention is not None:
+            # The worker's clock names the floor, so a skewed worker shifts
+            # the window by its skew.
+            floor = int((time.time() - self._retention.total_seconds()) * 1000)
+            await self._client.xtrim(
+                name, minid=f"{max(floor, 0)}-0", approximate=False
+            )
+        if self._max_len is not None:
+            await self._client.xtrim(name, maxlen=self._max_len, approximate=False)
 
 
 def _drive(coroutine: Coroutine[Any, Any, None]) -> None:
@@ -504,6 +614,17 @@ class RedisStreamHandle:
         backend = self._streams._require_backend()
         chain = await _chain(self._client, self._workflow_id)
         key = chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+        if (
+            position is not None
+            and isinstance(backend, _RetainingBackend)
+            and not await backend.retains(key, position)
+        ):
+            # Refused rather than resumed from the first retained record,
+            # which would skip whatever the trim took in between.
+            raise StreamCursorError(
+                f"cursor {after.token!r} names a record on {topic!r} that the "
+                f"provider's retention has trimmed ({backend.describe_window()})"
+            )
         cursor = TRANSPORT_BEGINNING if position is None else AFTER(position)
         closed = False
         while True:
@@ -616,6 +737,8 @@ class RedisStreams(ProviderPlugin):
         idle_timeout: timedelta = timedelta(seconds=1),
         backend: Any | None = None,
         poll_interval: timedelta = timedelta(milliseconds=500),
+        retention: timedelta | None = None,
+        max_len: int | None = None,
     ) -> None:
         """Create the provider.
 
@@ -625,24 +748,47 @@ class RedisStreams(ProviderPlugin):
                 deployments.
             idle_timeout: How long a workflow reader with nothing to read
                 holds its Workflow Task open before the worker parks it.
-            backend: A transport backend the caller constructed and owns.
+            backend: A transport backend the caller constructed and owns. It
+                is trimmed by its owner, so it takes neither ``retention`` nor
+                ``max_len``.
             poll_interval: How long an outside reader that is caught up waits
                 for a record before asking whether the workflow closed.
+            retention: Trim records older than this from a topic's input and
+                output keys on every append the provider makes to them. This
+                is retention without a consumer floor: nothing holds a record
+                for a reader that has not reached it. A workflow whose replay
+                reaches a recorded range past the window fails its Workflow
+                Task with the transport's ``StreamIntegrityError`` until the
+                window is raised, an outside ``read(after=)`` below the window
+                raises ``StreamCursorError``, and a live reader that falls
+                behind the window misses records. The floor the server-side
+                provider keeps would need a consumer registry in Redis.
+            max_len: Keep at most this many entries per key, trimmed on the
+                same appends and with the same consequences. It must exceed
+                the largest batch a task publishes, or a stage is trimmed
+                before its commit.
         """
+        if retention is not None and retention <= timedelta(0):
+            raise ValueError("retention must be positive")
+        if max_len is not None and max_len < 1:
+            raise ValueError("max_len must be positive")
+        if backend is not None and (retention is not None or max_len is not None):
+            raise ValueError(
+                "retention and max_len trim the backend this provider opens; a "
+                "backend handed in is trimmed by its owner"
+            )
         self._url = url
         self._key_prefix = key_prefix
         self._idle_timeout = idle_timeout
         self._backend = backend
         self._owned_client: Any = None
         self._poll = poll_interval
+        self._retention = retention
+        self._max_len = max_len
 
     def _require_backend(self) -> Any:
         if self._backend is None:
             import redis.asyncio
-
-            from temporalio.contrib.external_workflow_streams._redis import (
-                RedisStreamBackend,
-            )
 
             # A dead peer would otherwise hold a blocking read open forever.
             # Several block periods, so a healthy socket that is merely idle
@@ -652,8 +798,11 @@ class RedisStreams(ProviderPlugin):
                 decode_responses=False,
                 socket_timeout=DEFAULT_WATCH_BLOCK.total_seconds() * 6,
             )
-            self._backend = RedisStreamBackend(
-                client=self._owned_client, key_prefix=self._key_prefix
+            self._backend = _RetainingBackend(
+                client=self._owned_client,
+                key_prefix=self._key_prefix,
+                retention=self._retention,
+                max_len=self._max_len,
             )
         return self._backend
 
