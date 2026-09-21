@@ -1,12 +1,14 @@
 """One agent loop, written once, run on every stream provider.
 
 Reads input, decides on it, publishes the decision, and runs an ordinary
-Activity in the same workflow task. Also handles the two control records the
-contract defines, so a retried producer and a finished topic are exercised
-rather than described.
+Activity in the same workflow task; the Activity reports on its own
+workflow's stream in turn. Also handles the two control records the contract
+defines, so a retried producer and a finished topic are exercised rather than
+described.
 
 This file is byte-identical in the server-side tree and the client-side tree.
-Only the worker that runs it differs, and only in which provider it is given.
+Nothing in it names a provider: the workflow asks its runtime, the Activity
+asks its context, and the process that runs them registered the provider once.
 """
 
 from __future__ import annotations
@@ -19,12 +21,20 @@ from temporalio.streams import RecordKind
 
 DECISIONS = "decisions"
 INPUTS = "inputs"
+RECEIPTS = "receipts"
 
 
 @activity.defn(name="RecordDecision")
 async def record_decision(decision: dict[str, Any]) -> str:
-    """An ordinary command in the same task as the publish."""
-    return f"recorded:{decision['source']}:{decision['branch']}"
+    """An ordinary command in the same task as the publish.
+
+    Appends its receipt onto its own workflow's stream too, under the
+    Activity's own identity, so a reader outside sees the decision and the
+    record of it side by side.
+    """
+    receipt = f"recorded:{decision['source']}:{decision['branch']}"
+    await activity.stream_handle().producer(topic=RECEIPTS).append({"receipt": receipt})
+    return receipt
 
 
 def decide(token: dict[str, Any]) -> dict[str, Any]:
