@@ -42,7 +42,7 @@ import re
 import time
 from collections.abc import AsyncGenerator, Coroutine
 from datetime import timedelta
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -88,6 +88,7 @@ from temporalio.streams._errors import (
 )
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
     WireRecord,
@@ -100,6 +101,8 @@ from temporalio.streams.providers import ProviderPlugin
 from temporalio.worker import ReplayerConfig, WorkerConfig
 
 __all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
+
+T = TypeVar("T")
 
 _PROVIDER = "redis"
 _INPUT_PREFIX = "in:"
@@ -244,7 +247,7 @@ def _storage_error(error: Exception, what: str) -> StreamError:
     return StreamError(f"{what}: {error}")
 
 
-class RedisProducer:
+class RedisProducer(Generic[T]):
     """Appends to a topic from outside workflow code.
 
     Every append is visible as soon as the store accepts it. Each record goes
@@ -296,7 +299,7 @@ class RedisProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
+    async def append(self, *values: T) -> Cursor:
         """Append ``values`` and return the cursor of the last record as stored.
 
         A repeat returns where the original landed, because the transport
@@ -454,12 +457,12 @@ class RedisStreamHandle:
     def read(
         self,
         *,
-        topic: str,
+        topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
-        _require_topic(topic)
+        topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         position = _outside_position(after)
@@ -542,9 +545,9 @@ class RedisStreamHandle:
             self._run_id is None and status == WorkflowExecutionStatus.CONTINUED_AS_NEW
         )
 
-    async def latest(self, *, topic: str) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The cursor of the newest committed record on ``topic``, for following from now."""
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         backend = self._streams._require_backend()
         chain = await _chain(self._client, self._workflow_id)
         try:
@@ -559,10 +562,14 @@ class RedisStreamHandle:
         return mint_cursor(_PROVIDER, tail.offset.token)
 
     def producer(
-        self, *, topic: str, producer_id: str = "", attempt: int = 0
-    ) -> RedisProducer:
+        self,
+        *,
+        topic: str | StreamTopic[Any],
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> RedisProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return RedisProducer(
             self._streams, self._client, self._workflow_id, topic, producer_id, attempt
