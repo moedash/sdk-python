@@ -1,176 +1,195 @@
 """The server-side (native) provider.
 
-Streams live on the Temporal server. A workflow publishes with a command that
-the server applies in the same transaction that accepts the workflow task, and
-consumes ranges the server attaches to the workflow task it dispatches.
+Streams live on the Temporal server, beside the workflow that owns them. A
+topic is one owned stream named after the topic, created by whoever touches it
+first: the workflow publishes to it with a command the server applies in the
+transaction that accepts the Workflow Task, subscribes to it by name and reads
+the ranges the server delivers on its Workflow Tasks; outside code appends and
+reads through the stream service, and the workflow's records and an outside
+producer's land in one log in the order the server accepted them.
+
+A cursor names the run as well as the offset, because an owned stream belongs
+to one run and a successor's starts over at zero. A handle without a run id
+reads run after run, learning from the poll that a run's stream is closed and
+from the run's close event who came next; with a run id it is pinned.
+
+Prototype support for AI-198. It needs a server built from that branch and
+opens its own gRPC channel to it, because sdk-core does not know the stream
+service yet, which is also why it does not support TLS or API keys.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from datetime import timedelta
 from typing import Any
 
-import grpc
-
 from temporalio import workflow
-from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
-from temporalio.client_stream import StreamClient, close_shared_clients, shared_client
-from temporalio.streams import _frame, _provider
-from temporalio.streams._handles import ReadSource, WriteSink
-from temporalio.streams._ids import inbound_stream_id
-from temporalio.streams._policy import AttemptTracker
+from temporalio.client import Client, WorkflowHistoryEventFilterType
+from temporalio.client_stream import (
+    StreamClient,
+    WorkflowStreamHandle,
+    close_shared_clients,
+    shared_client,
+)
+from temporalio.converter import PayloadCodec, PayloadConverter
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
+from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._wire import (
+    RecordDecoder,
+    WireRecord,
+    cursor_position,
+    mint_cursor,
+    producer_identity,
+    to_wire,
+)
+from temporalio.streams.providers import ProviderPlugin
 
-_RUN_STATE = "__temporal_streams_state"
+__all__ = ["NativeProducer", "NativeStreamHandle", "NativeStreams"]
+
+_PROVIDER = "native"
 
 logger = logging.getLogger(__name__)
 
 
-class _Fanout:
-    """One server subscription, shared by every reader of that stream.
-
-    The server sends a range once. Whoever reads it first would otherwise take
-    it from the others, so the pull happens here and the result goes to all
-    live readers.
-    """
-
-    def __init__(self, stream: str) -> None:
-        self._stream = stream
-        self._subscribers: list[list[tuple[Cursor, bytes]]] = []
-        self._pull: asyncio.Future[None] | None = None
-
-    def attach(self) -> list[tuple[Cursor, bytes]]:
-        queue: list[tuple[Cursor, bytes]] = []
-        self._subscribers.append(queue)
-        return queue
-
-    def detach(self, queue: list[tuple[Cursor, bytes]]) -> None:
-        if queue in self._subscribers:
-            self._subscribers.remove(queue)
-
-    async def next_batch(
-        self, queue: list[tuple[Cursor, bytes]]
-    ) -> list[tuple[Cursor, bytes]]:
-        while not queue:
-            pending = self._pull
-            if pending is None:
-                pending = self._pull = asyncio.ensure_future(self._run_pull())
-            # Shielded because one reader going away must not cancel a range
-            # the server will not send again.
-            await asyncio.shield(pending)
-        batch, queue[:] = list(queue), []
-        return batch
-
-    async def _run_pull(self) -> None:
-        try:
-            delivered = await workflow.read_stream_messages(self._stream)
-            arrived = [
-                (Cursor(str(message.offset)), message.body) for message in delivered
-            ]
-            for queue in self._subscribers:
-                queue.extend(arrived)
-        finally:
-            self._pull = None
+def _require_topic(topic: str) -> None:
+    if not topic:
+        raise ValueError("topic must not be empty")
 
 
-def _fanouts() -> dict[str, _Fanout]:
-    instance = workflow.instance()
-    state = getattr(instance, _RUN_STATE, None)
-    if state is None:
-        state = {}
-        setattr(instance, _RUN_STATE, state)
-    return state
+def _cursor(run_id: str, offset: int) -> Cursor:
+    return mint_cursor(_PROVIDER, f"{run_id}:{offset}")
+
+
+def _position(after: Cursor) -> tuple[str, int] | None:
+    """The ``(run id, offset)`` a cursor of this provider names, or ``None`` for BEGINNING."""
+    token = cursor_position(after, provider=_PROVIDER)
+    if token is None:
+        return None
+    run_id, _, offset = token.rpartition(":")
+    try:
+        if not run_id:
+            raise ValueError
+        return run_id, int(offset)
+    except ValueError:
+        raise StreamCursorError(
+            f"cursor {after.token!r} does not name a run and an offset on the "
+            "native provider"
+        ) from None
+
+
+async def _encode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
+    # The worker's payload visitor runs a codec over the bodies a workflow
+    # publishes and receives; the outside half has no such pass, so it applies
+    # the client's codec here or the two sides would not agree.
+    if codec is None or not record.HasField("body"):
+        return record
+    encoded = await codec.encode([record.body])
+    record.body.CopyFrom(encoded[0])
+    return record
+
+
+async def _decode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
+    if codec is None or not record.HasField("body"):
+        return record
+    decoded = await codec.decode([record.body])
+    record.body.CopyFrom(decoded[0])
+    return record
 
 
 class _NativeReadSource:
-    def __init__(self, fanout: _Fanout) -> None:
-        self._fanout = fanout
-        self._queue = fanout.attach()
+    """One subscription of the running workflow, fed by delivered ranges."""
 
-    async def next_batch(self) -> list[tuple[Cursor, bytes]]:
-        return await self._fanout.next_batch(self._queue)
+    def __init__(self, stream_id: str, run_id: str) -> None:
+        self._stream_id = stream_id
+        self._run_id = run_id
+        self._closed = False
+
+    async def next_batch(self) -> list[tuple[Cursor, WireRecord]]:
+        if self._closed:
+            raise StopAsyncIteration
+        delivered = await workflow.read_stream_records(self._stream_id)
+        return [(_cursor(self._run_id, item.offset), item.record) for item in delivered]
 
     def close(self) -> None:
-        self._fanout.detach(self._queue)
+        self._closed = True
 
 
 class _NativeWriteSink:
     def __init__(self, topic: str) -> None:
         self._topic = topic
 
-    async def publish(self, frame: bytes) -> None:
-        # Nothing is awaited. The server applies the payload when it accepts
-        # the task, so there is no back pressure to wait on and no round trip
-        # to pay for. The signature is awaitable because the contract allows a
-        # provider that does hold a publisher back.
-        workflow.add_stream_messages([frame], stream_id="", topic=self._topic)
+    def publish(self, record: WireRecord) -> None:
+        # Held by the runtime until the task completes, when the task's
+        # records on this topic become one command the server applies with
+        # the task: rule 1 through the server's own commit.
+        workflow.append_stream_records([record], stream_id=self._topic)
 
 
-def _reject_configured_codec(client: Client) -> None:
-    """Refuse a namespace whose payloads are meant to be encoded.
+class _NativeWorkflowProvider:
+    """The workflow half: the server's commands and delivered ranges."""
 
-    Stream bodies do not pass through the codec chain on this provider, so
-    proceeding would store in the clear what the namespace expects encrypted,
-    and would do it without saying so.
-    """
-    if client.data_converter.payload_codec is not None:
-        raise RuntimeError(
-            "this client has a payload codec configured, and server-side stream "
-            "bodies do not pass through it"
-        )
+    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+        _require_topic(topic)
+        run_id = workflow.info().run_id
+        start = 0
+        named = _position(after)
+        if named is not None:
+            if named[0] != run_id:
+                raise StreamCursorError(
+                    f"cursor {after.token!r} names another run; a run's stream is its own"
+                )
+            start = named[1] + 1
+        workflow.subscribe_stream(topic, start_offset=start)
+        return _NativeReadSource(topic, run_id)
 
+    def open_writer(self, topic: str) -> WriteSink:
+        _require_topic(topic)
+        return _NativeWriteSink(topic)
 
-# Streams this process has already opened, so a second producer for the same
-# stream reuses the handle rather than asking the server to create it again.
-# The second create is answered correctly, and it is still a failed call the
-# server logs, which is noise an operator has to learn to ignore.
-_handles: dict[tuple[str, str, str], Any] = {}
+    def on_workflow_start(self) -> None:
+        pass
 
-
-def _stream_client(client: Client) -> StreamClient:
-    return shared_client(client.service_client.config.target_host, client.namespace)
-
-
-async def _owner_run(client: Client, workflow_id: str) -> str:
-    """The run whose stream a handle on ``workflow_id`` should address.
-
-    Resolved once, when the handle opens. Left to the server, a follower whose
-    workflow continued as new would be redirected to the successor, whose
-    stream starts empty, and its offset read as "caught up" rather than as a
-    position on the run it was watching. A producer is pinned for the same
-    reason: an activity's output belongs to the run that scheduled it.
-    """
-    return (await client.get_workflow_handle(workflow_id).describe()).run_id
+    async def on_workflow_finish(self) -> None:
+        pass
 
 
 class NativeProducer:
-    """Appends to a stream from outside workflow code.
+    """Appends to a topic from outside workflow code.
 
-    Every append is visible as soon as it is written. That is the point for an
-    activity streaming model output, and it is why an activity carries its own
-    identity: the retry of a failed attempt has no commit boundary to sort it
-    out afterwards.
+    Every append is visible as soon as the server accepts it. That is the
+    point for an activity streaming model output, and it is why an activity
+    carries its own identity: the retry of a failed attempt has no commit
+    boundary to sort it out afterwards.
     """
 
     def __init__(
         self,
-        handle: Any,
-        converter: Any,
+        handle: WorkflowStreamHandle,
+        pin: Any,
+        codec: PayloadCodec | None,
+        converter: PayloadConverter,
         topic: str,
         producer_id: str,
         attempt: int,
     ) -> None:
         """Bind this producer to ``topic`` on the stream ``handle`` names."""
         self._handle = handle
+        self._pin = pin
+        self._codec = codec
         self._converter = converter
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
         self._sequence = 0
+        self._last = BEGINNING
+
+    @property
+    def producer_id(self) -> str:
+        """Who this producer writes as."""
+        return self._producer_id
 
     @property
     def attempt(self) -> int:
@@ -178,265 +197,260 @@ class NativeProducer:
         return self._attempt
 
     @property
-    def _provider_id(self) -> str:
-        """The identity the provider dedupes on.
-
-        The attempt is part of it. Deduplication answers "is this the same
-        append again", and a second attempt writing different words at the same
-        sequence is not. Folding the attempt in keeps a retried append idempotent
-        without letting a new generation be swallowed as a duplicate of the old
-        one.
-        """
+    def _writer(self) -> str:
+        # The server dedupes on this and the sequence. The attempt is part of
+        # it so a retried append is dropped while a new generation writing
+        # different words at the same sequence is not.
         return (
             f"{self._producer_id}#{self._attempt}"
             if self._attempt
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor | None:
-        """Append ``values`` and return the last one's cursor, or ``None`` if nothing landed."""
+    async def append(self, *values: Any) -> Cursor:
+        """Append ``values`` and return the cursor of the last record as stored.
+
+        A repeat returns where the original landed, because the server
+        answers a deduplicated batch with the original offsets; an empty call
+        returns the position of this producer's last record.
+        """
         if not values:
-            return None
-        frames = []
-        for value in values:
-            frames.append(
-                _frame.encode(
+            return self._last
+        return await self._write(
+            [
+                to_wire(
+                    self._converter,
                     topic=self._topic,
                     kind=RecordKind.DATA,
-                    producer=self._producer_id,
+                    value=value,
+                    producer_id=self._producer_id,
                     attempt=self._attempt,
-                    sequence=self._sequence,
-                    body=self._encode(value),
+                    sequence=self._sequence + index,
                 )
-            )
-            self._sequence += 1
-        appended = await self._handle.append(
-            *frames,
-            topic=self._topic,
-            producer_id=self._provider_id,
-            # The provider dedupes a retried append on this pair, which is a
-            # different job from telling readers that a new generation started.
-            sequence=self._sequence - len(frames),
+                for index, value in enumerate(values)
+            ]
         )
-        if appended.deduplicated:
-            return None
-        return Cursor(str(appended.next_offset - 1))
 
     async def finish(self) -> None:
-        """Declare this stream complete."""
-        frame = _frame.encode(
-            topic=self._topic,
-            kind=RecordKind.FINISH,
-            producer=self._producer_id,
-            attempt=self._attempt,
-            sequence=self._sequence,
-            body=b"",
-        )
-        self._sequence += 1
-        await self._handle.append(
-            frame,
-            topic=self._topic,
-            producer_id=self._provider_id,
-            sequence=self._sequence - 1,
+        """Write ``FINISH`` for this producer on this topic."""
+        await self._write(
+            [
+                to_wire(
+                    self._converter,
+                    topic=self._topic,
+                    kind=RecordKind.FINISH,
+                    producer_id=self._producer_id,
+                    attempt=self._attempt,
+                    sequence=self._sequence,
+                )
+            ]
         )
 
-    def _encode(self, value: Any) -> bytes:
-        payload = (
-            value
-            if isinstance(value, Payload)
-            else self._converter.to_payloads([value])[0]
+    async def _write(self, records: list[WireRecord]) -> Cursor:
+        # Pinned before the first write, so every cursor this producer hands
+        # out names the run its records landed in.
+        if not self._handle.owner_run_id:
+            self._handle.pin(await self._pin())
+        for record in records:
+            await _encode_body(self._codec, record)
+        appended = await self._handle.append(
+            *records, producer_id=self._writer, sequence=self._sequence
         )
-        return payload.SerializeToString()
+        self._sequence += len(records)
+        self._last = _cursor(self._handle.owner_run_id, appended.next_offset - 1)
+        return self._last
 
 
-class NativeConsumer:
-    """Reads a stream from outside workflow code, resumably."""
+class NativeStreamHandle:
+    """One workflow's topics from outside, over the stream service."""
 
-    def __init__(self, handle: Any, converter: Any, stream: str, address: str) -> None:
-        """Read the stream ``handle`` names, from anywhere.
+    def __init__(self, client: Client, workflow_id: str, run_id: str | None) -> None:
+        """Address ``workflow_id``'s topics, pinned to ``run_id`` when one is given."""
+        self._client = client
+        self._workflow_id = workflow_id
+        self._run_id = run_id
+        self._converter = client.data_converter.payload_converter
+        self._codec = client.data_converter.payload_codec
+        self._streams: StreamClient | None = None
 
-        ``stream`` is the inbound name the caller used, empty for the owner's
-        stream; ``address`` is what the server calls it, for log lines.
-        """
-        self._handle = handle
-        self._converter = converter
-        self._stream = stream
-        self._address = address
+    def _service(self) -> StreamClient:
+        # Resolved on first use, because the shared channel belongs to the
+        # running loop and a handle may be made before there is one.
+        if self._streams is None:
+            self._streams = shared_client(
+                self._client.service_client.config.target_host,
+                self._client.namespace,
+            )
+        return self._streams
 
-    async def read(
+    def _stream(self, topic: str, run_id: str) -> WorkflowStreamHandle:
+        return self._service().workflow_stream(
+            self._workflow_id, topic, owner_run_id=run_id
+        )
+
+    def read(
         self,
         *,
+        topic: str,
         after: Cursor = BEGINNING,
-        topic: str | None = None,
-        type: type | None = None,
+        result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield the records after ``after`` as they arrive.
-
-        Applies the same supersession rule as a workflow reader, so a browser
-        and a workflow watching one activity agree on which attempt is current.
-        """
-        _provider.check_topic(self._stream, topic)
-        attempts = AttemptTracker()
-        async for message in self._handle.follow(
-            from_offset=int(after.token) + 1 if after.token else 0
-        ):
-            cursor = Cursor(str(message.offset))
-            try:
-                kind, frame_topic, source, attempt, sequence, body = _frame.decode(
-                    message.data
-                )
-            except ValueError as error:
-                # Same answer as the workflow-side reader: skip and say so.
-                logger.warning(
-                    "skipping record %s of stream %s: %s", cursor, self._address, error
-                )
-                continue
-            if topic is not None and frame_topic != topic:
-                continue
-            superseded = attempts.note(source, attempt, cursor)
-            if superseded is not None:
-                yield superseded
-            yield StreamRecord(
-                value=self._decode(body, type) if kind is RecordKind.DATA else None,
-                cursor=cursor,
-                kind=kind,
-                topic=frame_topic,
-                producer=source,
-                attempt=attempt,
-                sequence=sequence,
+        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
+        _require_topic(topic)
+        # Parsed here so a foreign cursor fails this call, not the first
+        # iteration of the generator.
+        named = _position(after)
+        if named is not None and self._run_id is not None and named[0] != self._run_id:
+            raise StreamCursorError(
+                f"cursor {after.token!r} names another run than this handle is pinned to"
             )
+        return self._read(topic, named, after, result_type)
 
-    async def latest(self, *, topic: str | None = None) -> Cursor:
-        """The cursor of the last record written, for following from now."""
-        del topic  # one server-side log per stream, whatever the topic
+    async def _read(
+        self,
+        topic: str,
+        named: tuple[str, int] | None,
+        after: Cursor,
+        result_type: type | None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
+        if named is not None:
+            run_id, offset = named[0], named[1] + 1
+        else:
+            run_id, offset = self._run_id or await self._first_run(), 0
+        while True:
+            stream = self._stream(topic, run_id)
+            while True:
+                page = await stream.poll(from_offset=offset)
+                for entry in page.entries:
+                    record = await _decode_body(self._codec, entry.record)
+                    for out in decoder.decode(_cursor(run_id, entry.offset), record):
+                        yield out
+                offset = page.next_offset
+                # On a pinned stream the server reports the run's end as closed,
+                # and a closed stream is finished once its head is delivered.
+                if page.closed and offset >= page.head_offset:
+                    break
+            if self._run_id is not None:
+                return
+            successor = await self._successor(run_id)
+            if successor is None:
+                return
+            run_id, offset = successor, 0
+
+    async def latest(self, *, topic: str) -> Cursor:
+        """The cursor of the newest record on ``topic``, naming the run it was read from.
+
+        An empty topic on the chain's first run is the beginning of the
+        stream; on a successor it is a position of its own, because
+        ``BEGINNING`` would send a chain-following read back to the first run.
+        """
+        _require_topic(topic)
+        run_id = self._run_id or await self._current_run()
         try:
-            state = await self._handle.describe()
-        except grpc.aio.AioRpcError as error:
-            # A stream nobody has published to does not exist yet, and that
-            # is the same answer as an empty one. Any other failure is not:
-            # a reader that took it for "empty" would replay the whole stream.
-            if error.code() is not grpc.StatusCode.NOT_FOUND:
-                raise
-            return BEGINNING
-        return (
-            Cursor(str(state.head_offset - 1)) if state.head_offset > 0 else BEGINNING
+            head = (await self._stream(topic, run_id).describe()).head_offset
+        except StreamNotFoundError:
+            # A topic nobody has written yet does not exist on the server,
+            # which is the same answer as an empty one.
+            head = 0
+        if head > 0:
+            return _cursor(run_id, head - 1)
+        if self._run_id is None and await self._predecessor(run_id) is not None:
+            return _cursor(run_id, -1)
+        return BEGINNING
+
+    def producer(
+        self, *, topic: str, producer_id: str = "", attempt: int = 0
+    ) -> NativeProducer:
+        """A producer on ``topic``; inside an activity its identity is the activity's."""
+        _require_topic(topic)
+        producer_id, attempt = producer_identity(producer_id, attempt)
+        return NativeProducer(
+            self._stream(topic, self._run_id or ""),
+            self._current_run,
+            self._codec,
+            self._converter,
+            topic,
+            producer_id,
+            attempt,
         )
 
-    def _decode(self, body: bytes, as_type: type | None) -> Any:
-        payload = Payload()
-        payload.ParseFromString(body)
-        if as_type is None:
-            return self._converter.from_payloads([payload])[0]
-        return self._converter.from_payloads([payload], [as_type])[0]
+    async def _current_run(self) -> str:
+        try:
+            description = await self._client.get_workflow_handle(
+                self._workflow_id
+            ).describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                raise StreamNotFoundError(
+                    f"workflow {self._workflow_id!r} was not found"
+                ) from error
+            raise
+        assert description.run_id is not None
+        return description.run_id
+
+    async def _first_run(self) -> str:
+        """The oldest retained run of the chain, walking back from the latest."""
+        run_id = await self._current_run()
+        while True:
+            previous = await self._predecessor(run_id)
+            if previous is None:
+                return run_id
+            run_id = previous
+
+    async def _predecessor(self, run_id: str) -> str | None:
+        handle = self._client.get_workflow_handle(self._workflow_id, run_id=run_id)
+        try:
+            async for event in handle.fetch_history_events(page_size=1):
+                attributes = event.workflow_execution_started_event_attributes
+                return attributes.continued_execution_run_id or None
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+        # The run's History is gone: the chain's retained part starts here.
+        return None
+
+    async def _successor(self, run_id: str) -> str | None:
+        handle = self._client.get_workflow_handle(self._workflow_id, run_id=run_id)
+        events = handle.fetch_history_events(
+            event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT
+        )
+        try:
+            async for event in events:
+                if event.HasField(
+                    "workflow_execution_continued_as_new_event_attributes"
+                ):
+                    attributes = (
+                        event.workflow_execution_continued_as_new_event_attributes
+                    )
+                    return attributes.new_execution_run_id or None
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+        return None
 
 
-class _NativeProvider:
-    name = "native"
+class NativeStreams(ProviderPlugin):
+    """The server-side provider.
 
-    def configure(self, **options: Any) -> None:
-        """Take no options.
+    Takes no options: the streams are on the server the client is already
+    connected to. Construct one, pass it to the worker as a plugin and open
+    handles from it anywhere else; :meth:`close` releases the channels this
+    process opened to the stream service.
+    """
 
-        The streams are on the server the client is already connected to.
-        This exists so a process that switches providers changes one call
-        rather than its structure.
-        """
-        if options:
-            raise TypeError(
-                f"the native provider takes no options, got {sorted(options)}"
-            )
+    def workflow_provider(self) -> _NativeWorkflowProvider:
+        """The workflow half, over the server's commands and delivered ranges."""
+        return _NativeWorkflowProvider()
 
-    def worker_options(self) -> dict[str, Any]:
-        return {}
+    def get_stream_handle(
+        self, client: Client, workflow_id: str, *, run_id: str | None = None
+    ) -> NativeStreamHandle:
+        """A handle on ``workflow_id``'s topics; without ``run_id`` it follows the chain."""
+        return NativeStreamHandle(client, workflow_id, run_id)
 
     async def close(self) -> None:
         """Close the channels this process opened to the stream service."""
         await close_shared_clients()
-
-    def open_read(
-        self,
-        stream: str,
-        *,
-        after: Cursor = BEGINNING,
-        idle_timeout: timedelta | None = None,
-    ) -> ReadSource:
-        # Accepted and ignored. Delivery arrives on workflow tasks the server
-        # dispatches, so no worker is held between records and there is nothing
-        # for an idle timeout to release.
-        del idle_timeout
-        stream_id = inbound_stream_id(workflow.info().workflow_id, stream)
-        fanouts = _fanouts()
-        fanout = fanouts.get(stream_id)
-        if fanout is None:
-            workflow.subscribe_stream(
-                stream_id, start_offset=int(after.token) + 1 if after.token else 0
-            )
-            fanout = fanouts[stream_id] = _Fanout(stream_id)
-        return _NativeReadSource(fanout)
-
-    def open_write(self, topic: str) -> WriteSink:
-        return _NativeWriteSink(topic)
-
-    async def producer(
-        self,
-        client: Client,
-        *,
-        workflow_id: str,
-        stream: str = "",
-        topic: str = "",
-        producer_id: str = "",
-        attempt: int = 0,
-    ) -> NativeProducer:
-        """Open a producer on ``workflow_id``'s account.
-
-        ``stream`` names an inbound stream, a namespace-level stream the
-        server keys by the pair. With none, ``topic`` names a topic on the
-        stream the workflow publishes, which the server lets any producer
-        append to. An inbound record carries no topic: the stream's name is
-        its whole address.
-        """
-        _reject_configured_codec(client)
-        streams = _stream_client(client)
-        converter = client.data_converter.payload_converter
-        if not stream:
-            handle: Any = streams.workflow_stream(
-                workflow_id, owner_run_id=await _owner_run(client, workflow_id)
-            )
-            return NativeProducer(handle, converter, topic, producer_id, attempt)
-        stream_id = inbound_stream_id(workflow_id, stream)
-        key = (client.service_client.config.target_host, client.namespace, stream_id)
-        handle = _handles.get(key)
-        if handle is None:
-            try:
-                handle = await streams.create(stream_id)
-            except Exception:
-                # Created by whoever set the stream up. A producer opening a
-                # stream it does not own is the ordinary case, not the
-                # exception.
-                handle = streams.get(stream_id)
-            _handles[key] = handle
-        return NativeProducer(handle, converter, topic, producer_id, attempt)
-
-    async def consumer(
-        self, client: Client, *, workflow_id: str, stream: str = ""
-    ) -> NativeConsumer:
-        """Open a reader for what ``workflow_id`` publishes.
-
-        An empty ``stream`` reads what the workflow wrote through
-        :func:`temporalio.streams.writer`. Naming one reads that inbound
-        stream instead, which is how a second consumer follows the same input.
-        """
-        _reject_configured_codec(client)
-        streams = _stream_client(client)
-        address = inbound_stream_id(workflow_id, stream)
-        if stream:
-            handle: Any = streams.get(address)
-        else:
-            handle = streams.workflow_stream(
-                workflow_id, owner_run_id=await _owner_run(client, workflow_id)
-            )
-        return NativeConsumer(
-            handle, client.data_converter.payload_converter, stream, address
-        )
-
-
-_provider.register("native", _NativeProvider)
