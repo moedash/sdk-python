@@ -14,7 +14,8 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, streams, workflow
+from temporalio import activity, workflow
+from temporalio.streams import RecordKind
 
 DECISIONS = "decisions"
 INPUTS = "inputs"
@@ -41,50 +42,42 @@ def decide(token: dict[str, Any]) -> dict[str, Any]:
 class AgentLoop:
     """Read, decide, write, until the producer says it has finished."""
 
-    def __init__(self) -> None:
-        """Let the provider install what it needs before the first task.
-
-        A no-op except on a transport that serves outside readers through
-        handlers on this workflow, which has to register them before the
-        first task completes or an early reader finds nothing to talk to.
-        """
-        streams.prepare()
-
     @workflow.run
     async def run(self, limit: int) -> list[dict[str, Any]]:
         """Decide on at most ``limit`` inputs, then return the trace."""
-        inputs = streams.reader(INPUTS, type=dict, idle_timeout=timedelta(seconds=1))
-        decisions = streams.writer(DECISIONS)
+        inputs = workflow.stream_reader(INPUTS, result_type=dict)
+        decisions = workflow.stream_writer(DECISIONS)
         trace: list[dict[str, Any]] = []
         accepted = 0
         try:
             async for record in inputs:
-                if isinstance(record.value, streams.Supersession):
+                if record.kind is RecordKind.SUPERSEDED:
                     # A newer attempt of the same producer started writing. The
                     # decisions already published stand, so the workflow says so
                     # rather than pretending they can be withdrawn.
+                    assert record.supersession is not None
                     trace.append(
                         {
                             "kind": "superseded",
-                            "producer": record.producer,
-                            "replaced": record.value.previous_attempt,
-                            "attempt": record.value.attempt,
+                            "producer": record.producer_id,
+                            "replaced": record.supersession.previous_attempt,
+                            "attempt": record.supersession.attempt,
                         }
                     )
-                    await decisions.publish(
-                        {"retracting_attempt": record.value.previous_attempt}
+                    decisions.publish(
+                        {"retracting_attempt": record.supersession.previous_attempt}
                     )
                     continue
-                if record.kind is streams.RecordKind.FINISH:
+                if record.kind is RecordKind.FINISH:
                     # The producer says it is done, which is what ends the loop.
                     # Counting decisions instead would leave the terminal record
                     # unread and let the workflow finish while its producer is
                     # still writing.
-                    trace.append({"kind": "finish", "producer": record.producer})
+                    trace.append({"kind": "finish", "producer": record.producer_id})
                     break
-                assert isinstance(record.value, dict)
+                assert record.value is not None
                 decision = decide(record.value)
-                await decisions.publish(decision)
+                decisions.publish(decision)
                 receipt = await workflow.execute_activity(
                     record_decision,
                     decision,
@@ -101,8 +94,5 @@ class AgentLoop:
                     break
         finally:
             inputs.close()
-        await decisions.finish()
-        # Lets go of anything the provider parked against this run, so a
-        # transport that holds a long poll open can let the workflow return.
-        streams.drain()
+        decisions.finish()
         return trace
