@@ -8,6 +8,7 @@ from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import message as _message
 from google.protobuf import reflection as _reflection
 from google.protobuf import symbol_database as _symbol_database
+from google.protobuf.internal import enum_type_wrapper
 
 # @@protoc_insertion_point(imports)
 
@@ -19,34 +20,40 @@ from temporalio.api.common.v1 import (
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n$temporal/api/stream/v1/message.proto\x12\x16temporal.api.stream.v1\x1a$temporal/api/common/v1/message.proto"\xfe\x01\n\rStreamMessage\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x45\n\x08metadata\x18\x02 \x03(\x0b\x32\x33.temporal.api.stream.v1.StreamMessage.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x16\n\x0etopic_sequence\x18\x04 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\xbb\x01\n\x0bStreamSlice\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x03 \x01(\x03\x12\x11\n\tto_offset\x18\x04 \x01(\x03\x12\x37\n\x08messages\x18\x05 \x03(\x0b\x32%.temporal.api.stream.v1.StreamMessage\x12(\n workflow_task_completed_event_id\x18\x06 \x01(\x03"I\n\x0cStreamCursor\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x02 \x01(\x03\x12\x11\n\tto_offset\x18\x03 \x01(\x03\x42\x89\x01\n\x19io.temporal.api.stream.v1B\x0cMessageProtoP\x01Z#go.temporal.io/api/stream/v1;stream\xaa\x02\x18Temporalio.Api.Stream.V1\xea\x02\x1bTemporalio::Api::Stream::V1b\x06proto3'
+    b'\n$temporal/api/stream/v1/message.proto\x12\x16temporal.api.stream.v1\x1a$temporal/api/common/v1/message.proto"\xd4\x02\n\x0cStreamRecord\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x44\n\x08metadata\x18\x02 \x03(\x0b\x32\x32.temporal.api.stream.v1.StreamRecord.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x36\n\x04kind\x18\x04 \x01(\x0e\x32(.temporal.api.stream.v1.StreamRecordKind\x12\x13\n\x0bproducer_id\x18\x05 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x06 \x01(\x03\x12\x10\n\x08sequence\x18\x07 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\xb9\x01\n\x0bStreamSlice\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x03 \x01(\x03\x12\x11\n\tto_offset\x18\x04 \x01(\x03\x12\x35\n\x07records\x18\x05 \x03(\x0b\x32$.temporal.api.stream.v1.StreamRecord\x12(\n workflow_task_completed_event_id\x18\x06 \x01(\x03"H\n\x0bStreamRange\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x02 \x01(\x03\x12\x11\n\tto_offset\x18\x03 \x01(\x03*r\n\x10StreamRecordKind\x12"\n\x1eSTREAM_RECORD_KIND_UNSPECIFIED\x10\x00\x12\x1b\n\x17STREAM_RECORD_KIND_DATA\x10\x01\x12\x1d\n\x19STREAM_RECORD_KIND_FINISH\x10\x02\x42\x89\x01\n\x19io.temporal.api.stream.v1B\x0cMessageProtoP\x01Z#go.temporal.io/api/stream/v1;stream\xaa\x02\x18Temporalio.Api.Stream.V1\xea\x02\x1bTemporalio::Api::Stream::V1b\x06proto3'
 )
 
+_STREAMRECORDKIND = DESCRIPTOR.enum_types_by_name["StreamRecordKind"]
+StreamRecordKind = enum_type_wrapper.EnumTypeWrapper(_STREAMRECORDKIND)
+STREAM_RECORD_KIND_UNSPECIFIED = 0
+STREAM_RECORD_KIND_DATA = 1
+STREAM_RECORD_KIND_FINISH = 2
 
-_STREAMMESSAGE = DESCRIPTOR.message_types_by_name["StreamMessage"]
-_STREAMMESSAGE_METADATAENTRY = _STREAMMESSAGE.nested_types_by_name["MetadataEntry"]
+
+_STREAMRECORD = DESCRIPTOR.message_types_by_name["StreamRecord"]
+_STREAMRECORD_METADATAENTRY = _STREAMRECORD.nested_types_by_name["MetadataEntry"]
 _STREAMSLICE = DESCRIPTOR.message_types_by_name["StreamSlice"]
-_STREAMCURSOR = DESCRIPTOR.message_types_by_name["StreamCursor"]
-StreamMessage = _reflection.GeneratedProtocolMessageType(
-    "StreamMessage",
+_STREAMRANGE = DESCRIPTOR.message_types_by_name["StreamRange"]
+StreamRecord = _reflection.GeneratedProtocolMessageType(
+    "StreamRecord",
     (_message.Message,),
     {
         "MetadataEntry": _reflection.GeneratedProtocolMessageType(
             "MetadataEntry",
             (_message.Message,),
             {
-                "DESCRIPTOR": _STREAMMESSAGE_METADATAENTRY,
+                "DESCRIPTOR": _STREAMRECORD_METADATAENTRY,
                 "__module__": "temporalio.api.stream.v1.message_pb2",
-                # @@protoc_insertion_point(class_scope:temporal.api.stream.v1.StreamMessage.MetadataEntry)
+                # @@protoc_insertion_point(class_scope:temporal.api.stream.v1.StreamRecord.MetadataEntry)
             },
         ),
-        "DESCRIPTOR": _STREAMMESSAGE,
+        "DESCRIPTOR": _STREAMRECORD,
         "__module__": "temporalio.api.stream.v1.message_pb2",
-        # @@protoc_insertion_point(class_scope:temporal.api.stream.v1.StreamMessage)
+        # @@protoc_insertion_point(class_scope:temporal.api.stream.v1.StreamRecord)
     },
 )
-_sym_db.RegisterMessage(StreamMessage)
-_sym_db.RegisterMessage(StreamMessage.MetadataEntry)
+_sym_db.RegisterMessage(StreamRecord)
+_sym_db.RegisterMessage(StreamRecord.MetadataEntry)
 
 StreamSlice = _reflection.GeneratedProtocolMessageType(
     "StreamSlice",
@@ -59,28 +66,30 @@ StreamSlice = _reflection.GeneratedProtocolMessageType(
 )
 _sym_db.RegisterMessage(StreamSlice)
 
-StreamCursor = _reflection.GeneratedProtocolMessageType(
-    "StreamCursor",
+StreamRange = _reflection.GeneratedProtocolMessageType(
+    "StreamRange",
     (_message.Message,),
     {
-        "DESCRIPTOR": _STREAMCURSOR,
+        "DESCRIPTOR": _STREAMRANGE,
         "__module__": "temporalio.api.stream.v1.message_pb2",
-        # @@protoc_insertion_point(class_scope:temporal.api.stream.v1.StreamCursor)
+        # @@protoc_insertion_point(class_scope:temporal.api.stream.v1.StreamRange)
     },
 )
-_sym_db.RegisterMessage(StreamCursor)
+_sym_db.RegisterMessage(StreamRange)
 
 if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._options = None
     DESCRIPTOR._serialized_options = b"\n\031io.temporal.api.stream.v1B\014MessageProtoP\001Z#go.temporal.io/api/stream/v1;stream\252\002\030Temporalio.Api.Stream.V1\352\002\033Temporalio::Api::Stream::V1"
-    _STREAMMESSAGE_METADATAENTRY._options = None
-    _STREAMMESSAGE_METADATAENTRY._serialized_options = b"8\001"
-    _STREAMMESSAGE._serialized_start = 103
-    _STREAMMESSAGE._serialized_end = 357
-    _STREAMMESSAGE_METADATAENTRY._serialized_start = 277
-    _STREAMMESSAGE_METADATAENTRY._serialized_end = 357
-    _STREAMSLICE._serialized_start = 360
-    _STREAMSLICE._serialized_end = 547
-    _STREAMCURSOR._serialized_start = 549
-    _STREAMCURSOR._serialized_end = 622
+    _STREAMRECORD_METADATAENTRY._options = None
+    _STREAMRECORD_METADATAENTRY._serialized_options = b"8\001"
+    _STREAMRECORDKIND._serialized_start = 707
+    _STREAMRECORDKIND._serialized_end = 821
+    _STREAMRECORD._serialized_start = 103
+    _STREAMRECORD._serialized_end = 443
+    _STREAMRECORD_METADATAENTRY._serialized_start = 363
+    _STREAMRECORD_METADATAENTRY._serialized_end = 443
+    _STREAMSLICE._serialized_start = 446
+    _STREAMSLICE._serialized_end = 631
+    _STREAMRANGE._serialized_start = 633
+    _STREAMRANGE._serialized_end = 705
 # @@protoc_insertion_point(module_scope)

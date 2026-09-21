@@ -44,7 +44,7 @@ class _CommandTypeEnumTypeWrapper(
     COMMAND_TYPE_MODIFY_WORKFLOW_PROPERTIES: _CommandType.ValueType  # 16
     COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION: _CommandType.ValueType  # 17
     COMMAND_TYPE_REQUEST_CANCEL_NEXUS_OPERATION: _CommandType.ValueType  # 18
-    COMMAND_TYPE_ADD_STREAM_MESSAGES: _CommandType.ValueType  # 19
+    COMMAND_TYPE_APPEND_STREAM_RECORDS: _CommandType.ValueType  # 19
     COMMAND_TYPE_SUBSCRIBE_STREAM: _CommandType.ValueType  # 20
 
 class CommandType(_CommandType, metaclass=_CommandTypeEnumTypeWrapper):
@@ -68,6 +68,6 @@ COMMAND_TYPE_PROTOCOL_MESSAGE: CommandType.ValueType  # 14
 COMMAND_TYPE_MODIFY_WORKFLOW_PROPERTIES: CommandType.ValueType  # 16
 COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION: CommandType.ValueType  # 17
 COMMAND_TYPE_REQUEST_CANCEL_NEXUS_OPERATION: CommandType.ValueType  # 18
-COMMAND_TYPE_ADD_STREAM_MESSAGES: CommandType.ValueType  # 19
+COMMAND_TYPE_APPEND_STREAM_RECORDS: CommandType.ValueType  # 19
 COMMAND_TYPE_SUBSCRIBE_STREAM: CommandType.ValueType  # 20
 global___CommandType = CommandType

@@ -1,7 +1,7 @@
 """Conformance for the Nexus front.
 
-The caller talks only to the stream endpoint; the handler delegates to a
-storage provider, so these tests are the provider-hiding demonstration:
+The caller talks only to the stream endpoint; the handler fronts a storage
+provider's own handles, so these tests are the provider-hiding demonstration:
 nothing on the caller side names or could name the store.
 
 The loop test runs over the server's Nexus HTTP ingress and is gated behind
@@ -32,20 +32,27 @@ import nexusrpc.handler
 import pytest
 
 import temporalio.converter
-from temporalio import streams
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
-from temporalio.streams import RecordKind
-from temporalio.streams import _frame as frame
-from temporalio.streams._provider import instance
-from temporalio.streams.providers import memory, nexus
-from temporalio.streams.providers._nexus_generated import AppendInput, ReadInput
-from temporalio.streams.providers.nexus import (
-    StreamEndpointError,
-    TemporalStreamsHandler,
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams import (
+    BEGINNING,
+    Cursor,
+    RecordKind,
+    StreamCursorError,
+    StreamProducerError,
+    StreamUnsupportedError,
 )
+from temporalio.streams._wire import WireRecord
+from temporalio.streams.providers import nexus
+from temporalio.streams.providers._nexus_generated import AppendInput, ReadInput
+from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.nexus import NexusStreams, TemporalStreamsHandler
+from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.worker import Worker
+from tests.helpers import new_worker
 from tests.streams.test_workflow_streams_provider import EchoLoop, take
+from tests.streams.test_workflow_streams_provider import _feed as feed_echo_loop
 
 live_only = pytest.mark.skipif(
     os.environ.get("STREAMS_LIVE") != "nexus",
@@ -56,6 +63,8 @@ ENDPOINT = "streams-e2e"
 HANDLER_TQ = "streams-handlers-e2e"
 APPEND_OPERATION = nexus._APPEND_OPERATION  # pyright: ignore[reportPrivateUsage]
 READ_OPERATION = nexus._READ_OPERATION  # pyright: ignore[reportPrivateUsage]
+INPUTS = "inputs"
+DECISIONS = "decisions"
 
 
 @live_only
@@ -63,42 +72,34 @@ async def test_interface_loop_through_the_nexus_front():
     # The workflow worker and the handler worker both use the storage
     # provider; only the caller goes through the front, and it names the
     # endpoint the way an operator does, by name.
-    streams.configure(provider="workflow_streams")
+    store = WorkflowStreamsProvider()
     client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
-    front = instance(
-        "nexus",
+    front = NexusStreams(
         endpoint=ENDPOINT,
-        client=client,
         http_address=os.environ.get("TEMPORAL_HTTP", "http://127.0.0.1:7243"),
-        wait_ms=5000,
+        read_wait=timedelta(seconds=5),
     )
     workflow_id = f"streams-nexus-live-{uuid.uuid4().hex}"
-    handler = TemporalStreamsHandler(client, provider="workflow_streams")
+    handler = TemporalStreamsHandler(store, client)
 
     async with Worker(client, task_queue=HANDLER_TQ, nexus_service_handlers=[handler]):
         async with Worker(
             client,
             task_queue=f"tq-{workflow_id}",
             workflows=[EchoLoop],
-            **streams.worker_options(),
+            plugins=[store],
         ):
             handle = await client.start_workflow(
                 EchoLoop.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
             )
 
-            producer = await front.producer(
-                None,
-                workflow_id=workflow_id,
-                stream="inputs",
-                producer_id="model",
-                attempt=1,
-            )
+            stream = front.get_stream_handle(client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
             await producer.append({"n": 1}, {"n": 2})
             await producer.append({"n": 3})
             await producer.finish()
 
-            consumer = await front.consumer(None, workflow_id=workflow_id)
-            records = await take(consumer.read(type=dict), 4, timeout=60)
+            records = await take(stream.read(topic=DECISIONS, result_type=dict), 4, 60)
             assert [r.kind for r in records] == [
                 RecordKind.DATA,
                 RecordKind.DATA,
@@ -110,8 +111,9 @@ async def test_interface_loop_through_the_nexus_front():
             # An opaque cursor from behind the front resumes a fresh reader
             # just past the record it names.
             checkpoint = records[0].cursor
-            resumed = await front.consumer(None, workflow_id=workflow_id)
-            again = await take(resumed.read(type=dict, after=checkpoint), 2, timeout=60)
+            again = await take(
+                stream.read(topic=DECISIONS, result_type=dict, after=checkpoint), 2, 60
+            )
             assert [r.value["echo"] for r in again[:2]] == [2, 3]
 
             await handle.signal(EchoLoop.release)
@@ -136,12 +138,7 @@ class ScrambleCodec(temporalio.converter.PayloadCodec):
 
     async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
         """Recover the payloads :meth:`encode` wrapped."""
-        out: list[Payload] = []
-        for payload in payloads:
-            inner = Payload()
-            inner.ParseFromString(self._flip(payload.data))
-            out.append(inner)
-        return out
+        return [Payload.FromString(self._flip(payload.data)) for payload in payloads]
 
     @classmethod
     def _flip(cls, data: bytes) -> bytes:
@@ -202,9 +199,9 @@ def _in_process_endpoint(
     failing = set(fail_after_applying or [])
 
     def post(
-        url: str, body: bytes, headers: Mapping[str, str], timeout_ms: int
+        url: str, body: bytes, headers: Mapping[str, str], timeout: timedelta
     ) -> bytes:
-        del headers, timeout_ms
+        del headers, timeout
         posted.append(body)
         operation = url.rsplit("/", 1)[1]
         request_type = AppendInput if operation == APPEND_OPERATION else ReadInput
@@ -216,24 +213,30 @@ def _in_process_endpoint(
                 _dispatch(handler, operation, request), loop
             ).result()
         except nexusrpc.HandlerError as error:
-            raise StreamEndpointError(str(error), status=400) from error
+            # The ingress answers a handler error with a failure body and the
+            # status its type maps to.
+            status = 404 if error.type is nexusrpc.HandlerErrorType.NOT_FOUND else 400
+            raise nexus._EndpointFailure(  # pyright: ignore[reportPrivateUsage]
+                json.dumps({"message": str(error)}), status
+            ) from error
         raw = contract.to_payloads([answer])[0].data
         answered.append(raw)
         if operation in failing:
             failing.discard(operation)
-            raise StreamEndpointError("connection reset after the handler answered")
+            raise nexus._EndpointFailure(  # pyright: ignore[reportPrivateUsage]
+                "connection reset after the handler answered", None
+            )
         return raw
 
     return post
 
 
-def _front(codec: temporalio.converter.PayloadCodec | None) -> Any:
-    return instance(
-        "nexus",
+def _front(codec: temporalio.converter.PayloadCodec | None) -> NexusStreams:
+    return NexusStreams(
         endpoint="in-process",
         # This endpoint has no other traffic to wait for, so park briefly
         # rather than for the contract's default.
-        wait_ms=200,
+        read_wait=timedelta(milliseconds=200),
         data_converter=dataclasses.replace(
             temporalio.converter.DataConverter.default, payload_codec=codec
         ),
@@ -244,28 +247,19 @@ async def _loop_through_an_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     codec: temporalio.converter.PayloadCodec | None,
 ) -> tuple[list[Any], list[bytes], list[bytes]]:
-    memory.reset()
-    streams.configure(provider="memory")
+    store = MemoryStreams()
     posted: list[bytes] = []
     answered: list[bytes] = []
-    handler = TemporalStreamsHandler(None, provider="memory")
+    handler = TemporalStreamsHandler(store, None)
     monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, posted, answered))
-    front = _front(codec)
-    workflow_id = "wf-codec"
+    stream = _front(codec).get_stream_handle(None, "wf-codec")
 
-    producer = await front.producer(
-        None,
-        workflow_id=workflow_id,
-        stream="inputs",
-        producer_id="model",
-        attempt=1,
-    )
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
     await producer.append({"secret": "tuna"})
     await producer.finish()
 
-    consumer = await front.consumer(None, workflow_id=workflow_id, stream="inputs")
-    records = await take(consumer.read(type=dict), 2, timeout=30)
-    memory.reset()
+    records = await take(stream.read(topic=INPUTS, result_type=dict), 2, timeout=30)
+    await handler.close()
     return records, posted, answered
 
 
@@ -281,7 +275,8 @@ def _answered_bodies(answered: list[bytes]) -> bytes:
     out = b""
     for body in answered:
         for record in json.loads(body).get("records", []):
-            out += frame.decode(base64.b64decode(record["frame"]))[5]
+            wire = WireRecord.FromString(base64.b64decode(record["record"]))
+            out += wire.body.SerializeToString()
     return out
 
 
@@ -315,14 +310,21 @@ async def test_without_a_codec_the_same_records_go_out_in_the_clear(
 
 
 def _append(
-    workflow_id: str, batch_index: int, *values: Any, finish: bool = False
+    workflow_id: str,
+    batch_index: int,
+    *values: Any,
+    sequence: int | None = None,
+    finish: bool = False,
 ) -> AppendInput:
     converter = temporalio.converter.DataConverter.default.payload_converter
     return AppendInput(
         workflow_id=workflow_id,
-        stream="inputs",
+        topic=INPUTS,
         producer_id="model",
         attempt=1,
+        # Batches of one, numbered in step with the batch index unless a
+        # case wants them out of step.
+        sequence=batch_index - 1 if sequence is None else sequence,
         batch_index=batch_index,
         payloads=[
             converter.to_payloads([value])[0].SerializeToString() for value in values
@@ -331,57 +333,62 @@ def _append(
     )
 
 
-async def _stored(workflow_id: str) -> list[Any]:
-    consumer = await streams.consumer(None, workflow_id=workflow_id, stream="inputs")
+async def _stored(store: MemoryStreams, workflow_id: str) -> list[Any]:
+    stream = store.get_stream_handle(None, workflow_id)
+    end = await stream.latest(topic=INPUTS)
+    if end == BEGINNING:
+        return []
     out: list[Any] = []
-    async for record in consumer.read(type=dict):
+    async for record in stream.read(topic=INPUTS, result_type=dict):
         if record.kind is RecordKind.DATA:
             out.append(record.value)
-        if await consumer.latest() == record.cursor:
+        if record.cursor == end:
             break
     return out
 
 
-@pytest.fixture
-def _memory_store():  # pyright: ignore[reportUnusedFunction]
-    memory.reset()
-    streams.configure(provider="memory")
-    yield
-    memory.reset()
-
-
-@pytest.mark.usefixtures("_memory_store")
 async def test_a_handler_without_state_for_a_producer_refuses_to_continue_it():
     # A second handler instance stands in for a restarted or load-balanced
     # handler worker: it shares the store but not the dedupe state.
-    first = TemporalStreamsHandler(None, provider="memory")
-    second = TemporalStreamsHandler(None, provider="memory")
+    store = MemoryStreams()
+    first = TemporalStreamsHandler(store, None)
+    second = TemporalStreamsHandler(store, None)
     await _dispatch(first, APPEND_OPERATION, _append("wf", 1, {"n": 1}))
     with pytest.raises(nexusrpc.HandlerError) as failed:
         await _dispatch(second, APPEND_OPERATION, _append("wf", 2, {"n": 2}))
     assert failed.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
     assert failed.value.retryable_override is False
+    # Named so the caller can raise the same class.
+    assert str(failed.value).startswith("StreamProducerError: ")
     # The store holds the first batch and nothing was silently lost or doubled.
-    assert await _stored("wf") == [{"n": 1}]
+    assert await _stored(store, "wf") == [{"n": 1}]
 
 
-@pytest.mark.usefixtures("_memory_store")
-async def test_the_handler_drops_repeats_and_rejects_gaps():
-    handler = TemporalStreamsHandler(None, provider="memory")
+async def test_the_handler_answers_repeats_and_rejects_gaps():
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
     await _dispatch(handler, APPEND_OPERATION, _append("wf", 1, {"n": 1}))
-    await _dispatch(handler, APPEND_OPERATION, _append("wf", 2, {"n": 2}))
-    # An exact repeat is dropped with a success answer and no position.
+    second = await _dispatch(handler, APPEND_OPERATION, _append("wf", 2, {"n": 2}))
+    # A repeat of the last batch is written once and answers with where the
+    # original landed, so a retrying caller checkpoints the same position.
     repeat = await _dispatch(handler, APPEND_OPERATION, _append("wf", 2, {"n": 2}))
-    assert repeat.cursor is None
-    with pytest.raises(nexusrpc.HandlerError) as failed:
+    assert repeat.cursor == second.cursor
+    with pytest.raises(nexusrpc.HandlerError) as skipped:
         await _dispatch(handler, APPEND_OPERATION, _append("wf", 4, {"n": 4}))
-    assert failed.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
-    assert await _stored("wf") == [{"n": 1}, {"n": 2}]
+    assert skipped.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
+    with pytest.raises(nexusrpc.HandlerError) as behind:
+        await _dispatch(handler, APPEND_OPERATION, _append("wf", 1, {"n": 1}))
+    assert str(behind.value).startswith("StreamProducerError: ")
+    with pytest.raises(nexusrpc.HandlerError) as renumbered:
+        await _dispatch(
+            handler, APPEND_OPERATION, _append("wf", 3, {"n": 3}, sequence=7)
+        )
+    assert "sequence 7 does not continue at 2" in str(renumbered.value)
+    assert await _stored(store, "wf") == [{"n": 1}, {"n": 2}]
 
 
-@pytest.mark.usefixtures("_memory_store")
 async def test_a_malformed_payload_is_the_callers_fault():
-    handler = TemporalStreamsHandler(None, provider="memory")
+    handler = TemporalStreamsHandler(MemoryStreams(), None)
     request = _append("wf", 1)
     request.payloads = [b"\xff\xfe not a payload"]
     with pytest.raises(nexusrpc.HandlerError) as failed:
@@ -389,12 +396,12 @@ async def test_a_malformed_payload_is_the_callers_fault():
     assert failed.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
 
 
-@pytest.mark.usefixtures("_memory_store")
 async def test_the_caller_retries_an_ambiguous_append_under_the_same_index(
     monkeypatch: pytest.MonkeyPatch,
 ):
     posted: list[bytes] = []
-    handler = TemporalStreamsHandler(None, provider="memory")
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
     monkeypatch.setattr(
         nexus,
         "_post",
@@ -402,28 +409,41 @@ async def test_the_caller_retries_an_ambiguous_append_under_the_same_index(
             handler, posted, [], fail_after_applying=[APPEND_OPERATION]
         ),
     )
-    front = _front(None)
-    producer = await front.producer(
-        None, workflow_id="wf", stream="inputs", producer_id="model", attempt=1
-    )
-    with pytest.raises(StreamEndpointError):
+    stream = _front(None).get_stream_handle(None, "wf")
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    # A transport failure is an RPCError, never the transport's own type.
+    with pytest.raises(RPCError) as failed:
         await producer.append({"n": 1})
-    await producer.append({"n": 1})
+    assert failed.value.status == RPCStatusCode.UNAVAILABLE
+    landed = await producer.append({"n": 1})
     await producer.append({"n": 2})
     await producer.finish()
     indexes = [json.loads(body)["batch_index"] for body in posted]
-    # The retry re-sent index 1, which the handler dropped as a repeat, so
-    # the store holds each record once.
+    sequences = [json.loads(body)["sequence"] for body in posted]
+    # The retry re-sent index 1, which the handler answered as a repeat with
+    # the original's position, so the store holds each record once.
     assert indexes == [1, 1, 2, 3]
-    assert await _stored("wf") == [{"n": 1}, {"n": 2}]
+    assert sequences == [0, 0, 1, 2]
+    assert landed == await _memory_position(store, "wf", 0)
+    assert await _stored(store, "wf") == [{"n": 1}, {"n": 2}]
 
 
-@pytest.mark.usefixtures("_memory_store")
+async def _memory_position(
+    store: MemoryStreams, workflow_id: str, index: int
+) -> Cursor:
+    records = await take(
+        store.get_stream_handle(None, workflow_id).read(topic=INPUTS, result_type=dict),
+        index + 1,
+    )
+    return records[index].cursor
+
+
 async def test_a_failed_append_goes_out_before_the_next_one(
     monkeypatch: pytest.MonkeyPatch,
 ):
     posted: list[bytes] = []
-    handler = TemporalStreamsHandler(None, provider="memory")
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
     monkeypatch.setattr(
         nexus,
         "_post",
@@ -431,28 +451,52 @@ async def test_a_failed_append_goes_out_before_the_next_one(
             handler, posted, [], fail_after_applying=[APPEND_OPERATION]
         ),
     )
-    front = _front(None)
-    producer = await front.producer(
-        None, workflow_id="wf", stream="inputs", producer_id="model", attempt=1
-    )
-    with pytest.raises(StreamEndpointError):
+    stream = _front(None).get_stream_handle(None, "wf")
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    with pytest.raises(RPCError):
         await producer.append({"n": 1})
     # The caller moves on without retrying; the pending batch is replayed
     # first under its own index and the new one takes the next.
     await producer.append({"n": 2})
     indexes = [json.loads(body)["batch_index"] for body in posted]
     assert indexes == [1, 1, 2]
-    assert await _stored("wf") == [{"n": 1}, {"n": 2}]
+    assert await _stored(store, "wf") == [{"n": 1}, {"n": 2}]
 
 
-@pytest.mark.usefixtures("_memory_store")
+async def test_a_stream_condition_crosses_the_endpoint_under_its_own_class(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    handler = TemporalStreamsHandler(MemoryStreams(), None)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
+    stream = _front(None).get_stream_handle(None, "wf")
+    # The token is opaque on this side, so the store behind the endpoint is
+    # what refuses it, and the refusal arrives on the first read as the class
+    # the store raised.
+    with pytest.raises(StreamCursorError):
+        await take(stream.read(topic=INPUTS, after=Cursor("elsewhere:1")), 1)
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    await producer.append({"n": 1})
+    # A second handler has no state for the attempt; the caller learns that
+    # as a producer conflict.
+    fresh = TemporalStreamsHandler(MemoryStreams(), None)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(fresh, [], []))
+    with pytest.raises(StreamProducerError):
+        await producer.append({"n": 2})
+    await handler.close()
+
+
+def test_the_front_has_no_workflow_half():
+    with pytest.raises(StreamUnsupportedError):
+        _front(None).workflow_provider()
+
+
 async def test_consecutive_reads_share_one_parked_subscription():
-    handler = TemporalStreamsHandler(None, provider="memory")
+    handler = TemporalStreamsHandler(MemoryStreams(), None)
     await _dispatch(handler, APPEND_OPERATION, _append("wf", 1, {"n": 1}, {"n": 2}))
     first = await _dispatch(
         handler,
         READ_OPERATION,
-        ReadInput(workflow_id="wf", stream="inputs", max_records=1, wait_ms=200),
+        ReadInput(workflow_id="wf", topic=INPUTS, max_records=1, wait_ms=200),
     )
     assert len(first.records) == 1
     parked = handler._subscriptions  # pyright: ignore[reportPrivateUsage]
@@ -464,7 +508,7 @@ async def test_consecutive_reads_share_one_parked_subscription():
         READ_OPERATION,
         ReadInput(
             workflow_id="wf",
-            stream="inputs",
+            topic=INPUTS,
             after_token=first.next_token,
             max_records=1,
             wait_ms=200,
@@ -477,21 +521,56 @@ async def test_consecutive_reads_share_one_parked_subscription():
     await _dispatch(
         handler,
         READ_OPERATION,
-        ReadInput(workflow_id="wf", stream="inputs", wait_ms=200),
+        ReadInput(workflow_id="wf", topic=INPUTS, wait_ms=200),
     )
     assert len(parked) == 1 and next(iter(parked.values())).pump is not pump
     await handler.close()
     assert not parked
 
 
-@pytest.mark.usefixtures("_memory_store")
 async def test_the_read_wait_is_cut_to_the_request_deadline():
-    handler = TemporalStreamsHandler(None, provider="memory")
+    handler = TemporalStreamsHandler(MemoryStreams(), None)
     started = asyncio.get_running_loop().time()
     answer = await handler.read(
         _context(READ_OPERATION, datetime.now(timezone.utc) + timedelta(seconds=1)),
-        ReadInput(workflow_id="wf", stream="inputs", wait_ms=60000),
+        ReadInput(workflow_id="wf", topic=INPUTS, wait_ms=60000),
     )
-    assert answer.records == [] and answer.next_token == ""
+    assert answer.records == [] and answer.next_token == "" and not answer.done
     assert asyncio.get_running_loop().time() - started < 5
     await handler.close()
+
+
+async def test_the_read_ends_when_the_store_ends_it(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+):
+    # Behind the endpoint sits the Workflow Streams store, whose read ends
+    # once the run has closed and its tail is served. The front carries that
+    # end to the caller, whose loop leaves by itself.
+    store = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
+    handler = TemporalStreamsHandler(store, client)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
+    workflow_id = f"streams-nexus-{uuid.uuid4().hex}"
+    async with new_worker(client, EchoLoop, plugins=[store]) as worker:
+        handle = await client.start_workflow(
+            EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        await feed_echo_loop(store, client, workflow_id)
+        await handle.signal(EchoLoop.release)
+        assert await handle.result() == 3
+
+        stream = _front(None).get_stream_handle(None, workflow_id)
+
+        async def read_everything() -> list[Any]:
+            return [
+                (r.kind, r.value)
+                async for r in stream.read(topic=DECISIONS, result_type=dict)
+            ]
+
+        records = await asyncio.wait_for(read_everything(), 30)
+    await handler.close()
+    assert records == [
+        (RecordKind.DATA, {"echo": 1}),
+        (RecordKind.DATA, {"echo": 2}),
+        (RecordKind.DATA, {"echo": 3}),
+        (RecordKind.FINISH, None),
+    ]

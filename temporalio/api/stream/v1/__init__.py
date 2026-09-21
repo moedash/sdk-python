@@ -1,7 +1,8 @@
-from .message_pb2 import StreamCursor, StreamMessage, StreamSlice
+from .message_pb2 import StreamRange, StreamRecord, StreamRecordKind, StreamSlice
 
 __all__ = [
-    "StreamCursor",
-    "StreamMessage",
+    "StreamRange",
+    "StreamRecord",
+    "StreamRecordKind",
     "StreamSlice",
 ]

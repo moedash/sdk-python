@@ -217,12 +217,12 @@ class _EventTypeEnumTypeWrapper(
     EVENT_TYPE_WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED: _EventType.ValueType  # 60
     """An event that indicates time skipping advanced time or was disabled automatically after a bound was reached."""
     EVENT_TYPE_WORKFLOW_STREAM_SUBSCRIBED: _EventType.ValueType  # 61
-    """A Workflow subscribed to a stream. Once per subscription, not per
-    message: consumed offsets ride WorkflowTaskCompleted and payloads never
-    enter History.
+    """A Workflow subscribed to a stream. Recorded once per subscription, not
+    per record: the offsets a task consumed ride WorkflowTaskCompleted and
+    the payloads never enter History at all.
     """
-    EVENT_TYPE_WORKFLOW_STREAM_MESSAGES_ADDED: _EventType.ValueType  # 62
-    """A Workflow published a batch of messages to a stream. Recorded per
+    EVENT_TYPE_WORKFLOW_STREAM_RECORDS_APPENDED: _EventType.ValueType  # 62
+    """A Workflow appended a batch of records to a stream. Recorded per
     batch, and carrying only the offset range it landed at: the bodies go to
     the stream's own log, never into History.
     """
@@ -419,12 +419,12 @@ EVENT_TYPE_WORKFLOW_EXECUTION_UNPAUSED: EventType.ValueType  # 59
 EVENT_TYPE_WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED: EventType.ValueType  # 60
 """An event that indicates time skipping advanced time or was disabled automatically after a bound was reached."""
 EVENT_TYPE_WORKFLOW_STREAM_SUBSCRIBED: EventType.ValueType  # 61
-"""A Workflow subscribed to a stream. Once per subscription, not per
-message: consumed offsets ride WorkflowTaskCompleted and payloads never
-enter History.
+"""A Workflow subscribed to a stream. Recorded once per subscription, not
+per record: the offsets a task consumed ride WorkflowTaskCompleted and
+the payloads never enter History at all.
 """
-EVENT_TYPE_WORKFLOW_STREAM_MESSAGES_ADDED: EventType.ValueType  # 62
-"""A Workflow published a batch of messages to a stream. Recorded per
+EVENT_TYPE_WORKFLOW_STREAM_RECORDS_APPENDED: EventType.ValueType  # 62
+"""A Workflow appended a batch of records to a stream. Recorded per
 batch, and carrying only the offset range it landed at: the bodies go to
 the stream's own log, never into History.
 """

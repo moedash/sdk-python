@@ -6,21 +6,62 @@ isort:skip_file
 import builtins
 import collections.abc
 import sys
+import typing
 
 import google.protobuf.descriptor
 import google.protobuf.internal.containers
+import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 
 import temporalio.api.common.v1.message_pb2
 
-if sys.version_info >= (3, 8):
+if sys.version_info >= (3, 10):
     import typing as typing_extensions
 else:
     import typing_extensions
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
 
-class StreamMessage(google.protobuf.message.Message):
+class _StreamRecordKind:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _StreamRecordKindEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+        _StreamRecordKind.ValueType
+    ],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    STREAM_RECORD_KIND_UNSPECIFIED: _StreamRecordKind.ValueType  # 0
+    """Read as DATA."""
+    STREAM_RECORD_KIND_DATA: _StreamRecordKind.ValueType  # 1
+    """A value the producer published; `body` carries it."""
+    STREAM_RECORD_KIND_FINISH: _StreamRecordKind.ValueType  # 2
+    """The producer named by `producer_id` writes nothing more on `topic`.
+    Says nothing about that producer's outcome and does not end the stream.
+    """
+
+class StreamRecordKind(_StreamRecordKind, metaclass=_StreamRecordKindEnumTypeWrapper):
+    """What a record means to a reader. Kept on the record itself so every store
+    and every language reads it the same way without a private envelope.
+    """
+
+STREAM_RECORD_KIND_UNSPECIFIED: StreamRecordKind.ValueType  # 0
+"""Read as DATA."""
+STREAM_RECORD_KIND_DATA: StreamRecordKind.ValueType  # 1
+"""A value the producer published; `body` carries it."""
+STREAM_RECORD_KIND_FINISH: StreamRecordKind.ValueType  # 2
+"""The producer named by `producer_id` writes nothing more on `topic`.
+Says nothing about that producer's outcome and does not end the stream.
+"""
+global___StreamRecordKind = StreamRecordKind
+
+class StreamRecord(google.protobuf.message.Message):
+    """One entry in a stream. The record is the wire format: stores keep it
+    serialized as is and readers in every language decode the same bytes.
+    """
+
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     class MetadataEntry(google.protobuf.message.Message):
@@ -48,17 +89,36 @@ class StreamMessage(google.protobuf.message.Message):
     BODY_FIELD_NUMBER: builtins.int
     METADATA_FIELD_NUMBER: builtins.int
     TOPIC_FIELD_NUMBER: builtins.int
-    TOPIC_SEQUENCE_FIELD_NUMBER: builtins.int
+    KIND_FIELD_NUMBER: builtins.int
+    PRODUCER_ID_FIELD_NUMBER: builtins.int
+    ATTEMPT_FIELD_NUMBER: builtins.int
+    SEQUENCE_FIELD_NUMBER: builtins.int
     @property
-    def body(self) -> temporalio.api.common.v1.message_pb2.Payload: ...
+    def body(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """The value the producer published, stored as sent. A payload codec
+        applies here as it does to any other payload.
+        """
     @property
     def metadata(
         self,
     ) -> google.protobuf.internal.containers.MessageMap[
         builtins.str, temporalio.api.common.v1.message_pb2.Payload
-    ]: ...
+    ]:
+        """Producer-supplied provenance, stored as sent."""
     topic: builtins.str
-    topic_sequence: builtins.int
+    """Producer-supplied grouping label, stored as sent."""
+    kind: global___StreamRecordKind.ValueType
+    """How to read this record. Unspecified is read as DATA."""
+    producer_id: builtins.str
+    """Who wrote the record. Empty when the owning Workflow did."""
+    attempt: builtins.int
+    """The producer's attempt. Readers treat a later attempt by the same
+    producer as superseding what the earlier one wrote.
+    """
+    sequence: builtins.int
+    """The producer's position within its attempt, or -1 when unnumbered.
+    Stored as sent; the server does not assign, validate or order by it.
+    """
     def __init__(
         self,
         *,
@@ -68,7 +128,10 @@ class StreamMessage(google.protobuf.message.Message):
         ]
         | None = ...,
         topic: builtins.str = ...,
-        topic_sequence: builtins.int = ...,
+        kind: global___StreamRecordKind.ValueType = ...,
+        producer_id: builtins.str = ...,
+        attempt: builtins.int = ...,
+        sequence: builtins.int = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["body", b"body"]
@@ -76,22 +139,28 @@ class StreamMessage(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "attempt",
+            b"attempt",
             "body",
             b"body",
+            "kind",
+            b"kind",
             "metadata",
             b"metadata",
+            "producer_id",
+            b"producer_id",
+            "sequence",
+            b"sequence",
             "topic",
             b"topic",
-            "topic_sequence",
-            b"topic_sequence",
         ],
     ) -> None: ...
 
-global___StreamMessage = StreamMessage
+global___StreamRecord = StreamRecord
 
 class StreamSlice(google.protobuf.message.Message):
     """A contiguous range of a stream delivered to a Workflow Task, along with the
-    offsets it covers. The offsets are what History records; the messages
+    offsets it covers. The offsets are what History records; the records
     themselves are never written to History.
     """
 
@@ -101,10 +170,13 @@ class StreamSlice(google.protobuf.message.Message):
     RUN_ID_FIELD_NUMBER: builtins.int
     FROM_OFFSET_FIELD_NUMBER: builtins.int
     TO_OFFSET_FIELD_NUMBER: builtins.int
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
     run_id: builtins.str
+    """Run id of the execution that owns the stream. Set on both a slice for the
+    task being started and a re-supplied one.
+    """
     from_offset: builtins.int
     """Inclusive."""
     to_offset: builtins.int
@@ -112,16 +184,16 @@ class StreamSlice(google.protobuf.message.Message):
     which is a fact replay has to reproduce rather than an absence of one.
     """
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        global___StreamMessage
+        global___StreamRecord
     ]: ...
     workflow_task_completed_event_id: builtins.int
-    """The WorkflowTaskCompleted event whose stream_cursors recorded this range.
-    Set only when the server is re-supplying a range for a task being
-    replayed; a slice for the task now being started leaves it unset, because
-    the event closing that task does not exist yet.
+    """The WorkflowTaskCompleted event whose consumed_stream_ranges recorded
+    this range. Set only when the server is re-supplying a range for a task
+    being replayed; a slice for the task now being started leaves it unset,
+    because the event closing that task does not exist yet.
 
     Replay needs this because a Workflow Task response carries one slice set
     while a cache miss replays every prior task, so the ranges have to be
@@ -134,7 +206,7 @@ class StreamSlice(google.protobuf.message.Message):
         run_id: builtins.str = ...,
         from_offset: builtins.int = ...,
         to_offset: builtins.int = ...,
-        messages: collections.abc.Iterable[global___StreamMessage] | None = ...,
+        records: collections.abc.Iterable[global___StreamRecord] | None = ...,
         workflow_task_completed_event_id: builtins.int = ...,
     ) -> None: ...
     def ClearField(
@@ -142,8 +214,8 @@ class StreamSlice(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "from_offset",
             b"from_offset",
-            "messages",
-            b"messages",
+            "records",
+            b"records",
             "run_id",
             b"run_id",
             "stream_id",
@@ -157,10 +229,10 @@ class StreamSlice(google.protobuf.message.Message):
 
 global___StreamSlice = StreamSlice
 
-class StreamCursor(google.protobuf.message.Message):
+class StreamRange(google.protobuf.message.Message):
     """The offsets a Workflow Task consumed, without the payloads. Recorded on
     WorkflowTaskCompleted so History grows with Workflow Tasks rather than with
-    messages.
+    records.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -170,7 +242,9 @@ class StreamCursor(google.protobuf.message.Message):
     TO_OFFSET_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
     from_offset: builtins.int
+    """Inclusive."""
     to_offset: builtins.int
+    """Exclusive."""
     def __init__(
         self,
         *,
@@ -190,4 +264,4 @@ class StreamCursor(google.protobuf.message.Message):
         ],
     ) -> None: ...
 
-global___StreamCursor = StreamCursor
+global___StreamRange = StreamRange

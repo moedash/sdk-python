@@ -12,6 +12,8 @@ trip and replays without the provider being involved.
 
 from __future__ import annotations
 
+from typing import Any
+
 from temporalio.streams._record import (
     Cursor,
     RecordKind,
@@ -30,28 +32,35 @@ class AttemptTracker:
         self._attempts: dict[str, int] = {}
 
     def note(
-        self, producer: str, attempt: int, cursor: Cursor
-    ) -> StreamRecord[Supersession] | None:
+        self, producer_id: str, attempt: int, *, topic: str, previous: Cursor
+    ) -> StreamRecord[Any] | None:
         """A supersession record when this record starts a newer attempt.
+
+        ``previous`` is the cursor of the last record delivered before the one
+        being noted, or the cursor the read started from. The synthesized
+        record carries it, so a consumer that checkpoints the supersession and
+        resumes after it is handed the new attempt's first record next rather
+        than skipping it.
 
         A producer that declares no attempt supersedes nothing, because there
         is no generation to compare. That is the same answer as an unnumbered
         record: the interface reports what it was told and invents nothing.
         """
-        if not producer or attempt <= 0:
+        if not producer_id or attempt <= 0:
             return None
-        previous = self._attempts.get(producer, 0)
-        if attempt <= previous:
+        seen = self._attempts.get(producer_id, 0)
+        if attempt <= seen:
             return None
-        self._attempts[producer] = attempt
-        if previous == 0:
+        self._attempts[producer_id] = attempt
+        if seen == 0:
             return None
         return StreamRecord(
-            value=Supersession(
-                producer=producer, previous_attempt=previous, attempt=attempt
-            ),
-            cursor=cursor,
             kind=RecordKind.SUPERSEDED,
-            producer=producer,
+            cursor=previous,
+            topic=topic,
+            producer_id=producer_id,
             attempt=attempt,
+            supersession=Supersession(
+                producer_id=producer_id, previous_attempt=seen, attempt=attempt
+            ),
         )

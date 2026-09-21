@@ -1,13 +1,16 @@
 """Pick the provider for a demo run from the environment.
 
-``STREAMS_PROVIDER`` names any registered provider; this tree carries
-``memory`` and ``redis``. The demo needs a Temporal server to run the
-workflow either way; ``TEMPORAL_ADDRESS`` points at it.
+``STREAMS_PROVIDER`` names a provider; this base tree carries only ``memory``,
+and each provider branch adds its own name here. The demo needs a Temporal
+server to run the workflow either way; ``TEMPORAL_ADDRESS`` points at it.
 """
 
 from __future__ import annotations
 
 import os
+
+from temporalio.streams.providers import ProviderPlugin
+from temporalio.streams.providers.memory import MemoryStreams
 
 NAME = os.environ.get("STREAMS_PROVIDER", "memory")
 
@@ -16,15 +19,18 @@ NAME = os.environ.get("STREAMS_PROVIDER", "memory")
 WORKFLOW_CACHE = int(os.environ.get("STREAMS_WORKFLOW_CACHE", "512"))
 
 
-async def open() -> tuple[str, dict]:
-    """The server to connect to and the options :func:`configure` takes."""
-    return os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"), {"provider": NAME}
+async def open() -> tuple[str, ProviderPlugin]:
+    """The server to connect to and the provider the worker and the client share."""
+    if NAME != "memory":
+        raise SystemExit(f"this tree carries no stream provider named {NAME!r}")
+    return os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"), MemoryStreams()
 
 
-async def close() -> None:
+async def close(provider: ProviderPlugin) -> None:
     """Let go of whatever :func:`open` acquired.
 
-    Nothing here: the memory provider holds no connection. A provider branch
-    that opens one closes it here, so the demo's teardown reads the same on
-    every provider.
+    The memory provider holds no connection, so this is its ``close()`` and
+    nothing more. A provider branch that opens one closes it the same way, so
+    the demo's teardown reads the same on every provider.
     """
+    await provider.close()

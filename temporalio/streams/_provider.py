@@ -1,218 +1,245 @@
-"""The provider registry: where a process names its stream provider.
+"""What a provider implements, in two halves.
 
-A provider only moves bytes. The handles, records, framing and supersession
-around it are shared, so every provider module is small: it implements
-:class:`StreamProvider` and registers a factory under a short name when it is
-imported. One :func:`configure` call decides which factory serves this
-process; :func:`worker_options` makes the same choice for a worker when
-exactly one provider is registered.
+:class:`WorkflowStreamProvider` runs on the workflow thread and must keep the
+contract's first two rules: publishes commit with the Workflow Task, and reads
+are recorded observations. Nothing it needs may do I/O. :class:`StreamProvider`
+is the half a process holds: it makes the workflow half for a worker and hands
+out :class:`StreamHandle` objects to code outside a workflow. A Python provider
+usually implements both on one class; the split is what lets a language whose
+workflow code is bundled separately name the two halves in two packages.
+
+A provider only moves ``temporal.api.stream.v1.StreamRecord`` protos. The
+handles around it convert values, synthesize supersession and mint cursors.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from datetime import timedelta
-from typing import Any, Callable, Protocol, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload
 
-from temporalio import activity
-from temporalio.streams._handles import ReadSource, WriteSink
+from temporalio.api.stream.v1 import StreamRecord as WireRecord
 from temporalio.streams._record import BEGINNING, Cursor, StreamRecord
 
+if TYPE_CHECKING:
+    from temporalio.client import Client
+
 __all__ = [
-    "Consumer",
-    "Producer",
+    "ReadSource",
+    "StreamHandle",
+    "StreamProducer",
     "StreamProvider",
-    "StreamProviderLifecycle",
-    "check_topic",
-    "close",
-    "configure",
-    "consumer",
-    "drain",
-    "instance",
-    "open_read",
-    "open_write",
-    "prepare",
-    "producer",
-    "register",
-    "registered",
-    "worker_options",
+    "WorkflowStreamProvider",
+    "WriteSink",
 ]
 
 T = TypeVar("T")
 
 
-class Producer(Protocol):
-    """Appends to a stream from outside workflow code.
+class StreamProducer(Protocol):
+    """Appends to one topic from outside workflow code.
 
-    Every append is visible as soon as the provider accepts it, and carries
-    the producer id, attempt and sequence that let a reader tell a retried
-    append from a new generation.
+    Every append is visible as soon as the store accepts it, and carries the
+    producer id, attempt and sequence that let a reader tell a retried append
+    from a new generation.
     """
 
     @property
+    def producer_id(self) -> str:
+        """Who this producer writes as."""
+        ...
+
+    @property
     def attempt(self) -> int:
-        """The generation this producer is writing."""
+        """The generation this producer is writing, or 0 when undeclared."""
         ...
 
     async def append(self, *values: Any) -> Cursor | None:
-        """Append values and return the cursor of the last one written.
+        """Append ``values`` and return the cursor of the last record as the store holds it.
 
-        The last rather than the first, so ``read(after=appended)`` yields
-        only what came later. ``None`` when nothing was written, because the
-        batch was empty or a repeat the provider dropped, and on a transport
-        that learns positions only at read time; a caller that needs to
-        position itself on such a transport asks :meth:`Consumer.latest`.
+        A repeat of an earlier append (same producer, attempt and sequence) is
+        written once and returns the position the original landed at. An
+        empty call writes nothing and returns the same value a repeat would:
+        the position of this producer's last record, or ``BEGINNING`` when it
+        has written none. ``None`` means one thing only: this provider learns
+        positions at read time, and a caller that needs one positions itself
+        with :meth:`StreamHandle.latest`.
+
+        Raises:
+            StreamProducerError: The attempt or sequence conflicts with what
+                the store holds.
         """
         ...
 
     async def finish(self) -> None:
-        """Declare this producer's output complete."""
+        """Write ``FINISH`` for this producer on this topic.
+
+        Says this producer has nothing more to send. It does not say the
+        activity behind it succeeded, and it does not end anyone's read.
+        """
         ...
 
 
-class Consumer(Protocol):
-    """Reads a stream from outside workflow code, resumably."""
+class StreamHandle(Protocol):
+    """One workflow's stream, addressed by topic, from outside workflow code.
+
+    A handle follows the workflow's execution chain unless it was opened with
+    a ``run_id``, in which case it is pinned to that run. A transport failure
+    surfaces as :class:`temporalio.service.RPCError`, never as the transport's
+    own exception type.
+    """
 
     @overload
     def read(
-        self,
-        *,
-        after: Cursor = ...,
-        topic: str | None = ...,
-        type: type[T],
+        self, *, topic: str, after: Cursor = ..., result_type: type[T]
     ) -> AsyncGenerator[StreamRecord[T], None]: ...
 
     @overload
     def read(
-        self,
-        *,
-        after: Cursor = ...,
-        topic: str | None = ...,
-        type: None = None,
+        self, *, topic: str, after: Cursor = ..., result_type: None = None
     ) -> AsyncGenerator[StreamRecord[Any], None]: ...
 
     def read(
         self,
         *,
+        topic: str,
         after: Cursor = BEGINNING,
-        topic: str | None = None,
-        type: type | None = None,
+        result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield the records after ``after`` as they arrive.
+        """Yield the records on ``topic`` after ``after`` as they arrive.
 
-        ``BEGINNING`` yields everything the stream retains. Any other cursor
-        came from a record this or another reader saw, and reading resumes
-        just past it, so a reader that stores the last cursor it handled and
-        hands it back sees every record exactly once. ``topic`` filters the
-        stream the workflow publishes; an inbound stream has no topics, and
-        naming one there raises ``ValueError``. The result is a generator so
-        a caller that stops early can ``aclose()`` it and release whatever
-        the provider parked against the store.
+        ``BEGINNING`` yields everything the topic retains. Any other cursor
+        came from a record a reader saw, and reading resumes just past it, so
+        a reader that stores the last cursor it handled and hands it back
+        sees every record exactly once. The read ends when the owning
+        execution, or its chain, is closed and every retained record after
+        ``after`` has been delivered; until then it waits. The result is a
+        generator, so a caller that stops early can ``aclose()`` it and
+        release whatever the provider parked against the store.
+
+        Raises:
+            StreamCursorError: ``after`` came from another provider or names
+                a record no longer retained. Raised by this call, not by the
+                first iteration.
+            StreamNotFoundError: The workflow or topic does not exist or is
+                past retention.
         """
         ...
 
-    async def latest(self, *, topic: str | None = None) -> Cursor:
-        """The cursor of the newest record, or ``BEGINNING`` when there is none.
+    async def latest(self, *, topic: str) -> Cursor:
+        """The cursor of the newest record on ``topic``, or ``BEGINNING`` when empty.
 
         For a reader that wants to follow from now: ``read(after=latest())``
         yields only what is published after this call returned, which is how
         a client that is about to send a message positions itself before
-        sending, without the workflow having to report a position. ``topic``
-        is for the provider that keeps each topic in its own store.
+        sending, without the workflow having to report a position.
+        """
+        ...
+
+    def producer(
+        self, *, topic: str, producer_id: str = "", attempt: int = 0
+    ) -> StreamProducer:
+        """A producer on ``topic``.
+
+        Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
+        activity's own id and attempt are the right answer, and they are what
+        let a reader tell a retry from a new generation. Outside one,
+        ``producer_id`` is required and an empty one raises ``ValueError``.
+        """
+        ...
+
+
+class ReadSource(Protocol):
+    """One subscription, as a provider supplies it to the workflow thread."""
+
+    async def next_batch(self) -> list[tuple[Cursor, WireRecord]]:
+        """The next records with their positions, waiting until there is at least one.
+
+        A batch rather than a record because delivery boundaries are what a
+        provider actually records, and flattening them here keeps that out of
+        the contract. A record that cannot be parsed into a ``StreamRecord``
+        proto is the provider's to skip.
+
+        Raises:
+            StopAsyncIteration: This subscription has ended.
+        """
+        ...
+
+    def close(self) -> None:
+        """End the subscription. Idempotent."""
+        ...
+
+
+class WriteSink(Protocol):
+    """One topic of the running workflow's stream, as a provider binds it."""
+
+    def publish(self, record: WireRecord) -> None:
+        """Take one record into this Workflow Task's output.
+
+        Synchronous: there is nothing to wait for inside a task, because the
+        task is the visibility boundary. The provider commits what it buffered
+        when the task completes and drops it when the task fails. A record
+        the provider cannot stage raises :class:`temporalio.streams.StreamError`
+        and fails the task, loudly.
+        """
+        ...
+
+
+class WorkflowStreamProvider(Protocol):
+    """The half of a provider that runs on the workflow thread.
+
+    Imports nothing that does I/O. The worker creates one per workflow
+    instance through :meth:`StreamProvider.workflow_provider`, so state kept
+    here dies with the instance the way handlers do.
+    """
+
+    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+        """Subscribe the running workflow to ``topic`` of its own stream.
+
+        Raises:
+            StreamCursorError: ``after`` was minted by another provider.
+        """
+        ...
+
+    def open_writer(self, topic: str) -> WriteSink:
+        """Bind ``topic`` of the running workflow's stream for publishing."""
+        ...
+
+    def on_workflow_start(self) -> None:
+        """Called before the workflow function runs.
+
+        A provider that serves outside readers through handlers on the
+        workflow registers them here, before the first task completes.
+        """
+        ...
+
+    async def on_workflow_finish(self) -> None:
+        """Called after the workflow function returns, raises or continues as new.
+
+        A provider that parked an outside reader against the run lets go
+        here, so the workflow can close.
         """
         ...
 
 
 class StreamProvider(Protocol):
-    """What a provider module implements.
+    """What a store ships. Also a :class:`temporalio.worker.Plugin` when it serves workers.
 
-    The workflow-side pair (:meth:`open_read`, :meth:`open_write`) runs inside
-    workflow code and must keep the contract's first two rules: publishes
-    commit with the workflow task, and reads are recorded observations. The
-    outside pair (:meth:`producer`, :meth:`consumer`) runs anywhere and moves
-    framed bytes. A transport-only provider may serve just the outside pair
-    and raise on the workflow side, naming the provider a worker should use.
-
-    A provider whose transport parks something against the running workflow
-    also implements :class:`StreamProviderLifecycle`.
+    Construct one, pass it to ``Worker(plugins=[provider])`` and
+    ``Replayer(plugins=[provider])``, and open handles from it anywhere else.
+    Nothing is global: two workers in one process may hold two providers.
     """
 
-    name: str
-
-    def configure(self, **options: Any) -> None:
-        """Accept this provider's process-level options."""
+    def workflow_provider(self) -> WorkflowStreamProvider:
+        """The half that serves one workflow instance on its thread."""
         ...
 
-    def worker_options(self) -> dict[str, Any]:
-        """What a ``Worker`` or ``Replayer`` needs to serve this provider."""
-        ...
+    def get_stream_handle(
+        self, client: Client, workflow_id: str, *, run_id: str | None = None
+    ) -> StreamHandle:
+        """A handle on ``workflow_id``'s stream.
 
-    def open_read(
-        self,
-        stream: str,
-        *,
-        after: Cursor = BEGINNING,
-        idle_timeout: timedelta | None = None,
-    ) -> ReadSource:
-        """Subscribe the running workflow to its inbound stream ``stream``."""
-        ...
-
-    def open_write(self, topic: str) -> WriteSink:
-        """Bind ``topic`` on the stream the running workflow owns."""
-        ...
-
-    async def producer(
-        self,
-        client: Any,
-        *,
-        workflow_id: str,
-        stream: str = "",
-        topic: str = "",
-        producer_id: str = "",
-        attempt: int = 0,
-    ) -> Producer:
-        """Open a producer that appends on ``workflow_id``'s account.
-
-        ``stream`` names one of the workflow's inbound streams. With no
-        ``stream``, ``topic`` names a topic on the stream the workflow itself
-        publishes, which is how an activity puts its live output next to the
-        workflow's own records for the same outside reader. ``producer_id``
-        is never empty here: the package resolved it, from the activity
-        context when the caller left it unset.
-        """
-        ...
-
-    async def consumer(
-        self, client: Any, *, workflow_id: str, stream: str = ""
-    ) -> Consumer:
-        """Open a reader on ``workflow_id``'s own stream, or its inbound ``stream``."""
-        ...
-
-
-class StreamProviderLifecycle(Protocol):
-    """The hooks a provider adds when it needs the workflow's own lifetime.
-
-    Separate from :class:`StreamProvider` because most transports need none
-    of them, and a provider is not asked to carry empty methods to say so.
-    :func:`prepare`, :func:`drain` and :func:`close` each call the hook when
-    the provider defines it.
-    """
-
-    def prepare(self) -> None:
-        """Install whatever this provider needs before the workflow runs.
-
-        A provider that serves outside readers through handlers on the
-        workflow itself has to register them before the first task completes,
-        or a reader that arrives early finds nothing to talk to.
-        """
-        ...
-
-    def drain(self) -> None:
-        """Release anything this provider parked on the workflow's behalf.
-
-        A provider that parks an outside reader against the running workflow,
-        as the Workflow Streams transport does with its long-poll update, has
-        to let go before the workflow can return.
+        Without ``run_id`` it follows the execution chain, so a consumer keeps
+        reading across continue-as-new; with one it is pinned to that run.
         """
         ...
 
@@ -220,199 +247,7 @@ class StreamProviderLifecycle(Protocol):
         """Release what this provider holds for the process.
 
         A provider that keeps a connection pool or an HTTP session open needs
-        a moment where the process says it is done; this is it.
+        a moment where the process says it is done; this is it. A provider
+        that holds nothing returns at once.
         """
         ...
-
-
-_factories: dict[str, Callable[[], StreamProvider]] = {}
-_active: StreamProvider | None = None
-
-
-def register(name: str, factory: Callable[[], StreamProvider]) -> None:
-    """Make ``factory`` selectable as ``configure(provider=name)``."""
-    _factories[name] = factory
-
-
-def registered() -> list[str]:
-    """The provider names this process can configure."""
-    return sorted(_factories)
-
-
-def _make(name: str | None) -> StreamProvider:
-    if name is None:
-        if len(_factories) == 1:
-            name = next(iter(_factories))
-        else:
-            raise RuntimeError(
-                f"name a provider: configure(provider=...) with one of {registered()}"
-            )
-    factory = _factories.get(name)
-    if factory is None:
-        raise RuntimeError(
-            f"no stream provider {name!r} is registered; available: {registered()}"
-        )
-    return factory()
-
-
-def configure(provider: str | None = None, **options: Any) -> None:
-    """Name the provider for this process and hand it its options.
-
-    ``provider`` may be omitted when exactly one provider is registered.
-    """
-    global _active
-    _active = instance(provider, **options)
-
-
-def instance(provider: str | None = None, **options: Any) -> StreamProvider:
-    """A configured provider that is not installed as the process default.
-
-    For code that serves one provider while the process is configured with
-    another, such as a Nexus stream handler delegating to its store.
-    """
-    chosen = _make(provider)
-    chosen.configure(**options)
-    return chosen
-
-
-def _current() -> StreamProvider:
-    if _active is None:
-        # Building a provider is process setup. Doing it on the first
-        # workflow's thread would race a second workflow thread for the
-        # global and hide the choice inside workflow code.
-        raise RuntimeError(
-            "no stream provider is configured; call streams.configure() or "
-            "streams.worker_options() before opening a stream"
-        )
-    return _active
-
-
-def worker_options() -> dict[str, Any]:
-    """What a ``Worker`` or ``Replayer`` needs to serve this provider.
-
-    Every worker calls this, so it is where the default is resolved when
-    :func:`configure` was not called and exactly one provider is registered.
-    """
-    if _active is None:
-        configure()
-    return _current().worker_options()
-
-
-def open_read(
-    stream: str,
-    *,
-    after: Cursor = BEGINNING,
-    idle_timeout: timedelta | None = None,
-) -> ReadSource:
-    """Subscribe the running workflow to its inbound stream ``stream``."""
-    return _current().open_read(stream, after=after, idle_timeout=idle_timeout)
-
-
-def open_write(topic: str) -> WriteSink:
-    """Bind ``topic`` on the stream the running workflow owns."""
-    return _current().open_write(topic)
-
-
-def prepare() -> None:
-    """Let the provider install what it needs, before the workflow runs.
-
-    Call it from the workflow's constructor. It is a no-op on providers that
-    need nothing, so workflow code can call it unconditionally and stay
-    portable.
-    """
-    provider = _current()
-    install = getattr(provider, "prepare", None)
-    if install is not None:
-        install()
-
-
-def drain() -> None:
-    """Release anything the provider parked on this workflow's behalf.
-
-    Call it before a workflow that read a stream returns. It is a no-op on
-    providers that park nothing, so workflow code can call it unconditionally
-    and stay portable.
-    """
-    provider = _current()
-    release = getattr(provider, "drain", None)
-    if release is not None:
-        release()
-
-
-async def close() -> None:
-    """Release what the provider holds for this process.
-
-    Await it when the process is done with streams. It is a no-op on
-    providers that hold nothing, and on a process that never configured one,
-    so a shutdown path can call it unconditionally.
-    """
-    if _active is None:
-        return
-    release = getattr(_active, "close", None)
-    if release is not None:
-        await release()
-
-
-def check_topic(stream: str, topic: str | None) -> None:
-    """Reject a topic filter on an inbound stream.
-
-    An inbound record carries no topic; the stream's name is its whole
-    address, so a filter there could only ever match nothing. Every provider
-    calls this at the top of its ``read`` so the answer is the same on all
-    of them.
-    """
-    if stream and topic is not None:
-        raise ValueError(
-            f"inbound stream {stream!r} has no topics; topic= applies to the "
-            "stream the workflow publishes"
-        )
-
-
-async def producer(
-    client: Any,
-    *,
-    workflow_id: str,
-    stream: str = "",
-    topic: str = "",
-    producer_id: str = "",
-    attempt: int = 0,
-) -> Producer:
-    """Open a producer that appends on ``workflow_id``'s account.
-
-    Name either an inbound ``stream`` of the workflow, or a ``topic`` on the
-    stream the workflow publishes. Inside an activity, leave ``producer_id``
-    and ``attempt`` unset: the activity's own id and attempt are the right
-    answer, and they are what let a reader tell a retry from a new generation.
-    """
-    if bool(stream) == bool(topic):
-        raise ValueError(
-            "name exactly one of stream (an inbound stream of the workflow) or "
-            "topic (a topic on the stream the workflow publishes)"
-        )
-    if not producer_id:
-        if not activity.in_activity():
-            raise ValueError(
-                "producer_id is required outside an activity; inside one it "
-                "defaults to the activity's id and attempt"
-            )
-        info = activity.info()
-        producer_id = info.activity_id
-        attempt = attempt or info.attempt
-    return await _current().producer(
-        client,
-        workflow_id=workflow_id,
-        stream=stream,
-        topic=topic,
-        producer_id=producer_id,
-        attempt=attempt,
-    )
-
-
-async def consumer(client: Any, *, workflow_id: str, stream: str = "") -> Consumer:
-    """Open a reader on ``workflow_id``'s own stream, or its inbound ``stream``.
-
-    With no ``stream`` the reader follows what the workflow publishes, topic
-    by topic. With one, it follows the inbound stream of that name, which is
-    how a process watches what producers hand the workflow.
-    """
-    return await _current().consumer(client, workflow_id=workflow_id, stream=stream)

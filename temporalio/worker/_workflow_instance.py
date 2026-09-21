@@ -59,7 +59,9 @@ import temporalio.common
 import temporalio.converter
 import temporalio.exceptions
 import temporalio.nexus.system
+import temporalio.streams
 import temporalio.workflow
+import temporalio.workflow._streams
 from temporalio.converter import StorageDriverStoreContext, StorageDriverWorkflowInfo
 from temporalio.converter._payload_converter import (
     _TemporalTransferTypePayloadConverter,
@@ -206,6 +208,7 @@ class WorkflowInstanceDetails:
     """
     external_streams_configured: bool = False
     """Whether Workflow code may use the runtime for new subscriptions."""
+    stream_provider: temporalio.streams.StreamProvider | None = None
 
 
 class WorkflowInstance(ABC):
@@ -426,6 +429,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             det.worker_level_failure_exception_types
         )
         self._patch_activation_callback = det.patch_activation_callback
+        self._stream_provider = det.stream_provider
+        self._streams: temporalio.workflow._streams._WorkflowStreams | None = None
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
@@ -2304,6 +2309,20 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 summary=summary,
             )
         )
+
+    def workflow_streams(self) -> temporalio.workflow._streams._WorkflowStreams:
+        if self._streams is None:
+            if self._stream_provider is None:
+                raise RuntimeError(
+                    "no stream provider is configured on this worker; pass one with "
+                    "Worker(plugins=[provider]) or stream_provider="
+                )
+            # The workflow half is made per instance, so whatever it keeps
+            # dies with the instance the way handlers do.
+            self._streams = temporalio.workflow._streams._WorkflowStreams(
+                self._stream_provider.workflow_provider()
+            )
+        return self._streams
 
     def workflow_time_ns(self) -> int:
         return self._time_ns

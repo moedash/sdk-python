@@ -1,5 +1,5 @@
 from .message_pb2 import (
-    AddStreamMessagesCommandAttributes,
+    AppendStreamRecordsCommandAttributes,
     CancelTimerCommandAttributes,
     CancelWorkflowExecutionCommandAttributes,
     Command,
@@ -22,7 +22,7 @@ from .message_pb2 import (
 )
 
 __all__ = [
-    "AddStreamMessagesCommandAttributes",
+    "AppendStreamRecordsCommandAttributes",
     "CancelTimerCommandAttributes",
     "CancelWorkflowExecutionCommandAttributes",
     "Command",

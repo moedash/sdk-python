@@ -50,6 +50,19 @@ to include examples, links to docs, or any other relevant information.
   workflow, and `temporalio.streams.providers.native` puts it behind the shared
   stream interface. Requires a server that serves the stream service.
   reference provider the conformance tests run against.
+  can read, decide on, and write. `workflow.stream_reader()` and
+  `workflow.stream_writer()` are the workflow-side entry points, a provider is a
+  worker plugin passed as `Worker(plugins=[provider])`, and
+  `provider.get_stream_handle()` reads and appends from outside. The record on
+  the wire is `temporal.api.stream.v1.StreamRecord` on every provider.
+  `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
+  reference provider the conformance tests run against.
+- **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
+  serves the stream interface over the shipped Workflow Streams transport as a
+  worker plugin, so a workflow reads and publishes through
+  `temporalio.contrib.workflow_streams` without naming it. Records are the
+  `StreamRecord` proto inside the shipped item payload, and a handle without a
+  run id follows continue-as-new run by run.
 - **Experimental**: `temporalio.streams.providers.workflow_streams` serves the
   stream interface over the shipped Workflow Streams transport, so a workflow
   reads and publishes through `temporalio.contrib.workflow_streams` without
@@ -68,6 +81,15 @@ to include examples, links to docs, or any other relevant information.
   `temporalio.contrib.server_streams` reach the same stream from outside a
   workflow, and `temporalio.streams.providers.native` puts it behind the shared
   stream interface. Requires a server that serves the stream service.
+- **Experimental**: `temporalio.streams.providers.nexus.NexusStreams` puts one
+  Nexus endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store, and
+  `TemporalStreamsHandler` serves that endpoint by fronting the provider's own
+  handles. Its contract is defined in `temporal_streams.nexusrpc.yaml` and the
+  bindings are generated from it; a record crosses as the serialized
+  `StreamRecord` proto. Configure the front with `data_converter=` to run a
+  payload codec on the caller side, so records are encoded before they leave
+  the process.
 
 ### Changed
 

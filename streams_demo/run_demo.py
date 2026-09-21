@@ -7,7 +7,7 @@ Three cases, the same on every provider:
   the run as it allows is rebuilt rather than remembered;
 - a producer whose second attempt supersedes its first, which the reader has
   to report and the workflow has to act on;
-- an outside consumer reading what the workflow published.
+- an outside reader following what the workflow published.
 
 Byte-identical in every tree. ``provider_setup`` is what differs, and it is
 the only import here that names a provider.
@@ -23,24 +23,23 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from temporalio import streams
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
+from temporalio.streams import StreamHandle
 from temporalio.worker import Worker
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import provider_setup  # noqa: E402
-from agent_loop import INPUTS, AgentLoop, record_decision  # noqa: E402
+from agent_loop import DECISIONS, INPUTS, AgentLoop, record_decision  # noqa: E402
 
 DECISION_LIMIT = 8
 EXPECTED_OUTPUT = 6
 
 
-async def collect_output(client: Client, workflow_id: str, want: int) -> list[dict]:
+async def collect_output(stream: StreamHandle, want: int) -> list[dict]:
     """Read ``want`` decisions off the workflow's stream from outside it."""
-    reader = await streams.consumer(client, workflow_id=workflow_id)
     seen: list[dict] = []
-    async for record in reader.read(type=dict, topic="decisions"):
+    async for record in stream.read(topic=DECISIONS, result_type=dict):
         seen.append({"kind": record.kind.name, "value": record.value})
         if len(seen) >= want:
             break
@@ -51,9 +50,8 @@ async def main() -> int:
     """Run the demo once and write what happened next to this file."""
     out = Path(__file__).resolve().parent / f"results-{provider_setup.NAME}"
     out.mkdir(exist_ok=True)
-    target, options = await provider_setup.open()
+    target, provider = await provider_setup.open()
     client = await Client.connect(target, namespace="default")
-    streams.configure(**options)
 
     uid = f"ai198-contract-{provider_setup.NAME}-" + uuid.uuid4().hex
     record: dict[str, Any] = {
@@ -69,24 +67,21 @@ async def main() -> int:
         workflows=[AgentLoop],
         activities=[record_decision],
         max_cached_workflows=provider_setup.WORKFLOW_CACHE,
-        **streams.worker_options(),
+        plugins=[provider],
     ):
         handle = await client.start_workflow(
             AgentLoop.run, DECISION_LIMIT, id=uid, task_queue=uid
         )
-        output = asyncio.create_task(collect_output(client, uid, EXPECTED_OUTPUT))
+        stream = provider.get_stream_handle(client, uid)
+        output = asyncio.create_task(collect_output(stream, EXPECTED_OUTPUT))
 
         # The first attempt writes two records and then stops, as a failed
         # activity would. The second writes different inputs under the same
         # logical producer, which is what the reader has to report.
-        first = await streams.producer(
-            client, workflow_id=uid, stream=INPUTS, producer_id="model", attempt=1
-        )
+        first = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
         await first.append({"id": "r1", "value": 1}, {"id": "r2", "value": 2})
         await asyncio.sleep(0.5)
-        second = await streams.producer(
-            client, workflow_id=uid, stream=INPUTS, producer_id="model", attempt=2
-        )
+        second = stream.producer(topic=INPUTS, producer_id="model", attempt=2)
         await second.append({"id": "r3", "value": 3}, {"id": "r4", "value": 4})
         await second.finish()
 
@@ -146,7 +141,7 @@ async def main() -> int:
     history = await handle.fetch_history()
     record["history_events"] = len(history.events)
     (out / "history.json").write_text(history.to_json())
-    await provider_setup.close()
+    await provider_setup.close(provider)
     (out / "results.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record, indent=2))
     return 0 if record["outcome"] == "completed" else 1

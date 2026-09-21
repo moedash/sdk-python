@@ -1,17 +1,25 @@
 """The in-process reference provider.
 
 Exists so the conformance suite can exercise the whole surface without a
-store, and to document in one file what a provider owes. Two honest limits,
-both stated so nobody mistakes this for evidence:
+store, and to document in one file what a provider owes. Its limits, stated
+so nobody mistakes it for evidence:
 
 - It is not replay-safe. Workflow-side state lives in plain process memory,
   so run it with a warm workflow cache and do not use it to demonstrate
   recovery.
 - A workflow's publish becomes visible at ``publish`` time rather than at
-  task acceptance, so it only approximates rule 1 of the contract.
+  task acceptance, and a failed task's records stay, so it only approximates
+  rule 1 of the contract.
+- Topics are keyed by workflow id rather than by run, so a successor run's
+  reader from ``BEGINNING`` sees the chain's records. A ``run_id`` on a
+  handle only decides which run's close ends a read.
+- It learns that a workflow closed by describing it, so a handle opened
+  without a client reads until the caller closes it.
 
-The outside surface (producer, consumer, dedupe, supersession, cursors) is
-faithful, which is what the conformance tests lean on.
+The outside surface (producer identity, retry deduplication, positions,
+supersession, cursors) is faithful, which is what the conformance tests lean
+on. One list per topic; a topic is written by the workflow and by outside
+producers alike and read from either side.
 """
 
 from __future__ import annotations
@@ -22,16 +30,29 @@ from collections.abc import AsyncGenerator
 from datetime import timedelta
 from typing import Any
 
+from google.protobuf.message import DecodeError
+
 import temporalio.converter
 from temporalio import workflow
-from temporalio.api.common.v1 import Payload
-from temporalio.streams import _frame, _provider
-from temporalio.streams._handles import ReadSource, WriteSink
-from temporalio.streams._ids import inbound_stream_id
-from temporalio.streams._policy import AttemptTracker
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams._errors import StreamCursorError
+from temporalio.streams._ids import topic_key
+from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._wire import (
+    RecordDecoder,
+    WireRecord,
+    cursor_position,
+    mint_cursor,
+    producer_identity,
+    to_wire,
+)
+from temporalio.streams.providers import ProviderPlugin
 
-_DEFAULT_POLL = timedelta(milliseconds=100)
+__all__ = ["MemoryProducer", "MemoryStreamHandle", "MemoryStreams"]
+
+_PROVIDER = "memory"
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +62,15 @@ def _wake(future: asyncio.Future[None]) -> None:
         future.set_result(None)
 
 
-class _MemoryStream:
+class _Topic:
+    """One topic's records, and the waiters parked on its tail."""
+
     def __init__(self) -> None:
-        self.frames: list[bytes] = []
+        self.records: list[bytes] = []
         # Dedupe identity is (producer#attempt, first sequence of the append),
-        # the same pair the storage providers use.
-        self.seen: dict[tuple[str, int], int] = {}
+        # the same pair the storage providers use, mapped to where the batch
+        # landed so a repeat can answer with the original position.
+        self.seen: dict[tuple[str, int], tuple[int, int]] = {}
         # Each waiter is parked with the loop it belongs to. A workflow's
         # publish runs on the workflow thread, and waking a foreign loop's
         # future from there needs call_soon_threadsafe or the loop stays
@@ -54,47 +78,50 @@ class _MemoryStream:
         self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
 
     def append(
-        self, frames: list[bytes], *, producer_id: str, sequence: int
-    ) -> int | None:
-        """Store ``frames`` and return the first one's offset, or ``None`` for a repeat."""
-        key = (producer_id, sequence)
-        if key in self.seen:
-            return None
-        offset = len(self.frames)
-        self.frames.extend(frames)
-        self.seen[key] = offset
+        self,
+        wires: list[WireRecord],
+        *,
+        writer: str | None = None,
+        sequence: int = 0,
+    ) -> tuple[int, int]:
+        """Store ``wires`` and return where they landed as ``(first offset, count)``.
+
+        With a ``writer``, a repeat of ``(writer, sequence)`` stores nothing
+        and returns where the original landed.
+        """
+        key = (writer or "", sequence)
+        if writer is not None and key in self.seen:
+            return self.seen[key]
+        first = len(self.records)
+        self.records.extend(wire.SerializeToString() for wire in wires)
+        if writer is not None:
+            self.seen[key] = (first, len(wires))
         waiters, self._waiters = self._waiters, []
         for loop, future in waiters:
             loop.call_soon_threadsafe(_wake, future)
-        return offset
+        return first, len(wires)
 
-    async def wait_past(self, offset: int) -> None:
-        while len(self.frames) <= offset:
-            loop = asyncio.get_running_loop()
-            future: asyncio.Future[None] = loop.create_future()
-            self._waiters.append((loop, future))
-            await future
-
-
-_streams: dict[str, _MemoryStream] = {}
-
-
-def _stream(stream_id: str) -> _MemoryStream:
-    found = _streams.get(stream_id)
-    if found is None:
-        found = _streams[stream_id] = _MemoryStream()
-    return found
+    async def wait_past(self, offset: int, timeout: float | None) -> None:
+        """Wait until a record exists at ``offset``, or ``timeout`` passes."""
+        if len(self.records) > offset:
+            return
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        self._waiters.append((loop, future))
+        try:
+            await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            self._waiters = [w for w in self._waiters if w[1] is not future]
 
 
-def reset() -> None:
-    """Drop every stream. For tests."""
-    _streams.clear()
-
-
-def _converter(client: Any) -> Any:
-    if client is None:
-        return temporalio.converter.DataConverter.default.payload_converter
-    return client.data_converter.payload_converter
+def _parse(cursor: Cursor, raw: bytes, warn: Any) -> WireRecord | None:
+    try:
+        return WireRecord.FromString(raw)
+    except DecodeError as error:
+        # Same answer as an undecodable body: skip and say so, so one bad
+        # record cannot pin a reader.
+        warn("skipping stream record at %s: %s", cursor, error)
+        return None
 
 
 class _MemReadSource:
@@ -104,22 +131,26 @@ class _MemReadSource:
     having no delivery path, and it is why this provider is for tests.
     """
 
-    def __init__(self, store: _MemoryStream, start: int, poll: timedelta) -> None:
+    def __init__(self, store: _Topic, start: int, poll: timedelta) -> None:
         self._store = store
-        self._cursor = start
+        self._offset = start
         self._poll = poll
         self._closed = False
 
-    async def next_batch(self) -> list[tuple[Cursor, bytes]]:
+    async def next_batch(self) -> list[tuple[Cursor, WireRecord]]:
         while not self._closed:
-            frames = self._store.frames
-            if len(frames) > self._cursor:
-                batch = [
-                    (Cursor(str(offset)), frames[offset])
-                    for offset in range(self._cursor, len(frames))
-                ]
-                self._cursor = len(frames)
-                return batch
+            records = self._store.records
+            if len(records) > self._offset:
+                batch: list[tuple[Cursor, WireRecord]] = []
+                for offset in range(self._offset, len(records)):
+                    cursor = mint_cursor(_PROVIDER, str(offset))
+                    wire = _parse(cursor, records[offset], workflow.logger.warning)
+                    if wire is not None:
+                        batch.append((cursor, wire))
+                self._offset = len(records)
+                if batch:
+                    return batch
+                continue
             await workflow.sleep(self._poll)
         raise StopAsyncIteration
 
@@ -128,18 +159,34 @@ class _MemReadSource:
 
 
 class _MemWriteSink:
-    def __init__(self, store: _MemoryStream, topic: str) -> None:
+    def __init__(self, store: _Topic) -> None:
         self._store = store
-        self._topic = topic
-        self._sequence = 0
 
-    async def publish(self, frame: bytes) -> None:
-        self._store.append(
-            [frame],
-            producer_id=f"__workflow__:{self._topic}",
-            sequence=self._sequence,
-        )
-        self._sequence += 1
+    def publish(self, record: WireRecord) -> None:
+        # Visible at once rather than at task acceptance: the documented gap
+        # between this provider and rule 1.
+        self._store.append([record])
+
+
+class _MemoryWorkflowProvider:
+    """The workflow half. Nothing to install and nothing to release."""
+
+    def __init__(self, streams: MemoryStreams) -> None:
+        self._streams = streams
+
+    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+        start = self._streams._offset_after(after)
+        store = self._streams._topic(workflow.info().workflow_id, topic)
+        return _MemReadSource(store, start, self._streams._poll)
+
+    def open_writer(self, topic: str) -> WriteSink:
+        return _MemWriteSink(self._streams._topic(workflow.info().workflow_id, topic))
+
+    def on_workflow_start(self) -> None:
+        pass
+
+    async def on_workflow_finish(self) -> None:
+        pass
 
 
 class MemoryProducer:
@@ -147,19 +194,25 @@ class MemoryProducer:
 
     def __init__(
         self,
-        store: _MemoryStream,
-        converter: Any,
+        store: _Topic,
+        converter: temporalio.converter.PayloadConverter,
         topic: str,
         producer_id: str,
         attempt: int,
     ) -> None:
-        """Bind this producer to ``topic`` on ``store``."""
+        """Bind this producer to ``topic``'s ``store``."""
         self._store = store
         self._converter = converter
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
         self._sequence = 0
+        self._last = BEGINNING
+
+    @property
+    def producer_id(self) -> str:
+        """Who this producer writes as."""
+        return self._producer_id
 
     @property
     def attempt(self) -> int:
@@ -167,192 +220,224 @@ class MemoryProducer:
         return self._attempt
 
     @property
-    def _provider_id(self) -> str:
+    def _writer(self) -> str:
         return (
             f"{self._producer_id}#{self._attempt}"
             if self._attempt
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor | None:
-        """Append ``values`` and return the last one's cursor, or ``None`` if nothing landed."""
+    async def append(self, *values: Any) -> Cursor:
+        """Append ``values`` and return the cursor of the last record as stored.
+
+        A repeat returns where the original landed; an empty call returns
+        the position of this producer's last record.
+        """
         if not values:
-            return None
-        frames = []
-        for value in values:
-            frames.append(
-                _frame.encode(
+            return self._last
+        return self._write(
+            [
+                to_wire(
+                    self._converter,
                     topic=self._topic,
                     kind=RecordKind.DATA,
-                    producer=self._producer_id,
+                    value=value,
+                    producer_id=self._producer_id,
                     attempt=self._attempt,
-                    sequence=self._sequence,
-                    body=self._encode(value),
+                    sequence=self._sequence + index,
                 )
-            )
-            self._sequence += 1
-        offset = self._store.append(
-            frames,
-            producer_id=self._provider_id,
-            sequence=self._sequence - len(frames),
+                for index, value in enumerate(values)
+            ]
         )
-        if offset is None:
-            return None
-        return Cursor(str(offset + len(frames) - 1))
 
     async def finish(self) -> None:
-        """Mark this producer done, so a reader stops waiting on it."""
-        frame = _frame.encode(
-            topic=self._topic,
-            kind=RecordKind.FINISH,
-            producer=self._producer_id,
-            attempt=self._attempt,
-            sequence=self._sequence,
-            body=b"",
+        """Write ``FINISH`` for this producer on this topic."""
+        self._write(
+            [
+                to_wire(
+                    self._converter,
+                    topic=self._topic,
+                    kind=RecordKind.FINISH,
+                    producer_id=self._producer_id,
+                    attempt=self._attempt,
+                    sequence=self._sequence,
+                )
+            ]
         )
-        self._sequence += 1
-        self._store.append(
-            [frame], producer_id=self._provider_id, sequence=self._sequence - 1
+
+    def _write(self, wires: list[WireRecord]) -> Cursor:
+        first, count = self._store.append(
+            wires, writer=self._writer, sequence=self._sequence
+        )
+        self._sequence += len(wires)
+        self._last = mint_cursor(_PROVIDER, str(first + count - 1))
+        return self._last
+
+
+class MemoryStreamHandle:
+    """One workflow's stream from outside, with the shared reader rules."""
+
+    def __init__(
+        self,
+        streams: MemoryStreams,
+        client: Client | None,
+        workflow_id: str,
+        run_id: str | None,
+    ) -> None:
+        """Address ``workflow_id``'s topics in ``streams``."""
+        self._streams = streams
+        self._client = client
+        self._workflow_id = workflow_id
+        self._run_id = run_id
+        self._converter = (
+            client.data_converter.payload_converter
+            if client is not None
+            else temporalio.converter.DataConverter.default.payload_converter
         )
 
-    def _encode(self, value: Any) -> bytes:
-        payload = (
-            value
-            if isinstance(value, Payload)
-            else self._converter.to_payloads([value])[0]
-        )
-        return payload.SerializeToString()
-
-
-class MemoryConsumer:
-    """The outside reader, with the shared supersession rule."""
-
-    def __init__(self, store: _MemoryStream, converter: Any, stream: str) -> None:
-        """Read whatever ``store`` holds, now and as it grows."""
-        self._store = store
-        self._converter = converter
-        self._stream = stream
-
-    async def read(
+    def read(
         self,
         *,
+        topic: str,
         after: Cursor = BEGINNING,
-        topic: str | None = None,
-        type: type | None = None,
+        result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records after ``after``, waiting for ones not written yet."""
-        _provider.check_topic(self._stream, topic)
-        attempts = AttemptTracker()
-        offset = int(after.token) + 1 if after.token else 0
+        """Yield records on ``topic`` after ``after`` until the workflow closes."""
+        store = self._streams._topic(self._workflow_id, topic)
+        # Parsed here so a foreign cursor fails this call, not the first
+        # iteration of the generator.
+        start = self._streams._offset_after(after)
+        return self._read(store, start, after, result_type)
+
+    async def _read(
+        self,
+        store: _Topic,
+        offset: int,
+        after: Cursor,
+        result_type: type | None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
+        closed = False
         while True:
-            await self._store.wait_past(offset)
-            frames = self._store.frames
-            while offset < len(frames):
-                cursor = Cursor(str(offset))
-                frame = frames[offset]
+            records = store.records
+            while offset < len(records):
+                cursor = mint_cursor(_PROVIDER, str(offset))
+                wire = _parse(cursor, records[offset], logger.warning)
                 offset += 1
-                try:
-                    kind, frame_topic, source, attempt, sequence, body = _frame.decode(
-                        frame
-                    )
-                except ValueError as error:
-                    # Same answer as the workflow-side reader: skip and say so.
-                    logger.warning("skipping stream record at %s: %s", cursor, error)
+                if wire is None:
                     continue
-                if topic is not None and frame_topic != topic:
-                    continue
-                superseded = attempts.note(source, attempt, cursor)
-                if superseded is not None:
-                    yield superseded
-                yield StreamRecord(
-                    value=self._decode(body, type) if kind is RecordKind.DATA else None,
-                    cursor=cursor,
-                    kind=kind,
-                    topic=frame_topic,
-                    producer=source,
-                    attempt=attempt,
-                    sequence=sequence,
+                for record in decoder.decode(cursor, wire):
+                    yield record
+            if closed:
+                return
+            # One more pass after learning the workflow closed, so a record
+            # that landed between the scan and the describe is not lost.
+            closed = await self._closed()
+            if not closed:
+                await store.wait_past(
+                    offset,
+                    None
+                    if self._client is None
+                    else self._streams._poll.total_seconds(),
                 )
 
-    async def latest(self, *, topic: str | None = None) -> Cursor:
-        """The cursor of the last record written, for following from now."""
-        del topic  # one store per stream, so the position is topic-independent
-        count = len(self._store.frames)
-        return Cursor(str(count - 1)) if count else BEGINNING
-
-    def _decode(self, body: bytes, as_type: type | None) -> Any:
-        payload = Payload()
-        payload.ParseFromString(body)
-        if as_type is None:
-            return self._converter.from_payloads([payload])[0]
-        return self._converter.from_payloads([payload], [as_type])[0]
-
-
-class _MemoryProvider:
-    name = "memory"
-
-    def __init__(self) -> None:
-        self._poll = _DEFAULT_POLL
-
-    def configure(self, **options: Any) -> None:
-        poll = options.pop("poll_interval", None)
-        if poll is not None:
-            self._poll = poll
-        if options:
-            raise TypeError(
-                f"the memory provider takes only poll_interval, got {sorted(options)}"
-            )
-
-    def worker_options(self) -> dict[str, Any]:
-        return {}
-
-    def open_read(
-        self,
-        stream: str,
-        *,
-        after: Cursor = BEGINNING,
-        idle_timeout: timedelta | None = None,
-    ) -> ReadSource:
-        # Ignored: this provider never releases the worker, it polls. Reading
-        # idle_timeout as the poll period would give the parameter a second
-        # meaning that a port copying the reference would copy too.
-        del idle_timeout
-        store = _stream(inbound_stream_id(workflow.info().workflow_id, stream))
-        return _MemReadSource(
-            store, int(after.token) + 1 if after.token else 0, self._poll
+    async def _closed(self) -> bool:
+        if self._client is None:
+            return False
+        handle = self._client.get_workflow_handle(
+            self._workflow_id, run_id=self._run_id
+        )
+        try:
+            description = await handle.describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                # A producer may write before the workflow exists; there is
+                # nothing to follow yet, so keep waiting.
+                return False
+            raise
+        status = description.status
+        if status is None or status == WorkflowExecutionStatus.RUNNING:
+            return False
+        # Following the chain, a run that continued as new is not the end:
+        # the next describe without a run id finds its successor.
+        return not (
+            self._run_id is None and status == WorkflowExecutionStatus.CONTINUED_AS_NEW
         )
 
-    def open_write(self, topic: str) -> WriteSink:
-        store = _stream(inbound_stream_id(workflow.info().workflow_id, ""))
-        return _MemWriteSink(store, topic)
+    async def latest(self, *, topic: str) -> Cursor:
+        """The cursor of the newest record on ``topic``, for following from now."""
+        count = len(self._streams._topic(self._workflow_id, topic).records)
+        return mint_cursor(_PROVIDER, str(count - 1)) if count else BEGINNING
 
-    async def producer(
-        self,
-        client: Any,
-        *,
-        workflow_id: str,
-        stream: str = "",
-        topic: str = "",
-        producer_id: str = "",
-        attempt: int = 0,
+    def producer(
+        self, *, topic: str, producer_id: str = "", attempt: int = 0
     ) -> MemoryProducer:
-        # With no inbound stream named, the target is the store the workflow's
-        # own writer appends to, and the frame carries the topic. An inbound
-        # record carries none: the stream's name is its whole address.
-        return MemoryProducer(
-            _stream(inbound_stream_id(workflow_id, stream)),
-            _converter(client),
-            topic,
-            producer_id,
-            attempt,
-        )
-
-    async def consumer(
-        self, client: Any, *, workflow_id: str, stream: str = ""
-    ) -> MemoryConsumer:
-        return MemoryConsumer(
-            _stream(inbound_stream_id(workflow_id, stream)), _converter(client), stream
-        )
+        """A producer on ``topic``; inside an activity its identity is the activity's."""
+        store = self._streams._topic(self._workflow_id, topic)
+        producer_id, attempt = producer_identity(producer_id, attempt)
+        return MemoryProducer(store, self._converter, topic, producer_id, attempt)
 
 
-_provider.register("memory", _MemoryProvider)
+class MemoryStreams(ProviderPlugin):
+    """The in-memory provider, one list per topic.
+
+    Construct one and pass the same instance to the worker and to the code
+    that opens handles; two instances share nothing.
+    """
+
+    def __init__(
+        self, *, poll_interval: timedelta = timedelta(milliseconds=100)
+    ) -> None:
+        """Create an empty provider.
+
+        Args:
+            poll_interval: How often a workflow-side reader with nothing to
+                read checks again, and how often an outside reader asks
+                whether the workflow closed.
+        """
+        self._poll = poll_interval
+        self._topics: dict[str, _Topic] = {}
+
+    def reset(self) -> None:
+        """Drop every topic. For tests."""
+        self._topics.clear()
+
+    def workflow_provider(self) -> _MemoryWorkflowProvider:
+        """The workflow half, over this provider's topics."""
+        return _MemoryWorkflowProvider(self)
+
+    def get_stream_handle(
+        self, client: Client | None, workflow_id: str, *, run_id: str | None = None
+    ) -> MemoryStreamHandle:
+        """A handle on ``workflow_id``'s topics.
+
+        ``client`` may be ``None`` here, unlike on a storage provider; then
+        the handle cannot see the workflow close and a read waits until the
+        caller closes it.
+        """
+        return MemoryStreamHandle(self, client, workflow_id, run_id)
+
+    async def close(self) -> None:
+        """Nothing to release: the provider holds no connection."""
+
+    def _topic(self, workflow_id: str, topic: str) -> _Topic:
+        if not topic:
+            raise ValueError("topic must not be empty")
+        key = topic_key(workflow_id, topic)
+        found = self._topics.get(key)
+        if found is None:
+            found = self._topics[key] = _Topic()
+        return found
+
+    def _offset_after(self, after: Cursor) -> int:
+        position = cursor_position(after, provider=_PROVIDER)
+        if position is None:
+            return 0
+        try:
+            return int(position) + 1
+        except ValueError:
+            raise StreamCursorError(
+                f"cursor {after.token!r} does not name a position on the memory provider"
+            ) from None
