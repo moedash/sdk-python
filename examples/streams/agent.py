@@ -3,9 +3,9 @@
 Nothing here names a store, a transport, or an option. The loop reads its
 ``inputs`` topic, decides, publishes the decision, and runs an ordinary
 activity in the same workflow task, which is the shape the design doc calls
-Paths A, B and C together. The activity that streams model output takes the
-provider from whoever built the worker, because an activity has no runtime
-to ask for it the way workflow code does.
+Paths A, B and C together. The Activity that streams model output asks its
+context for its own workflow's stream, the way workflow code asks its
+runtime, so the file is the same whichever provider the process registered.
 """
 
 from __future__ import annotations
@@ -14,32 +14,25 @@ from datetime import timedelta
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from temporalio.streams import RecordKind, StreamProvider
+from temporalio.streams import RecordKind
 
 INPUTS = "inputs"
 DECISIONS = "decisions"
 
 
-class Generator:
-    """The model activity, bound to the provider the process constructed."""
+@activity.defn
+async def generate(count: int) -> None:
+    """Stream model output onto this workflow's ``inputs`` topic.
 
-    def __init__(self, provider: StreamProvider) -> None:
-        """Publish through ``provider``, the same instance the worker runs on."""
-        self._provider = provider
-
-    @activity.defn
-    async def generate(self, workflow_id: str, count: int) -> None:
-        """Stream model output onto the workflow's ``inputs`` topic.
-
-        The producer carries this activity's own id and attempt, so a retry
-        deduplicates and a new attempt is reported to readers as a
-        supersession.
-        """
-        stream = self._provider.get_stream_handle(activity.client(), workflow_id)
-        model = stream.producer(topic=INPUTS)
-        for n in range(count):
-            await model.append({"n": n})
-        await model.finish()
+    No workflow id and no run id: the handle is this Activity's own
+    workflow, pinned to its run. The producer carries the Activity's own id
+    and attempt, so a retry deduplicates and a new attempt is reported to
+    readers as a supersession.
+    """
+    model = activity.stream_handle().producer(topic=INPUTS)
+    for n in range(count):
+        await model.append({"n": n})
+    await model.finish()
 
 
 @activity.defn
@@ -59,8 +52,8 @@ class Agent:
         decisions = workflow.stream_writer(DECISIONS)
 
         generating = workflow.start_activity(
-            Generator.generate,
-            args=[workflow.info().workflow_id, count],
+            generate,
+            count,
             start_to_close_timeout=timedelta(minutes=1),
             # Bounded, so a generator that cannot finish gives up instead of
             # retrying forever while every attempt streams from the start.
