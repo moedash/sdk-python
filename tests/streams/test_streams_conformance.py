@@ -2,11 +2,14 @@
 
 Written against the public surface, parametrised over the providers this
 tree can stand up. The memory provider always runs, with no server and no
-store. A storage provider adds itself to ``SETUPS`` behind its own
-``STREAMS_LIVE`` gate: its setup hands back a provider instance, the client
-the cases should use, and says which capabilities it lacks, so the cases
-marked ``reports_positions`` are skipped with a reason on a provider whose
-``append()`` learns positions at read time.
+store. A storage provider adds itself to ``SETUPS``, behind its own
+``STREAMS_LIVE`` gate when it needs a store the test environment does not
+start: its setup receives the environment's client and hands back a provider
+instance, the client the cases should use, a ``host`` that starts the
+workflow owning a stream when the store lives inside a running workflow, and
+which capabilities it lacks, so the cases marked ``reports_positions`` are
+skipped with a reason on a provider whose ``append()`` learns positions at
+read time.
 
 What this file pins down is the contract: the record on the wire, producer
 identity, retry deduplication, positions, supersession, topic addressing,
@@ -19,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -53,8 +56,14 @@ class ProviderCase:
     client: Client | None = None
     reports_positions: bool = True
     """``append()`` returns where the records landed."""
+    host: Callable[[str], Awaitable[None]] | None = None
+    """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
 
-    def handle(self, workflow_id: str, *, run_id: str | None = None) -> StreamHandle:
+    async def open(
+        self, workflow_id: str, *, run_id: str | None = None
+    ) -> StreamHandle:
+        if self.host is not None:
+            await self.host(workflow_id)
         # The memory provider takes no client; every storage provider's setup
         # supplies one, so the cast only ever lies for the provider that
         # does not read it.
@@ -63,13 +72,15 @@ class ProviderCase:
         )
 
 
-async def _memory_case() -> AsyncIterator[ProviderCase]:
+async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     provider = MemoryStreams()
     yield ProviderCase("memory", provider)
     provider.reset()
 
 
-SETUPS: dict[str, Callable[[], AsyncIterator[ProviderCase]]] = {"memory": _memory_case}
+SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
+    "memory": _memory_case
+}
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
@@ -77,8 +88,10 @@ _CAPABILITIES = {
 
 
 @pytest.fixture(params=sorted(SETUPS))
-async def case(request: pytest.FixtureRequest) -> AsyncIterator[ProviderCase]:
-    async for provider_case in SETUPS[request.param]():
+async def case(
+    request: pytest.FixtureRequest, client: Client
+) -> AsyncIterator[ProviderCase]:
+    async for provider_case in SETUPS[request.param](client):
         for marker, supported in _CAPABILITIES.items():
             if request.node.get_closest_marker(marker) and not supported(provider_case):
                 pytest.skip(f"the {provider_case.name} provider does not {marker}")
@@ -177,7 +190,7 @@ def test_cursors_name_their_provider():
 
 async def test_append_read_roundtrip(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     producer = stream.producer(topic="out", producer_id="model", attempt=1)
     assert (producer.producer_id, producer.attempt) == ("model", 1)
     await producer.append({"id": "r1"}, {"id": "r2"})
@@ -198,7 +211,7 @@ async def test_append_read_roundtrip(case: ProviderCase):
 
 async def test_raw_values_pass_through_untouched(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     payload = Payload(metadata={"encoding": b"binary/plain"}, data=b"\x00\x01raw")
     producer = stream.producer(topic="out", producer_id="model", attempt=1)
     await producer.append(RawValue(payload))
@@ -211,7 +224,7 @@ async def test_raw_values_pass_through_untouched(case: ProviderCase):
 @pytest.mark.reports_positions
 async def test_retried_append_returns_the_original_position(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     first = stream.producer(topic="out", producer_id="model", attempt=1)
     landed = await first.append({"id": "r1"})
     assert landed is not None
@@ -232,7 +245,7 @@ async def test_retried_append_returns_the_original_position(case: ProviderCase):
 
 async def test_retried_append_is_stored_once(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     first = stream.producer(topic="out", producer_id="model", attempt=1)
     await first.append({"id": "r1"})
     retry = stream.producer(topic="out", producer_id="model", attempt=1)
@@ -245,7 +258,7 @@ async def test_retried_append_is_stored_once(case: ProviderCase):
 
 async def test_new_attempt_supersedes_the_old_one(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     first = stream.producer(topic="out", producer_id="model", attempt=1)
     await first.append({"text": "The capital of"})
     second = stream.producer(topic="out", producer_id="model", attempt=2)
@@ -263,7 +276,7 @@ async def test_a_superseded_record_resumes_to_the_triggering_record(
     case: ProviderCase,
 ):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     first = stream.producer(topic="out", producer_id="model", attempt=1)
     await first.append({"n": 1})
     second = stream.producer(topic="out", producer_id="model", attempt=2)
@@ -287,7 +300,7 @@ async def test_topics_are_addressed_by_name(case: ProviderCase):
     # Two producers on two topics of the same workflow's stream: each read
     # names its topic and sees only that topic's records.
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     on_a = stream.producer(topic="a", producer_id="tool-a", attempt=1)
     await on_a.append({"n": 1})
     on_b = stream.producer(topic="b", producer_id="tool-b", attempt=1)
@@ -301,7 +314,7 @@ async def test_topics_are_addressed_by_name(case: ProviderCase):
 
 async def test_cursor_resumes_where_it_points(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     producer = stream.producer(topic="out", producer_id="model", attempt=1)
     await producer.append({"n": 1}, {"n": 2}, {"n": 3})
 
@@ -317,7 +330,7 @@ async def test_cursor_resumes_where_it_points(case: ProviderCase):
 @pytest.mark.reports_positions
 async def test_append_cursor_names_the_last_record_of_the_batch(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     producer = stream.producer(topic="out", producer_id="model", attempt=1)
     appended = await producer.append({"n": 1}, {"n": 2}, {"n": 3})
     assert appended is not None
@@ -333,7 +346,7 @@ async def test_append_cursor_names_the_last_record_of_the_batch(case: ProviderCa
 
 async def test_latest_positions_a_reader_at_the_end(case: ProviderCase):
     workflow_id = new_workflow_id()
-    stream = case.handle(workflow_id)
+    stream = await case.open(workflow_id)
     producer = stream.producer(topic="out", producer_id="model", attempt=1)
     assert await stream.latest(topic="out") == BEGINNING
 
@@ -350,8 +363,8 @@ async def test_latest_positions_a_reader_at_the_end(case: ProviderCase):
 async def test_topic_addresses_with_colons_do_not_share_a_store(case: ProviderCase):
     # ("wf:x", "y") and ("wf", "x:y") differ only in where the colon sits.
     base = new_workflow_id()
-    left = case.handle(f"{base}:x")
-    right = case.handle(base)
+    left = await case.open(f"{base}:x")
+    right = await case.open(base)
     await left.producer(topic="y", producer_id="l", attempt=1).append({"side": "left"})
     await right.producer(topic="x:y", producer_id="r", attempt=1).append(
         {"side": "right"}
@@ -366,7 +379,7 @@ async def test_topic_addresses_with_colons_do_not_share_a_store(case: ProviderCa
 
 
 async def test_a_foreign_cursor_is_refused_at_the_call(case: ProviderCase):
-    stream = case.handle(new_workflow_id())
+    stream = await case.open(new_workflow_id())
     # Refused by read() itself, not by the first iteration of its generator,
     # so the caller's except clause is where the mistake surfaces.
     with pytest.raises(StreamCursorError):
@@ -374,7 +387,7 @@ async def test_a_foreign_cursor_is_refused_at_the_call(case: ProviderCase):
 
 
 async def test_argument_mistakes_are_value_errors(case: ProviderCase):
-    stream = case.handle(new_workflow_id())
+    stream = await case.open(new_workflow_id())
     with pytest.raises(ValueError):
         stream.read(topic="")
     with pytest.raises(ValueError):
