@@ -11,15 +11,18 @@ services:
       hides the store behind it, so an operator switches storage without
       touching callers. Reads hand out batches and an append carries one batch
       per call, because a Nexus operation per record costs too much for token
-      streams.
+      streams. A record crosses as the serialized
+      temporal.api.stream.v1.StreamRecord, the same bytes every store keeps, so
+      a caller in any language decodes it with the api protos alone.
     operations:
       append:
         fqn: append
         description: >-
-          Append one batch on the caller's account. The handler drops a
-          batch_index it has already written for this producer attempt, so a
-          retried call writes once, and rejects an index that skips ahead or a
-          producer attempt it has no state for. Supersession records are not
+          Append one batch on the caller's account. The handler writes a batch
+          once: a repeat of the last batch_index answers with where the
+          original landed, and an index that skips ahead, one already behind
+          the last, a sequence that does not continue, or a producer attempt
+          the handler has no state for is refused. Supersession records are not
           transported: a reader re-synthesizes them from the attempts it
           observes.
         input: { $ref: "#/$defs/AppendInput" }
@@ -29,7 +32,8 @@ services:
         description: >-
           Answer with the records after the caller's token, or time out. The
           call parks until it has max_records records or wait_ms elapses,
-          whichever comes first, and returns whatever it collected.
+          whichever comes first, and returns whatever it collected. It says
+          when the store has ended the read, so the caller can stop.
         input: { $ref: "#/$defs/ReadInput" }
         output: { $ref: "#/$defs/ReadOutput" }
 
@@ -41,49 +45,61 @@ $defs:
       workflow_id:
         type: string
         description: "The workflow whose stream is being written."
-      stream:
+      run_id:
         type: string
         description: >-
-          The named stream to append to. Empty when the producer writes to a
-          topic instead.
+          The run to address. Empty addresses the workflow's execution chain,
+          which is what a producer normally wants.
+      topic:
+        type: string
+        description: "The topic of the workflow's stream to append to."
       producer_id:
         type: string
         description: >-
           Identifies the writer across its retries, so its attempts can be
-          ordered.
+          ordered. Never empty here: the caller resolved it, from the activity
+          context when it was not given.
       attempt:
         type: integer
         description: >-
           The generation this producer is writing. A later attempt supersedes
           an earlier one.
+      sequence:
+        type: integer
+        minimum: 0
+        description: >-
+          The producer's sequence of the first record in this batch; the batch
+          is numbered from it and a finish takes the next number. It has to
+          continue where the previous batch ended, so the handler and the
+          store agree on every record's position within the attempt.
       batch_index:
         type: integer
         minimum: 1
         description: >-
-          Counts this producer's batches from 1. The handler drops an index it
-          has already written for this producer attempt, and rejects one that
-          skips ahead or that resumes an attempt it never saw start.
-      topic:
-        type: string
-        description: "The topic to append to, when stream is empty."
+          Counts this producer's batches from 1. The handler answers a repeat
+          of the last index with the original's position, and refuses one that
+          skips ahead, one already behind the last, or one that resumes an
+          attempt it never saw start.
       payloads:
         type: array
         items:
           type: string
           contentEncoding: base64
         description: >-
-          The records to write, each a serialized Temporal Payload. Empty on a
-          call that only finishes.
+          The record bodies to write, in order, each a serialized
+          temporal.api.common.v1.Payload. A payload codec configured on the
+          caller has already run on them. Empty on a call that only finishes.
       finish:
         type: boolean
         description: >-
-          Mark this producer done after writing the batch, so a reader stops
-          waiting on it.
+          Write FINISH for this producer after the batch: it will write nothing
+          more on the topic. Says nothing about the producer's outcome.
     required:
       - workflow_id
-      - stream
+      - topic
       - producer_id
       - attempt
+      - sequence
       - batch_index
     additionalProperties: false
 
@@ -94,10 +110,10 @@ $defs:
       cursor:
         type: string
         description: >-
-          Opaque token naming the last record written by this call. Absent
-          when the call carried no payloads, when the batch was a repeat the
-          handler dropped, or when the store learns positions only at read
-          time.
+          Opaque token naming the last record written by this call, or by the
+          original when the call repeated the last batch. Absent when the
+          store learns positions only at read time; such a caller positions
+          itself with a latest_only read.
     additionalProperties: true
 
   ReadInput:
@@ -107,17 +123,14 @@ $defs:
       workflow_id:
         type: string
         description: "The workflow whose stream is being read."
-      stream:
+      run_id:
         type: string
         description: >-
-          The named stream to read. Empty reads every stream the workflow
-          publishes.
+          Pin the read to this run. Empty follows the workflow's execution
+          chain across continue-as-new.
       topic:
         type: string
-        description: >-
-          Yield only records on this topic. Empty yields every topic. Only
-          meaningful when stream is empty, because an inbound stream has no
-          topics.
+        description: "The topic of the workflow's stream to read."
       after_token:
         type: string
         description: >-
@@ -125,7 +138,7 @@ $defs:
           strictly after the record it names, so a caller never sees that
           record twice. Empty starts at the beginning. The token is produced by
           whichever store sits behind the endpoint, so a caller cannot tell
-          which one that is.
+          which one that is, and a token from another store is refused.
       max_records:
         type: integer
         minimum: 1
@@ -146,26 +159,27 @@ $defs:
           wants to follow from now.
     required:
       - workflow_id
+      - topic
     additionalProperties: false
 
   RecordWire:
     type: object
-    description: "One record on the wire: its cursor and its frame."
+    description: "One record on the wire: its cursor and the record itself."
     properties:
       token:
         type: string
         description: >-
           Opaque cursor naming this record. Pass it as after_token to resume
           just past it.
-      frame:
+      record:
         type: string
         contentEncoding: base64
         description: >-
-          The record frame, carrying the topic, kind, producer, attempt,
-          sequence and body.
+          The serialized temporal.api.stream.v1.StreamRecord: topic, kind,
+          producer_id, attempt, sequence and body, as the store holds it.
     required:
       - token
-      - frame
+      - record
     additionalProperties: true
 
   ReadOutput:
@@ -182,4 +196,10 @@ $defs:
         description: >-
           Opaque cursor to pass as after_token on the following call. Echoes
           the caller's own token when the call collected nothing.
+      done:
+        type: boolean
+        description: >-
+          The store ended the read: the owning execution, or its chain, is
+          closed and every retained record after the caller's token has been
+          delivered. Nothing more will arrive, so the caller stops.
     additionalProperties: true

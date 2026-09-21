@@ -22,10 +22,10 @@ from ._definitions import (
 _APPEND_OUTPUT_DECLARED: frozenset[str] = frozenset({"cursor"})
 
 
-_READ_OUTPUT_DECLARED: frozenset[str] = frozenset({"records", "next_token"})
+_READ_OUTPUT_DECLARED: frozenset[str] = frozenset({"records", "next_token", "done"})
 
 
-_RECORD_WIRE_DECLARED: frozenset[str] = frozenset({"token", "frame"})
+_RECORD_WIRE_DECLARED: frozenset[str] = frozenset({"token", "record"})
 
 
 class _AppendInputTransferTypeConverter(
@@ -54,15 +54,30 @@ class _AppendInputTransferTypeConverter(
             else:
                 workflow_id_value = workflow_id_value_raw
 
-        stream_value: str = typing.cast("typing.Any", None)
-        if "stream" not in raw or raw["stream"] is None:
-            violations.append(Violation(path="stream", reason="required"))
-        else:
-            stream_value_raw = raw["stream"]
-            if not isinstance(stream_value_raw, str):
-                violations.append(Violation(path="stream", reason="expected string"))
+        run_id_value: str | None = None
+        if "run_id" in raw:
+            run_id_value_raw = raw["run_id"]
+            if run_id_value_raw is None:
+                violations.append(
+                    Violation(path="run_id", reason="explicit null not allowed")
+                )
             else:
-                stream_value = stream_value_raw
+                if not isinstance(run_id_value_raw, str):
+                    violations.append(
+                        Violation(path="run_id", reason="expected string")
+                    )
+                else:
+                    run_id_value = run_id_value_raw
+
+        topic_value: str = typing.cast("typing.Any", None)
+        if "topic" not in raw or raw["topic"] is None:
+            violations.append(Violation(path="topic", reason="required"))
+        else:
+            topic_value_raw = raw["topic"]
+            if not isinstance(topic_value_raw, str):
+                violations.append(Violation(path="topic", reason="expected string"))
+            else:
+                topic_value = topic_value_raw
 
         producer_id_value: str = typing.cast("typing.Any", None)
         if "producer_id" not in raw or raw["producer_id"] is None:
@@ -87,6 +102,24 @@ class _AppendInputTransferTypeConverter(
             if attempt_value_parsed is not None:
                 attempt_value = attempt_value_parsed
 
+        sequence_value: int = typing.cast("typing.Any", None)
+        if "sequence" not in raw or raw["sequence"] is None:
+            violations.append(Violation(path="sequence", reason="required"))
+        else:
+            sequence_value_raw = raw["sequence"]
+            sequence_value_parsed = _parse_spec_integer(
+                sequence_value_raw, "sequence", violations
+            )
+            if sequence_value_parsed is not None:
+                sequence_value = sequence_value_parsed
+                if sequence_value < 0:
+                    violations.append(
+                        Violation(
+                            path="sequence",
+                            reason=f"must be >= 0, got {sequence_value}",
+                        )
+                    )
+
         batch_index_value: int = typing.cast("typing.Any", None)
         if "batch_index" not in raw or raw["batch_index"] is None:
             violations.append(Violation(path="batch_index", reason="required"))
@@ -104,19 +137,6 @@ class _AppendInputTransferTypeConverter(
                             reason=f"must be >= 1, got {batch_index_value}",
                         )
                     )
-
-        topic_value: str | None = None
-        if "topic" in raw:
-            topic_value_raw = raw["topic"]
-            if topic_value_raw is None:
-                violations.append(
-                    Violation(path="topic", reason="explicit null not allowed")
-                )
-            else:
-                if not isinstance(topic_value_raw, str):
-                    violations.append(Violation(path="topic", reason="expected string"))
-                else:
-                    topic_value = topic_value_raw
 
         payloads_value: list[bytes] | None = None
         if "payloads" in raw:
@@ -175,11 +195,12 @@ class _AppendInputTransferTypeConverter(
         for key in raw:
             if (
                 key != "workflow_id"
-                and key != "stream"
+                and key != "run_id"
+                and key != "topic"
                 and key != "producer_id"
                 and key != "attempt"
+                and key != "sequence"
                 and key != "batch_index"
-                and key != "topic"
                 and key != "payloads"
                 and key != "finish"
             ):
@@ -188,11 +209,12 @@ class _AppendInputTransferTypeConverter(
             raise temporalio.converter.create_payload_validation_error(violations)
         return AppendInput(
             workflow_id=workflow_id_value,
-            stream=stream_value,
+            run_id=run_id_value,
+            topic=topic_value,
             producer_id=producer_id_value,
             attempt=attempt_value,
+            sequence=sequence_value,
             batch_index=batch_index_value,
-            topic=topic_value,
             payloads=payloads_value,
             finish=finish_value,
         )
@@ -202,13 +224,24 @@ class _AppendInputTransferTypeConverter(
         violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
         out["workflow_id"] = value.workflow_id
-        out["stream"] = value.stream
+        if value.run_id is not None:
+            out["run_id"] = value.run_id
+        out["topic"] = value.topic
         out["producer_id"] = value.producer_id
         if abs(value.attempt) > 9007199254740991:
             violations.append(
                 Violation(path="attempt", reason="exceeds ±(2^53-1) integer cap")
             )
         out["attempt"] = value.attempt
+        if abs(value.sequence) > 9007199254740991:
+            violations.append(
+                Violation(path="sequence", reason="exceeds ±(2^53-1) integer cap")
+            )
+        if value.sequence < 0:
+            violations.append(
+                Violation(path="sequence", reason=f"must be >= 0, got {value.sequence}")
+            )
+        out["sequence"] = value.sequence
         if abs(value.batch_index) > 9007199254740991:
             violations.append(
                 Violation(path="batch_index", reason="exceeds ±(2^53-1) integer cap")
@@ -220,8 +253,6 @@ class _AppendInputTransferTypeConverter(
                 )
             )
         out["batch_index"] = value.batch_index
-        if value.topic is not None:
-            out["topic"] = value.topic
         if value.payloads is not None:
             out["payloads"] = [_format_base64(element) for element in value.payloads]
         if value.finish is not None:
@@ -239,31 +270,45 @@ class AppendInput:
     workflow_id: str
     """The workflow whose stream is being written."""
 
-    stream: str
-    """The named stream to append to. Empty when the producer writes to a topic instead."""
+    run_id: str | None = None
+    """The run to address. Empty addresses the workflow's execution chain, which is what a
+    producer normally wants.
+    """
+
+    topic: str
+    """The topic of the workflow's stream to append to."""
 
     producer_id: str
-    """Identifies the writer across its retries, so its attempts can be ordered."""
+    """Identifies the writer across its retries, so its attempts can be ordered. Never
+    empty here: the caller resolved it, from the activity context when it was not given.
+    """
 
     attempt: int
     """The generation this producer is writing. A later attempt supersedes an earlier one."""
 
-    batch_index: int
-    """Counts this producer's batches from 1. The handler drops an index it has already
-    written for this producer attempt, and rejects one that skips ahead or that resumes
-    an attempt it never saw start.
+    sequence: int
+    """The producer's sequence of the first record in this batch; the batch is numbered
+    from it and a finish takes the next number. It has to continue where the previous
+    batch ended, so the handler and the store agree on every record's position within
+    the attempt.
     """
 
-    topic: str | None = None
-    """The topic to append to, when stream is empty."""
+    batch_index: int
+    """Counts this producer's batches from 1. The handler answers a repeat of the last
+    index with the original's position, and refuses one that skips ahead, one already
+    behind the last, or one that resumes an attempt it never saw start.
+    """
 
     payloads: list[bytes] | None = None
-    """The records to write, each a serialized Temporal Payload. Empty on a call that only
-    finishes.
+    """The record bodies to write, in order, each a serialized
+    temporal.api.common.v1.Payload. A payload codec configured on the caller has already
+    run on them. Empty on a call that only finishes.
     """
 
     finish: bool | None = None
-    """Mark this producer done after writing the batch, so a reader stops waiting on it."""
+    """Write FINISH for this producer after the batch: it will write nothing more on the
+    topic. Says nothing about the producer's outcome.
+    """
 
 
 class _AppendOutputTransferTypeConverter(
@@ -333,9 +378,9 @@ class AppendOutput:
     """Where the append landed, when the store can say."""
 
     cursor: str | None = None
-    """Opaque token naming the last record written by this call. Absent when the call
-    carried no payloads, when the batch was a repeat the handler dropped, or when the
-    store learns positions only at read time.
+    """Opaque token naming the last record written by this call, or by the original when
+    the call repeated the last batch. Absent when the store learns positions only at
+    read time; such a caller positions itself with a latest_only read.
     """
 
     additional_properties: dict[str, typing.Any] = dataclasses.field(
@@ -369,33 +414,30 @@ class _ReadInputTransferTypeConverter(
             else:
                 workflow_id_value = workflow_id_value_raw
 
-        stream_value: str | None = None
-        if "stream" in raw:
-            stream_value_raw = raw["stream"]
-            if stream_value_raw is None:
+        run_id_value: str | None = None
+        if "run_id" in raw:
+            run_id_value_raw = raw["run_id"]
+            if run_id_value_raw is None:
                 violations.append(
-                    Violation(path="stream", reason="explicit null not allowed")
+                    Violation(path="run_id", reason="explicit null not allowed")
                 )
             else:
-                if not isinstance(stream_value_raw, str):
+                if not isinstance(run_id_value_raw, str):
                     violations.append(
-                        Violation(path="stream", reason="expected string")
+                        Violation(path="run_id", reason="expected string")
                     )
                 else:
-                    stream_value = stream_value_raw
+                    run_id_value = run_id_value_raw
 
-        topic_value: str | None = None
-        if "topic" in raw:
+        topic_value: str = typing.cast("typing.Any", None)
+        if "topic" not in raw or raw["topic"] is None:
+            violations.append(Violation(path="topic", reason="required"))
+        else:
             topic_value_raw = raw["topic"]
-            if topic_value_raw is None:
-                violations.append(
-                    Violation(path="topic", reason="explicit null not allowed")
-                )
+            if not isinstance(topic_value_raw, str):
+                violations.append(Violation(path="topic", reason="expected string"))
             else:
-                if not isinstance(topic_value_raw, str):
-                    violations.append(Violation(path="topic", reason="expected string"))
-                else:
-                    topic_value = topic_value_raw
+                topic_value = topic_value_raw
 
         after_token_value: str | None = None
         if "after_token" in raw:
@@ -486,7 +528,7 @@ class _ReadInputTransferTypeConverter(
         for key in raw:
             if (
                 key != "workflow_id"
-                and key != "stream"
+                and key != "run_id"
                 and key != "topic"
                 and key != "after_token"
                 and key != "max_records"
@@ -498,7 +540,7 @@ class _ReadInputTransferTypeConverter(
             raise temporalio.converter.create_payload_validation_error(violations)
         return ReadInput(
             workflow_id=workflow_id_value,
-            stream=stream_value,
+            run_id=run_id_value,
             topic=topic_value,
             after_token=after_token_value,
             max_records=max_records_value,
@@ -511,10 +553,9 @@ class _ReadInputTransferTypeConverter(
         violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
         out["workflow_id"] = value.workflow_id
-        if value.stream is not None:
-            out["stream"] = value.stream
-        if value.topic is not None:
-            out["topic"] = value.topic
+        if value.run_id is not None:
+            out["run_id"] = value.run_id
+        out["topic"] = value.topic
         if value.after_token is not None:
             out["after_token"] = value.after_token
         if value.max_records is not None:
@@ -572,19 +613,19 @@ class ReadInput:
     workflow_id: str
     """The workflow whose stream is being read."""
 
-    stream: str | None = None
-    """The named stream to read. Empty reads every stream the workflow publishes."""
-
-    topic: str | None = None
-    """Yield only records on this topic. Empty yields every topic. Only meaningful when
-    stream is empty, because an inbound stream has no topics.
+    run_id: str | None = None
+    """Pin the read to this run. Empty follows the workflow's execution chain across
+    continue-as-new.
     """
+
+    topic: str
+    """The topic of the workflow's stream to read."""
 
     after_token: str | None = None
     """Opaque cursor from an earlier record or append. The read resumes strictly after the
     record it names, so a caller never sees that record twice. Empty starts at the
     beginning. The token is produced by whichever store sits behind the endpoint, so a
-    caller cannot tell which one that is.
+    caller cannot tell which one that is, and a token from another store is refused.
     """
 
     max_records: int | None = None
@@ -663,6 +704,19 @@ class _ReadOutputTransferTypeConverter(
                 else:
                     next_token_value = next_token_value_raw
 
+        done_value: bool | None = None
+        if "done" in raw:
+            done_value_raw = raw["done"]
+            if done_value_raw is None:
+                violations.append(
+                    Violation(path="done", reason="explicit null not allowed")
+                )
+            else:
+                if not isinstance(done_value_raw, bool):
+                    violations.append(Violation(path="done", reason="expected boolean"))
+                else:
+                    done_value = done_value_raw
+
         additional_properties: dict[str, typing.Any] = {}
         for key in raw:
             if key not in _READ_OUTPUT_DECLARED:
@@ -672,6 +726,7 @@ class _ReadOutputTransferTypeConverter(
         return ReadOutput(
             records=records_value,
             next_token=next_token_value,
+            done=done_value,
             additional_properties=additional_properties,
         )
 
@@ -693,6 +748,8 @@ class _ReadOutputTransferTypeConverter(
             out["records"] = records_out
         if value.next_token is not None:
             out["next_token"] = value.next_token
+        if value.done is not None:
+            out["done"] = value.done
         for key, entry in value.additional_properties.items():
             if key in _READ_OUTPUT_DECLARED:
                 violations.append(
@@ -719,6 +776,12 @@ class ReadOutput:
     next_token: str | None = None
     """Opaque cursor to pass as after_token on the following call. Echoes the caller's own
     token when the call collected nothing.
+    """
+
+    done: bool | None = None
+    """The store ended the read: the owning execution, or its chain, is closed and every
+    retained record after the caller's token has been delivered. Nothing more will
+    arrive, so the caller stops.
     """
 
     additional_properties: dict[str, typing.Any] = dataclasses.field(
@@ -750,17 +813,19 @@ class _RecordWireTransferTypeConverter(
             else:
                 token_value = token_value_raw
 
-        frame_value: bytes = typing.cast("typing.Any", None)
-        if "frame" not in raw or raw["frame"] is None:
-            violations.append(Violation(path="frame", reason="required"))
+        record_value: bytes = typing.cast("typing.Any", None)
+        if "record" not in raw or raw["record"] is None:
+            violations.append(Violation(path="record", reason="required"))
         else:
-            frame_value_raw = raw["frame"]
-            if not isinstance(frame_value_raw, str):
-                violations.append(Violation(path="frame", reason="expected string"))
+            record_value_raw = raw["record"]
+            if not isinstance(record_value_raw, str):
+                violations.append(Violation(path="record", reason="expected string"))
             else:
-                frame_value_parsed = _parse_base64(frame_value_raw, "frame", violations)
-                if frame_value_parsed is not None:
-                    frame_value = frame_value_parsed
+                record_value_parsed = _parse_base64(
+                    record_value_raw, "record", violations
+                )
+                if record_value_parsed is not None:
+                    record_value = record_value_parsed
 
         additional_properties: dict[str, typing.Any] = {}
         for key in raw:
@@ -770,7 +835,7 @@ class _RecordWireTransferTypeConverter(
             raise temporalio.converter.create_payload_validation_error(violations)
         return RecordWire(
             token=token_value,
-            frame=frame_value,
+            record=record_value,
             additional_properties=additional_properties,
         )
 
@@ -779,7 +844,7 @@ class _RecordWireTransferTypeConverter(
         violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
         out["token"] = value.token
-        out["frame"] = _format_base64(value.frame)
+        out["record"] = _format_base64(value.record)
         for key, entry in value.additional_properties.items():
             if key in _RECORD_WIRE_DECLARED:
                 violations.append(
@@ -798,13 +863,15 @@ class _RecordWireTransferTypeConverter(
 @_transfer_type_convertible(_RecordWireTransferTypeConverter)
 @dataclasses.dataclass(slots=True, kw_only=True)
 class RecordWire:
-    """One record on the wire: its cursor and its frame."""
+    """One record on the wire: its cursor and the record itself."""
 
     token: str
     """Opaque cursor naming this record. Pass it as after_token to resume just past it."""
 
-    frame: bytes
-    """The record frame, carrying the topic, kind, producer, attempt, sequence and body."""
+    record: bytes
+    """The serialized temporal.api.stream.v1.StreamRecord: topic, kind, producer_id,
+    attempt, sequence and body, as the store holds it.
+    """
 
     additional_properties: dict[str, typing.Any] = dataclasses.field(
         default_factory=dict
