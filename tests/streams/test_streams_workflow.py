@@ -30,6 +30,7 @@ from temporalio.streams import (
     RecordKind,
     StreamCursorError,
     WriteSink,
+    topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.testing import WorkflowEnvironment
@@ -37,8 +38,8 @@ from temporalio.worker import Replayer
 from tests.helpers import new_worker
 from tests.streams.test_streams_conformance import take
 
-INPUTS = "inputs"
-DECISIONS = "decisions"
+INPUTS = topic("inputs", dict)
+DECISIONS = topic("decisions", dict)
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ class ContractLoop:
 
     @workflow.run
     async def run(self) -> list[dict[str, Any]]:
-        inputs = workflow.stream_reader(INPUTS, result_type=dict)
+        inputs = workflow.stream_reader(INPUTS)
         decisions = workflow.stream_writer(DECISIONS)
         trace: list[dict[str, Any]] = []
         try:
@@ -128,7 +129,7 @@ async def test_workflow_reads_decides_and_publishes(
 
     # The outside view of what the workflow published, on its own topic.
     stream = provider.get_stream_handle(client, handle.id)
-    records = await take(stream.read(topic=DECISIONS, result_type=dict), 5)
+    records = await take(stream.read(topic=DECISIONS), 5)
     assert [(r.kind, r.value) for r in records] == [
         (RecordKind.DATA, {"decided": 1}),
         (RecordKind.DATA, {"decided": 2}),
@@ -136,7 +137,7 @@ async def test_workflow_reads_decides_and_publishes(
         (RecordKind.DATA, {"decided": 3}),
         (RecordKind.FINISH, None),
     ]
-    assert all(r.producer_id == "" and r.topic == DECISIONS for r in records)
+    assert all(r.producer_id == "" and r.topic == DECISIONS.name for r in records)
     # The second finish() wrote nothing: the marker is the newest record.
     assert await stream.latest(topic=DECISIONS) == records[-1].cursor
 
@@ -148,7 +149,7 @@ async def test_read_ends_when_the_workflow_closes_and_the_tail_is_delivered(
     stream = provider.get_stream_handle(client, handle.id)
 
     async def read_everything() -> list[Any]:
-        return [r.value async for r in stream.read(topic=DECISIONS, result_type=dict)]
+        return [r.value async for r in stream.read(topic=DECISIONS)]
 
     # No count and no early break: the read ends by itself once the workflow
     # is closed and everything it retained has been handed over.
@@ -218,9 +219,7 @@ async def test_a_failed_task_publishes_nothing(client: Client, provider: MemoryS
             PublishThenFail.run, id=workflow_id, task_queue=worker.task_queue
         )
         stream = provider.get_stream_handle(client, workflow_id)
-        records = await take(
-            stream.read(topic=DECISIONS, result_type=dict), 2, timeout=30
-        )
+        records = await take(stream.read(topic=DECISIONS), 2, timeout=30)
         await handle.result()
     assert [(r.kind, r.value) for r in records] == [
         (RecordKind.DATA, {"committed": True}),
@@ -301,10 +300,7 @@ async def test_a_handle_without_a_run_id_reads_across_continue_as_new(
         stream = provider.get_stream_handle(client, workflow_id)
 
         async def read_everything() -> list[Any]:
-            return [
-                (r.kind, r.value)
-                async for r in stream.read(topic=DECISIONS, result_type=dict)
-            ]
+            return [(r.kind, r.value) async for r in stream.read(topic=DECISIONS)]
 
         records = await asyncio.wait_for(read_everything(), 30)
         await handle.result()
@@ -323,15 +319,15 @@ class SharedReaders:
 
     @workflow.run
     async def run(self) -> list[Any]:
-        first = workflow.stream_reader(INPUTS, result_type=dict)
-        second = workflow.stream_reader(INPUTS, result_type=dict)
+        first = workflow.stream_reader(INPUTS)
+        second = workflow.stream_reader(INPUTS)
         trace: list[Any] = ["shared" if first is second else "separate"]
         try:
-            workflow.stream_reader(INPUTS, result_type=dict, after=Cursor("memory:0"))
+            workflow.stream_reader(INPUTS, after=Cursor("memory:0"))
         except ValueError:
             trace.append("after-rejected")
         try:
-            workflow.stream_reader(INPUTS, result_type=list)
+            workflow.stream_reader(INPUTS.name, result_type=list)
         except ValueError:
             trace.append("type-rejected")
         trace.append((await first.__anext__()).value)
@@ -435,7 +431,7 @@ async def test_an_outside_producer_and_the_workflow_share_a_topic(
         await handle.result()
 
         async def read_everything() -> list[Any]:
-            return [r async for r in stream.read(topic=DECISIONS, result_type=dict)]
+            return [r async for r in stream.read(topic=DECISIONS)]
 
         records = await asyncio.wait_for(read_everything(), 30)
     # Both writers land on one topic in one order, each under its own

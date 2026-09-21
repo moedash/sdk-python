@@ -28,7 +28,10 @@ The contract, in five statements:
 5. **A workflow addresses its streams relative to itself, by topic.** A topic
    can be written by the workflow and by outside producers, and read by the
    workflow and by outside consumers; which of those happen is the
-   application's business.
+   application's business. A topic is defined once with :func:`topic`, with
+   the type its records decode to, and that definition is shared by the
+   workflow, its activities and the backend; a plain string names a topic
+   decided at runtime.
 
 A provider is an object, registered once as a plugin:
 ``Client.connect(plugins=[provider])``; workers built from that client inherit
@@ -80,6 +83,7 @@ from temporalio.streams._record import (
     StreamRecord,
     Supersession,
 )
+from temporalio.streams._topic import StreamTopic, resolve_topic, topic
 
 __all__ = [
     "BEGINNING",
@@ -94,8 +98,11 @@ __all__ = [
     "StreamProducerError",
     "StreamProvider",
     "StreamRecord",
+    "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
     "WorkflowStreamProvider",
     "WriteSink",
+    "resolve_topic",
+    "topic",
 ]
