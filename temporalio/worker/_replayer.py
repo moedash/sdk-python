@@ -12,6 +12,7 @@ from typing import Any
 
 from typing_extensions import TypedDict
 
+import temporalio.api.enums.v1
 import temporalio.api.history.v1
 import temporalio.api.stream.v1
 import temporalio.bridge.proto.workflow_activation
@@ -474,6 +475,40 @@ def _consumed_ranges(
     return out
 
 
+def _eras(
+    history: temporalio.client.WorkflowHistory,
+) -> list[tuple[str, list[tuple[int, temporalio.api.stream.v1.StreamRange]]]]:
+    """The recorded ranges grouped by the run whose streams hold them.
+
+    A reset copies the base run's history into the new run, so the ranges
+    before the reset point were consumed from the base run's streams, and the
+    run they belong to is only named by the `WorkflowTaskFailed` event that
+    marks the reset point, after them in the history. Ranges after the last
+    reset point belong to the run itself, which that event names as well; a
+    history with no reset point belongs to the run its start event names. This
+    is the split the server makes when it re-supplies a cache miss.
+    """
+    reset = temporalio.api.enums.v1.WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_WORKFLOW
+    eras: list[tuple[str, list[tuple[int, temporalio.api.stream.v1.StreamRange]]]] = []
+    pending: list[tuple[int, temporalio.api.stream.v1.StreamRange]] = []
+    own_run_id = history.run_id
+    for event in history.events:
+        if event.HasField("workflow_task_failed_event_attributes"):
+            failed = event.workflow_task_failed_event_attributes
+            if failed.cause == reset and failed.base_run_id:
+                eras.append((failed.base_run_id, pending))
+                pending = []
+                own_run_id = failed.new_run_id or own_run_id
+                continue
+        if not event.HasField("workflow_task_completed_event_attributes"):
+            continue
+        attributes = event.workflow_task_completed_event_attributes
+        for consumed in attributes.consumed_stream_ranges:
+            pending.append((event.event_id, consumed))
+    eras.append((own_run_id, pending))
+    return eras
+
+
 def _stream_records_missing(history: temporalio.client.WorkflowHistory) -> str | None:
     """Why this history cannot be replayed without a stream client, or ``None``."""
     ranges = [r for _, r in _consumed_ranges(history) if r.to_offset > r.from_offset]
@@ -496,43 +531,43 @@ async def _stream_slices(
 
     The shape is the one the server puts on a poll response when it re-supplies
     a cache miss: one slice per recorded range, tagged with the completion that
-    recorded it, an empty range included. Raises
-    :py:class:`temporalio.streams.StreamNotFoundError` for a range the stream no
-    longer holds.
+    recorded it, an empty range included, fetched from the run whose stream
+    holds it (the run reset from, for a range recorded before a reset point).
+    Raises :py:class:`temporalio.streams.StreamNotFoundError` for a range the
+    stream no longer holds.
     """
-    ranges = _consumed_ranges(history)
-    if not ranges:
+    if not _consumed_ranges(history):
         return []
     # Imported here: the stream client needs the grpc extra, which a replayer
     # without a stream client never touches.
     from temporalio.client_stream import shared_client
 
     streams = shared_client(client.service_client.config.target_host, client.namespace)
-    run_id = history.run_id
-    # The handle that served each stream id, so later ranges of the same
+    # The handle that served each run's stream, so later ranges of the same
     # stream go straight to it.
-    served_by: dict[str, Any] = {}
+    served_by: dict[tuple[str, str], Any] = {}
     slices: list[bytes] = []
-    for event_id, consumed in ranges:
-        stream_slice = temporalio.api.stream.v1.StreamSlice(
-            stream_id=consumed.stream_id,
-            run_id=run_id,
-            from_offset=consumed.from_offset,
-            to_offset=consumed.to_offset,
-            workflow_task_completed_event_id=event_id,
-        )
-        if consumed.to_offset > consumed.from_offset:
-            handle, records, owner_run_id = await _fetch_range(
-                streams,
-                history.workflow_id,
-                run_id,
-                consumed,
-                served_by.get(consumed.stream_id),
+    for run_id, ranges in _eras(history):
+        for event_id, consumed in ranges:
+            stream_slice = temporalio.api.stream.v1.StreamSlice(
+                stream_id=consumed.stream_id,
+                run_id=run_id,
+                from_offset=consumed.from_offset,
+                to_offset=consumed.to_offset,
+                workflow_task_completed_event_id=event_id,
             )
-            served_by[consumed.stream_id] = handle
-            stream_slice.run_id = owner_run_id or run_id
-            stream_slice.records.extend(records)
-        slices.append(stream_slice.SerializeToString())
+            if consumed.to_offset > consumed.from_offset:
+                handle, records, owner_run_id = await _fetch_range(
+                    streams,
+                    history.workflow_id,
+                    run_id,
+                    consumed,
+                    served_by.get((run_id, consumed.stream_id)),
+                )
+                served_by[(run_id, consumed.stream_id)] = handle
+                stream_slice.run_id = owner_run_id or run_id
+                stream_slice.records.extend(records)
+            slices.append(stream_slice.SerializeToString())
     return slices
 
 
