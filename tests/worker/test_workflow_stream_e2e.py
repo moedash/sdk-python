@@ -46,8 +46,11 @@ EVENT_STREAM_SUBSCRIBED = EventType.EVENT_TYPE_WORKFLOW_STREAM_SUBSCRIBED
 EVENT_STREAM_RECORDS_APPENDED = EventType.EVENT_TYPE_WORKFLOW_STREAM_RECORDS_APPENDED
 
 
-async def _connect() -> Client:
-    return await Client.connect(TARGET or "")
+async def _connect(provider: NativeStreams | None = None) -> Client:
+    # Registered once, on the client: the worker inherits it and the tests
+    # open handles through client.get_stream_handle. The contrib tests below
+    # need no provider.
+    return await Client.connect(TARGET or "", plugins=[provider] if provider else [])
 
 
 async def _event_counts(client: Client, workflow_id: str) -> dict[Any, int]:
@@ -101,8 +104,8 @@ async def test_the_interface_loop_runs_on_the_server_with_a_cold_cache() -> None
     and the server re-supplies the ranges earlier tasks consumed, so the loop
     completing at all means the same records came back in the same order.
     """
-    client = await _connect()
     provider = NativeStreams()
+    client = await _connect(provider)
     task_queue = "loop-tq-" + uuid.uuid4().hex[:8]
     workflow_id = "loop-wf-" + uuid.uuid4().hex[:8]
     try:
@@ -110,13 +113,12 @@ async def test_the_interface_loop_runs_on_the_server_with_a_cold_cache() -> None
             client,
             task_queue=task_queue,
             workflows=[ContractLoop],
-            plugins=[provider],
             max_cached_workflows=0,
         ):
             handle = await client.start_workflow(
                 ContractLoop.run, id=workflow_id, task_queue=task_queue
             )
-            stream = provider.get_stream_handle(client, workflow_id)
+            stream = client.get_stream_handle(workflow_id)
             first = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
             await first.append({"n": 1}, {"n": 2})
             second = stream.producer(topic=INPUTS, producer_id="model", attempt=2)
@@ -185,8 +187,8 @@ class PublishThenFail:
 
 async def test_a_failed_task_publishes_nothing() -> None:
     """Rule 1 on the native provider: the server applies the command with the task."""
-    client = await _connect()
     provider = NativeStreams()
+    client = await _connect(provider)
     task_queue = "fail-tq-" + uuid.uuid4().hex[:8]
     workflow_id = "fail-wf-" + uuid.uuid4().hex[:8]
     try:
@@ -194,12 +196,11 @@ async def test_a_failed_task_publishes_nothing() -> None:
             client,
             task_queue=task_queue,
             workflows=[PublishThenFail],
-            plugins=[provider],
         ):
             handle = await client.start_workflow(
                 PublishThenFail.run, id=workflow_id, task_queue=task_queue
             )
-            stream = provider.get_stream_handle(client, workflow_id)
+            stream = client.get_stream_handle(workflow_id)
             records = await take(
                 stream.read(topic=DECISIONS, result_type=dict), 2, timeout=60
             )
@@ -226,18 +227,16 @@ class Relay:
 
 
 async def test_a_handle_without_a_run_id_reads_across_continue_as_new() -> None:
-    client = await _connect()
     provider = NativeStreams()
+    client = await _connect(provider)
     task_queue = "relay-tq-" + uuid.uuid4().hex[:8]
     workflow_id = "relay-wf-" + uuid.uuid4().hex[:8]
     try:
-        async with Worker(
-            client, task_queue=task_queue, workflows=[Relay], plugins=[provider]
-        ):
+        async with Worker(client, task_queue=task_queue, workflows=[Relay]):
             handle = await client.start_workflow(
                 Relay.run, 0, id=workflow_id, task_queue=task_queue
             )
-            stream = provider.get_stream_handle(client, workflow_id)
+            stream = client.get_stream_handle(workflow_id)
 
             async def read_everything() -> list[Any]:
                 return [
@@ -256,7 +255,7 @@ async def test_a_handle_without_a_run_id_reads_across_continue_as_new() -> None:
         ]
         # Pinned to the last run, a handle sees that run's stream alone.
         last_run = (await client.get_workflow_handle(workflow_id).describe()).run_id
-        pinned = provider.get_stream_handle(client, workflow_id, run_id=last_run)
+        pinned = client.get_stream_handle(workflow_id, run_id=last_run)
         only_last = [
             r.value async for r in pinned.read(topic=DECISIONS, result_type=dict)
         ]
