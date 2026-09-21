@@ -2,37 +2,49 @@
 
 Written against the public surface, parametrised over the providers this
 tree can stand up. The memory provider always runs, with no server and no
-store. A storage provider adds itself to ``SETUPS`` behind its own
-``STREAMS_LIVE`` gate: its setup configures the provider, hands back the
-client the cases should use and a workflow that exists for the case to
-address, and says which capabilities it lacks, so the cases marked
-``inbound_stream`` or ``unfiltered_read`` are skipped with a reason on a
-provider that cannot do them. Every other case reads with a topic, which is
-what a store that keys by topic needs.
+store. A storage provider adds itself to ``SETUPS``, behind its own
+``STREAMS_LIVE`` gate when it needs a store the test environment does not
+start: its setup receives the environment's client and hands back a provider
+instance, the client the cases should use, a ``host`` that starts the
+workflow owning a stream when the store lives inside a running workflow, and
+which capabilities it lacks, so the cases marked ``reports_positions`` are
+skipped with a reason on a provider whose ``append()`` learns positions at
+read time.
 
-What this file pins down is the contract: framing, producer identity, retry
-deduplication, supersession, topic filtering, cursor resumption, and store
-keys that cannot collide. The workflow-side handles and the two rules about
-workflow tasks live in ``test_streams_workflow``.
+What this file pins down is the contract: the record on the wire, producer
+identity, retry deduplication, positions, supersession, topic addressing,
+cursor resumption, cursor ownership, and store keys that cannot collide. The
+workflow-side handles and the two rules about Workflow Tasks live in
+``test_streams_workflow``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from temporalio import streams
+from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
-from temporalio.streams import _frame, _ids, _provider
+from temporalio.common import RawValue
+from temporalio.converter import DataConverter
+from temporalio.streams import (
+    BEGINNING,
+    Cursor,
+    RecordKind,
+    StreamCursorError,
+    StreamHandle,
+    StreamProvider,
+    Supersession,
+    _ids,
+    _wire,
+)
 from temporalio.streams._policy import AttemptTracker
-from temporalio.streams._record import Cursor, RecordKind
-from temporalio.streams.providers import memory
+from temporalio.streams.providers.memory import MemoryStreams
 
 
 @dataclass
@@ -40,81 +52,50 @@ class ProviderCase:
     """One provider under test, and what the cases may ask of it."""
 
     name: str
-    client: Any = None
-    workflow_id: str = ""
-    """The workflow whose streams the case addresses.
+    provider: StreamProvider
+    client: Client | None = None
+    reports_positions: bool = True
+    """``append()`` returns where the records landed."""
+    host: Callable[[str], Awaitable[None]] | None = None
+    """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
 
-    A store keeps a workflow's stream with the workflow, so the setup makes
-    the execution exist before the case opens a producer on its account.
-    """
-    inbound_streams: bool = True
-    """Outside producers may write a workflow's inbound stream."""
-    unfiltered_reads: bool = True
-    """A consumer may read the owner's stream without naming a topic."""
-    reports_dropped_repeats: bool = True
-    """``append`` returns ``None`` for a repeat it dropped.
-
-    A store that answers a repeat with the original position instead still
-    holds the record once; it just cannot say at append time that this call
-    wrote nothing.
-    """
-
-
-async def _memory_case() -> AsyncIterator[ProviderCase]:
-    memory.reset()
-    streams.configure(provider="memory")
-    yield ProviderCase("memory", workflow_id=new_workflow_id())
-    memory.reset()
-
-
-async def _redis_case() -> AsyncIterator[ProviderCase]:
-    # A prefix per case, because the store keeps what earlier cases wrote.
-    streams.configure(
-        provider="redis", key_prefix=f"streams-conformance-{uuid.uuid4().hex}"
-    )
-    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
-    # The store keys a workflow's streams under its chain, which is read from
-    # the execution, so one has to exist; no worker ever picks its task up.
-    owner = await client.start_workflow(
-        "StreamOwner",
-        id=new_workflow_id(),
-        task_queue="streams-conformance-unserved",
-    )
-    try:
-        yield ProviderCase(
-            "redis",
-            client,
-            workflow_id=owner.id,
-            # Each topic is its own store, and an inbound stream is not
-            # readable from outside; a dropped repeat answers with the
-            # original position because the store's seam does not say.
-            inbound_streams=False,
-            unfiltered_reads=False,
-            reports_dropped_repeats=False,
+    async def open(
+        self, workflow_id: str, *, run_id: str | None = None
+    ) -> StreamHandle:
+        if self.host is not None:
+            await self.host(workflow_id)
+        # The memory provider takes no client; every storage provider's setup
+        # supplies one, so the cast only ever lies for the provider that
+        # does not read it.
+        return self.provider.get_stream_handle(
+            cast(Client, self.client), workflow_id, run_id=run_id
         )
-    finally:
-        await owner.terminate("conformance case finished")
-        await streams.close()
 
 
-SETUPS: dict[str, Callable[[], AsyncIterator[ProviderCase]]] = {"memory": _memory_case}
-if os.environ.get("STREAMS_LIVE") == "redis":
-    # Needs a dev server at TEMPORAL_ADDRESS and a Redis at TEMPORAL_TEST_REDIS_URL.
-    SETUPS["redis"] = _redis_case
+async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
+    provider = MemoryStreams()
+    yield ProviderCase("memory", provider)
+    provider.reset()
+
+
+SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
+    "memory": _memory_case
+}
 
 _CAPABILITIES = {
-    "inbound_stream": lambda case: case.inbound_streams,
-    "unfiltered_read": lambda case: case.unfiltered_reads,
+    "reports_positions": lambda case: case.reports_positions,
 }
 
 
 @pytest.fixture(params=sorted(SETUPS))
-async def provider(request: pytest.FixtureRequest) -> AsyncIterator[ProviderCase]:
-    async for case in SETUPS[request.param]():
+async def case(
+    request: pytest.FixtureRequest, client: Client
+) -> AsyncIterator[ProviderCase]:
+    async for provider_case in SETUPS[request.param](client):
         for marker, supported in _CAPABILITIES.items():
-            if request.node.get_closest_marker(marker) and not supported(case):
-                pytest.skip(f"the {case.name} provider does not support {marker}")
-        yield case
+            if request.node.get_closest_marker(marker) and not supported(provider_case):
+                pytest.skip(f"the {provider_case.name} provider does not {marker}")
+        yield provider_case
 
 
 def new_workflow_id() -> str:
@@ -136,343 +117,281 @@ async def take(records: Any, count: int, timeout: float = 5.0) -> list:
     return out
 
 
-def test_frame_roundtrip():
-    frame = _frame.encode(
+def test_record_roundtrips_through_the_wire():
+    converter = DataConverter.default.payload_converter
+    wire = _wire.to_wire(
+        converter,
         topic="decisions",
         kind=RecordKind.DATA,
-        producer="model",
+        value={"n": 1},
+        producer_id="model",
         attempt=3,
         sequence=7,
-        body=b"payload-bytes",
     )
-    kind, topic, producer, attempt, sequence, body = _frame.decode(frame)
-    assert (kind, topic, producer, attempt, sequence, body) == (
-        RecordKind.DATA,
-        "decisions",
-        "model",
-        3,
-        7,
-        b"payload-bytes",
-    )
+    parsed = _wire.WireRecord.FromString(wire.SerializeToString())
+    record = _wire.from_wire(converter, Cursor("memory:0"), parsed, dict)
+    assert (
+        record.kind,
+        record.topic,
+        record.producer_id,
+        record.attempt,
+        record.sequence,
+        record.value,
+    ) == (RecordKind.DATA, "decisions", "model", 3, 7, {"n": 1})
+    assert record.supersession is None
+    finish = _wire.to_wire(converter, topic="decisions", kind=RecordKind.FINISH)
+    assert not finish.HasField("body")
+    assert _wire.from_wire(converter, Cursor("memory:1"), finish, dict).value is None
+
+
+def test_a_stored_supersession_is_not_a_record():
+    converter = DataConverter.default.payload_converter
+    wire = _wire.WireRecord(topic="t", kind=int(RecordKind.SUPERSEDED))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="synthesized"):
+        _wire.from_wire(converter, Cursor("memory:0"), wire, None)
+
+
+def test_an_unset_kind_is_read_as_data():
+    converter = DataConverter.default.payload_converter
+    wire = _wire.WireRecord(topic="t", body=converter.to_payloads([{"n": 1}])[0])
+    record = _wire.from_wire(converter, Cursor("memory:0"), wire, dict)
+    assert record.kind is RecordKind.DATA
+    assert record.value == {"n": 1}
 
 
 def test_supersession_is_synthesized_from_observations():
     attempts = AttemptTracker()
-    assert attempts.note("model", 1, Cursor("0")) is None
-    superseded = attempts.note("model", 2, Cursor("1"))
+    assert attempts.note("model", 1, topic="t", previous=BEGINNING) is None
+    superseded = attempts.note("model", 2, topic="t", previous=Cursor("memory:0"))
     assert superseded is not None
     assert superseded.kind is RecordKind.SUPERSEDED
-    assert isinstance(superseded.value, streams.Supersession)
-    assert superseded.value.previous_attempt == 1
+    assert superseded.supersession == Supersession("model", 1, 2)
+    assert superseded.value is None
+    # Positioned before the triggering record, so a resume after it delivers
+    # that record next.
+    assert superseded.cursor == Cursor("memory:0")
     # The same attempt again is not a new generation.
-    assert attempts.note("model", 2, Cursor("2")) is None
+    assert attempts.note("model", 2, topic="t", previous=Cursor("memory:1")) is None
 
 
-def test_inbound_stream_ids_cannot_collide():
+def test_topic_keys_cannot_collide():
     # A colon in a workflow id must not make two addresses one key.
-    assert _ids.inbound_stream_id("a:b", "c") != _ids.inbound_stream_id("a", "b:c")
-    assert _ids.inbound_stream_id("a:b", "") != _ids.inbound_stream_id("a", "b")
-    assert _ids.inbound_stream_id("a%3Ab", "c") != _ids.inbound_stream_id("a:b", "c")
-    assert _ids.inbound_stream_id("wf", "inputs") == "wf:inputs"
+    assert _ids.topic_key("a:b", "c") != _ids.topic_key("a", "b:c")
+    assert _ids.topic_key("a%3Ab", "c") != _ids.topic_key("a:b", "c")
+    assert _ids.topic_key("wf", "inputs") == "wf:inputs"
 
 
-async def test_append_read_roundtrip(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    producer = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
+def test_cursors_name_their_provider():
+    assert _wire.cursor_position(BEGINNING, provider="memory") is None
+    assert _wire.cursor_position(Cursor("memory:42"), provider="memory") == "42"
+    with pytest.raises(StreamCursorError):
+        _wire.cursor_position(Cursor("redis:1700000000000-0"), provider="memory")
+
+
+async def test_append_read_roundtrip(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic="out", producer_id="model", attempt=1)
+    assert (producer.producer_id, producer.attempt) == ("model", 1)
     await producer.append({"id": "r1"}, {"id": "r2"})
     await producer.finish()
 
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    records = await take(consumer.read(type=dict, topic="out"), 3)
+    records = await take(stream.read(topic="out", result_type=dict), 3)
     assert [r.kind for r in records] == [
         RecordKind.DATA,
         RecordKind.DATA,
         RecordKind.FINISH,
     ]
     assert [r.value for r in records[:2]] == [{"id": "r1"}, {"id": "r2"}]
-    assert all(r.producer == "model" and r.attempt == 1 for r in records)
+    assert records[2].value is None
+    assert all(r.producer_id == "model" and r.attempt == 1 for r in records)
     assert [r.sequence for r in records] == [0, 1, 2]
     assert all(r.topic == "out" for r in records)
 
 
-@pytest.mark.inbound_stream
-async def test_inbound_records_carry_no_topic(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    producer = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        stream="inputs",
-        producer_id="model",
-        attempt=1,
-    )
-    await producer.append({"id": "r1"})
-    await producer.finish()
+async def test_raw_values_pass_through_untouched(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    payload = Payload(metadata={"encoding": b"binary/plain"}, data=b"\x00\x01raw")
+    producer = stream.producer(topic="out", producer_id="model", attempt=1)
+    await producer.append(RawValue(payload))
 
-    consumer = await streams.consumer(
-        provider.client, workflow_id=workflow_id, stream="inputs"
-    )
-    records = await take(consumer.read(type=dict), 2)
-    assert [r.kind for r in records] == [RecordKind.DATA, RecordKind.FINISH]
-    assert records[0].value == {"id": "r1"}
-    # An inbound stream has no topics; its name is the whole address.
-    assert all(r.topic == "" for r in records)
-    with pytest.raises(ValueError, match="inbound stream 'inputs' has no topics"):
-        await take(consumer.read(type=dict, topic="inputs"), 1)
+    records = await take(stream.read(topic="out", result_type=RawValue), 1)
+    assert isinstance(records[0].value, RawValue)
+    assert records[0].value.payload == payload
 
 
-async def test_retried_append_is_deduplicated(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    first = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
-    await first.append({"id": "r1"})
+@pytest.mark.reports_positions
+async def test_retried_append_returns_the_original_position(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    first = stream.producer(topic="out", producer_id="model", attempt=1)
+    landed = await first.append({"id": "r1"})
+    assert landed is not None
     # The retry of the same attempt starts its sequence over and appends the
-    # same record. The provider must not store it twice, and says so by
-    # returning no position for what it dropped, or the original one when
-    # its store cannot tell the two apart at append time.
-    retry = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
-    dropped = await retry.append({"id": "r1"})
+    # same record. The provider stores it once and answers with where the
+    # original landed, so the retry can checkpoint the same position.
+    retry = stream.producer(topic="out", producer_id="model", attempt=1)
+    assert await retry.append({"id": "r1"}) == landed
+    # An empty call writes nothing and answers the same way.
+    assert await retry.append() == landed
 
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    records = await take(consumer.read(type=dict, topic="out"), 1)
+    records = await take(stream.read(topic="out", result_type=dict), 1)
     assert records[0].value == {"id": "r1"}
-    if provider.reports_dropped_repeats:
-        assert dropped is None
-    else:
-        assert dropped == records[0].cursor
+    assert records[0].cursor == landed
     # The store holds exactly the one record: the newest position is its cursor.
-    assert await consumer.latest(topic="out") == records[0].cursor
+    assert await stream.latest(topic="out") == landed
 
 
-async def test_new_attempt_supersedes_the_old_one(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    first = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
+async def test_retried_append_is_stored_once(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    first = stream.producer(topic="out", producer_id="model", attempt=1)
+    await first.append({"id": "r1"})
+    retry = stream.producer(topic="out", producer_id="model", attempt=1)
+    await retry.append({"id": "r1"})
+    await retry.append({"id": "r2"})
+
+    records = await take(stream.read(topic="out", result_type=dict), 2)
+    assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
+
+
+async def test_new_attempt_supersedes_the_old_one(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    first = stream.producer(topic="out", producer_id="model", attempt=1)
     await first.append({"text": "The capital of"})
-    second = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=2,
-    )
+    second = stream.producer(topic="out", producer_id="model", attempt=2)
     await second.append({"text": "Paris is the capital"})
 
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    records = await take(consumer.read(type=dict, topic="out"), 3)
+    records = await take(stream.read(topic="out", result_type=dict), 3)
     assert records[0].kind is RecordKind.DATA and records[0].attempt == 1
     assert records[1].kind is RecordKind.SUPERSEDED
-    assert isinstance(records[1].value, streams.Supersession)
-    assert records[1].value.previous_attempt == 1
+    assert records[1].supersession == Supersession("model", 1, 2)
+    assert records[1].value is None
     assert records[2].kind is RecordKind.DATA and records[2].attempt == 2
 
 
-async def test_topic_filter_on_the_owners_stream(provider: ProviderCase):
-    # Two producers on two topics of the stream the workflow publishes. The
-    # filter is only meaningful on a store that mixes topics, which is this
-    # one; an inbound stream carries none.
-    workflow_id = provider.workflow_id
-    on_a = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="a",
-        producer_id="tool-a",
-        attempt=1,
+async def test_a_superseded_record_resumes_to_the_triggering_record(
+    case: ProviderCase,
+):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    first = stream.producer(topic="out", producer_id="model", attempt=1)
+    await first.append({"n": 1})
+    second = stream.producer(topic="out", producer_id="model", attempt=2)
+    await second.append({"n": 2})
+
+    records = await take(stream.read(topic="out", result_type=dict), 3)
+    superseded = records[1]
+    assert superseded.kind is RecordKind.SUPERSEDED
+    # The synthesized record sits at the position before the new attempt's
+    # first record, so a consumer that checkpoints it and restarts is handed
+    # that record rather than skipping it.
+    assert superseded.cursor == records[0].cursor
+    resumed = await take(
+        stream.read(topic="out", result_type=dict, after=superseded.cursor), 1
     )
+    assert resumed[0].kind is RecordKind.DATA
+    assert resumed[0].value == {"n": 2}
+
+
+async def test_topics_are_addressed_by_name(case: ProviderCase):
+    # Two producers on two topics of the same workflow's stream: each read
+    # names its topic and sees only that topic's records.
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    on_a = stream.producer(topic="a", producer_id="tool-a", attempt=1)
     await on_a.append({"n": 1})
-    on_b = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="b",
-        producer_id="tool-b",
-        attempt=1,
-    )
+    on_b = stream.producer(topic="b", producer_id="tool-b", attempt=1)
     await on_b.append({"n": 2})
 
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    only_a = await take(consumer.read(type=dict, topic="a"), 1)
+    only_a = await take(stream.read(topic="a", result_type=dict), 1)
     assert [(r.topic, r.value) for r in only_a] == [("a", {"n": 1})]
-    only_b = await take(consumer.read(type=dict, topic="b"), 1)
+    only_b = await take(stream.read(topic="b", result_type=dict), 1)
     assert [(r.topic, r.value) for r in only_b] == [("b", {"n": 2})]
 
 
-@pytest.mark.unfiltered_read
-async def test_a_read_without_a_topic_sees_every_topic(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    on_a = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="a",
-        producer_id="tool-a",
-        attempt=1,
-    )
-    await on_a.append({"n": 1})
-    on_b = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="b",
-        producer_id="tool-b",
-        attempt=1,
-    )
-    await on_b.append({"n": 2})
-
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    both = await take(consumer.read(type=dict), 2)
-    assert [(r.topic, r.value) for r in both] == [("a", {"n": 1}), ("b", {"n": 2})]
-
-
-async def test_cursor_resumes_where_it_points(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    producer = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
+async def test_cursor_resumes_where_it_points(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic="out", producer_id="model", attempt=1)
     await producer.append({"n": 1}, {"n": 2}, {"n": 3})
 
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    records = await take(consumer.read(type=dict, topic="out"), 3)
+    records = await take(stream.read(topic="out", result_type=dict), 3)
     checkpoint = records[0].cursor
 
     # Resuming after a record hands back everything past it and nothing
     # twice, without the reader ever advancing a cursor itself.
-    resumed = await streams.consumer(provider.client, workflow_id=workflow_id)
-    again = await take(resumed.read(type=dict, topic="out", after=checkpoint), 2)
+    again = await take(stream.read(topic="out", result_type=dict, after=checkpoint), 2)
     assert [r.value for r in again] == [{"n": 2}, {"n": 3}]
 
 
-async def test_append_cursor_names_the_last_record_of_the_batch(
-    provider: ProviderCase,
-):
-    workflow_id = provider.workflow_id
-    producer = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
+@pytest.mark.reports_positions
+async def test_append_cursor_names_the_last_record_of_the_batch(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic="out", producer_id="model", attempt=1)
     appended = await producer.append({"n": 1}, {"n": 2}, {"n": 3})
-    if appended is None:
-        pytest.skip(f"the {provider.name} provider learns positions at read time")
-    await producer.append({"n": 4})
+    assert appended is not None
+    then = await producer.append({"n": 4})
 
     # A producer that resumes a reader after its own append must see only
     # what came later, not the tail of the batch it just wrote.
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    records = await take(consumer.read(type=dict, topic="out", after=appended), 1)
+    records = await take(stream.read(topic="out", result_type=dict, after=appended), 1)
     assert [r.value for r in records] == [{"n": 4}]
-    assert await producer.append() is None
+    assert records[0].cursor == then
+    assert await producer.append() == then
 
 
-async def test_latest_positions_a_reader_at_the_end(provider: ProviderCase):
-    workflow_id = provider.workflow_id
-    producer = await streams.producer(
-        provider.client,
-        workflow_id=workflow_id,
-        topic="out",
-        producer_id="model",
-        attempt=1,
-    )
-    consumer = await streams.consumer(provider.client, workflow_id=workflow_id)
-    assert await consumer.latest(topic="out") == streams.BEGINNING
+async def test_latest_positions_a_reader_at_the_end(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic="out", producer_id="model", attempt=1)
+    assert await stream.latest(topic="out") == BEGINNING
 
     await producer.append({"n": 1}, {"n": 2})
-    since = await consumer.latest(topic="out")
+    since = await stream.latest(topic="out")
     await producer.append({"n": 3})
 
     # A reader that positioned itself before the last append sees only what
     # came after, which is how a client follows a turn it is about to start.
-    records = await take(consumer.read(type=dict, topic="out", after=since), 1)
+    records = await take(stream.read(topic="out", result_type=dict, after=since), 1)
     assert [r.value for r in records] == [{"n": 3}]
 
 
-@pytest.mark.inbound_stream
-async def test_stream_addresses_with_colons_do_not_share_a_store(
-    provider: ProviderCase,
-):
+async def test_topic_addresses_with_colons_do_not_share_a_store(case: ProviderCase):
     # ("wf:x", "y") and ("wf", "x:y") differ only in where the colon sits.
-    base = provider.workflow_id
-    left = await streams.producer(
-        provider.client, workflow_id=f"{base}:x", stream="y", producer_id="l", attempt=1
+    base = new_workflow_id()
+    left = await case.open(f"{base}:x")
+    right = await case.open(base)
+    await left.producer(topic="y", producer_id="l", attempt=1).append({"side": "left"})
+    await right.producer(topic="x:y", producer_id="r", attempt=1).append(
+        {"side": "right"}
     )
-    right = await streams.producer(
-        provider.client, workflow_id=base, stream="x:y", producer_id="r", attempt=1
-    )
-    await left.append({"side": "left"})
-    await right.append({"side": "right"})
 
-    seen_left = await streams.consumer(
-        provider.client, workflow_id=f"{base}:x", stream="y"
-    )
-    only_left = await take(seen_left.read(type=dict), 1)
+    only_left = await take(left.read(topic="y", result_type=dict), 1)
     assert [r.value for r in only_left] == [{"side": "left"}]
-    assert await seen_left.latest() == only_left[0].cursor
-    seen_right = await streams.consumer(provider.client, workflow_id=base, stream="x:y")
-    only_right = await take(seen_right.read(type=dict), 1)
+    assert await left.latest(topic="y") == only_left[0].cursor
+    only_right = await take(right.read(topic="x:y", result_type=dict), 1)
     assert [r.value for r in only_right] == [{"side": "right"}]
-    assert await seen_right.latest() == only_right[0].cursor
+    assert await right.latest(topic="x:y") == only_right[0].cursor
 
 
-async def test_producer_needs_exactly_one_address_and_an_identity(
-    provider: ProviderCase,
-):
-    workflow_id = provider.workflow_id
+async def test_a_foreign_cursor_is_refused_at_the_call(case: ProviderCase):
+    stream = await case.open(new_workflow_id())
+    # Refused by read() itself, not by the first iteration of its generator,
+    # so the caller's except clause is where the mistake surfaces.
+    with pytest.raises(StreamCursorError):
+        stream.read(topic="out", after=Cursor("elsewhere:42"))
+
+
+async def test_argument_mistakes_are_value_errors(case: ProviderCase):
+    stream = await case.open(new_workflow_id())
     with pytest.raises(ValueError):
-        await streams.producer(
-            provider.client, workflow_id=workflow_id, producer_id="model", attempt=1
-        )
+        stream.read(topic="")
     with pytest.raises(ValueError):
-        await streams.producer(
-            provider.client,
-            workflow_id=workflow_id,
-            stream="inputs",
-            topic="out",
-            producer_id="model",
-            attempt=1,
-        )
+        stream.producer(topic="", producer_id="model", attempt=1)
     # Outside an activity there is no identity to fall back on.
     with pytest.raises(ValueError, match="producer_id is required"):
-        await streams.producer(provider.client, workflow_id=workflow_id, topic="out")
-
-
-def test_unknown_provider_is_a_clear_error():
-    with pytest.raises(RuntimeError, match="no stream provider 'nope'"):
-        streams.configure(provider="nope")
-
-
-async def test_opening_a_stream_needs_a_configured_provider():
-    # Building a provider is process setup, so the first workflow's thread
-    # is not allowed to do it as a side effect of opening a stream.
-    _provider._active = None
-    with pytest.raises(RuntimeError, match="streams.configure"):
-        await streams.consumer(None, workflow_id="wf")
-    # Closing with nothing configured is allowed, so a shutdown path can
-    # call it unconditionally.
-    await streams.close()
-    streams.configure(provider="memory")
-    assert await streams.consumer(None, workflow_id="wf") is not None
-    await streams.close()
+        stream.producer(topic="out")
