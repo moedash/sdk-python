@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
-from temporalio.streams.providers.redis import _drive, _outside_position
+from temporalio.streams.providers.redis import (
+    RedisStreams,
+    _drive,
+    _outside_position,
+    _workflow_position,
+)
 
 
 def test_outside_cursors_name_output_positions():
@@ -43,3 +49,28 @@ def test_a_publish_that_would_wait_fails_loudly():
             _drive(publish())
 
     asyncio.run(run())
+
+
+def test_workflow_cursors_name_input_positions():
+    assert _workflow_position(BEGINNING) is None
+    position = _workflow_position(Cursor("redis:in:1700000000000-3"))
+    assert position is not None and position.token == "1700000000000-3"
+    # An outside cursor names the output stream, whose entry ids are not the
+    # input stream's, so it cannot seed a workflow reader.
+    with pytest.raises(StreamCursorError, match="output stream"):
+        _workflow_position(Cursor("redis:1700000000000-3"))
+    with pytest.raises(StreamCursorError):
+        _workflow_position(Cursor("memory:3"))
+    with pytest.raises(StreamCursorError):
+        _workflow_position(Cursor("redis:in:not-an-id"))
+
+
+def test_retention_options_are_checked_at_construction():
+    with pytest.raises(ValueError, match="retention"):
+        RedisStreams(retention=timedelta(0))
+    with pytest.raises(ValueError, match="max_len"):
+        RedisStreams(max_len=0)
+    # A backend the caller owns is the caller's to trim.
+    with pytest.raises(ValueError, match="trimmed by its owner"):
+        RedisStreams(backend=object(), max_len=10)
+    RedisStreams(retention=timedelta(hours=1), max_len=10)

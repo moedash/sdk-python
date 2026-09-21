@@ -14,6 +14,7 @@ use temporalio_common::protos::coresdk::{
     nexus::NexusTaskCompletion, ActivityHeartbeat, ActivityTaskCompletion,
 };
 use temporalio_common::protos::temporal::api::history::v1::History;
+use temporalio_common::protos::temporal::api::stream::v1::StreamSlice;
 use temporalio_common::protos::temporal::api::worker::v1::{PluginInfo, StorageDriverInfo};
 use temporalio_sdk_core::replay::{HistoryForReplay, ReplayWorkerInput};
 use temporalio_sdk_core::{
@@ -1007,14 +1008,24 @@ impl HistoryPusher {
 
 #[pymethods]
 impl HistoryPusher {
+    /// Feed one history to the replay worker. `stream_slices` are serialized
+    /// `temporal.api.stream.v1.StreamSlice` messages carrying the records the
+    /// history's completed tasks consumed, which History itself never holds.
+    #[pyo3(signature = (workflow_id, history_proto, stream_slices = Vec::new()))]
     fn push_history<'p>(
         &self,
         py: Python<'p>,
         workflow_id: &str,
         history_proto: &Bound<'_, PyBytes>,
+        stream_slices: Vec<Bound<'p, PyBytes>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let history = History::decode(history_proto.as_bytes())
             .map_err(|err| PyValueError::new_err(format!("Invalid proto: {err}")))?;
+        let slices = stream_slices
+            .iter()
+            .map(|slice| StreamSlice::decode(slice.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| PyValueError::new_err(format!("Invalid stream slice proto: {err}")))?;
         let wfid = workflow_id.to_string();
         let tx = if let Some(tx) = self.tx.as_ref() {
             tx.clone()
@@ -1025,7 +1036,7 @@ impl HistoryPusher {
         };
         // We accept this doesn't have logging/tracing
         self.runtime.future_into_py(py, async move {
-            tx.send(HistoryForReplay::new(history, wfid))
+            tx.send(HistoryForReplay::new(history, wfid).with_stream_slices(slices))
                 .await
                 .map_err(|_| {
                     PyRuntimeError::new_err(
