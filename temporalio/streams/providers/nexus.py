@@ -58,7 +58,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, NoReturn, TypeVar, cast
@@ -67,12 +67,13 @@ import nexusrpc
 import nexusrpc.handler
 from google.protobuf.message import DecodeError
 
+import temporalio.client
 import temporalio.converter
 from temporalio.api.common.v1 import Payload
 from temporalio.api.operatorservice.v1 import ListNexusEndpointsRequest
-from temporalio.client import Client
+from temporalio.client import Client, ClientConfig
 from temporalio.common import RawValue
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import ConnectConfig, RPCError, RPCStatusCode, ServiceClient
 from temporalio.streams._errors import (
     StreamCursorError,
     StreamError,
@@ -843,12 +844,15 @@ class NexusStreamHandle:
         )
 
 
-class NexusStreams(StreamProvider):
+class NexusStreams(StreamProvider, temporalio.client.Plugin):
     """The outside half of a provider, over one Nexus endpoint.
 
-    Not a worker plugin: a workflow publishes and reads through the storage
-    provider its worker was given, and this front only serves code outside a
-    workflow. The endpoint hides which store that is.
+    A client plugin but not a worker plugin: a workflow publishes and reads
+    through the storage provider its worker was given, and this front only
+    serves code outside a workflow, so ``Client.connect(plugins=[front])``
+    makes ``client.get_stream_handle()`` go through the endpoint while a
+    worker built from that client is left without a provider. The endpoint
+    hides which store sits behind it.
     """
 
     def __init__(
@@ -906,6 +910,19 @@ class NexusStreams(StreamProvider):
 
     async def close(self) -> None:
         """Nothing to release: each call opens and closes its own connection."""
+
+    def configure_client(self, config: ClientConfig) -> ClientConfig:
+        """Set this front as the client's ``stream_provider``."""
+        config["stream_provider"] = self
+        return config
+
+    async def connect_service_client(
+        self,
+        config: ConnectConfig,
+        next: Callable[[ConnectConfig], Awaitable[ServiceClient]],
+    ) -> ServiceClient:
+        """Connect unchanged."""
+        return await next(config)
 
     async def _endpoint_id(self, client: Client | None) -> str:
         if self._resolved is not None:
