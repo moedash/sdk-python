@@ -115,8 +115,13 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
     # No STREAMS_LIVE gate: the store is the workflow's own History, which the
     # test environment's server provides.
     provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost, plugins=[provider]) as worker:
+    async with new_worker(client, StreamHost) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
