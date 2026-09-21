@@ -8,7 +8,6 @@ from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import message as _message
 from google.protobuf import reflection as _reflection
 from google.protobuf import symbol_database as _symbol_database
-from google.protobuf.internal import enum_type_wrapper
 
 # @@protoc_insertion_point(imports)
 
@@ -18,66 +17,61 @@ _sym_db = _symbol_database.Default()
 from temporalio.api.common.v1 import (
     message_pb2 as temporal_dot_api_dot_common_dot_v1_dot_message__pb2,
 )
-
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n&temporalio/api/stream/v1/message.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a$temporal/api/common/v1/message.proto"\xed\x02\n\rStreamMessage\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12X\n\x08metadata\x18\x02 \x03(\x0b\x32\x46.temporal.server.chasm.lib.stream.proto.v1.StreamMessage.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x16\n\x0etopic_sequence\x18\x04 \x01(\x03\x12J\n\x04kind\x18\x05 \x01(\x0e\x32<.temporal.server.chasm.lib.stream.proto.v1.StreamMessageKind\x12\x0e\n\x06offset\x18\x06 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"`\n\x12StreamMessageBatch\x12J\n\x08messages\x18\x01 \x03(\x0b\x32\x38.temporal.server.chasm.lib.stream.proto.v1.StreamMessage*u\n\x11StreamMessageKind\x12#\n\x1fSTREAM_MESSAGE_KIND_UNSPECIFIED\x10\x00\x12\x1c\n\x18STREAM_MESSAGE_KIND_DATA\x10\x01\x12\x1d\n\x19STREAM_MESSAGE_KIND_FLUSH\x10\x02\x42>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
+from temporalio.api.stream.v1 import (
+    message_pb2 as temporal_dot_api_dot_stream_dot_v1_dot_message__pb2,
 )
 
-_STREAMMESSAGEKIND = DESCRIPTOR.enum_types_by_name["StreamMessageKind"]
-StreamMessageKind = enum_type_wrapper.EnumTypeWrapper(_STREAMMESSAGEKIND)
-STREAM_MESSAGE_KIND_UNSPECIFIED = 0
-STREAM_MESSAGE_KIND_DATA = 1
-STREAM_MESSAGE_KIND_FLUSH = 2
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
+    b'\n&temporalio/api/stream/v1/message.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a$temporal/api/common/v1/message.proto\x1a$temporal/api/stream/v1/message.proto"\xf7\x02\n\x0cStreamRecord\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12W\n\x08metadata\x18\x02 \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamRecord.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x10\n\x08sequence\x18\x04 \x01(\x03\x12\x36\n\x04kind\x18\x05 \x01(\x0e\x32(.temporal.api.stream.v1.StreamRecordKind\x12\x0e\n\x06offset\x18\x06 \x01(\x03\x12\x13\n\x0bproducer_id\x18\x07 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x08 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"]\n\x11StreamRecordBatch\x12H\n\x07records\x18\x01 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecordB>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
+)
 
 
-_STREAMMESSAGE = DESCRIPTOR.message_types_by_name["StreamMessage"]
-_STREAMMESSAGE_METADATAENTRY = _STREAMMESSAGE.nested_types_by_name["MetadataEntry"]
-_STREAMMESSAGEBATCH = DESCRIPTOR.message_types_by_name["StreamMessageBatch"]
-StreamMessage = _reflection.GeneratedProtocolMessageType(
-    "StreamMessage",
+_STREAMRECORD = DESCRIPTOR.message_types_by_name["StreamRecord"]
+_STREAMRECORD_METADATAENTRY = _STREAMRECORD.nested_types_by_name["MetadataEntry"]
+_STREAMRECORDBATCH = DESCRIPTOR.message_types_by_name["StreamRecordBatch"]
+StreamRecord = _reflection.GeneratedProtocolMessageType(
+    "StreamRecord",
     (_message.Message,),
     {
         "MetadataEntry": _reflection.GeneratedProtocolMessageType(
             "MetadataEntry",
             (_message.Message,),
             {
-                "DESCRIPTOR": _STREAMMESSAGE_METADATAENTRY,
+                "DESCRIPTOR": _STREAMRECORD_METADATAENTRY,
                 "__module__": "temporalio.api.streamservice.v1.message_pb2",
-                # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamMessage.MetadataEntry)
+                # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamRecord.MetadataEntry)
             },
         ),
-        "DESCRIPTOR": _STREAMMESSAGE,
+        "DESCRIPTOR": _STREAMRECORD,
         "__module__": "temporalio.api.streamservice.v1.message_pb2",
-        # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamMessage)
+        # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamRecord)
     },
 )
-_sym_db.RegisterMessage(StreamMessage)
-_sym_db.RegisterMessage(StreamMessage.MetadataEntry)
+_sym_db.RegisterMessage(StreamRecord)
+_sym_db.RegisterMessage(StreamRecord.MetadataEntry)
 
-StreamMessageBatch = _reflection.GeneratedProtocolMessageType(
-    "StreamMessageBatch",
+StreamRecordBatch = _reflection.GeneratedProtocolMessageType(
+    "StreamRecordBatch",
     (_message.Message,),
     {
-        "DESCRIPTOR": _STREAMMESSAGEBATCH,
+        "DESCRIPTOR": _STREAMRECORDBATCH,
         "__module__": "temporalio.api.streamservice.v1.message_pb2",
-        # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamMessageBatch)
+        # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamRecordBatch)
     },
 )
-_sym_db.RegisterMessage(StreamMessageBatch)
+_sym_db.RegisterMessage(StreamRecordBatch)
 
 if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._options = None
     DESCRIPTOR._serialized_options = (
         b"Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampb"
     )
-    _STREAMMESSAGE_METADATAENTRY._options = None
-    _STREAMMESSAGE_METADATAENTRY._serialized_options = b"8\001"
-    _STREAMMESSAGEKIND._serialized_start = 589
-    _STREAMMESSAGEKIND._serialized_end = 706
-    _STREAMMESSAGE._serialized_start = 124
-    _STREAMMESSAGE._serialized_end = 489
-    _STREAMMESSAGE_METADATAENTRY._serialized_start = 409
-    _STREAMMESSAGE_METADATAENTRY._serialized_end = 489
-    _STREAMMESSAGEBATCH._serialized_start = 491
-    _STREAMMESSAGEBATCH._serialized_end = 587
+    _STREAMRECORD_METADATAENTRY._options = None
+    _STREAMRECORD_METADATAENTRY._serialized_options = b"8\001"
+    _STREAMRECORD._serialized_start = 162
+    _STREAMRECORD._serialized_end = 537
+    _STREAMRECORD_METADATAENTRY._serialized_start = 457
+    _STREAMRECORD_METADATAENTRY._serialized_end = 537
+    _STREAMRECORDBATCH._serialized_start = 539
+    _STREAMRECORDBATCH._serialized_end = 632
 # @@protoc_insertion_point(module_scope)

@@ -6,55 +6,27 @@ isort:skip_file
 import builtins
 import collections.abc
 import sys
-import typing
 
 import google.protobuf.descriptor
 import google.protobuf.internal.containers
-import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 
 import temporalio.api.common.v1.message_pb2
+import temporalio.api.stream.v1.message_pb2
 
-if sys.version_info >= (3, 10):
+if sys.version_info >= (3, 8):
     import typing as typing_extensions
 else:
     import typing_extensions
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
 
-class _StreamMessageKind:
-    ValueType = typing.NewType("ValueType", builtins.int)
-    V: typing_extensions.TypeAlias = ValueType
-
-class _StreamMessageKindEnumTypeWrapper(
-    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
-        _StreamMessageKind.ValueType
-    ],
-    builtins.type,
-):  # noqa: F821
-    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
-    STREAM_MESSAGE_KIND_UNSPECIFIED: _StreamMessageKind.ValueType  # 0
-    STREAM_MESSAGE_KIND_DATA: _StreamMessageKind.ValueType  # 1
-    STREAM_MESSAGE_KIND_FLUSH: _StreamMessageKind.ValueType  # 2
-    """Producer signalling a delivery boundary. Carries no body and consumes an
-    offset like any other message. A consumer uses it to end a turn without
-    waiting out an idle timeout.
+class StreamRecord(google.protobuf.message.Message):
+    """The stored shape of temporal.api.stream.v1.StreamRecord plus the offset a
+    read assigns. Field for field the public record, so one crosses the frontend
+    in either direction without translation.
     """
 
-class StreamMessageKind(
-    _StreamMessageKind, metaclass=_StreamMessageKindEnumTypeWrapper
-): ...
-
-STREAM_MESSAGE_KIND_UNSPECIFIED: StreamMessageKind.ValueType  # 0
-STREAM_MESSAGE_KIND_DATA: StreamMessageKind.ValueType  # 1
-STREAM_MESSAGE_KIND_FLUSH: StreamMessageKind.ValueType  # 2
-"""Producer signalling a delivery boundary. Carries no body and consumes an
-offset like any other message. A consumer uses it to end a turn without
-waiting out an idle timeout.
-"""
-global___StreamMessageKind = StreamMessageKind
-
-class StreamMessage(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     class MetadataEntry(google.protobuf.message.Message):
@@ -82,9 +54,11 @@ class StreamMessage(google.protobuf.message.Message):
     BODY_FIELD_NUMBER: builtins.int
     METADATA_FIELD_NUMBER: builtins.int
     TOPIC_FIELD_NUMBER: builtins.int
-    TOPIC_SEQUENCE_FIELD_NUMBER: builtins.int
+    SEQUENCE_FIELD_NUMBER: builtins.int
     KIND_FIELD_NUMBER: builtins.int
     OFFSET_FIELD_NUMBER: builtins.int
+    PRODUCER_ID_FIELD_NUMBER: builtins.int
+    ATTEMPT_FIELD_NUMBER: builtins.int
     @property
     def body(self) -> temporal.api.common.v1.message_pb2.Payload: ...
     @property
@@ -93,17 +67,28 @@ class StreamMessage(google.protobuf.message.Message):
     ) -> google.protobuf.internal.containers.MessageMap[
         builtins.str, temporal.api.common.v1.message_pb2.Payload
     ]:
-        """Producer-supplied provenance. The server does not populate this today."""
+        """Producer-supplied provenance, stored as sent."""
     topic: builtins.str
-    topic_sequence: builtins.int
-    """Position within this topic. The global offset orders the whole stream;
-    this lets a consumer reason about one topic without decoding the rest.
+    sequence: builtins.int
+    """The producer's position within its attempt, or -1 when unnumbered. Stored
+    as sent; the global offset is what orders the stream.
     """
-    kind: global___StreamMessageKind.ValueType
+    kind: temporal.api.stream.v1.message_pb2.StreamRecordKind.ValueType
+    """Settled to DATA on append when left unspecified, so a retry hashes the
+    same bytes and a reader never sees the zero value.
+    """
     offset: builtins.int
     """Position in the whole stream, set on read and never stored. A consumer
-    that resumes at message granularity needs it, and a topic-filtered read
+    that resumes at record granularity needs it, and a topic-filtered read
     leaves gaps that make it underivable from the response alone.
+    """
+    producer_id: builtins.str
+    """Who wrote the record. Empty when the owning Workflow did: its publish
+    command clears the field, whatever the worker sent.
+    """
+    attempt: builtins.int
+    """The producer's attempt, stored as sent. Readers treat a later attempt by
+    the same producer as superseding what the earlier one wrote.
     """
     def __init__(
         self,
@@ -114,9 +99,11 @@ class StreamMessage(google.protobuf.message.Message):
         ]
         | None = ...,
         topic: builtins.str = ...,
-        topic_sequence: builtins.int = ...,
-        kind: global___StreamMessageKind.ValueType = ...,
+        sequence: builtins.int = ...,
+        kind: temporal.api.stream.v1.message_pb2.StreamRecordKind.ValueType = ...,
         offset: builtins.int = ...,
+        producer_id: builtins.str = ...,
+        attempt: builtins.int = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["body", b"body"]
@@ -124,6 +111,8 @@ class StreamMessage(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "attempt",
+            b"attempt",
             "body",
             b"body",
             "kind",
@@ -132,37 +121,39 @@ class StreamMessage(google.protobuf.message.Message):
             b"metadata",
             "offset",
             b"offset",
+            "producer_id",
+            b"producer_id",
+            "sequence",
+            b"sequence",
             "topic",
             b"topic",
-            "topic_sequence",
-            b"topic_sequence",
         ],
     ) -> None: ...
 
-global___StreamMessage = StreamMessage
+global___StreamRecord = StreamRecord
 
-class StreamMessageBatch(google.protobuf.message.Message):
-    """One append is one batch, and one batch is one log node. The server stores
+class StreamRecordBatch(google.protobuf.message.Message):
+    """One append is one batch, and one batch is one data node. The server stores
     this serialized and opaque; it decodes only to trim a partial first page or
     to apply a topic filter.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        global___StreamMessage
+        global___StreamRecord
     ]: ...
     def __init__(
         self,
         *,
-        messages: collections.abc.Iterable[global___StreamMessage] | None = ...,
+        records: collections.abc.Iterable[global___StreamRecord] | None = ...,
     ) -> None: ...
     def ClearField(
-        self, field_name: typing_extensions.Literal["messages", b"messages"]
+        self, field_name: typing_extensions.Literal["records", b"records"]
     ) -> None: ...
 
-global___StreamMessageBatch = StreamMessageBatch
+global___StreamRecordBatch = StreamRecordBatch

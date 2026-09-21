@@ -22,13 +22,14 @@ from temporalio.api.common.v1 import (
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n+temporalio/api/stream/v1/stream_state.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a$temporal/api/common/v1/message.proto"\xe5\x05\n\x0bStreamState\x12\x13\n\x0bhead_offset\x18\x01 \x01(\x03\x12\x13\n\x0b\x62\x61se_offset\x18\x02 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x35\n\x0c\x63lose_reason\x18\x05 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x13\n\x0bowner_epoch\x18\x06 \x01(\x03\x12\x13\n\x0b\x62ucket_size\x18\x07 \x01(\x03\x12\x15\n\rcollection_id\x18\x08 \x01(\t\x12X\n\tproducers\x18\t \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamState.ProducersEntry\x12X\n\tconsumers\x18\n \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamState.ConsumersEntry\x12M\n\tlifecycle\x18\x0b \x01(\x0b\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamLifecycle\x12\x17\n\x0fredirect_run_id\x18\x0c \x01(\t\x12.\n\nclose_time\x18\r \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x1ak\n\x0eProducersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12H\n\x05value\x18\x02 \x01(\x0b\x32\x39.temporal.server.chasm.lib.stream.proto.v1.ProducerCursor:\x02\x38\x01\x1ak\n\x0e\x43onsumersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12H\n\x05value\x18\x02 \x01(\x0b\x32\x39.temporal.server.chasm.lib.stream.proto.v1.ConsumerCursor:\x02\x38\x01"h\n\x0eProducerCursor\x12\x0b\n\x03seq\x18\x01 \x01(\x03\x12\x14\n\x0c\x66irst_offset\x18\x02 \x01(\x03\x12\r\n\x05\x63ount\x18\x03 \x01(\x03\x12\x14\n\x0c\x63ontent_hash\x18\x04 \x01(\x0c\x12\x0e\n\x06\x66\x65nced\x18\x05 \x01(\x08"}\n\x0e\x43onsumerCursor\x12\x13\n\x0bworkflow_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x0e\n\x06offset\x18\x03 \x01(\x03\x12\x0e\n\x06\x61\x63tive\x18\x04 \x01(\x08\x12\x10\n\x08\x65xternal\x18\x05 \x01(\x08\x12\x14\n\x0creplay_floor\x18\x06 \x01(\x03"\xe0\x01\n\x14WorkflowStreamCursor\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x15\n\rcollection_id\x18\x02 \x01(\t\x12\x13\n\x0b\x62ucket_size\x18\x03 \x01(\x03\x12\x0e\n\x06offset\x18\x04 \x01(\x03\x12\x12\n\nknown_head\x18\x08 \x01(\x03\x12\x10\n\x08\x65xternal\x18\t \x01(\x08\x12\x14\n\x0cpending_from\x18\x05 \x01(\x03\x12\x12\n\npending_to\x18\x06 \x01(\x03\x12\x13\n\x0bhas_pending\x18\x07 \x01(\x08\x12\x14\n\x0cstart_offset\x18\n \x01(\x03"R\n\x0fStreamLifecycle\x12,\n\tretention\x18\x01 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x11\n\tmax_items\x18\x02 \x01(\x03\x42>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
+    b'\n+temporalio/api/stream/v1/stream_state.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a$temporal/api/common/v1/message.proto"\xb5\x06\n\x0bStreamState\x12\x13\n\x0bhead_offset\x18\x01 \x01(\x03\x12\x13\n\x0b\x62\x61se_offset\x18\x02 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x35\n\x0c\x63lose_reason\x18\x05 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12X\n\tproducers\x18\t \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamState.ProducersEntry\x12X\n\tconsumers\x18\n \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamState.ConsumersEntry\x12M\n\tlifecycle\x18\x0b \x01(\x0b\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamLifecycle\x12\x17\n\x0fredirect_run_id\x18\x0c \x01(\t\x12.\n\nclose_time\x18\r \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12G\n\x06\x62udget\x18\x0e \x01(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamBudget\x12\x16\n\x0e\x61ppended_bytes\x18\x0f \x01(\x03\x12\x16\n\x0enotify_pending\x18\x10 \x01(\x08\x1ak\n\x0eProducersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12H\n\x05value\x18\x02 \x01(\x0b\x32\x39.temporal.server.chasm.lib.stream.proto.v1.ProducerCursor:\x02\x38\x01\x1ak\n\x0e\x43onsumersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12H\n\x05value\x18\x02 \x01(\x0b\x32\x39.temporal.server.chasm.lib.stream.proto.v1.ConsumerCursor:\x02\x38\x01J\x04\x08\x03\x10\x04J\x04\x08\x06\x10\x07J\x04\x08\x07\x10\x08J\x04\x08\x08\x10\t"4\n\x0cStreamBudget\x12\x11\n\tmax_items\x18\x01 \x01(\x03\x12\x11\n\tmax_bytes\x18\x02 \x01(\x03"h\n\x0eProducerCursor\x12\x0b\n\x03seq\x18\x01 \x01(\x03\x12\x14\n\x0c\x66irst_offset\x18\x02 \x01(\x03\x12\r\n\x05\x63ount\x18\x03 \x01(\x03\x12\x14\n\x0c\x63ontent_hash\x18\x04 \x01(\x0c\x12\x0e\n\x06\x66\x65nced\x18\x05 \x01(\x08"}\n\x0e\x43onsumerCursor\x12\x13\n\x0bworkflow_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x0e\n\x06offset\x18\x03 \x01(\x03\x12\x0e\n\x06\x61\x63tive\x18\x04 \x01(\x08\x12\x10\n\x08\x65xternal\x18\x05 \x01(\x08\x12\x14\n\x0creplay_floor\x18\x06 \x01(\x03"\xc0\x01\n\x14WorkflowStreamCursor\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0e\n\x06offset\x18\x04 \x01(\x03\x12\x12\n\nknown_head\x18\x08 \x01(\x03\x12\x10\n\x08\x65xternal\x18\t \x01(\x08\x12\x14\n\x0cpending_from\x18\x05 \x01(\x03\x12\x12\n\npending_to\x18\x06 \x01(\x03\x12\x13\n\x0bhas_pending\x18\x07 \x01(\x08\x12\x14\n\x0cstart_offset\x18\n \x01(\x03J\x04\x08\x02\x10\x03J\x04\x08\x03\x10\x04"R\n\x0fStreamLifecycle\x12,\n\tretention\x18\x01 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x11\n\tmax_items\x18\x02 \x01(\x03\x42>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
 )
 
 
 _STREAMSTATE = DESCRIPTOR.message_types_by_name["StreamState"]
 _STREAMSTATE_PRODUCERSENTRY = _STREAMSTATE.nested_types_by_name["ProducersEntry"]
 _STREAMSTATE_CONSUMERSENTRY = _STREAMSTATE.nested_types_by_name["ConsumersEntry"]
+_STREAMBUDGET = DESCRIPTOR.message_types_by_name["StreamBudget"]
 _PRODUCERCURSOR = DESCRIPTOR.message_types_by_name["ProducerCursor"]
 _CONSUMERCURSOR = DESCRIPTOR.message_types_by_name["ConsumerCursor"]
 _WORKFLOWSTREAMCURSOR = DESCRIPTOR.message_types_by_name["WorkflowStreamCursor"]
@@ -63,6 +64,17 @@ StreamState = _reflection.GeneratedProtocolMessageType(
 _sym_db.RegisterMessage(StreamState)
 _sym_db.RegisterMessage(StreamState.ProducersEntry)
 _sym_db.RegisterMessage(StreamState.ConsumersEntry)
+
+StreamBudget = _reflection.GeneratedProtocolMessageType(
+    "StreamBudget",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _STREAMBUDGET,
+        "__module__": "temporalio.api.streamservice.v1.stream_state_pb2",
+        # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamBudget)
+    },
+)
+_sym_db.RegisterMessage(StreamBudget)
 
 ProducerCursor = _reflection.GeneratedProtocolMessageType(
     "ProducerCursor",
@@ -118,17 +130,19 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     _STREAMSTATE_CONSUMERSENTRY._options = None
     _STREAMSTATE_CONSUMERSENTRY._serialized_options = b"8\001"
     _STREAMSTATE._serialized_start = 194
-    _STREAMSTATE._serialized_end = 935
-    _STREAMSTATE_PRODUCERSENTRY._serialized_start = 719
-    _STREAMSTATE_PRODUCERSENTRY._serialized_end = 826
-    _STREAMSTATE_CONSUMERSENTRY._serialized_start = 828
-    _STREAMSTATE_CONSUMERSENTRY._serialized_end = 935
-    _PRODUCERCURSOR._serialized_start = 937
-    _PRODUCERCURSOR._serialized_end = 1041
-    _CONSUMERCURSOR._serialized_start = 1043
-    _CONSUMERCURSOR._serialized_end = 1168
-    _WORKFLOWSTREAMCURSOR._serialized_start = 1171
-    _WORKFLOWSTREAMCURSOR._serialized_end = 1395
-    _STREAMLIFECYCLE._serialized_start = 1397
-    _STREAMLIFECYCLE._serialized_end = 1479
+    _STREAMSTATE._serialized_end = 1015
+    _STREAMSTATE_PRODUCERSENTRY._serialized_start = 775
+    _STREAMSTATE_PRODUCERSENTRY._serialized_end = 882
+    _STREAMSTATE_CONSUMERSENTRY._serialized_start = 884
+    _STREAMSTATE_CONSUMERSENTRY._serialized_end = 991
+    _STREAMBUDGET._serialized_start = 1017
+    _STREAMBUDGET._serialized_end = 1069
+    _PRODUCERCURSOR._serialized_start = 1071
+    _PRODUCERCURSOR._serialized_end = 1175
+    _CONSUMERCURSOR._serialized_start = 1177
+    _CONSUMERCURSOR._serialized_end = 1302
+    _WORKFLOWSTREAMCURSOR._serialized_start = 1305
+    _WORKFLOWSTREAMCURSOR._serialized_end = 1497
+    _STREAMLIFECYCLE._serialized_start = 1499
+    _STREAMLIFECYCLE._serialized_end = 1581
 # @@protoc_insertion_point(module_scope)
