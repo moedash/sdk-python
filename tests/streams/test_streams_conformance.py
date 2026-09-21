@@ -25,7 +25,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -68,11 +68,15 @@ class ProviderCase:
     ) -> StreamHandle:
         if self.host is not None:
             await self.host(workflow_id)
-        # The memory provider takes no client; every storage provider's setup
-        # supplies one, so the cast only ever lies for the provider that
-        # does not read it.
+        if self.client is not None:
+            # A storage provider's setup registers the provider on the client,
+            # so the cases go through the accessor an application uses.
+            return self.client.get_stream_handle(workflow_id, run_id=run_id)
+        # Only the memory provider gets here, and it takes no client.
         return self.provider.get_stream_handle(
-            cast(Client, self.client), workflow_id, run_id=run_id
+            None,  # type: ignore[arg-type]
+            workflow_id,
+            run_id=run_id,
         )
 
 
