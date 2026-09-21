@@ -308,7 +308,7 @@ class PayloadVisitor:
         if o.HasField("result"):
             await self._visit_coresdk_nexus_NexusOperationResult(fs, o.result)
 
-    async def _visit_temporal_api_stream_v1_StreamMessage(
+    async def _visit_temporal_api_stream_v1_StreamRecord(
         self, fs: VisitorFunctions, o: Any
     ):
         if o.HasField("body"):
@@ -316,11 +316,11 @@ class PayloadVisitor:
         for v in o.metadata.values():
             await self._visit_temporal_api_common_v1_Payload(fs, v)
 
-    async def _visit_coresdk_workflow_activation_DeliverStreamMessages(
+    async def _visit_coresdk_workflow_activation_DeliverStreamRecords(
         self, fs: VisitorFunctions, o: Any
     ):
-        for v in o.messages:
-            await self._visit_temporal_api_stream_v1_StreamMessage(fs, v)
+        for v in o.records:
+            await self._visit_temporal_api_stream_v1_StreamRecord(fs, v)
 
     async def _visit_coresdk_workflow_activation_WorkflowActivationJob(
         self, fs: VisitorFunctions, o: Any
@@ -367,9 +367,9 @@ class PayloadVisitor:
             await self._visit_coresdk_workflow_activation_ResolveNexusOperation(
                 fs, o.resolve_nexus_operation
             )
-        elif o.HasField("deliver_stream_messages"):
-            await self._visit_coresdk_workflow_activation_DeliverStreamMessages(
-                fs, o.deliver_stream_messages
+        elif o.HasField("deliver_stream_records"):
+            await self._visit_coresdk_workflow_activation_DeliverStreamRecords(
+                fs, o.deliver_stream_records
             )
 
     async def _visit_coresdk_workflow_activation_WorkflowActivation(
@@ -510,11 +510,11 @@ class PayloadVisitor:
         if o.HasField("input"):
             await self._visit_nexus_operation_input_payload(fs, o.input)
 
-    async def _visit_coresdk_workflow_commands_AddStreamMessages(
+    async def _visit_coresdk_workflow_commands_AppendStreamRecords(
         self, fs: VisitorFunctions, o: Any
     ):
-        for v in o.messages:
-            await self._visit_temporal_api_stream_v1_StreamMessage(fs, v)
+        for v in o.records:
+            await self._visit_temporal_api_stream_v1_StreamRecord(fs, v)
 
     async def _visit_coresdk_workflow_commands_WorkflowCommand(
         self, fs: VisitorFunctions, o: Any
@@ -575,9 +575,9 @@ class PayloadVisitor:
             await self._visit_coresdk_workflow_commands_ScheduleNexusOperation(
                 fs, o.schedule_nexus_operation
             )
-        elif o.HasField("add_stream_messages"):
-            await self._visit_coresdk_workflow_commands_AddStreamMessages(
-                fs, o.add_stream_messages
+        elif o.HasField("append_stream_records"):
+            await self._visit_coresdk_workflow_commands_AppendStreamRecords(
+                fs, o.append_stream_records
             )
 
     async def _visit_coresdk_workflow_completion_Success(
