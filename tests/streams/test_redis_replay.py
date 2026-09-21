@@ -3,10 +3,10 @@
 The conformance suite covers the outside surface when ``STREAMS_LIVE=redis``.
 This module runs the interface loop inside a workflow over the staged commit,
 lets a read end with the workflow, shares a topic between an outside producer
-and the workflow, and queries a completed run, which replays it. All need a
-dev server (``TEMPORAL_ADDRESS``) and a Redis (``TEMPORAL_TEST_REDIS_URL`` or
-``AI198_REDIS_URL``). The worker keeps a warm cache because the transport
-holds the task open between records.
+and the workflow, queries a completed run, which replays it, and seeds a
+workflow reader from a cursor. All need a dev server (``TEMPORAL_ADDRESS``)
+and a Redis (``TEMPORAL_TEST_REDIS_URL`` or ``AI198_REDIS_URL``). The worker
+keeps a warm cache because the transport holds the task open between records.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ import pytest
 
 from temporalio import workflow
 from temporalio.client import Client
-from temporalio.streams import RecordKind
+from temporalio.streams import BEGINNING, Cursor, RecordKind
 from temporalio.streams.providers.redis import RedisStreams
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 from tests.streams.test_streams_conformance import take
 from tests.streams.test_streams_workflow import (
     DECISIONS,
@@ -100,9 +100,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         # The read ends by itself once the workflow is closed and every
         # promoted record has been handed over.
         async def read_everything() -> list[Any]:
-            return [
-                r.value async for r in stream.read(topic=DECISIONS)
-            ]
+            return [r.value async for r in stream.read(topic=DECISIONS)]
 
         assert await asyncio.wait_for(read_everything(), 60) == [
             {"decided": 1},
@@ -205,3 +203,68 @@ async def test_query_after_completion_replays_the_final_task(
         assert await handle.query(SignalWokenPublish.probe) == 1
         values = [r.value async for r in stream.read(topic="out", result_type=dict)]
         assert values == [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}]
+
+
+@workflow.defn
+class ResumeAfter:
+    """Reads ``inputs``; the first run hands its first record's cursor to the next."""
+
+    def __init__(self) -> None:
+        self._seen: list[int] = []
+
+    @workflow.query
+    def seen(self) -> list[int]:
+        return self._seen
+
+    @workflow.run
+    async def run(self, after: str | None) -> list[int]:
+        reader = workflow.stream_reader(
+            INPUTS, after=Cursor(after) if after else BEGINNING
+        )
+        first: str | None = None
+        async for record in reader:
+            if record.kind is RecordKind.FINISH:
+                break
+            assert record.value is not None
+            self._seen.append(record.value["n"])
+            first = first or record.cursor.token
+            if after is None and len(self._seen) == 2:
+                workflow.continue_as_new(first)
+        return self._seen
+
+
+async def test_a_workflow_reader_started_from_a_cursor_skips_the_earlier_records(
+    live_client: Client, provider: RedisStreams
+):
+    # The first run reads two records and continues as new with the cursor of
+    # the first. Without the cursor the successor would resume after the
+    # second, which is where the chain left off; with it, it reads the second
+    # again and then the rest.
+    workflow_id = f"streams-redis-resume-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[ResumeAfter],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        handle = await live_client.start_workflow(
+            ResumeAfter.run, None, id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+        await producer.finish()
+        assert await handle.result() == [2, 3]
+        # The completed run is evicted, so the query replays it cold with the
+        # seeded position and the recorded ranges.
+        assert await handle.query(ResumeAfter.seen) == [2, 3]
+
+    # Both runs replay offline against the store, the seeded one included.
+    replayer = Replayer(workflows=[ResumeAfter], plugins=[provider])
+    await replayer.replay_workflow(
+        await live_client.get_workflow_handle(
+            workflow_id, run_id=handle.first_execution_run_id
+        ).fetch_history()
+    )
+    await replayer.replay_workflow(await handle.fetch_history())
