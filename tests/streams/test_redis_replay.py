@@ -3,10 +3,11 @@
 The conformance suite covers the outside surface when ``STREAMS_LIVE=redis``.
 This module runs the interface loop inside a workflow over the staged commit,
 lets a read end with the workflow, shares a topic between an outside producer
-and the workflow, and queries a completed run, which replays it. All need a
-dev server (``TEMPORAL_ADDRESS``) and a Redis (``TEMPORAL_TEST_REDIS_URL`` or
-``AI198_REDIS_URL``). The worker keeps a warm cache because the transport
-holds the task open between records.
+and the workflow, queries a completed run, which replays it, trims by
+retention and shows what a replay and a read past the trim do, and seeds a
+workflow reader from a cursor. All need a dev server (``TEMPORAL_ADDRESS``)
+and a Redis (``TEMPORAL_TEST_REDIS_URL`` or ``AI198_REDIS_URL``). The worker
+keeps a warm cache because the transport holds the task open between records.
 """
 
 from __future__ import annotations
@@ -15,16 +16,18 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
 from temporalio import workflow
 from temporalio.client import Client
-from temporalio.streams import RecordKind
-from temporalio.streams.providers.redis import RedisStreams
-from temporalio.worker import Worker
-from tests.streams.test_streams_conformance import take
+from temporalio.contrib.external_workflow_streams import StreamDirection
+from temporalio.streams import BEGINNING, Cursor, RecordKind, StreamCursorError
+from temporalio.streams.providers.redis import RedisStreams, _chain
+from temporalio.worker import Replayer, Worker
+from tests.streams.test_streams_conformance import StreamHost, take
 from tests.streams.test_streams_workflow import (
     DECISIONS,
     INPUTS,
@@ -81,7 +84,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         await producer.append({"n": 3})
         await producer.finish()
 
-        records = await take(stream.read(topic=DECISIONS, result_type=dict), 4, 60)
+        records = await take(stream.read(topic=DECISIONS), 4, 60)
         assert [r.kind for r in records] == [
             RecordKind.DATA,
             RecordKind.DATA,
@@ -89,7 +92,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
             RecordKind.FINISH,
         ]
         assert [r.value["decided"] for r in records[:3]] == [1, 2, 3]
-        assert all(r.producer_id == "" and r.topic == DECISIONS for r in records)
+        assert all(r.producer_id == "" and r.topic == DECISIONS.name for r in records)
         assert await handle.result() == [
             {"kind": "decision", "n": 1, "attempt": 1},
             {"kind": "decision", "n": 2, "attempt": 1},
@@ -100,9 +103,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         # The read ends by itself once the workflow is closed and every
         # promoted record has been handed over.
         async def read_everything() -> list[Any]:
-            return [
-                r.value async for r in stream.read(topic=DECISIONS, result_type=dict)
-            ]
+            return [r.value async for r in stream.read(topic=DECISIONS)]
 
         assert await asyncio.wait_for(read_everything(), 60) == [
             {"decided": 1},
@@ -112,7 +113,7 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         ]
         # The producer's own records are readable from outside as well, on
         # the topic it wrote.
-        inputs = await take(stream.read(topic=INPUTS, result_type=dict), 4, 60)
+        inputs = await take(stream.read(topic=INPUTS), 4, 60)
         assert [r.value for r in inputs[:3]] == [{"n": 1}, {"n": 2}, {"n": 3}]
         assert inputs[3].kind is RecordKind.FINISH
         assert all(r.producer_id == "model" and r.attempt == 1 for r in inputs)
@@ -138,7 +139,7 @@ async def test_an_outside_producer_and_the_workflow_share_a_topic(
         await handle.result()
 
         async def read_everything() -> list[Any]:
-            return [r async for r in stream.read(topic=DECISIONS, result_type=dict)]
+            return [r async for r in stream.read(topic=DECISIONS)]
 
         records = await asyncio.wait_for(read_everything(), 60)
     # Both writers land on one topic, each under its own identity. The order
@@ -205,3 +206,226 @@ async def test_query_after_completion_replays_the_final_task(
         assert await handle.query(SignalWokenPublish.probe) == 1
         values = [r.value async for r in stream.read(topic="out", result_type=dict)]
         assert values == [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}]
+
+
+async def _key_lengths(
+    streams: RedisStreams, client: Client, workflow_id: str, topic: str
+) -> tuple[int, int]:
+    """How many entries the topic's input and output keys hold."""
+    import redis.asyncio
+
+    backend = streams._require_backend()
+    chain = await _chain(client, workflow_id)
+    store = redis.asyncio.from_url(redis_url())
+    try:
+        return (
+            await store.xlen(
+                backend.stream_key(
+                    chain.stream_key(topic, direction=StreamDirection.INPUT)
+                )
+            ),
+            await store.xlen(
+                backend.stream_key(
+                    chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+                )
+            ),
+        )
+    finally:
+        await store.aclose()
+
+
+async def _trim_everything(
+    streams: RedisStreams, client: Client, workflow_id: str, topic: str
+) -> None:
+    """What retention elsewhere, or an operator, does to a topic's output key."""
+    import redis.asyncio
+
+    backend = streams._require_backend()
+    chain = await _chain(client, workflow_id)
+    store = redis.asyncio.from_url(redis_url())
+    try:
+        await store.xtrim(
+            backend.stream_key(
+                chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+            ),
+            maxlen=0,
+            approximate=False,
+        )
+    finally:
+        await store.aclose()
+
+
+async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Client):
+    # Six entries per key: the loop's four input records stay while it runs,
+    # and six more appends afterwards push them out.
+    streams = RedisStreams(
+        url=redis_url(), key_prefix=f"streams-redis-{uuid.uuid4().hex}", max_len=6
+    )
+    workflow_id = f"streams-redis-retention-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[ContractLoop],
+            plugins=[streams],
+            max_cached_workflows=100,
+        ):
+            handle = await live_client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+            )
+            stream = streams.get_stream_handle(live_client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+            await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+            await producer.finish()
+            assert len(await handle.result()) == 4
+            before = await take(stream.read(topic=INPUTS), 4, 60)
+        history = await handle.fetch_history()
+        assert await _key_lengths(streams, live_client, workflow_id, INPUTS.name) == (
+            4,
+            4,
+        )
+
+        # Inside the window the recorded ranges read back and the replay passes.
+        await Replayer(workflows=[ContractLoop], plugins=[streams]).replay_workflow(
+            history
+        )
+
+        late = stream.producer(topic=INPUTS, producer_id="late", attempt=1)
+        cursors = [await late.append({"n": n}) for n in range(10, 16)]
+        assert await _key_lengths(streams, live_client, workflow_id, INPUTS.name) == (
+            6,
+            6,
+        )
+
+        # The recorded input ranges are gone, and the replay says so rather
+        # than delivering fewer records.
+        with pytest.raises(Exception) as failure:
+            await Replayer(workflows=[ContractLoop], plugins=[streams]).replay_workflow(
+                history
+            )
+        # The task fails under the transport's integrity row: its type, the
+        # external storage cause, and a message that names the window.
+        message = str(failure.value)
+        assert "StreamIntegrityError" in message and "ExternalStorageFailure" in message
+        assert "past the redis provider's retention (max_len=6)" in message
+
+        # An outside cursor below the trim is refused, not resumed from the
+        # first retained record.
+        with pytest.raises(StreamCursorError, match="retention has trimmed"):
+            await take(stream.read(topic=INPUTS, after=before[0].cursor), 1, 10)
+
+        # Inside the window a read still works and lands where append said.
+        records = [r async for r in stream.read(topic=INPUTS, after=cursors[1])]
+        assert [r.value for r in records] == [{"n": n} for n in range(12, 16)]
+        assert [r.cursor for r in records] == cursors[2:]
+    finally:
+        await streams.close()
+
+
+async def test_retention_by_age_trims_older_entries(live_client: Client):
+    streams = RedisStreams(
+        url=redis_url(),
+        key_prefix=f"streams-redis-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+    )
+    workflow_id = f"streams-redis-age-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[StreamHost],
+            plugins=[streams],
+        ):
+            handle = await live_client.start_workflow(
+                StreamHost.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+            )
+            stream = streams.get_stream_handle(live_client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+            first = await producer.append({"n": 1})
+            await producer.append({"n": 2})
+            await asyncio.sleep(0.6)
+            # The append that crosses the window is what trims the two before it.
+            third = await producer.append({"n": 3})
+            assert await _key_lengths(
+                streams, live_client, workflow_id, INPUTS.name
+            ) == (
+                1,
+                1,
+            )
+            assert await stream.latest(topic=INPUTS) == third
+            with pytest.raises(StreamCursorError, match="retention has trimmed"):
+                await take(stream.read(topic=INPUTS, after=first), 1, 10)
+
+            # A fully trimmed topic answers the way an empty one does.
+            await _trim_everything(streams, live_client, workflow_id, INPUTS.name)
+            assert await stream.latest(topic=INPUTS) == BEGINNING
+            await handle.signal(StreamHost.release)
+            await handle.result()
+            assert [r async for r in stream.read(topic=INPUTS)] == []
+    finally:
+        await streams.close()
+
+
+@workflow.defn
+class ResumeAfter:
+    """Reads ``inputs``; the first run hands its first record's cursor to the next."""
+
+    def __init__(self) -> None:
+        self._seen: list[int] = []
+
+    @workflow.query
+    def seen(self) -> list[int]:
+        return self._seen
+
+    @workflow.run
+    async def run(self, after: str | None) -> list[int]:
+        reader = workflow.stream_reader(
+            INPUTS, after=Cursor(after) if after else BEGINNING
+        )
+        first: str | None = None
+        async for record in reader:
+            if record.kind is RecordKind.FINISH:
+                break
+            assert record.value is not None
+            self._seen.append(record.value["n"])
+            first = first or record.cursor.token
+            if after is None and len(self._seen) == 2:
+                workflow.continue_as_new(first)
+        return self._seen
+
+
+async def test_a_workflow_reader_started_from_a_cursor_skips_the_earlier_records(
+    live_client: Client, provider: RedisStreams
+):
+    # The first run reads two records and continues as new with the cursor of
+    # the first. Without the cursor the successor would resume after the
+    # second, which is where the chain left off; with it, it reads the second
+    # again and then the rest.
+    workflow_id = f"streams-redis-resume-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[ResumeAfter],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        handle = await live_client.start_workflow(
+            ResumeAfter.run, None, id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+        await producer.finish()
+        assert await handle.result() == [2, 3]
+        # The completed run is evicted, so the query replays it cold with the
+        # seeded position and the recorded ranges.
+        assert await handle.query(ResumeAfter.seen) == [2, 3]
+
+    # Both runs replay offline against the store, the seeded one included.
+    replayer = Replayer(workflows=[ResumeAfter], plugins=[provider])
+    await replayer.replay_workflow(
+        await live_client.get_workflow_handle(
+            workflow_id, run_id=handle.first_execution_run_id
+        ).fetch_history()
+    )
+    await replayer.replay_workflow(await handle.fetch_history())
