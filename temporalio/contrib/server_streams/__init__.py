@@ -7,10 +7,16 @@ call, publishing from an Activity is still a buffered handle, and a consumer
 still subscribes by topic from an offset.
 
 What changes is underneath. A publish is a Workflow Command whose payload never
-enters History, so History gets one fixed-size event per batch rather than a
-Signal per batch. A consumer reads the log directly rather than long-polling an
-Update, so there is no per-Workflow limit on how many can read at once, and a
-closed Workflow stays readable until its stream's retention expires.
+enters History, so History gets one fixed-size event per Workflow Task rather
+than a Signal per batch. A consumer reads the log directly rather than
+long-polling an Update, so there is no per-Workflow limit on how many can read
+at once, and a closed Workflow stays readable until its stream's retention
+expires.
+
+As in the shipped feature, a topic here is a label on a record in the
+Workflow's one default stream, which a consumer filters on. The provider in
+:mod:`temporalio.streams.providers.native` keeps one stream per topic instead;
+the two do not share a log.
 
 Prototype support for AI-198. It needs a server built from that branch, and it
 opens its own gRPC channel because sdk-core does not know the stream service
@@ -27,10 +33,11 @@ from datetime import timedelta
 from typing import Any, Generic, TypeVar, overload
 
 from temporalio import activity, workflow
-from temporalio.api.common.v1 import Payload
+from temporalio.api.stream.v1 import StreamRecord, StreamRecordKind
 from temporalio.client import Client, WorkflowExecutionDescription
 from temporalio.client_stream import StreamClient, WorkflowStreamHandle, shared_client
-from temporalio.converter import PayloadConverter
+from temporalio.common import RawValue
+from temporalio.converter import PayloadCodec, PayloadConverter
 
 __all__ = [
     "RawPage",
@@ -48,12 +55,14 @@ DEFAULT_BATCH_INTERVAL = timedelta(milliseconds=50)
 
 @dataclass
 class RawPage:
-    """One read whose items are still encoded.
+    """One read whose items are still the stored records.
 
     ``closed`` with ``next_offset >= head_offset`` is the end of the stream.
+    The bodies are as the server holds them, codec included, for a caller
+    that forwards records rather than using them.
     """
 
-    items: list["WorkflowStreamItem[bytes]"]
+    items: list[WorkflowStreamItem[StreamRecord]]
     next_offset: int
     head_offset: int
     closed: bool
@@ -72,49 +81,24 @@ class WorkflowStreamItem(Generic[T]):
     offset: int = 0
 
 
-def _encode(converter: PayloadConverter, value: Any) -> bytes:
-    """Serialize one value to a stream message body.
+def _record(converter: PayloadConverter, topic: str, value: Any) -> StreamRecord:
+    """The record one published value becomes.
 
-    The payload rather than the bare bytes, so the encoding metadata the
-    consumer needs to decode into a type travels with it.
-
-    The codec chain is not applied here. Inside a Workflow it does not have to
-    be: the Worker runs the payload visitor with its codec over the commands
-    and activations, so a body that rides ``add_stream_messages`` is encoded
-    on the way out and one that arrives on ``deliver_stream_messages`` is
-    decoded on the way in, as every other payload is. The client path has no
-    such pass, and encoding one side but not the other is worse than encoding
-    neither: an Activity's messages would reach a consuming Workflow as
-    ciphertext it has no way to decode. :func:`_reject_configured_codec`
-    refuses a client with a codec until the client path applies one too.
+    The body is the value's payload, so the encoding metadata the consumer
+    needs to decode into a type travels with it and a
+    :class:`temporalio.common.RawValue` passes through pre-encoded.
     """
-    payload = value if isinstance(value, Payload) else converter.to_payloads([value])[0]
-    return payload.SerializeToString()
+    record = StreamRecord(topic=topic, kind=StreamRecordKind.STREAM_RECORD_KIND_DATA)
+    record.body.CopyFrom(converter.to_payloads([value])[0])
+    return record
 
 
-def _reject_configured_codec(client: Client) -> None:
-    """Refuse a namespace whose payloads are meant to be encoded.
-
-    Stream bodies bypass the codec chain, so proceeding would write payloads
-    this namespace expects to be encrypted in the clear, and would do it
-    silently. Raising is the only honest answer until the Worker-side plumbing
-    exists.
-    """
-    if client.data_converter.payload_codec is not None:
-        raise RuntimeError(
-            "this client has a payload codec configured, and server-side stream "
-            "bodies do not pass through it. Publishing would store them "
-            "unencoded. Use a client without a codec, or wait for codec support "
-            "on streams."
-        )
-
-
-def _decode(converter: PayloadConverter, body: bytes, as_type: type | None) -> Any:
-    payload = Payload()
-    payload.ParseFromString(body)
+def _decode(
+    converter: PayloadConverter, record: StreamRecord, as_type: type | None
+) -> Any:
     if as_type is None:
-        return converter.from_payloads([payload])[0]
-    return converter.from_payloads([payload], [as_type])[0]
+        return converter.from_payloads([record.body])[0]
+    return converter.from_payloads([record.body], [as_type])[0]
 
 
 class WorkflowTopicHandle(Generic[T]):
@@ -135,15 +119,17 @@ class WorkflowTopicHandle(Generic[T]):
         """The value type this handle is bound to."""
         return self._type
 
-    def publish(self, value: T | Payload) -> None:
+    def publish(self, value: T | RawValue) -> None:
         """Append ``value`` to the Workflow's stream on this topic.
 
-        Returns as soon as the Command is issued. There is nothing to await:
-        the append is applied in the Workflow Task's own commit, so it costs
-        this Workflow no round trip and no extra transition.
+        Returns at once. There is nothing to await: the Workflow Task's
+        publishes become one command the server applies in the task's own
+        commit, so it costs this Workflow no round trip and no extra
+        transition. The Worker's payload codec applies to the body as it does
+        to any other payload the Workflow sends.
         """
-        workflow.add_stream_messages(
-            [_encode(workflow.payload_converter(), value)], topic=self._name
+        workflow.append_stream_records(
+            [_record(workflow.payload_converter(), self._name, value)]
         )
 
 
@@ -178,7 +164,7 @@ class TopicHandle(Generic[T]):
     """A topic on a Workflow's stream, from outside that Workflow."""
 
     def __init__(
-        self, client: "WorkflowStreamClient", topic: str, value_type: type[T]
+        self, client: WorkflowStreamClient, topic: str, value_type: type[T]
     ) -> None:
         """Prefer :meth:`WorkflowStreamClient.topic`."""
         self._client = client
@@ -195,7 +181,7 @@ class TopicHandle(Generic[T]):
         """The value type this handle is bound to."""
         return self._type
 
-    def publish(self, value: T | Payload, *, force_flush: bool = False) -> None:
+    def publish(self, value: T | RawValue, *, force_flush: bool = False) -> None:
         """Buffer ``value`` for the next flush.
 
         Buffered rather than sent, because an append costs one transition on
@@ -232,15 +218,20 @@ class WorkflowStreamClient:
         converter: PayloadConverter,
         batch_interval: timedelta = DEFAULT_BATCH_INTERVAL,
         *,
+        codec: PayloadCodec | None = None,
         describe: Callable[[], Awaitable[WorkflowExecutionDescription]] | None = None,
     ) -> None:
         """Prefer :meth:`create` or :meth:`from_within_activity`.
 
+        ``codec`` is applied to every body this client sends and receives, so
+        a namespace whose payloads are encoded agrees with the Worker, whose
+        payload visitor applies the same codec to the Workflow's publishes.
         ``describe`` is how an unpinned handle learns which run it follows;
         see :meth:`WorkflowStreamHandle.pin`.
         """
         self._handle = handle
         self._converter = converter
+        self._codec = codec
         self._batch_interval = batch_interval
         self._describe = describe
         self._buffered: list[tuple[str, Any]] = []
@@ -256,7 +247,7 @@ class WorkflowStreamClient:
         *,
         owner_run_id: str = "",
         batch_interval: timedelta = DEFAULT_BATCH_INTERVAL,
-    ) -> "WorkflowStreamClient":
+    ) -> WorkflowStreamClient:
         """Open the stream owned by ``workflow_id``.
 
         Without ``owner_run_id`` the current run is looked up on the first
@@ -264,20 +255,20 @@ class WorkflowStreamClient:
         continue-as-new sees the run end rather than being moved to the
         successor's stream at a stale offset.
         """
-        _reject_configured_codec(client)
         return cls(
             _stream_client(client).workflow_stream(
                 workflow_id, owner_run_id=owner_run_id
             ),
             client.data_converter.payload_converter,
             batch_interval,
+            codec=client.data_converter.payload_codec,
             describe=client.get_workflow_handle(workflow_id).describe,
         )
 
     @classmethod
     def from_within_activity(
         cls, *, batch_interval: timedelta = DEFAULT_BATCH_INTERVAL
-    ) -> "WorkflowStreamClient":
+    ) -> WorkflowStreamClient:
         """Open the stream owned by the Workflow that scheduled this Activity."""
         info = activity.info()
         if info.workflow_id is None:
@@ -294,7 +285,7 @@ class WorkflowStreamClient:
             batch_interval=batch_interval,
         )
 
-    async def __aenter__(self) -> "WorkflowStreamClient":
+    async def __aenter__(self) -> WorkflowStreamClient:
         """Start the background flusher."""
         self._flusher = asyncio.create_task(self._run_flusher())
         return self
@@ -352,13 +343,12 @@ class WorkflowStreamClient:
         """
         del poll_cooldown
         await self._pin()
-        async for message in self._handle.follow(
-            from_offset=from_offset, topics=topics
-        ):
+        async for entry in self._handle.follow(from_offset=from_offset, topics=topics):
+            record = await self._decoded(entry.record)
             yield WorkflowStreamItem(
-                topic=message.topic,
-                data=_decode(self._converter, message.data, result_type),
-                offset=message.offset,
+                topic=record.topic,
+                data=_decode(self._converter, record, result_type),
+                offset=entry.offset,
             )
 
     async def poll_raw(
@@ -367,8 +357,8 @@ class WorkflowStreamClient:
         topics: Sequence[str] = (),
         from_offset: int = 0,
         wait: bool = True,
-    ) -> "RawPage":
-        """One read, with the bodies left as they were stored.
+    ) -> RawPage:
+        """One read, with the records left as they were stored.
 
         For a caller that forwards items on rather than using them. A gateway
         would only have to encode again what this decoded.
@@ -379,8 +369,10 @@ class WorkflowStreamClient:
         )
         return RawPage(
             items=[
-                WorkflowStreamItem(topic=m.topic, data=m.data, offset=m.offset)
-                for m in page.messages
+                WorkflowStreamItem(
+                    topic=entry.record.topic, data=entry.record, offset=entry.offset
+                )
+                for entry in page.entries
             ],
             next_offset=page.next_offset,
             head_offset=page.head_offset,
@@ -393,13 +385,11 @@ class WorkflowStreamClient:
         if not pending:
             return
         await self._pin()
-        # One append per topic, because a batch carries a single topic. The
-        # harness case is one topic, so this is one append.
-        by_topic: dict[str, list[bytes]] = {}
-        for topic, value in pending:
-            by_topic.setdefault(topic, []).append(_encode(self._converter, value))
-        for topic, bodies in by_topic.items():
-            await self._handle.append(*bodies, topic=topic)
+        records = [
+            await self._encoded(_record(self._converter, topic, value))
+            for topic, value in pending
+        ]
+        await self._handle.append(*records)
 
     def _buffer(self, topic: str, value: Any) -> None:
         self._buffered.append((topic, value))
@@ -418,6 +408,16 @@ class WorkflowStreamClient:
                 pass
             self._wake.clear()
             await self.flush()
+
+    async def _encoded(self, record: StreamRecord) -> StreamRecord:
+        if self._codec is not None and record.HasField("body"):
+            record.body.CopyFrom((await self._codec.encode([record.body]))[0])
+        return record
+
+    async def _decoded(self, record: StreamRecord) -> StreamRecord:
+        if self._codec is not None and record.HasField("body"):
+            record.body.CopyFrom((await self._codec.decode([record.body]))[0])
+        return record
 
 
 def _stream_client(client: Client) -> StreamClient:
