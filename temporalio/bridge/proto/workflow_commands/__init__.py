@@ -1,6 +1,6 @@
 from .workflow_commands_pb2 import (
     ActivityCancellationType,
-    AddStreamMessages,
+    AppendStreamRecords,
     CancelChildWorkflowExecution,
     CancelSignalWorkflow,
     CancelTimer,
@@ -30,7 +30,7 @@ from .workflow_commands_pb2 import (
 
 __all__ = [
     "ActivityCancellationType",
-    "AddStreamMessages",
+    "AppendStreamRecords",
     "CancelChildWorkflowExecution",
     "CancelSignalWorkflow",
     "CancelTimer",

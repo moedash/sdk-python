@@ -236,7 +236,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     DO_UPDATE_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
-    DELIVER_STREAM_MESSAGES_FIELD_NUMBER: builtins.int
+    DELIVER_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -297,7 +297,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     def resolve_nexus_operation(self) -> global___ResolveNexusOperation:
         """A nexus operation resolved."""
     @property
-    def deliver_stream_messages(self) -> global___DeliverStreamMessages:
+    def deliver_stream_records(self) -> global___DeliverStreamRecords:
         """17 to 20 are taken by the external stream jobs, which are developed
         alongside this one and share this message. The number below is fixed
         with that family and must not be reused.
@@ -332,7 +332,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         do_update: global___DoUpdate | None = ...,
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
-        deliver_stream_messages: global___DeliverStreamMessages | None = ...,
+        deliver_stream_records: global___DeliverStreamRecords | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -340,8 +340,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
-            "deliver_stream_messages",
-            b"deliver_stream_messages",
+            "deliver_stream_records",
+            b"deliver_stream_records",
             "do_update",
             b"do_update",
             "fire_timer",
@@ -381,8 +381,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
-            "deliver_stream_messages",
-            b"deliver_stream_messages",
+            "deliver_stream_records",
+            b"deliver_stream_records",
             "do_update",
             b"do_update",
             "fire_timer",
@@ -436,7 +436,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "do_update",
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
-            "deliver_stream_messages",
+            "deliver_stream_records",
             "remove_from_cache",
         ]
         | None
@@ -444,7 +444,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
 
 global___WorkflowActivationJob = WorkflowActivationJob
 
-class DeliverStreamMessages(google.protobuf.message.Message):
+class DeliverStreamRecords(google.protobuf.message.Message):
     """Hand a workflow the next range of a stream it subscribed to.
 
     The range is delivered once, on the task the server decided it belongs to,
@@ -461,7 +461,7 @@ class DeliverStreamMessages(google.protobuf.message.Message):
     STREAM_ID_FIELD_NUMBER: builtins.int
     FROM_OFFSET_FIELD_NUMBER: builtins.int
     TO_OFFSET_FIELD_NUMBER: builtins.int
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
     """Id of the stream this range came from."""
     from_offset: builtins.int
@@ -469,10 +469,10 @@ class DeliverStreamMessages(google.protobuf.message.Message):
     to_offset: builtins.int
     """Exclusive. Equal to from_offset when the subscription saw nothing."""
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.stream.v1.message_pb2.StreamMessage
+        temporalio.api.stream.v1.message_pb2.StreamRecord
     ]: ...
     def __init__(
         self,
@@ -480,8 +480,8 @@ class DeliverStreamMessages(google.protobuf.message.Message):
         stream_id: builtins.str = ...,
         from_offset: builtins.int = ...,
         to_offset: builtins.int = ...,
-        messages: collections.abc.Iterable[
-            temporalio.api.stream.v1.message_pb2.StreamMessage
+        records: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamRecord
         ]
         | None = ...,
     ) -> None: ...
@@ -490,8 +490,8 @@ class DeliverStreamMessages(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "from_offset",
             b"from_offset",
-            "messages",
-            b"messages",
+            "records",
+            b"records",
             "stream_id",
             b"stream_id",
             "to_offset",
@@ -499,7 +499,7 @@ class DeliverStreamMessages(google.protobuf.message.Message):
         ],
     ) -> None: ...
 
-global___DeliverStreamMessages = DeliverStreamMessages
+global___DeliverStreamRecords = DeliverStreamRecords
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""

@@ -1,6 +1,6 @@
 from .workflow_activation_pb2 import (
     CancelWorkflow,
-    DeliverStreamMessages,
+    DeliverStreamRecords,
     DoUpdate,
     FireTimer,
     InitializeWorkflow,
@@ -25,7 +25,7 @@ from .workflow_activation_pb2 import (
 
 __all__ = [
     "CancelWorkflow",
-    "DeliverStreamMessages",
+    "DeliverStreamRecords",
     "DoUpdate",
     "FireTimer",
     "InitializeWorkflow",
