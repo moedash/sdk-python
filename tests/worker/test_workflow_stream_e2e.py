@@ -18,16 +18,18 @@ import asyncio
 import os
 import uuid
 from collections.abc import Sequence
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
 from temporalio import workflow
-from temporalio.api.common.v1 import Payload
-from temporalio.api.enums.v1 import EventType
+from temporalio.api.common.v1 import Payload, WorkflowExecution
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
 from temporalio.api.history.v1 import HistoryEvent
 from temporalio.api.stream.v1 import StreamRange, StreamRecord
-from temporalio.client import Client, WorkflowHistory
+from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHistory
 from temporalio.client_stream import StreamClient
 from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.streams import RecordKind, StreamNotFoundError
@@ -73,11 +75,19 @@ async def _event_counts(client: Client, workflow_id: str) -> dict[Any, int]:
 class ContractLoop:
     """Reads ``inputs``, publishes a decision per value, reports control records."""
 
+    def __init__(self) -> None:
+        self._trace: list[dict[str, Any]] = []
+
+    @workflow.query
+    def trace(self) -> list[dict[str, Any]]:
+        """What the loop has decided so far, for a query against replayed state."""
+        return self._trace
+
     @workflow.run
     async def run(self) -> list[dict[str, Any]]:
         inputs = workflow.stream_reader(INPUTS, result_type=dict)
         decisions = workflow.stream_writer(DECISIONS)
-        trace: list[dict[str, Any]] = []
+        trace = self._trace
         async for record in inputs:
             if record.kind is RecordKind.SUPERSEDED:
                 assert record.supersession is not None
@@ -649,3 +659,255 @@ async def test_a_replayer_fetches_a_standalone_stream_by_its_id() -> None:
         assert result.replay_failure is None
     finally:
         await streams.close()
+
+
+TWO_DECISIONS = [{"kind": "decision", "n": 1}, {"kind": "decision", "n": 2}]
+
+
+async def _feed_two(client: Client, workflow_id: str) -> Any:
+    """Append two inputs and wait until both decisions are out, so their tasks have completed."""
+    stream = client.get_stream_handle(workflow_id)
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    await producer.append({"n": 1}, {"n": 2})
+    await take(stream.read(topic=DECISIONS, result_type=dict), 2, timeout=60)
+    return producer
+
+
+async def test_a_query_against_a_cold_worker_answers_from_replayed_state() -> None:
+    """A query task built through matching carries the recorded ranges.
+
+    With the cache off every task is a full replay. A query dispatched to a
+    worker that holds nothing has to rebuild the run from History, and the
+    records the run read are not in it, so the server attaches them to the
+    query task the way it does to a task after a cache miss. Without them the
+    replay would have nothing to read and the query would fail.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "query-cold-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "query-cold-wf-" + uuid.uuid4().hex[:8]
+    try:
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[ContractLoop],
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=task_queue
+            )
+            producer = await _feed_two(client, workflow_id)
+            assert await handle.query(ContractLoop.trace) == TWO_DECISIONS
+            await producer.finish()
+            await asyncio.wait_for(handle.result(), 60)
+    finally:
+        await provider.close()
+
+
+async def test_a_sticky_query_after_an_eviction_still_answers() -> None:
+    """A query sent to the sticky queue of a run the worker evicted still answers.
+
+    The sticky task carries the history since the last task and no records,
+    which a worker that lost the run cannot use. Core sees that the history it
+    fetched itself records a consumed range it was sent no records for, and
+    lets the query go unanswered rather than answer it from the wrong state.
+    The server's sticky attempt then times out, stickiness is reset, and the
+    query is dispatched again on the normal queue, which carries the records.
+    The sticky timeout is shortened so the test does not wait the default out.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "query-sticky-tq-" + uuid.uuid4().hex[:8]
+    first_id = "query-sticky-a-" + uuid.uuid4().hex[:8]
+    second_id = "query-sticky-b-" + uuid.uuid4().hex[:8]
+    try:
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[ContractLoop],
+            max_cached_workflows=1,
+            sticky_queue_schedule_to_start_timeout=timedelta(seconds=2),
+        ):
+            first = await client.start_workflow(
+                ContractLoop.run, id=first_id, task_queue=task_queue
+            )
+            first_producer = await _feed_two(client, first_id)
+            # A second run on a one-slot cache pushes the first out of it.
+            second = await client.start_workflow(
+                ContractLoop.run, id=second_id, task_queue=task_queue
+            )
+            second_producer = await _feed_two(client, second_id)
+
+            answer = await first.query(
+                ContractLoop.trace, rpc_timeout=timedelta(seconds=60)
+            )
+            assert answer == TWO_DECISIONS
+
+            await first_producer.finish()
+            await second_producer.finish()
+            await asyncio.wait_for(first.result(), 60)
+            await asyncio.wait_for(second.result(), 60)
+    finally:
+        await provider.close()
+
+
+async def _collect(
+    client: Client, workflow_id: str, topic: str, run_id: str | None
+) -> list[tuple[Any, str, int]]:
+    """Every record on ``topic`` as ``(value, run, offset)``, the run and offset from the cursor."""
+    handle = client.get_stream_handle(workflow_id, run_id=run_id)
+    out: list[tuple[Any, str, int]] = []
+    async for record in handle.read(topic=topic, result_type=dict):
+        # native:<run>:<offset>
+        _, run, offset = record.cursor.token.split(":")
+        out.append((record.value, run, int(offset)))
+    return out
+
+
+async def test_a_reset_run_is_followed_and_replayed() -> None:
+    """A run reset from a consuming one carries its subscriptions on, and readers follow.
+
+    The reset re-runs the task named by the reset point, so the base run's
+    history is copied up to that task and the ranges recorded in the copy are
+    what the reset run replays, from the base run's streams. The inherited
+    ``inputs`` stream is the reset run's own from the inherited cursor on: it
+    starts empty at that offset, and the input the re-run task had consumed is
+    not delivered again, so the next input takes that offset. The
+    ``decisions`` stream, which the base run only published to, starts at zero.
+    A handle without a run id follows the base run into the reset run and starts
+    each stream at the floor it reports; a handle pinned to the base run ends
+    with it; the ``Replayer`` fetches each era of the reset run's history from
+    the run whose stream holds it.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "reset-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "reset-wf-" + uuid.uuid4().hex[:8]
+    try:
+        async with Worker(client, task_queue=task_queue, workflows=[ContractLoop]):
+            base = await client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=task_queue
+            )
+            base_run = base.result_run_id
+            assert base_run
+            producer = await _feed_two(client, workflow_id)
+            # A third input in a task of its own, which is the task the reset
+            # re-runs: its consumption is dropped with it.
+            await producer.append({"n": 3})
+            base_stream = client.get_stream_handle(workflow_id, run_id=base_run)
+            await take(
+                base_stream.read(topic=DECISIONS, result_type=dict), 3, timeout=60
+            )
+
+            # Reset to the completion of the last consuming task, while the base
+            # run waits for more input.
+            completion_id = 0
+            async for event in client.get_workflow_handle(
+                workflow_id, run_id=base_run
+            ).fetch_history_events():
+                if event.HasField("workflow_task_completed_event_attributes"):
+                    completed = event.workflow_task_completed_event_attributes
+                    if any(
+                        r.to_offset > r.from_offset
+                        for r in completed.consumed_stream_ranges
+                    ):
+                        completion_id = event.event_id
+            assert completion_id
+            reset = await client.workflow_service.reset_workflow_execution(
+                ResetWorkflowExecutionRequest(
+                    namespace=client.namespace,
+                    workflow_execution=WorkflowExecution(
+                        workflow_id=workflow_id, run_id=base_run
+                    ),
+                    reason="re-run the last consuming task",
+                    workflow_task_finish_event_id=completion_id,
+                    request_id=uuid.uuid4().hex,
+                )
+            )
+            reset_run = reset.run_id
+            assert reset_run and reset_run != base_run
+
+            # A fresh producer pins to the current run, the reset run, whose
+            # inherited inputs stream continues at the inherited offset.
+            continued = client.get_stream_handle(workflow_id).producer(
+                topic=INPUTS, producer_id="model2", attempt=1
+            )
+            await continued.append({"n": 4})
+            await continued.finish()
+            trace = await asyncio.wait_for(
+                client.get_workflow_handle(workflow_id, run_id=reset_run).result(),
+                60,
+            )
+            # The first two decisions were replayed from the base run's stream;
+            # the third input went with the task the reset re-ran.
+            assert trace == TWO_DECISIONS + [
+                {"kind": "decision", "n": 4},
+                {"kind": "finish", "producer": "model2"},
+            ]
+
+            # The base run was terminated by the reset, and describe is the one
+            # place that names the run it was reset into.
+            described = await client.get_workflow_handle(
+                workflow_id, run_id=base_run
+            ).describe()
+            assert described.status == WorkflowExecutionStatus.TERMINATED
+            extended = described.raw_description.workflow_extended_info
+            assert extended.reset_run_id == reset_run
+
+            # A reader pinned to the base run ends with the base run.
+            pinned = await asyncio.wait_for(
+                _collect(client, workflow_id, DECISIONS, base_run), 30
+            )
+            assert pinned == [
+                ({"decided": 1}, base_run, 0),
+                ({"decided": 2}, base_run, 1),
+                ({"decided": 3}, base_run, 2),
+            ]
+
+            # A chain-following reader crosses from the base run into the reset
+            # run on both topics, with no gap and no refusal: the published one
+            # restarts at zero, the inherited one continues at the floor.
+            decisions = await asyncio.wait_for(
+                _collect(client, workflow_id, DECISIONS, None), 30
+            )
+            assert decisions == [
+                ({"decided": 1}, base_run, 0),
+                ({"decided": 2}, base_run, 1),
+                ({"decided": 3}, base_run, 2),
+                ({"decided": 4}, reset_run, 0),
+                (None, reset_run, 1),
+            ]
+            inputs = await asyncio.wait_for(
+                _collect(client, workflow_id, INPUTS, None), 30
+            )
+            assert inputs == [
+                ({"n": 1}, base_run, 0),
+                ({"n": 2}, base_run, 1),
+                ({"n": 3}, base_run, 2),
+                ({"n": 4}, reset_run, 2),
+                (None, reset_run, 3),
+            ]
+            latest = await client.get_stream_handle(workflow_id).latest(topic=INPUTS)
+            assert latest.token == f"native:{reset_run}:3"
+
+        # The reset run's history: the base run's events, the reset marker
+        # naming both runs, then its own. The replayer fetches the first era
+        # from the base run's stream and the rest from the reset run's.
+        history = await client.get_workflow_handle(
+            workflow_id, run_id=reset_run
+        ).fetch_history()
+        reset_cause = WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_WORKFLOW
+        markers = [
+            (failed.base_run_id, failed.new_run_id)
+            for event in history.events
+            if event.HasField("workflow_task_failed_event_attributes")
+            for failed in [event.workflow_task_failed_event_attributes]
+            if failed.cause == reset_cause
+        ]
+        assert markers == [(base_run, reset_run)]
+        result = await Replayer(
+            workflows=[ContractLoop], plugins=[provider], stream_client=client
+        ).replay_workflow(history)
+        assert result.replay_failure is None
+    finally:
+        await provider.close()
