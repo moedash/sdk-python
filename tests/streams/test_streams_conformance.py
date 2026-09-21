@@ -26,7 +26,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -71,11 +71,15 @@ class ProviderCase:
     ) -> StreamHandle:
         if self.host is not None:
             await self.host(workflow_id)
-        # The memory provider takes no client; every storage provider's setup
-        # supplies one, so the cast only ever lies for the provider that
-        # does not read it.
+        if self.client is not None:
+            # A storage provider's setup registers the provider on the client,
+            # so the cases go through the accessor an application uses.
+            return self.client.get_stream_handle(workflow_id, run_id=run_id)
+        # Only the memory provider gets here, and it takes no client.
         return self.provider.get_stream_handle(
-            cast(Client, self.client), workflow_id, run_id=run_id
+            None,  # type: ignore[arg-type]
+            workflow_id,
+            run_id=run_id,
         )
 
 
@@ -105,8 +109,13 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
     # No STREAMS_LIVE gate: the store is the workflow's own History, which the
     # test environment's server provides.
     provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost, plugins=[provider]) as worker:
+    async with new_worker(client, StreamHost) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
@@ -134,8 +143,13 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
             address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
         )
     provider = NativeStreams()
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost, plugins=[provider]) as worker:
+    async with new_worker(client, StreamHost) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
@@ -163,8 +177,13 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
         # A prefix per setup, because the store keeps what earlier runs wrote.
         key_prefix=f"streams-conformance-{uuid.uuid4().hex}",
     )
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost, plugins=[provider]) as worker:
+    async with new_worker(client, StreamHost) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:

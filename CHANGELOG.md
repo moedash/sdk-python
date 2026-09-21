@@ -21,11 +21,13 @@ to include examples, links to docs, or any other relevant information.
 ### Added
 
 - **Experimental**: `temporalio.streams` defines one stream interface a workflow
-  can read, decide on, and write. `workflow.stream_reader()` and
-  `workflow.stream_writer()` are the workflow-side entry points, a provider is a
-  worker plugin passed as `Worker(plugins=[provider])`, and
-  `provider.get_stream_handle()` reads and appends from outside. The record on
-  the wire is `temporal.api.stream.v1.StreamRecord` on every provider.
+  can read, decide on, and write. A provider is registered once as a plugin,
+  `Client.connect(plugins=[provider])`, and workers built from that client
+  inherit it; each context then asks for its stream the same way:
+  `workflow.stream_reader()` and `workflow.stream_writer()` in workflow code,
+  `activity.stream_handle()` in an activity, and `client.get_stream_handle()`
+  anywhere a client is held. The record on the wire is
+  `temporal.api.stream.v1.StreamRecord` on every provider.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against, and
   `temporalio.streams.providers.redis.RedisStreams` serves the same interface

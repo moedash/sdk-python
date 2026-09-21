@@ -7,10 +7,13 @@ Three cases, the same on every provider:
   the run as it allows is rebuilt rather than remembered;
 - a producer whose second attempt supersedes its first, which the reader has
   to report and the workflow has to act on;
-- an outside reader following what the workflow published.
+- an outside reader following what the workflow published, and the receipts
+  the Activity appended on the workflow's stream from inside its own context.
 
-Byte-identical in every tree. ``provider_setup`` is what differs, and it is
-the only import here that names a provider.
+The provider is registered once, on the client; the worker inherits it and
+every context asks for its stream without naming it. Byte-identical in every
+tree. ``provider_setup`` is what differs, and it is the only import here that
+names a provider.
 """
 
 from __future__ import annotations
@@ -25,12 +28,18 @@ from typing import Any
 
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
-from temporalio.streams import StreamHandle
+from temporalio.streams import RecordKind, StreamHandle
 from temporalio.worker import Worker
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import provider_setup  # noqa: E402
-from agent_loop import DECISIONS, INPUTS, AgentLoop, record_decision  # noqa: E402
+from agent_loop import (  # noqa: E402
+    DECISIONS,
+    INPUTS,
+    RECEIPTS,
+    AgentLoop,
+    record_decision,
+)
 
 DECISION_LIMIT = 8
 EXPECTED_OUTPUT = 6
@@ -51,7 +60,7 @@ async def main() -> int:
     out = Path(__file__).resolve().parent / f"results-{provider_setup.NAME}"
     out.mkdir(exist_ok=True)
     target, provider = await provider_setup.open()
-    client = await Client.connect(target, namespace="default")
+    client = await Client.connect(target, namespace="default", plugins=[provider])
 
     uid = f"ai198-contract-{provider_setup.NAME}-" + uuid.uuid4().hex
     record: dict[str, Any] = {
@@ -67,12 +76,11 @@ async def main() -> int:
         workflows=[AgentLoop],
         activities=[record_decision],
         max_cached_workflows=provider_setup.WORKFLOW_CACHE,
-        plugins=[provider],
     ):
         handle = await client.start_workflow(
             AgentLoop.run, DECISION_LIMIT, id=uid, task_queue=uid
         )
-        stream = provider.get_stream_handle(client, uid)
+        stream = client.get_stream_handle(uid)
         output = asyncio.create_task(collect_output(stream, EXPECTED_OUTPUT))
 
         # The first attempt writes two records and then stops, as a failed
@@ -137,6 +145,19 @@ async def main() -> int:
         except asyncio.TimeoutError:
             output.cancel()
             record["observed_output"] = "timed_out"
+
+        async def receipts() -> list[Any]:
+            # Ends by itself once the workflow is closed and the tail served.
+            return [
+                r.value
+                async for r in stream.read(topic=RECEIPTS, result_type=dict)
+                if r.kind is RecordKind.DATA
+            ]
+
+        try:
+            record["receipts"] = await asyncio.wait_for(receipts(), timeout=20)
+        except asyncio.TimeoutError:
+            record["receipts"] = "timed_out"
 
     history = await handle.fetch_history()
     record["history_events"] = len(history.events)

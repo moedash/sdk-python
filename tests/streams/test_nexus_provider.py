@@ -47,7 +47,11 @@ from temporalio.streams._wire import WireRecord
 from temporalio.streams.providers import nexus
 from temporalio.streams.providers._nexus_generated import AppendInput, ReadInput
 from temporalio.streams.providers.memory import MemoryStreams
-from temporalio.streams.providers.nexus import NexusStreams, TemporalStreamsHandler
+from temporalio.streams.providers.nexus import (
+    NexusStreamHandle,
+    NexusStreams,
+    TemporalStreamsHandler,
+)
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.worker import Worker
 from tests.helpers import new_worker
@@ -488,6 +492,15 @@ async def test_a_stream_condition_crosses_the_endpoint_under_its_own_class(
 def test_the_front_has_no_workflow_half():
     with pytest.raises(StreamUnsupportedError):
         _front(None).workflow_provider()
+
+
+async def test_the_front_registers_on_a_client(client: Client):
+    # The same accessor as any provider, so code outside a workflow does not
+    # change when the store moves behind an endpoint.
+    config = client.config()
+    config["plugins"] = [_front(None)]
+    registered = Client(**config)
+    assert isinstance(registered.get_stream_handle("wf"), NexusStreamHandle)
 
 
 async def test_consecutive_reads_share_one_parked_subscription():
