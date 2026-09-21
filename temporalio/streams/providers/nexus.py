@@ -1,47 +1,58 @@
 """The Nexus front: the outside surface behind one Temporal-authenticated endpoint.
 
-Two halves in one module. The provider half implements only :func:`producer`
-and :func:`consumer`; the workflow side raises, naming a storage provider,
-because a workflow's publishes and reads ride the Workflow Task and cannot
-cross an RPC. The handler half runs in a worker configured with any storage
-provider and serves two sync operations, ``append`` and ``read``, so the
-store behind the endpoint is invisible to callers and an operator switches
-it without touching them.
+Two halves in one module. :class:`NexusStreams` is a provider that implements
+the outside half only: it hands out handles that append and read through the
+endpoint, and it has no workflow half, because a workflow's publishes and
+reads ride the Workflow Task and cannot cross an RPC.
+:class:`TemporalStreamsHandler` runs in a worker next to any storage provider
+and serves two sync operations, ``append`` and ``read``, by fronting that
+provider's own handles, so the store behind the endpoint is invisible to
+callers and an operator switches it without touching them.
 
 The wire types and the service definition come from
 ``temporal_streams.nexusrpc.yaml``, so any language nexgen targets can be
-handed the same contract. What stays hand-written here is what the
-generator cannot express yet: the handler's dedupe and long-poll collect
-loop, and the caller's batching, cursor handling and codec.
+handed the same contract. A record crosses as the serialized
+``temporal.api.stream.v1.StreamRecord``, the same bytes every store keeps, so
+a caller in another language decodes it with the api protos alone. What stays
+hand-written here is what the generator cannot express yet: the handler's
+dedupe and long-poll collect loop, and the caller's batching, cursor handling
+and codec.
 
 Reads hand out batches and an append carries one batch per call, because a
 Nexus operation per record costs too much for token streams. Record bodies
-cross the handler untouched: it reads the store as raw payloads and frames
+cross the handler untouched: it reads the store as raw payloads and forwards
 them as they are, so a codec that changes the payload encoding survives the
 hop and the handler's worker never needs the key. Supersession records are
-not transported: the caller's reader re-synthesizes them from the attempts
-it observes, which is the policy module's job on every provider. Cursors
-pass through opaque, so the caller cannot tell which store produced them.
+not transported: the caller's reader re-synthesizes them from the attempts it
+observes, which is the policy module's job on every provider. Cursors pass
+through opaque, so the caller cannot tell which store produced them; a
+foreign one is refused by the store behind the endpoint and reaches the
+caller on the first read.
 
-The handler keeps one parked read per ``(workflow, stream, topic)`` and
-serves consecutive calls from it, so an idle caller does not leave one
-abandoned long poll on the store per call. A call whose token does not
-match the parked position replaces the subscription, and an idle one is
-released after a minute; that is the residual cost.
+The handler keeps one parked read per ``(workflow, run, topic)`` and serves
+consecutive calls from it, so an idle caller does not leave one abandoned
+long poll on the store per call. A call whose token does not match the parked
+position replaces the subscription, and an idle one is released after a
+minute; that is the residual cost.
 
-Two stated prototype limits. Append deduplication lives in handler memory,
-by batch index per producer attempt, so a handler that has no state for a
-producer attempt refuses to continue it rather than starting a fresh
-delegate whose numbering the store would drop as a repeat; the caller opens
-a new attempt, which readers report as a supersession. The store-level fix,
-a sequence-explicit append in the contract, is listed in the design doc's
-work table. And any caller the endpoint admits may touch any workflow's
-streams in the namespace; the endpoint's own authorization is the boundary.
+Two stated prototype limits. Append deduplication lives in handler memory, by
+batch index per producer attempt, so a handler that has no state for a
+producer attempt refuses to continue it rather than starting a fresh delegate
+whose numbering the store would drop as a repeat; the caller opens a new
+attempt, which readers report as a supersession. And any caller the endpoint
+admits may touch any workflow's streams in the namespace; the endpoint's own
+authorization is the boundary.
+
+A failure from the endpoint reaches the caller as the
+:class:`temporalio.streams.StreamError` the store raised, when the handler
+named one, and as :class:`temporalio.service.RPCError` otherwise, never as an
+HTTP or urllib exception.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import urllib.error
@@ -50,7 +61,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar, cast
 
 import nexusrpc
 import nexusrpc.handler
@@ -59,11 +70,24 @@ from google.protobuf.message import DecodeError
 import temporalio.converter
 from temporalio.api.common.v1 import Payload
 from temporalio.api.operatorservice.v1 import ListNexusEndpointsRequest
+from temporalio.client import Client
 from temporalio.common import RawValue
-from temporalio.streams import _frame, _provider
-from temporalio.streams._handles import ReadSource, WriteSink
-from temporalio.streams._policy import AttemptTracker
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams._errors import (
+    StreamCursorError,
+    StreamError,
+    StreamNotFoundError,
+    StreamProducerError,
+    StreamUnsupportedError,
+)
+from temporalio.streams._provider import StreamHandle, StreamProducer, StreamProvider
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._wire import (
+    RecordDecoder,
+    WireRecord,
+    producer_identity,
+    to_wire,
+)
 from temporalio.streams.providers._nexus_generated import (
     AppendInput,
     AppendOutput,
@@ -73,9 +97,16 @@ from temporalio.streams.providers._nexus_generated import (
     TemporalStreams,
 )
 
+__all__ = [
+    "NexusProducer",
+    "NexusStreamHandle",
+    "NexusStreams",
+    "TemporalStreamsHandler",
+]
+
 _WORKFLOW_SIDE_ERROR = (
     "the nexus provider is an outside transport; a worker publishes and reads "
-    "through a storage provider, so configure one of those on the worker"
+    "through a storage provider, so give the worker one of those"
 )
 
 # The contract leaves these unset, so the handler is the one place that says
@@ -83,12 +114,13 @@ _WORKFLOW_SIDE_ERROR = (
 # shortens it to the request deadline anyway, and a shorter default only
 # means more round trips on an idle stream.
 _DEFAULT_MAX_RECORDS = 100
-_DEFAULT_WAIT_MS = 30_000
+_DEFAULT_READ_WAIT = timedelta(seconds=30)
 _DEADLINE_MARGIN = timedelta(milliseconds=500)
 _DEFAULT_MAX_PRODUCERS = 10_000
 _DEFAULT_SUBSCRIPTION_IDLE = timedelta(seconds=60)
 _QUEUE_DEPTH = 1000
-_APPEND_TIMEOUT_MS = 30_000
+_APPEND_TIMEOUT = timedelta(seconds=30)
+_ROUND_TRIP_MARGIN = timedelta(seconds=5)
 
 _definition = nexusrpc.get_service_definition(TemporalStreams)
 if _definition is None:  # pragma: no cover
@@ -104,16 +136,58 @@ _OPERATION_NAMES = {
 _APPEND_OPERATION = _OPERATION_NAMES["append"]
 _READ_OPERATION = _OPERATION_NAMES["read"]
 
+# The stream conditions that cross the endpoint under their own name, so the
+# caller raises the class the store raised.
+_STREAM_ERRORS: dict[str, type[StreamError]] = {
+    cls.__name__: cls
+    for cls in (
+        StreamError,
+        StreamNotFoundError,
+        StreamCursorError,
+        StreamProducerError,
+        StreamUnsupportedError,
+    )
+}
+_HTTP_TO_RPC = {
+    400: RPCStatusCode.INVALID_ARGUMENT,
+    401: RPCStatusCode.UNAUTHENTICATED,
+    403: RPCStatusCode.PERMISSION_DENIED,
+    404: RPCStatusCode.NOT_FOUND,
+    408: RPCStatusCode.DEADLINE_EXCEEDED,
+    409: RPCStatusCode.ALREADY_EXISTS,
+    412: RPCStatusCode.FAILED_PRECONDITION,
+    429: RPCStatusCode.RESOURCE_EXHAUSTED,
+    500: RPCStatusCode.INTERNAL,
+    501: RPCStatusCode.UNIMPLEMENTED,
+    503: RPCStatusCode.UNAVAILABLE,
+    504: RPCStatusCode.DEADLINE_EXCEEDED,
+}
+
 _OutputT = TypeVar("_OutputT")
 
 logger = logging.getLogger(__name__)
 
 
+def _require_topic(topic: str) -> None:
+    if not topic:
+        raise ValueError("topic must not be empty")
+
+
+def _handler_error(error: StreamError) -> nexusrpc.HandlerError:
+    """Carry a stream condition across the endpoint under its own class name."""
+    kind = (
+        nexusrpc.HandlerErrorType.NOT_FOUND
+        if isinstance(error, StreamNotFoundError)
+        else nexusrpc.HandlerErrorType.BAD_REQUEST
+    )
+    return nexusrpc.HandlerError(
+        f"{type(error).__name__}: {error}", type=kind, retryable_override=False
+    )
+
+
 def _bad_request(message: str) -> nexusrpc.HandlerError:
     return nexusrpc.HandlerError(
-        message,
-        type=nexusrpc.HandlerErrorType.BAD_REQUEST,
-        retryable_override=False,
+        message, type=nexusrpc.HandlerErrorType.BAD_REQUEST, retryable_override=False
     )
 
 
@@ -131,29 +205,30 @@ class _Subscription:
 
 @dataclass
 class _ProducerState:
-    delegate: Any
+    delegate: StreamProducer
     batch_index: int
+    sequence: int
+    last_cursor: str | None
 
 
 @nexusrpc.handler.service_handler(service=TemporalStreams)
 class TemporalStreamsHandler:
-    """Serves the stream endpoint, delegating to one storage provider.
+    """Serves the stream endpoint by fronting one storage provider's handles.
 
-    The delegate is an explicit instance rather than the process default, so
-    a caller and a handler can coexist in one process, and so an operator can
+    The provider is an explicit instance the application constructed, so a
+    caller and a handler can coexist in one process, and so an operator can
     run handlers for a new store next to handlers for the old one.
     """
 
     def __init__(
         self,
-        client: Any,
-        provider: str,
+        provider: StreamProvider,
+        client: Client | None,
         *,
         max_producers: int = _DEFAULT_MAX_PRODUCERS,
         subscription_idle: timedelta = _DEFAULT_SUBSCRIPTION_IDLE,
-        **provider_options: Any,
     ) -> None:
-        """Serve the endpoint out of the provider named by ``provider``.
+        """Serve the endpoint out of ``provider``'s handles, opened with ``client``.
 
         ``max_producers`` bounds the dedupe state kept per producer attempt;
         the oldest is evicted, and a producer evicted mid-life gets a clear
@@ -161,9 +236,9 @@ class TemporalStreamsHandler:
         ``subscription_idle`` is how long a parked read outlives its last
         caller.
         """
+        self._provider = provider
         self._client = client
-        self._delegate = _provider.instance(provider, **provider_options)
-        self._producers: OrderedDict[tuple[str, str, str, int], _ProducerState] = (
+        self._producers: OrderedDict[tuple[str, str, str, str, int], _ProducerState] = (
             OrderedDict()
         )
         self._max_producers = max_producers
@@ -171,60 +246,82 @@ class TemporalStreamsHandler:
         self._read_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._subscription_idle = subscription_idle.total_seconds()
 
+    def _stream(self, workflow_id: str, run_id: str | None) -> StreamHandle:
+        # A storage provider wants a client; the memory provider, which the
+        # tests front, accepts none, so the cast only lies where it is unread.
+        return self._provider.get_stream_handle(
+            cast(Client, self._client), workflow_id, run_id=run_id or None
+        )
+
     @nexusrpc.handler.sync_operation
     async def append(
         self, _ctx: nexusrpc.handler.StartOperationContext, input: AppendInput
     ) -> AppendOutput:
-        """Append on the caller's account, dropping a repeated batch.
+        """Append on the caller's account, writing a repeated batch once.
 
         Raises:
-            nexusrpc.HandlerError: ``BAD_REQUEST`` when the batch index skips
-                ahead, when it continues a producer attempt this handler has
-                no state for, or when a payload is not a serialized
-                ``Payload``.
+            nexusrpc.HandlerError: ``BAD_REQUEST`` when the batch index or
+                sequence does not continue the producer attempt, when the
+                attempt is one this handler has no state for, or when a
+                payload is not a serialized ``Payload``; ``NOT_FOUND`` when
+                the store has no such workflow.
         """
-        topic = input.topic or ""
+        try:
+            return await self._append(input)
+        except StreamError as error:
+            raise _handler_error(error) from error
+        except ValueError as error:
+            raise _bad_request(str(error)) from error
+
+    async def _append(self, input: AppendInput) -> AppendOutput:
+        _require_topic(input.topic)
         key = (
             input.workflow_id,
-            input.stream or f"@{topic}",
+            input.run_id or "",
+            input.topic,
             input.producer_id,
             input.attempt,
         )
         state = self._producers.get(key)
         if state is None:
-            if input.batch_index != 1:
+            if input.batch_index != 1 or input.sequence != 0:
                 # A fresh delegate would restart its numbering at zero, and
                 # the store would drop that as a repeat of the first batch.
                 # Refusing here turns a silent loss into a failure the caller
                 # can act on by opening a new attempt.
-                raise _bad_request(
+                raise StreamProducerError(
                     f"producer {input.producer_id!r} attempt {input.attempt} resumed "
                     f"at batch {input.batch_index} on a handler that has no state for "
                     "it; open a new attempt"
                 )
-            delegate = await self._delegate.producer(
-                self._client,
-                workflow_id=input.workflow_id,
-                stream=input.stream,
-                topic=topic,
-                producer_id=input.producer_id,
-                attempt=input.attempt,
+            delegate = self._stream(input.workflow_id, input.run_id).producer(
+                topic=input.topic, producer_id=input.producer_id, attempt=input.attempt
             )
-            state = _ProducerState(delegate, 0)
-        elif input.batch_index <= state.batch_index:
-            # A repeat, or a producer that restarted its numbering: either
-            # way the store already holds the batch.
+            state = _ProducerState(delegate, 0, 0, None)
+        elif input.batch_index == state.batch_index:
+            # The last batch again: the store already holds it, and where it
+            # landed is the answer the original got.
             self._producers.move_to_end(key)
-            return AppendOutput()
+            return AppendOutput(cursor=state.last_cursor)
+        elif input.batch_index < state.batch_index:
+            raise StreamProducerError(
+                f"batch {input.batch_index} was written and is no longer the last "
+                f"for producer {input.producer_id!r} attempt {input.attempt}"
+            )
         elif input.batch_index != state.batch_index + 1:
-            raise _bad_request(
+            raise StreamProducerError(
                 f"batch {input.batch_index} skips ahead of {state.batch_index} for "
+                f"producer {input.producer_id!r} attempt {input.attempt}"
+            )
+        if input.sequence != state.sequence:
+            raise StreamProducerError(
+                f"sequence {input.sequence} does not continue at {state.sequence} for "
                 f"producer {input.producer_id!r} attempt {input.attempt}"
             )
         payloads = self._payloads(input.payloads)
         cursor: str | None = None
         if payloads:
-            appended = await state.delegate.append(*payloads)
+            appended = await state.delegate.append(*(RawValue(p) for p in payloads))
             cursor = appended.token if appended is not None else None
         if input.finish:
             await state.delegate.finish()
@@ -233,6 +330,8 @@ class TemporalStreamsHandler:
         # Recorded only once the store accepted the batch, so a failed append
         # is not mistaken for a repeat when the caller retries it.
         state.batch_index = input.batch_index
+        state.sequence += len(payloads)
+        state.last_cursor = cursor
         self._producers[key] = state
         self._producers.move_to_end(key)
         while len(self._producers) > self._max_producers:
@@ -243,32 +342,46 @@ class TemporalStreamsHandler:
     def _payloads(encoded: list[bytes] | None) -> list[Payload]:
         payloads = []
         for index, raw in enumerate(encoded or []):
-            payload = Payload()
             try:
-                payload.ParseFromString(raw)
+                payloads.append(Payload.FromString(raw))
             except DecodeError as error:
                 raise _bad_request(
                     f"payloads[{index}] is not a serialized Temporal Payload: {error}"
                 ) from error
-            payloads.append(payload)
         return payloads
 
     @nexusrpc.handler.sync_operation
     async def read(
         self, ctx: nexusrpc.handler.StartOperationContext, input: ReadInput
     ) -> ReadOutput:
-        """Answer with the records after the caller's token, or time out."""
-        stream = input.stream or ""
-        topic = input.topic or None
+        """Answer with the records after the caller's token, or time out.
+
+        Raises:
+            nexusrpc.HandlerError: ``BAD_REQUEST`` when the store refuses the
+                token, ``NOT_FOUND`` when it has no such workflow.
+        """
+        try:
+            return await self._read(ctx, input)
+        except StreamError as error:
+            raise _handler_error(error) from error
+        except ValueError as error:
+            raise _bad_request(str(error)) from error
+
+    async def _read(
+        self, ctx: nexusrpc.handler.StartOperationContext, input: ReadInput
+    ) -> ReadOutput:
+        _require_topic(input.topic)
+        stream = self._stream(input.workflow_id, input.run_id)
         if input.latest_only:
-            delegate = await self._delegate.consumer(
-                self._client, workflow_id=input.workflow_id, stream=stream
-            )
-            return ReadOutput(next_token=(await delegate.latest(topic=topic)).token)
+            return ReadOutput(next_token=(await stream.latest(topic=input.topic)).token)
         max_records = (
             _DEFAULT_MAX_RECORDS if input.max_records is None else input.max_records
         )
-        wait = (_DEFAULT_WAIT_MS if input.wait_ms is None else input.wait_ms) / 1000
+        wait = (
+            _DEFAULT_READ_WAIT.total_seconds()
+            if input.wait_ms is None
+            else input.wait_ms / 1000
+        )
         if ctx.request_deadline is not None:
             # The server answers the caller with a timeout at the deadline
             # whatever this call does, so collecting past it only holds the
@@ -279,7 +392,7 @@ class TemporalStreamsHandler:
             left = deadline - datetime.now(timezone.utc) - _DEADLINE_MARGIN
             wait = max(0.0, min(wait, left.total_seconds()))
         after = input.after_token or ""
-        key = (input.workflow_id, stream, topic or "")
+        key = (input.workflow_id, input.run_id or "", input.topic)
         await self._expire_subscriptions()
         lock = self._read_locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -287,34 +400,31 @@ class TemporalStreamsHandler:
             if subscription is None or subscription.position != after:
                 if subscription is not None:
                     await self._drop(key)
-                subscription = await self._subscribe(
-                    key, input.workflow_id, stream, topic, after
-                )
+                subscription = self._subscribe(key, stream, input.topic, after)
             records, next_token = await self._drain(subscription, max_records, wait)
             subscription.position = next_token
             subscription.last_used = time.monotonic()
-            if subscription.done and subscription.records.empty():
-                # The store ended the read, as the Workflow Streams delegate
-                # does when the run closes. Nothing more will arrive on it.
+            done = (
+                subscription.done
+                and subscription.records.empty()
+                and subscription.failure is None
+            )
+            if done:
+                # The store ended the read: the run or chain is closed and the
+                # tail has been handed over. Nothing more will arrive on it.
                 await self._drop(key)
-        return ReadOutput(records=records, next_token=next_token)
+        return ReadOutput(records=records, next_token=next_token, done=done)
 
-    async def _subscribe(
-        self,
-        key: tuple[str, str, str],
-        workflow_id: str,
-        stream: str,
-        topic: str | None,
-        after: str,
+    def _subscribe(
+        self, key: tuple[str, str, str], stream: StreamHandle, topic: str, after: str
     ) -> _Subscription:
-        delegate = await self._delegate.consumer(
-            self._client, workflow_id=workflow_id, stream=stream
-        )
-        # Raw payloads: the handler frames what the store holds without
+        # Raw payloads: the handler forwards what the store holds without
         # decoding it, so an encoding only the caller's codec understands
-        # passes through untouched.
-        source = delegate.read(
-            after=Cursor(after) if after else BEGINNING, topic=topic, type=RawValue
+        # passes through untouched. A foreign token is refused right here.
+        source = stream.read(
+            topic=topic,
+            after=Cursor(after) if after else BEGINNING,
+            result_type=RawValue,
         )
         subscription = _Subscription(
             records=asyncio.Queue(maxsize=_QUEUE_DEPTH),
@@ -334,8 +444,7 @@ class TemporalStreamsHandler:
                 subscription.failure = error
             finally:
                 subscription.done = True
-                if isinstance(source, AsyncGenerator):
-                    await source.aclose()
+                await source.aclose()
 
         subscription.pump = asyncio.create_task(pump())
         self._subscriptions[key] = subscription
@@ -354,8 +463,10 @@ class TemporalStreamsHandler:
                 if records or remaining <= 0:
                     break
                 if subscription.done:
+                    if subscription.failure is None:
+                        break
                     # Honour the wait even though nothing can arrive, so a
-                    # caller polling a closed stream does not spin on the
+                    # caller polling a failed stream does not spin on the
                     # endpoint.
                     await asyncio.sleep(remaining)
                     break
@@ -374,20 +485,19 @@ class TemporalStreamsHandler:
 
     @staticmethod
     def _wire(record: StreamRecord[Any]) -> RecordWire:
-        body = (
-            record.value.payload.SerializeToString()
-            if isinstance(record.value, RawValue)
-            else b""
-        )
-        frame = _frame.encode(
+        # The record read as RawValue carries the stored body untouched; the
+        # default converter passes a RawValue through, so no encoding happens
+        # here.
+        wire = to_wire(
+            temporalio.converter.DataConverter.default.payload_converter,
             topic=record.topic,
             kind=record.kind,
-            producer=record.producer,
+            value=record.value,
+            producer_id=record.producer_id,
             attempt=record.attempt,
             sequence=record.sequence,
-            body=body,
         )
-        return RecordWire(token=record.cursor.token, frame=frame)
+        return RecordWire(token=record.cursor.token, record=wire.SerializeToString())
 
     async def close(self) -> None:
         """Release every parked read.
@@ -419,20 +529,44 @@ class TemporalStreamsHandler:
             self._read_locks.pop(key, None)
 
 
-class StreamEndpointError(RuntimeError):
-    """The stream endpoint refused a call or could not be reached.
+class _EndpointFailure(Exception):
+    """What the transport saw: the endpoint's answer, or the reason it gave none."""
 
-    ``status`` is the HTTP status when the endpoint answered, and ``None``
-    when the connection itself failed.
-    """
-
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        """Carry the endpoint's answer, or the reason it gave none."""
-        super().__init__(message)
+    def __init__(self, detail: str, status: int | None) -> None:
+        super().__init__(detail)
+        self.detail = detail
         self.status = status
 
 
-def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_ms: int) -> bytes:
+def _translate(failure: _EndpointFailure) -> Exception:
+    """The exception a caller raises for an endpoint failure.
+
+    The handler names a stream condition by its class in the failure message,
+    so the same class is raised here; anything else is an ``RPCError`` with
+    the status the HTTP answer maps to, or ``UNAVAILABLE`` when there was none.
+    """
+    message = failure.detail
+    try:
+        parsed = json.loads(message)
+        if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+            message = parsed["message"]
+    except ValueError:
+        pass
+    if failure.status is not None:
+        for name, cls in _STREAM_ERRORS.items():
+            prefix = f"{name}: "
+            if message.startswith(prefix):
+                return cls(message[len(prefix) :])
+        status = _HTTP_TO_RPC.get(failure.status, RPCStatusCode.UNKNOWN)
+    else:
+        status = RPCStatusCode.UNAVAILABLE
+    return RPCError(message, status, b"")
+
+
+def _post(
+    url: str, body: bytes, headers: Mapping[str, str], timeout: timedelta
+) -> bytes:
+    timeout_ms = int(timeout.total_seconds() * 1000)
     request = urllib.request.Request(
         url,
         data=body,
@@ -446,57 +580,74 @@ def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_ms: int) ->
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_ms / 1000 + 5) as response:
+        with urllib.request.urlopen(
+            request, timeout=(timeout + _ROUND_TRIP_MARGIN).total_seconds()
+        ) as response:
             return response.read()
     except urllib.error.HTTPError as error:
-        detail = error.read().decode(errors="replace")
-        raise StreamEndpointError(
-            f"stream endpoint call failed ({error.code}): {detail}", status=error.code
+        raise _EndpointFailure(
+            error.read().decode(errors="replace"), error.code
         ) from error
     except urllib.error.URLError as error:
-        raise StreamEndpointError(
-            f"stream endpoint unreachable at {url}: {error.reason}"
+        raise _EndpointFailure(
+            f"stream endpoint unreachable at {url}: {error.reason}", None
         ) from error
 
 
 class _Front:
-    """Everything the caller half needs to reach one endpoint."""
+    """Everything a handle needs to reach one endpoint."""
 
-    def __init__(
-        self,
-        base_url: str,
-        data_converter: temporalio.converter.DataConverter,
-        headers: Mapping[str, str],
-        wait_ms: int,
-        max_records: int,
-    ) -> None:
-        self.base_url = base_url
+    def __init__(self, streams: NexusStreams, client: Client | None) -> None:
+        self._streams = streams
+        self._client = client
+        data_converter = streams._data_converter
+        if data_converter is None:
+            data_converter = (
+                client.data_converter
+                if client is not None
+                else temporalio.converter.DataConverter.default
+            )
         self.converter = data_converter.payload_converter
         self.codec = data_converter.payload_codec
-        self.headers = dict(headers)
-        self.wait_ms = wait_ms
-        self.max_records = max_records
+        self.read_wait = streams._read_wait
+        self.max_records = streams._max_records
+
+    async def _base_url(self) -> str:
+        endpoint_id = await self._streams._endpoint_id(self._client)
+        return (
+            f"{self._streams._http_address}/nexus/endpoints/{endpoint_id}"
+            f"/services/{_SERVICE_NAME}"
+        )
 
     async def invoke(
-        self, operation: str, request: Any, output: type[_OutputT], *, timeout_ms: int
+        self,
+        operation: str,
+        request: Any,
+        output: type[_OutputT],
+        *,
+        timeout: timedelta,
     ) -> _OutputT:
         # The contract types carry their own JSON encoding, so the raw caller
         # and the worker serving the operation agree on the body without
         # either of them spelling the fields out.
         contract = temporalio.converter.DataConverter.default.payload_converter
-        raw = await asyncio.to_thread(
-            _post,
-            f"{self.base_url}/{operation}",
-            contract.to_payloads([request])[0].data,
-            self.headers,
-            timeout_ms,
-        )
+        url = f"{await self._base_url()}/{operation}"
+        try:
+            raw = await asyncio.to_thread(
+                _post,
+                url,
+                contract.to_payloads([request])[0].data,
+                self._streams._headers,
+                timeout,
+            )
+        except _EndpointFailure as failure:
+            raise _translate(failure) from failure
         payload = Payload(metadata={"encoding": b"json/plain"}, data=raw or b"{}")
         return contract.from_payloads([payload], [output])[0]
 
 
 class NexusProducer:
-    """Appends through the stream endpoint; framing happens behind it.
+    """Appends through the stream endpoint; the store behind it does the rest.
 
     Calls are serialized and the batch index is committed only once the
     endpoint answered. A batch whose call raised stays pending and is sent
@@ -509,21 +660,28 @@ class NexusProducer:
         self,
         front: _Front,
         workflow_id: str,
-        stream: str,
+        run_id: str | None,
         topic: str,
         producer_id: str,
         attempt: int,
     ) -> None:
-        """Bind this producer to one stream or topic on the endpoint."""
+        """Bind this producer to ``topic`` on the workflow behind the endpoint."""
         self._front = front
         self._workflow_id = workflow_id
-        self._stream = stream
+        self._run_id = run_id
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
         self._batch_index = 0
+        self._sequence = 0
+        self._last: Cursor | None = BEGINNING
         self._pending: tuple[AppendInput, tuple[bytes, ...], bool] | None = None
         self._lock = asyncio.Lock()
+
+    @property
+    def producer_id(self) -> str:
+        """Who this producer writes as."""
+        return self._producer_id
 
     @property
     def attempt(self) -> int:
@@ -531,20 +689,21 @@ class NexusProducer:
         return self._attempt
 
     async def append(self, *values: Any) -> Cursor | None:
-        """Append ``values`` through the endpoint."""
+        """Append ``values`` through the endpoint and return where the last one landed.
+
+        A repeat answers with the original's position and an empty call with
+        the last one; ``None`` when the store behind the endpoint learns
+        positions only at read time.
+        """
         if not values:
-            return None
-        payloads = [
-            value
-            if isinstance(value, Payload)
-            else self._front.converter.to_payloads([value])[0]
-            for value in values
-        ]
+            return self._last
+        payloads = self._front.converter.to_payloads(list(values))
         answer = await self._call(payloads, finish=False)
-        return Cursor(answer.cursor) if answer.cursor else None
+        self._last = Cursor(answer.cursor) if answer.cursor else None
+        return self._last
 
     async def finish(self) -> None:
-        """Mark this producer done, so a reader stops waiting on it."""
+        """Write ``FINISH`` for this producer on this topic."""
         await self._call([], finish=True)
 
     async def _call(self, payloads: list[Payload], *, finish: bool) -> AppendOutput:
@@ -566,238 +725,202 @@ class NexusProducer:
                 await self._send(*self._pending)
             elif self._pending is not None:
                 return await self._send(*self._pending)
-            request = self._request(self._batch_index + 1, encoded, finish)
+            request = AppendInput(
+                workflow_id=self._workflow_id,
+                run_id=self._run_id,
+                topic=self._topic,
+                producer_id=self._producer_id,
+                attempt=self._attempt,
+                sequence=self._sequence,
+                batch_index=self._batch_index + 1,
+                payloads=encoded,
+                finish=finish,
+            )
             return await self._send(request, identity, finish)
-
-    def _request(
-        self, batch_index: int, payloads: list[bytes], finish: bool
-    ) -> AppendInput:
-        return AppendInput(
-            workflow_id=self._workflow_id,
-            stream=self._stream,
-            producer_id=self._producer_id,
-            attempt=self._attempt,
-            batch_index=batch_index,
-            topic=self._topic,
-            payloads=payloads,
-            finish=finish,
-        )
 
     async def _send(
         self, request: AppendInput, identity: tuple[bytes, ...], finish: bool
     ) -> AppendOutput:
         self._pending = (request, identity, finish)
         answer = await self._front.invoke(
-            _APPEND_OPERATION, request, AppendOutput, timeout_ms=_APPEND_TIMEOUT_MS
+            _APPEND_OPERATION, request, AppendOutput, timeout=_APPEND_TIMEOUT
         )
         self._batch_index = request.batch_index
+        self._sequence = request.sequence + len(request.payloads or []) + int(finish)
         self._pending = None
         return answer
 
 
-class NexusConsumer:
-    """Reads batches from the stream endpoint, re-synthesizing supersession."""
+class NexusStreamHandle:
+    """One workflow's stream through the endpoint, re-synthesizing supersession."""
 
-    def __init__(self, front: _Front, workflow_id: str, stream: str) -> None:
-        """Read what ``workflow_id`` publishes, through the endpoint."""
+    def __init__(self, front: _Front, workflow_id: str, run_id: str | None) -> None:
+        """Address ``workflow_id``'s stream, pinned to ``run_id`` when one is given."""
         self._front = front
         self._workflow_id = workflow_id
-        self._stream = stream
+        self._run_id = run_id
 
-    async def read(
+    def read(
         self,
         *,
+        topic: str,
         after: Cursor = BEGINNING,
-        topic: str | None = None,
-        type: type | None = None,
+        result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records after ``after``, one endpoint batch at a time."""
-        _provider.check_topic(self._stream, topic)
-        attempts = AttemptTracker()
+        """Yield records on ``topic`` after ``after``, one endpoint batch at a time.
+
+        The token is opaque here, so a cursor from another store is refused by
+        the store behind the endpoint and raises
+        :class:`temporalio.streams.StreamCursorError` on the first iteration.
+        """
+        _require_topic(topic)
+        return self._read(topic, after, result_type)
+
+    async def _read(
+        self, topic: str, after: Cursor, result_type: type | None
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        decoder = RecordDecoder(
+            self._front.converter, result_type, after=after, warn=logger.warning
+        )
         token = after.token
         while True:
             answer = await self._front.invoke(
                 _READ_OPERATION,
                 ReadInput(
                     workflow_id=self._workflow_id,
-                    stream=self._stream,
-                    topic=topic or "",
+                    run_id=self._run_id,
+                    topic=topic,
                     after_token=token,
                     max_records=self._front.max_records,
-                    wait_ms=self._front.wait_ms,
+                    wait_ms=int(self._front.read_wait.total_seconds() * 1000),
                 ),
                 ReadOutput,
-                timeout_ms=self._front.wait_ms + 5000,
+                timeout=self._front.read_wait + _ROUND_TRIP_MARGIN,
             )
             for wire in answer.records or []:
                 cursor = Cursor(wire.token)
                 try:
-                    kind, frame_topic, source, attempt, sequence, body = _frame.decode(
-                        wire.frame
-                    )
-                except ValueError as error:
+                    record = WireRecord.FromString(wire.record)
+                except DecodeError as error:
                     # Same answer as every other reader: skip and say so.
                     logger.warning("skipping stream record at %s: %s", cursor, error)
                     continue
-                if topic is not None and frame_topic != topic:
-                    continue
-                superseded = attempts.note(source, attempt, cursor)
-                if superseded is not None:
-                    yield superseded
-                value = (
-                    await self._decode(body, type) if kind is RecordKind.DATA else None
-                )
-                yield StreamRecord(
-                    value=value,
-                    cursor=cursor,
-                    kind=kind,
-                    topic=frame_topic,
-                    producer=source,
-                    attempt=attempt,
-                    sequence=sequence,
-                )
+                if self._front.codec is not None and record.HasField("body"):
+                    record.body.CopyFrom(
+                        (await self._front.codec.decode([record.body]))[0]
+                    )
+                for out in decoder.decode(cursor, record):
+                    yield out
             token = answer.next_token or token
+            if answer.done:
+                return
 
-    async def latest(self, *, topic: str | None = None) -> Cursor:
-        """The cursor of the last record written, for following from now."""
+    async def latest(self, *, topic: str) -> Cursor:
+        """The newest position on ``topic`` behind the endpoint, for following from now."""
+        _require_topic(topic)
         answer = await self._front.invoke(
             _READ_OPERATION,
             ReadInput(
                 workflow_id=self._workflow_id,
-                stream=self._stream,
-                topic=topic or "",
+                run_id=self._run_id,
+                topic=topic,
                 latest_only=True,
             ),
             ReadOutput,
-            timeout_ms=_APPEND_TIMEOUT_MS,
+            timeout=_APPEND_TIMEOUT,
         )
         token = answer.next_token or ""
         return Cursor(token) if token else BEGINNING
 
-    async def _decode(self, body: bytes, as_type: type | None) -> Any:
-        payload = Payload()
-        payload.ParseFromString(body)
-        if self._front.codec is not None:
-            payload = (await self._front.codec.decode([payload]))[0]
-        if as_type is None:
-            return self._front.converter.from_payloads([payload])[0]
-        return self._front.converter.from_payloads([payload], [as_type])[0]
-
-
-class _NexusProvider:
-    name = "nexus"
-
-    def __init__(self) -> None:
-        self._endpoint: str | None = None
-        self._endpoint_id: str | None = None
-        self._http_address = "http://127.0.0.1:7243"
-        self._service = _SERVICE_NAME
-        self._data_converter: temporalio.converter.DataConverter | None = None
-        self._client: Any = None
-        self._headers: dict[str, str] = {}
-        self._wait_ms = _DEFAULT_WAIT_MS
-        self._max_records = _DEFAULT_MAX_RECORDS
-
-    def configure(self, **options: Any) -> None:
-        """Point the caller half at one endpoint.
-
-        ``endpoint`` is the endpoint's name when ``client`` is given, and is
-        resolved to its id through the operator service on first use; without
-        a client it has to be the id, because the HTTP ingress dispatches by
-        id. ``headers`` go on every request, which is where an authorization
-        header belongs. ``wait_ms`` and ``max_records`` are the read bounds
-        the caller asks the handler for.
-        """
-        endpoint = options.pop("endpoint", None)
-        self._http_address = options.pop("http_address", self._http_address)
-        self._service = options.pop("service", _SERVICE_NAME)
-        self._data_converter = options.pop("data_converter", None)
-        self._client = options.pop("client", None)
-        self._headers = dict(options.pop("headers", None) or {})
-        self._wait_ms = int(options.pop("wait_ms", _DEFAULT_WAIT_MS))
-        self._max_records = int(options.pop("max_records", _DEFAULT_MAX_RECORDS))
-        if options:
-            raise TypeError(
-                "the nexus provider takes endpoint, http_address, service, "
-                f"data_converter, client, headers, wait_ms and max_records, got "
-                f"{sorted(options)}"
-            )
-        if not endpoint:
-            raise TypeError(
-                "the nexus provider needs endpoint=<nexus endpoint name> together with "
-                "client=<Client>, or endpoint=<nexus endpoint id> on its own"
-            )
-        self._endpoint = endpoint
-        self._endpoint_id = None
-
-    def worker_options(self) -> dict[str, Any]:
-        raise RuntimeError(_WORKFLOW_SIDE_ERROR)
-
-    def open_read(
-        self,
-        stream: str,
-        *,
-        after: Cursor = BEGINNING,
-        idle_timeout: timedelta | None = None,
-    ) -> ReadSource:
-        del stream, after, idle_timeout
-        raise RuntimeError(_WORKFLOW_SIDE_ERROR)
-
-    def open_write(self, topic: str) -> WriteSink:
-        del topic
-        raise RuntimeError(_WORKFLOW_SIDE_ERROR)
-
-    async def _front(self, client: Any) -> _Front:
-        if self._endpoint is None:
-            raise RuntimeError("configure the nexus provider before opening handles")
-        if self._endpoint_id is None:
-            resolver = self._client if self._client is not None else client
-            if resolver is None:
-                self._endpoint_id = self._endpoint
-            else:
-                found = await resolver.operator_service.list_nexus_endpoints(
-                    ListNexusEndpointsRequest(name=self._endpoint)
-                )
-                if not found.endpoints:
-                    raise RuntimeError(f"no nexus endpoint is named {self._endpoint!r}")
-                self._endpoint_id = found.endpoints[0].id
-        base_url = (
-            f"{self._http_address}/nexus/endpoints/{self._endpoint_id}"
-            f"/services/{self._service}"
-        )
-        return _Front(
-            base_url,
-            self._converter(client),
-            self._headers,
-            self._wait_ms,
-            self._max_records,
-        )
-
-    async def producer(
-        self,
-        client: Any,
-        *,
-        workflow_id: str,
-        stream: str = "",
-        topic: str = "",
-        producer_id: str = "",
-        attempt: int = 0,
+    def producer(
+        self, *, topic: str, producer_id: str = "", attempt: int = 0
     ) -> NexusProducer:
+        """A producer on ``topic``; inside an activity its identity is the activity's."""
+        _require_topic(topic)
+        producer_id, attempt = producer_identity(producer_id, attempt)
         return NexusProducer(
-            await self._front(client), workflow_id, stream, topic, producer_id, attempt
+            self._front, self._workflow_id, self._run_id, topic, producer_id, attempt
         )
 
-    async def consumer(
-        self, client: Any, *, workflow_id: str, stream: str = ""
-    ) -> NexusConsumer:
-        return NexusConsumer(await self._front(client), workflow_id, stream)
 
-    def _converter(self, client: Any) -> temporalio.converter.DataConverter:
-        if self._data_converter is not None:
-            return self._data_converter
-        if client is None:
-            return temporalio.converter.DataConverter.default
-        return client.data_converter
+class NexusStreams(StreamProvider):
+    """The outside half of a provider, over one Nexus endpoint.
 
+    Not a worker plugin: a workflow publishes and reads through the storage
+    provider its worker was given, and this front only serves code outside a
+    workflow. The endpoint hides which store that is.
+    """
 
-_provider.register("nexus", _NexusProvider)
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        http_address: str = "http://127.0.0.1:7243",
+        headers: Mapping[str, str] | None = None,
+        read_wait: timedelta = _DEFAULT_READ_WAIT,
+        max_records: int = _DEFAULT_MAX_RECORDS,
+        data_converter: temporalio.converter.DataConverter | None = None,
+    ) -> None:
+        """Point the front at one endpoint.
+
+        Args:
+            endpoint: The Nexus endpoint's name, resolved to its id through
+                the operator service of the client a handle is opened with.
+                When a handle is opened without a client it has to be the id,
+                because the HTTP ingress dispatches by id.
+            http_address: The server's Nexus HTTP ingress.
+            headers: Sent on every request; where an authorization header
+                belongs.
+            read_wait: How long the handler may park a read before answering
+                with what it has.
+            max_records: The most records one read answer carries.
+            data_converter: Overrides the client's converter for record
+                bodies. A payload codec configured here runs on this side of
+                the endpoint, so records are encoded before they leave the
+                process and the handler's worker never holds the key.
+        """
+        if not endpoint:
+            raise ValueError("endpoint must not be empty")
+        self._endpoint = endpoint
+        self._http_address = http_address.rstrip("/")
+        self._headers = dict(headers or {})
+        self._read_wait = read_wait
+        self._max_records = max_records
+        self._data_converter = data_converter
+        self._resolved: str | None = None
+        self._resolving = asyncio.Lock()
+
+    def workflow_provider(self) -> NoReturn:
+        """Raise: this front has no workflow half."""
+        raise StreamUnsupportedError(_WORKFLOW_SIDE_ERROR)
+
+    def get_stream_handle(
+        self, client: Client | None, workflow_id: str, *, run_id: str | None = None
+    ) -> NexusStreamHandle:
+        """A handle on ``workflow_id``'s stream through the endpoint.
+
+        ``client`` is not used for transport: it resolves the endpoint's name
+        and supplies the data converter when none was configured.
+        """
+        return NexusStreamHandle(_Front(self, client), workflow_id, run_id)
+
+    async def close(self) -> None:
+        """Nothing to release: each call opens and closes its own connection."""
+
+    async def _endpoint_id(self, client: Client | None) -> str:
+        if self._resolved is not None:
+            return self._resolved
+        async with self._resolving:
+            if self._resolved is None:
+                if client is None:
+                    self._resolved = self._endpoint
+                else:
+                    found = await client.operator_service.list_nexus_endpoints(
+                        ListNexusEndpointsRequest(name=self._endpoint)
+                    )
+                    if not found.endpoints:
+                        raise ValueError(
+                            f"no nexus endpoint is named {self._endpoint!r}"
+                        )
+                    self._resolved = found.endpoints[0].id
+        return self._resolved
