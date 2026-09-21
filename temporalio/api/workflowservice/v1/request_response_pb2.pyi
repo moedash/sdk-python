@@ -1277,7 +1277,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
     MESSAGES_FIELD_NUMBER: builtins.int
     POLLER_SCALING_DECISION_FIELD_NUMBER: builtins.int
     POLLER_GROUP_ID_FIELD_NUMBER: builtins.int
-    STREAM_SLICES_FIELD_NUMBER: builtins.int
     POLLER_GROUP_INFOS_FIELD_NUMBER: builtins.int
     POLLER_GROUPS_INFO_FIELD_NUMBER: builtins.int
     STREAM_SLICES_FIELD_NUMBER: builtins.int
@@ -1369,17 +1368,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
     Corresponding RespondQueryTaskCompleted should pass this value for proper routing.
     """
     @property
-    def stream_slices(
-        self,
-    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.stream.v1.message_pb2.StreamSlice
-    ]:
-        """Slices of the streams this Workflow consumes. A slice with no
-        workflow_task_completed_event_id is for the task about to run; one with
-        it set is re-supplying a range an earlier task consumed, so a worker
-        replaying from History gets the same bytes that task was given.
-        """
-    @property
     def poller_group_infos(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
@@ -1444,10 +1432,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         poller_scaling_decision: temporalio.api.taskqueue.v1.message_pb2.PollerScalingDecision
         | None = ...,
         poller_group_id: builtins.str = ...,
-        stream_slices: collections.abc.Iterable[
-            temporalio.api.stream.v1.message_pb2.StreamSlice
-        ]
-        | None = ...,
         poller_group_infos: collections.abc.Iterable[
             temporalio.api.taskqueue.v1.message_pb2.PollerGroupInfo
         ]
