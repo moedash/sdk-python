@@ -61,7 +61,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, NoReturn, TypeVar, cast
+from typing import Any, Generic, NoReturn, TypeVar, cast
 
 import nexusrpc
 import nexusrpc.handler
@@ -83,6 +83,7 @@ from temporalio.streams._errors import (
 )
 from temporalio.streams._provider import StreamHandle, StreamProducer, StreamProvider
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
     WireRecord,
@@ -104,6 +105,8 @@ __all__ = [
     "NexusStreams",
     "TemporalStreamsHandler",
 ]
+
+T = TypeVar("T")
 
 _WORKFLOW_SIDE_ERROR = (
     "the nexus provider is an outside transport; a worker publishes and reads "
@@ -647,7 +650,7 @@ class _Front:
         return contract.from_payloads([payload], [output])[0]
 
 
-class NexusProducer:
+class NexusProducer(Generic[T]):
     """Appends through the stream endpoint; the store behind it does the rest.
 
     Calls are serialized and the batch index is committed only once the
@@ -689,7 +692,7 @@ class NexusProducer:
         """The generation this producer is writing."""
         return self._attempt
 
-    async def append(self, *values: Any) -> Cursor | None:
+    async def append(self, *values: T) -> Cursor | None:
         """Append ``values`` through the endpoint and return where the last one landed.
 
         A repeat answers with the original's position and an empty call with
@@ -764,7 +767,7 @@ class NexusStreamHandle:
     def read(
         self,
         *,
-        topic: str,
+        topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -774,7 +777,7 @@ class NexusStreamHandle:
         the store behind the endpoint and raises
         :class:`temporalio.streams.StreamCursorError` on the first iteration.
         """
-        _require_topic(topic)
+        topic, result_type = resolve_topic(topic, result_type)
         return self._read(topic, after, result_type)
 
     async def _read(
@@ -816,9 +819,9 @@ class NexusStreamHandle:
             if answer.done:
                 return
 
-    async def latest(self, *, topic: str) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The newest position on ``topic`` behind the endpoint, for following from now."""
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         answer = await self._front.invoke(
             _READ_OPERATION,
             ReadInput(
@@ -834,10 +837,14 @@ class NexusStreamHandle:
         return Cursor(token) if token else BEGINNING
 
     def producer(
-        self, *, topic: str, producer_id: str = "", attempt: int = 0
-    ) -> NexusProducer:
+        self,
+        *,
+        topic: str | StreamTopic[Any],
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> NexusProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return NexusProducer(
             self._front, self._workflow_id, self._run_id, topic, producer_id, attempt
