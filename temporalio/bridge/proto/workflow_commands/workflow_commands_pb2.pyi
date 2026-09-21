@@ -105,7 +105,7 @@ class WorkflowCommand(google.protobuf.message.Message):
     SCHEDULE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     REQUEST_CANCEL_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     SUBSCRIBE_STREAM_FIELD_NUMBER: builtins.int
-    ADD_STREAM_MESSAGES_FIELD_NUMBER: builtins.int
+    APPEND_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """User metadata that may or may not be persisted into history depending on the command type.
@@ -187,7 +187,7 @@ class WorkflowCommand(google.protobuf.message.Message):
         with that family and must not be reused.
         """
     @property
-    def add_stream_messages(self) -> global___AddStreamMessages: ...
+    def append_stream_records(self) -> global___AppendStreamRecords: ...
     def __init__(
         self,
         *,
@@ -227,13 +227,13 @@ class WorkflowCommand(google.protobuf.message.Message):
         request_cancel_nexus_operation: global___RequestCancelNexusOperation
         | None = ...,
         subscribe_stream: global___SubscribeStream | None = ...,
-        add_stream_messages: global___AddStreamMessages | None = ...,
+        append_stream_records: global___AppendStreamRecords | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
-            "add_stream_messages",
-            b"add_stream_messages",
+            "append_stream_records",
+            b"append_stream_records",
             "cancel_child_workflow_execution",
             b"cancel_child_workflow_execution",
             "cancel_signal_workflow",
@@ -289,8 +289,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "add_stream_messages",
-            b"add_stream_messages",
+            "append_stream_records",
+            b"append_stream_records",
             "cancel_child_workflow_execution",
             b"cancel_child_workflow_execution",
             "cancel_signal_workflow",
@@ -372,50 +372,52 @@ class WorkflowCommand(google.protobuf.message.Message):
             "schedule_nexus_operation",
             "request_cancel_nexus_operation",
             "subscribe_stream",
-            "add_stream_messages",
+            "append_stream_records",
         ]
         | None
     ): ...
 
 global___WorkflowCommand = WorkflowCommand
 
-class AddStreamMessages(google.protobuf.message.Message):
-    """Publish a batch of messages to a stream this workflow owns.
+class AppendStreamRecords(google.protobuf.message.Message):
+    """Append a batch of records to a stream this workflow owns.
 
     The bodies go to the stream's own log rather than into History, which gets
     one fixed-size event naming the offset range. That is what makes the batch
-    size free: a thousand messages cost the same in History as one.
+    size free: a thousand records cost the same in History as one. The server
+    stores each record with an empty producer id, because the workflow is the
+    producer here.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     STREAM_ID_FIELD_NUMBER: builtins.int
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
     """Empty means the workflow's default output stream."""
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.stream.v1.message_pb2.StreamMessage
+        temporalio.api.stream.v1.message_pb2.StreamRecord
     ]: ...
     def __init__(
         self,
         *,
         stream_id: builtins.str = ...,
-        messages: collections.abc.Iterable[
-            temporalio.api.stream.v1.message_pb2.StreamMessage
+        records: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamRecord
         ]
         | None = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "messages", b"messages", "stream_id", b"stream_id"
+            "records", b"records", "stream_id", b"stream_id"
         ],
     ) -> None: ...
 
-global___AddStreamMessages = AddStreamMessages
+global___AppendStreamRecords = AppendStreamRecords
 
 class SubscribeStream(google.protobuf.message.Message):
     """Subscribe this workflow to a stream, so later Workflow Tasks carry the
