@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -25,8 +26,9 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.stream.v1 import StreamRecord
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHistory
 from temporalio.client_stream import StreamClient
+from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.streams import RecordKind
 from temporalio.streams.providers.native import NativeStreams
 from temporalio.worker import Worker
@@ -384,3 +386,116 @@ async def test_a_cached_workflow_consumes_across_sticky_tasks() -> None:
         )
     finally:
         await streams.close()
+
+
+class _EncryptingCodec(PayloadCodec):
+    """A codec whose output never contains its input.
+
+    The SDK's own test codec marks payloads as encrypted but leaves the bytes
+    as they are, so it cannot show that a stored body is not plaintext. This
+    one keeps its metadata convention and runs a repeating-key XOR over the
+    serialized payload, which is enough for the plaintext markers the tests
+    look for to be absent from what the server stores.
+    """
+
+    _KEY = b"ai198"
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return [
+            Payload(
+                metadata={"encoding": b"binary/encrypted"},
+                data=self._xor(p.SerializeToString()),
+            )
+            for p in payloads
+        ]
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        out: list[Payload] = []
+        for p in payloads:
+            if p.metadata.get("encoding", b"") != b"binary/encrypted":
+                out.append(p)
+                continue
+            out.append(Payload.FromString(self._xor(p.data)))
+        return out
+
+    def _xor(self, data: bytes) -> bytes:
+        key = self._KEY
+        return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+
+async def _drive_contract_loop(client: Client) -> WorkflowHistory:
+    """Run ``ContractLoop`` to completion on ``client`` and return its history."""
+    task_queue = "codec-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "codec-wf-" + uuid.uuid4().hex[:8]
+    async with Worker(client, task_queue=task_queue, workflows=[ContractLoop]):
+        handle = await client.start_workflow(
+            ContractLoop.run, id=workflow_id, task_queue=task_queue
+        )
+        stream = client.get_stream_handle(workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await producer.append({"n": 1}, {"n": 2})
+        await producer.finish()
+        trace = await asyncio.wait_for(handle.result(), 60)
+        # The workflow decoded what the outside producer appended.
+        assert trace == [
+            {"kind": "decision", "n": 1},
+            {"kind": "decision", "n": 2},
+            {"kind": "finish", "producer": "model"},
+        ]
+        # The outside read decodes what the workflow published.
+        decisions = [
+            (r.kind, r.value)
+            async for r in stream.read(topic=DECISIONS, result_type=dict)
+        ]
+        assert decisions == [
+            (RecordKind.DATA, {"decided": 1}),
+            (RecordKind.DATA, {"decided": 2}),
+            (RecordKind.FINISH, None),
+        ]
+    return await handle.fetch_history()
+
+
+async def test_a_codec_encodes_records_on_both_halves() -> None:
+    """A payload codec on the client covers the workflow's records and an outside producer's.
+
+    The worker's payload visitor runs the codec over the bodies a workflow
+    publishes and receives; the outside half applies the client's codec to each
+    body it sends and reads. Read raw, without the codec, every stored body is
+    ciphertext, and each side still reads the other's records in the clear.
+    """
+    plain = await _connect()
+    config = plain.config()
+    config["data_converter"] = DataConverter(payload_codec=_EncryptingCodec())
+    provider = NativeStreams()
+    config["plugins"] = [provider]
+    client = Client(**config)
+    raw = StreamClient.connect(TARGET or "")
+    try:
+        history = await _drive_contract_loop(client)
+        run_id = history.run_id
+
+        # What the server holds, read through the stream service with no codec.
+        inputs = await raw.workflow_stream(
+            history.workflow_id, INPUTS, owner_run_id=run_id
+        ).poll(from_offset=0, wait=False)
+        decisions = await raw.workflow_stream(
+            history.workflow_id, DECISIONS, owner_run_id=run_id
+        ).poll(from_offset=0, wait=False)
+
+        # The outside producer's two records, stored encoded.
+        stored_inputs = [e.record for e in inputs.entries if e.record.HasField("body")]
+        assert len(stored_inputs) == 2
+        for record in stored_inputs:
+            assert record.body.metadata["encoding"] == b"binary/encrypted"
+            assert b'"n"' not in record.body.data
+        # The workflow's two decisions, stored encoded by the worker's visitor.
+        stored_decisions = [
+            e.record for e in decisions.entries if e.record.HasField("body")
+        ]
+        assert len(stored_decisions) == 2
+        for record in stored_decisions:
+            assert record.body.metadata["encoding"] == b"binary/encrypted"
+            assert b"decided" not in record.body.data
+    finally:
+        await raw.close()
+        await provider.close()
