@@ -46,6 +46,7 @@ import temporalio.api.schedule.v1.message_pb2
 import temporalio.api.sdk.v1.task_complete_metadata_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.sdk.v1.worker_config_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.api.version.v1.message_pb2
@@ -1278,6 +1279,7 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
     POLLER_GROUP_ID_FIELD_NUMBER: builtins.int
     POLLER_GROUP_INFOS_FIELD_NUMBER: builtins.int
     POLLER_GROUPS_INFO_FIELD_NUMBER: builtins.int
+    STREAM_SLICES_FIELD_NUMBER: builtins.int
     task_token: builtins.bytes
     """A unique identifier for this task"""
     @property
@@ -1392,6 +1394,15 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
           3. If every group has some pending polls, assign the next poll to a group randomly
             according to the weights.
         """
+    @property
+    def stream_slices(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamSlice
+    ]:
+        """Stream data attached to this task. Delivered out of band so the payloads
+        never enter History; only the offset ranges are recorded there.
+        """
     def __init__(
         self,
         *,
@@ -1426,6 +1437,10 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         ]
         | None = ...,
         poller_groups_info: temporalio.api.taskqueue.v1.message_pb2.PollerGroupsInfo
+        | None = ...,
+        stream_slices: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamSlice
+        ]
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -1484,6 +1499,8 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
             b"started_event_id",
             "started_time",
             b"started_time",
+            "stream_slices",
+            b"stream_slices",
             "task_token",
             b"task_token",
             "workflow_execution",
