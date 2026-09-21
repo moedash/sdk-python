@@ -2,7 +2,7 @@ r"""Run the same agent on whichever provider is configured.
 
     python -m examples.streams.run workflow_streams
     python -m examples.streams.run redis     --redis redis://127.0.0.1:6379
-    python -m examples.streams.run native    --address 127.0.0.1:7233
+    python -m examples.streams.run native    --address 127.0.0.1:7333
     python -m examples.streams.run nexus     --endpoint <endpoint-id>
 
 The Nexus mode needs an endpoint that routes to the handler worker's task
@@ -12,9 +12,11 @@ queue, and the flag takes the endpoint's id, not its name::
         --target-task-queue streams-handlers-e2e
     temporal operator nexus endpoint get --name streams-e2e -o json | jq -r .id
 
-The only provider-specific code in this file is :func:`configure_provider`,
-which turns a name into one ``streams.configure`` call. Everything below it,
-and all of ``agent.py``, is the same on every option.
+The only provider-specific code in this file is :func:`make_provider`, which
+turns a name into one constructor call. Everything below it, and all of
+``agent.py``, is the same on every option: the worker takes the provider as a
+plugin, the activity publishes through it, and outside code opens a handle
+from it, or from the Nexus front standing in for it.
 """
 
 from __future__ import annotations
@@ -24,61 +26,46 @@ import asyncio
 import contextlib
 import uuid
 
-from examples.streams.agent import Agent, generate, record_decision
-from temporalio import streams
+from examples.streams.agent import DECISIONS, Agent, Generator, record_decision
 from temporalio.client import Client
-from temporalio.streams import instance
+from temporalio.streams import RecordKind, StreamProvider
+from temporalio.streams.providers import ProviderPlugin
 from temporalio.worker import Worker
 
 
-def configure_provider(args: argparse.Namespace) -> None:
-    """The whole difference between the options."""
-    if args.provider == "workflow_streams":
-        streams.configure(provider="workflow_streams")
-    elif args.provider == "redis":
-        streams.configure(provider="redis", url=args.redis)
-    elif args.provider == "native":
-        streams.configure(provider="native")
-    elif args.provider == "nexus":
-        # The worker still needs a store; the endpoint is how everything
-        # outside the worker reaches it without naming one.
-        streams.configure(provider=args.behind)
-    else:
-        raise SystemExit(f"unknown provider {args.provider}")
+def make_provider(args: argparse.Namespace) -> ProviderPlugin:
+    """The whole difference between the options: one constructor call."""
+    name = args.behind if args.provider == "nexus" else args.provider
+    if name == "workflow_streams":
+        from temporalio.streams.providers.workflow_streams import (
+            WorkflowStreamsProvider,
+        )
+
+        return WorkflowStreamsProvider()
+    if name == "redis":
+        from temporalio.streams.providers.redis import RedisStreams
+
+        return RedisStreams(url=args.redis)
+    if name == "native":
+        from temporalio.streams.providers.native import NativeStreams
+
+        return NativeStreams()
+    raise SystemExit(f"unknown provider {name}")
 
 
-async def ensure_stream(
-    args: argparse.Namespace, client: Client, workflow_id: str
-) -> None:
-    """Create the inbound stream when the provider needs it to pre-exist.
+def outside_surface(
+    args: argparse.Namespace, provider: StreamProvider
+) -> StreamProvider:
+    """Where an outside producer or consumer opens its handle.
 
-    The two storage providers want opposite orders, which is worth knowing
-    before writing an application against either. The native provider
-    resolves a subscription against a stream the server already has, and a
-    workflow cannot create one from workflow code because that would be I/O,
-    so whoever starts the workflow creates it first. The client-side provider
-    is the mirror image: it names streams under the run's chain key, so its
-    producer needs the workflow to exist already. Option 0 mints on first
-    publish and does not care.
+    The same handle either way: from the Nexus front when there is one,
+    otherwise straight from the provider the worker runs on.
     """
-    if args.provider != "native":
-        return
-    from temporalio.client_stream import StreamClient
-    from temporalio.streams._ids import inbound_stream_id
+    if args.provider != "nexus":
+        return provider
+    from temporalio.streams.providers.nexus import NexusStreams
 
-    streams_client = StreamClient.connect(args.address, client.namespace)
-    await streams_client.create(inbound_stream_id(workflow_id, "inputs"))
-
-
-def outside_surface(args: argparse.Namespace):
-    """Where an outside producer or consumer connects.
-
-    The same handles either way: through the Nexus endpoint when there is
-    one, otherwise straight at the configured provider.
-    """
-    if args.provider == "nexus":
-        return instance("nexus", endpoint=args.endpoint, http_address=args.http)
-    return streams
+    return NexusStreams(endpoint=args.endpoint, http_address=args.http)
 
 
 async def main() -> None:
@@ -109,7 +96,7 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    configure_provider(args)
+    provider = make_provider(args)
     client = await Client.connect(args.address)
     workflow_id = f"streams-example-{uuid.uuid4().hex[:8]}"
     task_queue = f"tq-{workflow_id}"
@@ -119,12 +106,12 @@ async def main() -> None:
             client,
             task_queue=task_queue,
             workflows=[Agent],
-            activities=[generate, record_decision],
+            activities=[Generator(provider).generate, record_decision],
             # Warm, because two of these transports park work against the
             # running workflow. The native provider also runs at zero, which
             # is its own result rather than something this example shows.
             max_cached_workflows=args.cache,
-            **streams.worker_options(),
+            plugins=[provider],
         )
     ]
     if args.provider == "nexus":
@@ -134,55 +121,47 @@ async def main() -> None:
             Worker(
                 client,
                 task_queue=args.handler_queue,
-                nexus_service_handlers=[
-                    TemporalStreamsHandler(client, provider=args.behind)
-                ],
+                nexus_service_handlers=[TemporalStreamsHandler(provider, client)],
             )
         )
 
-    async with contextlib.AsyncExitStack() as running:
-        for worker in workers:
-            await running.enter_async_context(worker)
-        await ensure_stream(args, client, workflow_id)
-        handle = await client.start_workflow(
-            Agent.run, args.records, id=workflow_id, task_queue=task_queue
-        )
-        print(f"provider={args.provider} workflow={workflow_id}")
+    front = outside_surface(args, provider)
+    try:
+        async with contextlib.AsyncExitStack() as running:
+            for worker in workers:
+                await running.enter_async_context(worker)
+            handle = await client.start_workflow(
+                Agent.run, args.records, id=workflow_id, task_queue=task_queue
+            )
+            print(f"provider={args.provider} workflow={workflow_id}")
 
-        reader = await outside_surface(args).consumer(
-            client if args.provider != "nexus" else None,
-            workflow_id=workflow_id,
-        )
-        # Counted apart: a retried generator makes the workflow retract the
-        # earlier attempt, and those records are correct output rather than
-        # echoes that the workflow's own count would have to agree with.
-        echoes = retractions = 0
-        records = reader.read(type=dict, topic="decisions")
-        try:
-            async for record in records:
+            # Counted apart: a retried generator makes the workflow retract the
+            # earlier attempt, and those records are correct output rather than
+            # echoes that the workflow's own count would have to agree with.
+            echoes = retractions = 0
+            stream = front.get_stream_handle(client, workflow_id)
+            # The read ends by itself once the workflow is closed and the tail
+            # has been delivered, on every provider.
+            async for record in stream.read(topic=DECISIONS, result_type=dict):
                 print(
                     f"  {record.kind.name:11} {record.value} at {record.cursor.token}"
                 )
-                if record.kind is streams.RecordKind.FINISH:
-                    break
-                if record.kind is not streams.RecordKind.DATA:
+                if record.kind is not RecordKind.DATA:
                     continue
                 if isinstance(record.value, dict) and "echo" in record.value:
                     echoes += 1
                 else:
                     retractions += 1
-        finally:
-            # Closed before the workflow is released, because a reader
-            # still polling this run would have its in-flight poll
-            # cancelled when the workflow lets its readers go.
-            await records.aclose()
 
-        await handle.signal(Agent.release)
-        decided = await handle.result()
-        print(
-            f"workflow decided {decided}; reader saw {echoes} echoes and "
-            f"{retractions} retractions"
-        )
+            decided = await handle.result()
+            print(
+                f"workflow decided {decided}; reader saw {echoes} echoes and "
+                f"{retractions} retractions"
+            )
+    finally:
+        if front is not provider:
+            await front.close()
+        await provider.close()
 
 
 if __name__ == "__main__":

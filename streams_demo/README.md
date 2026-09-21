@@ -76,5 +76,5 @@ The conformance suite runs the same expectations on every provider:
 
 `examples/streams/` is the same thing written as a worked example rather than
 a measurement run: `agent.py` holds the workflow and activities, identical on
-every provider, and `run.py` picks one. See its `configure_provider`, which
-is the whole difference between the options.
+every provider, and `run.py` picks one. See its `make_provider`, which
+is the whole difference between the options: one constructor call.
