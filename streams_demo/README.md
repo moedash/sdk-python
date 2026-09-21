@@ -51,14 +51,14 @@ provider it is configured with. Workers still configure a storage provider,
 because workflow reads and writes ride the Workflow Task.
 
 ```python
-front = streams._provider.instance("nexus", endpoint=endpoint_id)
-producer = await front.producer(None, workflow_id=wid, stream="inputs",
-                                producer_id="model", attempt=1)
+front = NexusStreams(endpoint=endpoint_id)
+stream = front.get_stream_handle(client, workflow_id)
+producer = stream.producer(topic="inputs", producer_id="model", attempt=1)
 ```
 
 See `tests/streams/test_nexus_provider.py` for the endpoint setup and the
 handler worker.
 
 The conformance suite runs the same expectations on every provider:
-`pytest tests/streams/` (in-memory, no server), plus
-`STREAMS_LIVE=workflow_streams|nexus` for the live suites.
+`pytest tests/streams/` (memory and Workflow Streams on the test server), plus
+`STREAMS_LIVE=native|redis|nexus` for the suites that need a store.
