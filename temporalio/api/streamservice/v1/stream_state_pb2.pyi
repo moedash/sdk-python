@@ -24,7 +24,8 @@ DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
 
 class StreamState(google.protobuf.message.Message):
     """Size is O(producers + consumers), never O(messages). Payload bytes live in
-    the log, not here, which is what keeps this off the CHASM partial-read path.
+    the component's data nodes, not here, which keeps this off the CHASM
+    partial-read path.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -77,14 +78,14 @@ class StreamState(google.protobuf.message.Message):
     BASE_OFFSET_FIELD_NUMBER: builtins.int
     CLOSED_FIELD_NUMBER: builtins.int
     CLOSE_REASON_FIELD_NUMBER: builtins.int
-    OWNER_EPOCH_FIELD_NUMBER: builtins.int
-    BUCKET_SIZE_FIELD_NUMBER: builtins.int
-    COLLECTION_ID_FIELD_NUMBER: builtins.int
     PRODUCERS_FIELD_NUMBER: builtins.int
     CONSUMERS_FIELD_NUMBER: builtins.int
     LIFECYCLE_FIELD_NUMBER: builtins.int
     REDIRECT_RUN_ID_FIELD_NUMBER: builtins.int
     CLOSE_TIME_FIELD_NUMBER: builtins.int
+    BUDGET_FIELD_NUMBER: builtins.int
+    APPENDED_BYTES_FIELD_NUMBER: builtins.int
+    NOTIFY_PENDING_FIELD_NUMBER: builtins.int
     head_offset: builtins.int
     """Visibility frontier. Readers never observe an offset at or past this."""
     base_offset: builtins.int
@@ -92,16 +93,6 @@ class StreamState(google.protobuf.message.Message):
     closed: builtins.bool
     @property
     def close_reason(self) -> temporal.api.common.v1.message_pb2.Payload: ...
-    owner_epoch: builtins.int
-    """Bumped on ownership change so a stale producer's write fails."""
-    bucket_size: builtins.int
-    """Immutable once set. Offsets roll to a new log tree every bucket_size so no
-    single storage partition grows with the stream.
-    """
-    collection_id: builtins.str
-    """Identity of the log this stream writes to. Bucket trees are derived from
-    it, so there is no per-bucket index to store.
-    """
     @property
     def producers(
         self,
@@ -123,6 +114,21 @@ class StreamState(google.protobuf.message.Message):
     @property
     def close_time(self) -> google.protobuf.timestamp_pb2.Timestamp:
         """Wall-clock close time, used to schedule retention deletion."""
+    @property
+    def budget(self) -> global___StreamBudget:
+        """Set on a stream a workflow owns. Its batches are the owning execution's
+        mutable state, so appends past the budget are refused rather than left to
+        the execution size limit, which terminates the workflow.
+        """
+    appended_bytes: builtins.int
+    """Bytes appended over the stream's life, kept for the budget check. A stream
+    with a budget never reclaims, so this is also what it holds.
+    """
+    notify_pending: builtins.bool
+    """A notify task is scheduled and has not run yet. Appends while it is set
+    schedule none of their own; the task reads the head when it runs, so it
+    carries every append that landed before it.
+    """
     def __init__(
         self,
         *,
@@ -130,9 +136,6 @@ class StreamState(google.protobuf.message.Message):
         base_offset: builtins.int = ...,
         closed: builtins.bool = ...,
         close_reason: temporal.api.common.v1.message_pb2.Payload | None = ...,
-        owner_epoch: builtins.int = ...,
-        bucket_size: builtins.int = ...,
-        collection_id: builtins.str = ...,
         producers: collections.abc.Mapping[builtins.str, global___ProducerCursor]
         | None = ...,
         consumers: collections.abc.Mapping[builtins.str, global___ConsumerCursor]
@@ -140,10 +143,15 @@ class StreamState(google.protobuf.message.Message):
         lifecycle: global___StreamLifecycle | None = ...,
         redirect_run_id: builtins.str = ...,
         close_time: google.protobuf.timestamp_pb2.Timestamp | None = ...,
+        budget: global___StreamBudget | None = ...,
+        appended_bytes: builtins.int = ...,
+        notify_pending: builtins.bool = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
+            "budget",
+            b"budget",
             "close_reason",
             b"close_reason",
             "close_time",
@@ -155,26 +163,26 @@ class StreamState(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "appended_bytes",
+            b"appended_bytes",
             "base_offset",
             b"base_offset",
-            "bucket_size",
-            b"bucket_size",
+            "budget",
+            b"budget",
             "close_reason",
             b"close_reason",
             "close_time",
             b"close_time",
             "closed",
             b"closed",
-            "collection_id",
-            b"collection_id",
             "consumers",
             b"consumers",
             "head_offset",
             b"head_offset",
             "lifecycle",
             b"lifecycle",
-            "owner_epoch",
-            b"owner_epoch",
+            "notify_pending",
+            b"notify_pending",
             "producers",
             b"producers",
             "redirect_run_id",
@@ -183,6 +191,32 @@ class StreamState(google.protobuf.message.Message):
     ) -> None: ...
 
 global___StreamState = StreamState
+
+class StreamBudget(google.protobuf.message.Message):
+    """Hard bounds on what a stream may hold. Distinct from StreamLifecycle.max_items,
+    which reclaims the oldest messages: a budget refuses the newest.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    MAX_ITEMS_FIELD_NUMBER: builtins.int
+    MAX_BYTES_FIELD_NUMBER: builtins.int
+    max_items: builtins.int
+    max_bytes: builtins.int
+    def __init__(
+        self,
+        *,
+        max_items: builtins.int = ...,
+        max_bytes: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "max_bytes", b"max_bytes", "max_items", b"max_items"
+        ],
+    ) -> None: ...
+
+global___StreamBudget = StreamBudget
 
 class ProducerCursor(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -301,8 +335,6 @@ class WorkflowStreamCursor(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     STREAM_ID_FIELD_NUMBER: builtins.int
-    COLLECTION_ID_FIELD_NUMBER: builtins.int
-    BUCKET_SIZE_FIELD_NUMBER: builtins.int
     OFFSET_FIELD_NUMBER: builtins.int
     KNOWN_HEAD_FIELD_NUMBER: builtins.int
     EXTERNAL_FIELD_NUMBER: builtins.int
@@ -311,9 +343,6 @@ class WorkflowStreamCursor(google.protobuf.message.Message):
     HAS_PENDING_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
-    collection_id: builtins.str
-    """Enough to address the log without reading the stream component first."""
-    bucket_size: builtins.int
     offset: builtins.int
     """Next offset to deliver."""
     known_head: builtins.int
@@ -342,8 +371,6 @@ class WorkflowStreamCursor(google.protobuf.message.Message):
         self,
         *,
         stream_id: builtins.str = ...,
-        collection_id: builtins.str = ...,
-        bucket_size: builtins.int = ...,
         offset: builtins.int = ...,
         known_head: builtins.int = ...,
         external: builtins.bool = ...,
@@ -355,10 +382,6 @@ class WorkflowStreamCursor(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "bucket_size",
-            b"bucket_size",
-            "collection_id",
-            b"collection_id",
             "external",
             b"external",
             "has_pending",
@@ -389,7 +412,7 @@ class StreamLifecycle(google.protobuf.message.Message):
     def retention(self) -> google.protobuf.duration_pb2.Duration:
         """How long a closed stream stays readable before it is deleted."""
     max_items: builtins.int
-    """Cap on readable messages. Older whole buckets are reclaimed once the floor
+    """Cap on readable messages. Whole batches are reclaimed once the floor
     passes them, so a capped stream has bounded storage.
     """
     def __init__(
