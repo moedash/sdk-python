@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ._activities import ActivityCancellationType, ActivityHandle
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
     from ._nexus import NexusOperationCancellationType, NexusOperationHandle
+    from ._streams import _WorkflowStreams
     from ._workflow_ops import (
         ChildWorkflowCancellationType,
         ChildWorkflowHandle,
@@ -474,6 +475,9 @@ class _Runtime(ABC):
         headers: Mapping[str, str] | None,
         summary: str | None,
     ) -> NexusOperationHandle[OutputT]: ...
+
+    @abstractmethod
+    def workflow_streams(self) -> _WorkflowStreams: ...
 
     @abstractmethod
     def workflow_time_ns(self) -> int: ...
