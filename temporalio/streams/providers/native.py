@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from temporalio import workflow
 from temporalio.client import Client, WorkflowHistoryEventFilterType
@@ -37,6 +37,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
     WireRecord,
@@ -48,6 +49,8 @@ from temporalio.streams._wire import (
 from temporalio.streams.providers import ProviderPlugin
 
 __all__ = ["NativeProducer", "NativeStreamHandle", "NativeStreams"]
+
+T = TypeVar("T")
 
 _PROVIDER = "native"
 
@@ -156,7 +159,7 @@ class _NativeWorkflowProvider:
         pass
 
 
-class NativeProducer:
+class NativeProducer(Generic[T]):
     """Appends to a topic from outside workflow code.
 
     Every append is visible as soon as the server accepts it. That is the
@@ -207,7 +210,7 @@ class NativeProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
+    async def append(self, *values: T) -> Cursor:
         """Append ``values`` and return the cursor of the last record as stored.
 
         A repeat returns where the original landed, because the server
@@ -291,12 +294,12 @@ class NativeStreamHandle:
     def read(
         self,
         *,
-        topic: str,
+        topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
-        _require_topic(topic)
+        topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         named = _position(after)
@@ -340,14 +343,14 @@ class NativeStreamHandle:
                 return
             run_id, offset = successor, 0
 
-    async def latest(self, *, topic: str) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The cursor of the newest record on ``topic``, naming the run it was read from.
 
         An empty topic on the chain's first run is the beginning of the
         stream; on a successor it is a position of its own, because
         ``BEGINNING`` would send a chain-following read back to the first run.
         """
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         run_id = self._run_id or await self._current_run()
         try:
             head = (await self._stream(topic, run_id).describe()).head_offset
@@ -362,10 +365,14 @@ class NativeStreamHandle:
         return BEGINNING
 
     def producer(
-        self, *, topic: str, producer_id: str = "", attempt: int = 0
-    ) -> NativeProducer:
+        self,
+        *,
+        topic: str | StreamTopic[Any],
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> NativeProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
-        _require_topic(topic)
+        topic, _ = resolve_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return NativeProducer(
             self._stream(topic, self._run_id or ""),
