@@ -3,7 +3,8 @@
 A stream is a durable, offset-addressed append-only sequence that lives beside
 Workflow History rather than inside it. Appending schedules no Workflow Task,
 and each reader holds its own cursor, so adding a reader costs nothing on the
-write side.
+write side. The record is ``temporal.api.stream.v1.StreamRecord`` on the wire
+and in the store, so a reader in any language decodes the same bytes.
 
 Prototype support for AI-198. Four things about it are temporary and will
 change before this is a real feature:
@@ -15,36 +16,46 @@ change before this is a real feature:
   coming from the api submodule, because the service is still defined in the
   server. That is why the wire names read as server-internal.
 - **This client is for use outside a Workflow.** Workflow code publishes and
-  consumes with ``workflow.add_stream_messages`` and ``workflow.read_stream``
-  instead.
+  consumes with ``workflow.append_stream_records`` and
+  ``workflow.read_stream_records`` instead.
 - **No TLS or API-key support**, for the same reason: the channel is built
   here rather than by the machinery that normally handles that.
+
+A failed call raises :class:`temporalio.streams.StreamNotFoundError` when the
+server answers ``NOT_FOUND`` and :class:`temporalio.service.RPCError`
+otherwise, never the transport's own exception type.
 """
 
 from __future__ import annotations
 
 import asyncio
 import weakref
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import google.protobuf.duration_pb2
+import grpc
+import grpc.aio
 
-import temporalio.api.common.v1
 import temporalio.api.streamservice.v1 as stream
+from temporalio.api.stream.v1 import StreamRecord
 from temporalio.api.streamservice.v1 import service_pb2_grpc
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams import StreamNotFoundError
 
 __all__ = [
     "Appended",
-    "Message",
     "Page",
     "StreamClient",
+    "StreamEntry",
     "StreamHandle",
     "WorkflowStreamHandle",
     "close_shared_clients",
     "shared_client",
 ]
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -62,23 +73,16 @@ class Appended:
 
 
 @dataclass(frozen=True)
-class Message:
-    """One item read from a stream.
+class StreamEntry:
+    """One record read from a stream, with where it sits.
 
     Offsets are assigned over the unfiltered stream, so a topic-filtered read
-    hands back messages whose offsets are not contiguous. To resume at the
-    boundary of a whole read, checkpoint the ``next_offset`` that
-    :meth:`StreamHandle.read` returns instead.
+    hands back entries whose offsets are not contiguous. A reader that resumes
+    between records takes ``offset`` rather than counting what it received.
     """
 
-    data: bytes
-    topic: str = ""
+    record: StreamRecord
     offset: int = 0
-    """Where this message sits in the whole stream.
-
-    A topic filter leaves gaps, so a reader that resumes between messages has
-    to take this rather than count what it received.
-    """
 
 
 @dataclass(frozen=True)
@@ -86,13 +90,73 @@ class Page:
     """One read of a stream.
 
     ``closed`` with ``next_offset >= head_offset`` is the end: nothing more can
-    be added and this reader has everything.
+    be added and this reader has everything. ``run_id`` names the execution
+    holding the stream, which is how a reader of a workflow's stream learns
+    which run it is on when it did not pin one.
     """
 
-    messages: list[Message]
+    entries: list[StreamEntry]
     next_offset: int
     head_offset: int
     closed: bool
+    run_id: str = ""
+
+
+def _to_service(record: StreamRecord) -> stream.StreamRecord:
+    # Field for field the public record; the stored shape only adds the offset
+    # a read assigns. An unset body stays unset so a FINISH record reads back
+    # as one.
+    out = stream.StreamRecord(
+        topic=record.topic,
+        kind=record.kind,
+        producer_id=record.producer_id,
+        attempt=record.attempt,
+        sequence=record.sequence,
+    )
+    if record.HasField("body"):
+        out.body.CopyFrom(record.body)
+    for key, value in record.metadata.items():
+        out.metadata[key].CopyFrom(value)
+    return out
+
+
+def _to_public(record: stream.StreamRecord) -> StreamEntry:
+    out = StreamRecord(
+        topic=record.topic,
+        kind=record.kind,
+        producer_id=record.producer_id,
+        attempt=record.attempt,
+        sequence=record.sequence,
+    )
+    if record.HasField("body"):
+        out.body.CopyFrom(record.body)
+    for key, value in record.metadata.items():
+        out.metadata[key].CopyFrom(value)
+    return StreamEntry(record=out, offset=record.offset)
+
+
+def _translate(error: grpc.aio.AioRpcError) -> Exception:
+    code = error.code()
+    details = error.details() or code.name
+    if code is grpc.StatusCode.NOT_FOUND:
+        return StreamNotFoundError(details)
+    raw = b""
+    # The aio metadata iterates as (key, value) pairs at runtime, whatever
+    # shape the stubs give its items.
+    trailing: Any = error.trailing_metadata()
+    for item in trailing or ():
+        key, value = item[0], item[1]
+        if key == "grpc-status-details-bin" and isinstance(value, bytes):
+            raw = value
+    return RPCError(details, RPCStatusCode(code.value[0]), raw)
+
+
+async def _call(method: Callable[[Any], Awaitable[_T]], request: Any) -> _T:
+    """Make one stub call, translating the transport's failure to the SDK's."""
+    try:
+        return await method(request)
+    except grpc.aio.AioRpcError as error:
+        raise _translate(error) from error
 
 
 class StreamClient:
@@ -107,19 +171,12 @@ class StreamClient:
         self._stub: Any = service_pb2_grpc.StreamServiceStub(channel)
 
     @staticmethod
-    def connect(target_host: str, namespace: str = "default") -> "StreamClient":
+    def connect(target_host: str, namespace: str = "default") -> StreamClient:
         """Open a channel to a frontend.
 
         Separate from ``Client.connect`` because this does not share the
         connection the rest of the SDK uses.
         """
-        try:
-            import grpc
-        except ImportError as err:
-            raise RuntimeError(
-                "temporalio.client_stream requires the grpc extra: "
-                "pip install 'temporalio[grpc]'"
-            ) from err
         return StreamClient(grpc.aio.insecure_channel(target_host), namespace)
 
     async def close(self) -> None:
@@ -132,11 +189,11 @@ class StreamClient:
         *,
         retention: float | None = None,
         max_items: int | None = None,
-    ) -> "StreamHandle":
+    ) -> StreamHandle:
         """Create a stream and return a handle to it.
 
         ``retention`` is how long a closed stream stays readable, in seconds.
-        ``max_items`` caps how many messages remain readable, dropping the
+        ``max_items`` caps how many records remain readable, dropping the
         oldest, which bounds storage for a stream nobody truncates.
         """
         lifecycle = stream.StreamLifecycle()
@@ -147,14 +204,15 @@ class StreamClient:
         if max_items is not None:
             lifecycle.max_items = max_items
 
-        response = await self._stub.CreateStream(
+        response = await _call(
+            self._stub.CreateStream,
             stream.CreateStreamRequest(
                 frontend_request=stream.CreateStreamInput(
                     namespace=self._namespace,
                     stream_id=stream_id,
                     lifecycle=lifecycle,
                 )
-            )
+            ),
         )
         return StreamHandle(
             self._stub,
@@ -163,24 +221,25 @@ class StreamClient:
             run_id=response.frontend_response.run_id,
         )
 
-    def get(self, stream_id: str) -> "StreamHandle":
+    def get(self, stream_id: str) -> StreamHandle:
         """Open an existing stream without a round trip."""
         return StreamHandle(self._stub, self._namespace, stream_id)
 
     def workflow_stream(
         self, workflow_id: str, name: str = "", *, owner_run_id: str = ""
-    ) -> "WorkflowStreamHandle":
-        """Open a stream a workflow publishes to.
+    ) -> WorkflowStreamHandle:
+        """Open a stream a workflow owns.
 
         A stream a workflow owns lives inside that workflow's execution and has
         no id of its own, so it is named by its owner and its name. An empty
         name is the workflow's default output stream, which is what
-        ``workflow.add_stream_messages`` writes to when it is given none.
+        ``workflow.append_stream_records`` writes to when it is given none.
 
-        The stream is created by the workflow's first publish. Reading one that
-        does not exist yet is not an error: it reads as empty and a
-        :meth:`WorkflowStreamHandle.follow` parked on it wakes when the
-        workflow publishes.
+        The stream is created by the workflow's first publish or subscription,
+        or by the first append from outside. Reading one that does not exist
+        yet is not an error: it reads as empty and a
+        :meth:`WorkflowStreamHandle.follow` parked on it wakes when something
+        is written.
 
         ``owner_run_id`` pins the handle to one run of the workflow; see
         :meth:`WorkflowStreamHandle.pin` for why a follower wants that.
@@ -191,7 +250,7 @@ class StreamClient:
 
 
 class StreamHandle:
-    """A handle to one stream."""
+    """A handle to one standalone stream."""
 
     def __init__(
         self, stub: Any, namespace: str, stream_id: str, run_id: str = ""
@@ -211,12 +270,11 @@ class StreamHandle:
 
     async def append(
         self,
-        *messages: bytes,
-        topic: str = "",
+        *records: StreamRecord,
         producer_id: str = "",
         sequence: int = 0,
     ) -> Appended:
-        """Append messages and return where they landed.
+        """Append records and return where they landed.
 
         Supplying ``producer_id`` and ``sequence`` makes the append idempotent:
         a retry with the same pair returns the original offsets rather than
@@ -224,26 +282,18 @@ class StreamHandle:
         at-least-once, which is only the right trade when duplicates are
         harmless.
         """
-        response = await self._stub.AddMessages(
+        response = await _call(
+            self._stub.AddMessages,
             stream.AddMessagesRequest(
                 frontend_request=stream.AddMessagesInput(
                     namespace=self._namespace,
                     stream_id=self._id,
                     run_id=self._run_id,
-                    messages=[
-                        stream.StreamMessage(
-                            body=temporalio.api.common.v1.Payload(
-                                data=m, metadata={"encoding": b"binary/plain"}
-                            ),
-                            topic=topic,
-                            kind=stream.STREAM_MESSAGE_KIND_DATA,
-                        )
-                        for m in messages
-                    ],
+                    records=[_to_service(record) for record in records],
                     producer_id=producer_id,
                     sequence=sequence,
                 )
-            )
+            ),
         )
         return _appended(response.frontend_response)
 
@@ -251,43 +301,29 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
-        max_messages: int = 0,
+        max_records: int = 0,
         topics: Sequence[str] = (),
         wait: bool = False,
-    ) -> tuple[list[Message], int]:
-        """Read once from ``from_offset``, returning the messages and the
+    ) -> tuple[list[StreamEntry], int]:
+        """Read once from ``from_offset``, returning the entries and the
         offset to read from next.
 
         With ``wait`` set, blocks until something arrives, the stream closes,
         or the server's long-poll window elapses. A window that elapses returns
         an empty list rather than raising, so the caller just reads again.
         """
-        response = await self._stub.PollMessages(
-            stream.PollMessagesRequest(
-                frontend_request=stream.PollMessagesInput(
-                    namespace=self._namespace,
-                    stream_id=self._id,
-                    run_id=self._run_id,
-                    from_offset=from_offset,
-                    max_messages=max_messages,
-                    topics=list(topics),
-                    wait_new_messages=wait,
-                )
-            )
+        page = await self.poll(
+            from_offset=from_offset, max_records=max_records, topics=topics, wait=wait
         )
-        out = response.frontend_response
-        return [
-            Message(data=m.body.data, topic=m.topic, offset=m.offset)
-            for m in out.messages
-        ], (out.next_offset)
+        return page.entries, page.next_offset
 
     async def follow(
         self,
         *,
         from_offset: int = 0,
         topics: Sequence[str] = (),
-    ) -> AsyncIterator[Message]:
-        """Yield messages as they arrive, starting at ``from_offset``.
+    ) -> AsyncIterator[StreamEntry]:
+        """Yield entries as they arrive, starting at ``from_offset``.
 
         Ends once the stream is closed and this reader has drained it. A closed
         stream stays readable until its retention expires, so a reader that
@@ -296,61 +332,77 @@ class StreamHandle:
         """
         offset = from_offset
         while True:
-            response = await self._stub.PollMessages(
-                stream.PollMessagesRequest(
-                    frontend_request=stream.PollMessagesInput(
-                        namespace=self._namespace,
-                        stream_id=self._id,
-                        run_id=self._run_id,
-                        from_offset=offset,
-                        topics=list(topics),
-                        wait_new_messages=True,
-                    )
-                )
-            )
-            out = response.frontend_response
-            for msg in out.messages:
-                yield Message(data=msg.body.data, topic=msg.topic, offset=msg.offset)
-            offset = out.next_offset
-            if out.closed and offset >= out.head_offset:
+            page = await self.poll(from_offset=offset, topics=topics)
+            for entry in page.entries:
+                yield entry
+            offset = page.next_offset
+            if page.closed and offset >= page.head_offset:
                 return
+
+    async def poll(
+        self,
+        *,
+        from_offset: int = 0,
+        topics: Sequence[str] = (),
+        max_records: int = 0,
+        wait: bool = True,
+    ) -> Page:
+        """One read, with everything the caller needs to decide what to do next."""
+        response = await _call(
+            self._stub.PollMessages,
+            stream.PollMessagesRequest(
+                frontend_request=stream.PollMessagesInput(
+                    namespace=self._namespace,
+                    stream_id=self._id,
+                    run_id=self._run_id,
+                    from_offset=from_offset,
+                    max_messages=max_records,
+                    topics=list(topics),
+                    wait_new_messages=wait,
+                )
+            ),
+        )
+        return _page(response.frontend_response)
 
     async def finish_writing(self, producer_id: str) -> None:
         """Declare one producer done without ending the stream for others."""
-        await self._stub.FinishWriting(
+        await _call(
+            self._stub.FinishWriting,
             stream.FinishWritingRequest(
                 frontend_request=stream.FinishWritingInput(
                     namespace=self._namespace,
                     stream_id=self._id,
                     producer_id=producer_id,
                 )
-            )
+            ),
         )
 
     async def close(self) -> None:
         """Seal the stream. Readers can still drain what is already there."""
-        await self._stub.CloseStream(
+        await _call(
+            self._stub.CloseStream,
             stream.CloseStreamRequest(
                 frontend_request=stream.CloseStreamInput(
                     namespace=self._namespace, stream_id=self._id
                 )
-            )
+            ),
         )
 
     async def describe(self) -> stream.StreamState:
         """Read the stream's current frontier, floor and closed state."""
-        response = await self._stub.DescribeStream(
+        response = await _call(
+            self._stub.DescribeStream,
             stream.DescribeStreamRequest(
                 frontend_request=stream.DescribeStreamInput(
                     namespace=self._namespace, stream_id=self._id
                 )
-            )
+            ),
         )
         return response.frontend_response.state
 
 
 class WorkflowStreamHandle:
-    """A handle to a stream a workflow publishes to.
+    """A handle to a stream a workflow owns.
 
     The workflow writes to it from inside its Workflow Task, which costs it no
     transition of its own. Anything else writes through :meth:`append`, which
@@ -404,8 +456,7 @@ class WorkflowStreamHandle:
 
     async def append(
         self,
-        *messages: bytes,
-        topic: str = "",
+        *records: StreamRecord,
         producer_id: str = "",
         sequence: int = 0,
     ) -> Appended:
@@ -415,27 +466,19 @@ class WorkflowStreamHandle:
         execution whatever its size, so a batch of a hundred costs what a batch
         of one does.
         """
-        response = await self._stub.AddWorkflowMessages(
+        response = await _call(
+            self._stub.AddWorkflowMessages,
             stream.AddWorkflowMessagesRequest(
                 frontend_request=stream.AddWorkflowMessagesInput(
                     namespace=self._namespace,
                     workflow_id=self._workflow_id,
                     owner_run_id=self._owner_run_id,
                     stream_name=self._name,
-                    messages=[
-                        stream.StreamMessage(
-                            body=temporalio.api.common.v1.Payload(
-                                data=m, metadata={"encoding": b"binary/plain"}
-                            ),
-                            topic=topic,
-                            kind=stream.STREAM_MESSAGE_KIND_DATA,
-                        )
-                        for m in messages
-                    ],
+                    records=[_to_service(record) for record in records],
                     producer_id=producer_id,
                     sequence=sequence,
                 )
-            )
+            ),
         )
         return _appended(response.frontend_response)
 
@@ -443,43 +486,28 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
-        max_messages: int = 0,
+        max_records: int = 0,
         topics: Sequence[str] = (),
         wait: bool = False,
-    ) -> tuple[list[Message], int]:
+    ) -> tuple[list[StreamEntry], int]:
         """Read once from ``from_offset``, as :meth:`StreamHandle.read`."""
-        response = await self._stub.PollWorkflowMessages(
-            stream.PollWorkflowMessagesRequest(
-                frontend_request=stream.PollWorkflowMessagesInput(
-                    namespace=self._namespace,
-                    workflow_id=self._workflow_id,
-                    owner_run_id=self._owner_run_id,
-                    stream_name=self._name,
-                    from_offset=from_offset,
-                    max_messages=max_messages,
-                    topics=list(topics),
-                    wait_new_messages=wait,
-                )
-            )
+        page = await self.poll(
+            from_offset=from_offset, max_records=max_records, topics=topics, wait=wait
         )
-        out = response.frontend_response
-        return [
-            Message(data=m.body.data, topic=m.topic, offset=m.offset)
-            for m in out.messages
-        ], (out.next_offset)
+        return page.entries, page.next_offset
 
     async def follow(
         self,
         *,
         from_offset: int = 0,
         topics: Sequence[str] = (),
-    ) -> AsyncIterator[Message]:
-        """Yield messages as they arrive, as :meth:`StreamHandle.follow`."""
+    ) -> AsyncIterator[StreamEntry]:
+        """Yield entries as they arrive, as :meth:`StreamHandle.follow`."""
         offset = from_offset
         while True:
             page = await self.poll(from_offset=offset, topics=topics)
-            for msg in page.messages:
-                yield msg
+            for entry in page.entries:
+                yield entry
             offset = page.next_offset
             if page.closed and offset >= page.head_offset:
                 return
@@ -489,16 +517,17 @@ class WorkflowStreamHandle:
         *,
         from_offset: int = 0,
         topics: Sequence[str] = (),
-        max_messages: int = 0,
+        max_records: int = 0,
         wait: bool = True,
-    ) -> "Page":
+    ) -> Page:
         """One read, with everything the caller needs to decide what to do next.
 
         :meth:`read` is the same call without the frontier and the closed flag.
         A caller that has to tell "nothing yet" from "nothing ever" needs both.
         On a pinned handle ``closed`` also says the run has ended.
         """
-        response = await self._stub.PollWorkflowMessages(
+        response = await _call(
+            self._stub.PollWorkflowMessages,
             stream.PollWorkflowMessagesRequest(
                 frontend_request=stream.PollWorkflowMessagesInput(
                     namespace=self._namespace,
@@ -506,22 +535,13 @@ class WorkflowStreamHandle:
                     owner_run_id=self._owner_run_id,
                     stream_name=self._name,
                     from_offset=from_offset,
-                    max_messages=max_messages,
+                    max_messages=max_records,
                     topics=list(topics),
                     wait_new_messages=wait,
                 )
-            )
+            ),
         )
-        out = response.frontend_response
-        return Page(
-            messages=[
-                Message(data=m.body.data, topic=m.topic, offset=m.offset)
-                for m in out.messages
-            ],
-            next_offset=out.next_offset,
-            head_offset=out.head_offset,
-            closed=out.closed,
-        )
+        return _page(response.frontend_response)
 
     async def describe(self) -> stream.StreamState:
         """Read the stream's current frontier, floor and closed state.
@@ -529,7 +549,8 @@ class WorkflowStreamHandle:
         A reader that wants only what comes next starts from the head this
         reports rather than from zero.
         """
-        response = await self._stub.DescribeWorkflowStream(
+        response = await _call(
+            self._stub.DescribeWorkflowStream,
             stream.DescribeWorkflowStreamRequest(
                 frontend_request=stream.DescribeWorkflowStreamInput(
                     namespace=self._namespace,
@@ -537,7 +558,7 @@ class WorkflowStreamHandle:
                     owner_run_id=self._owner_run_id,
                     stream_name=self._name,
                 )
-            )
+            ),
         )
         return response.frontend_response.state
 
@@ -548,6 +569,16 @@ def _appended(out: stream.AddMessagesOutput) -> Appended:
         next_offset=out.next_offset,
         count=out.count,
         deduplicated=out.deduplicated,
+    )
+
+
+def _page(out: stream.PollMessagesOutput) -> Page:
+    return Page(
+        entries=[_to_public(record) for record in out.records],
+        next_offset=out.next_offset,
+        head_offset=out.head_offset,
+        closed=out.closed,
+        run_id=out.run_id,
     )
 
 
