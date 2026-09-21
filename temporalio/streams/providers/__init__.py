@@ -1,25 +1,66 @@
 """Stream providers, one module each.
 
-Importing this package registers every provider whose dependencies are
-present. A tree that lacks a provider's dependencies simply does not offer
-that name; nothing else changes, because everything above the provider is
-shared.
+A provider that serves workers is a :class:`temporalio.worker.Plugin`.
+:class:`ProviderPlugin` is the plugin half the providers in this tree share:
+it hands the provider to the worker and the replayer as their
+``stream_provider`` and leaves their execution alone. A provider that holds
+connections closes them through its own ``close()``, not with the worker,
+because the same provider serves handles outside any worker.
 """
 
 from __future__ import annotations
 
-_KNOWN = ("memory", "workflow_streams", "native", "redis", "nexus")
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 
-for _name in _KNOWN:
-    try:
-        __import__(f"{__name__}.{_name}")
-    except ModuleNotFoundError as error:
-        # Two things may be missing: the provider module itself, or a
-        # dependency from outside this package. A name missing inside
-        # temporalio is a broken provider, and hiding that would turn its
-        # traceback into "no such provider".
-        missing = error.name or ""
-        if missing != f"{__name__}.{_name}" and (
-            not missing or missing.startswith("temporalio")
-        ):
-            raise
+import temporalio.worker
+from temporalio.client import WorkflowHistory
+from temporalio.streams._provider import StreamProvider
+from temporalio.worker import (
+    Replayer,
+    ReplayerConfig,
+    Worker,
+    WorkerConfig,
+    WorkflowReplayResult,
+)
+
+__all__ = ["ProviderPlugin"]
+
+
+class ProviderPlugin(StreamProvider, temporalio.worker.Plugin):
+    """The worker plugin every provider in this tree is built on.
+
+    Subclasses implement :class:`temporalio.streams.StreamProvider`; this
+    class supplies the four plugin hooks, so ``Worker(plugins=[provider])``
+    and ``Replayer(plugins=[provider])`` reach the provider through their
+    ``stream_provider`` option and the worker installs the interceptor that
+    calls the workflow half's lifecycle hooks.
+    """
+
+    def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
+        """Set this provider as the worker's ``stream_provider``."""
+        config["stream_provider"] = self
+        return config
+
+    def configure_replayer(self, config: ReplayerConfig) -> ReplayerConfig:
+        """Set this provider as the replayer's ``stream_provider``."""
+        config["stream_provider"] = self
+        return config
+
+    async def run_worker(
+        self, worker: Worker, next: Callable[[Worker], Awaitable[None]]
+    ) -> None:
+        """Run the worker unchanged."""
+        await next(worker)
+
+    def run_replayer(
+        self,
+        replayer: Replayer,
+        histories: AsyncIterator[WorkflowHistory],
+        next: Callable[
+            [Replayer, AsyncIterator[WorkflowHistory]],
+            AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]],
+        ],
+    ) -> AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]]:
+        """Run the replayer unchanged."""
+        return next(replayer, histories)
