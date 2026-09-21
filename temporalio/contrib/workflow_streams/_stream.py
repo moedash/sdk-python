@@ -57,8 +57,15 @@ Public so code that sends the signal itself, with its own publisher identity,
 does not have to copy the name.
 """
 
+POLL_UPDATE_NAME = "__temporal_workflow_stream_poll"
+"""The update :class:`WorkflowStream` registers for long polls.
+
+Public so code that drives the poll itself, with its own retry and
+cancellation rules, does not have to copy the name.
+"""
+
 _PUBLISH_SIGNAL = PUBLISH_SIGNAL_NAME
-_POLL_UPDATE = "__temporal_workflow_stream_poll"
+_POLL_UPDATE = POLL_UPDATE_NAME
 _OFFSET_QUERY = "__temporal_workflow_stream_offset"
 
 _MAX_POLL_RESPONSE_BYTES = 1_000_000
