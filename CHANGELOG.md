@@ -46,7 +46,10 @@ to include examples, links to docs, or any other relevant information.
   records only the offsets each task consumed, so the replayer fetches the
   records from the stream service and hands them to the replay with the
   history. A range the stream no longer holds fails the replay with
-  `StreamNotFoundError`.
+  `StreamNotFoundError`. A handle without a run id follows a workflow reset as
+  it follows a continue-as-new, reading the reset run from the floor its stream
+  reports, and the replayer fetches the ranges recorded before a reset point
+  from the run the workflow was reset from.
 
 ### Changed
 
