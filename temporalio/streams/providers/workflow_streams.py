@@ -32,6 +32,7 @@ The mapping, in one place:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from collections.abc import AsyncGenerator
@@ -48,10 +49,17 @@ from temporalio.client import (
     WorkflowHandle,
     WorkflowHistoryEventFilterType,
     WorkflowQueryFailedError,
+    WorkflowUpdateFailedError,
+    WorkflowUpdateRPCTimeoutOrCancelledError,
+    WorkflowUpdateStage,
 )
-from temporalio.common import RawValue
 from temporalio.contrib.workflow_streams import (
+    POLL_UPDATE_NAME,
     PUBLISH_SIGNAL_NAME,
+    STREAM_DRAINING_ERROR_TYPE,
+    TRUNCATED_OFFSET_ERROR_TYPE,
+    PollInput,
+    PollResult,
     PublishEntry,
     PublishInput,
     WorkflowStream,
@@ -81,6 +89,9 @@ __all__ = [
 _PROVIDER = "workflow_streams"
 _TAIL_QUERY = "__temporal_streams_tail"
 _ENCODING = b"binary/plain"
+# The server's failure type for an accepted Update whose run closed before
+# answering it: the poll's way of saying the run is over.
+_UPDATE_OUTLIVED_RUN = "AcceptedUpdateCompletedWorkflow"
 
 logger = logging.getLogger(__name__)
 
@@ -452,33 +463,14 @@ class WorkflowStreamsHandle:
         while True:
             handle = self._handle(run_id)
             next_offset = offset
-            # Pinned to one run, with no client for the shipped chain
-            # following: a log is not carried across continue-as-new, so
-            # the successor's offsets start over and this loop is what
-            # moves from one run to the next.
-            subscription = WorkflowStreamClient(handle).subscribe(
-                topic,
-                from_offset=offset,
-                result_type=RawValue,
-                poll_cooldown=self._poll_cooldown,
-            )
+            polls = self._poll(handle, topic, offset)
             try:
-                async for item in subscription:
-                    next_offset = item.offset + 1
-                    if item.topic != topic:
-                        continue
-                    for record in self._records(
-                        decoder, run_id, item.offset, item.data.payload
-                    ):
+                async for item_offset, payload in polls:
+                    next_offset = item_offset + 1
+                    for record in self._records(decoder, run_id, item_offset, payload):
                         yield record
-            except RPCError as error:
-                # The run closed and its poll Update went with it, or the
-                # workflow does not exist; the describe below tells which.
-                if error.status != RPCStatusCode.NOT_FOUND:
-                    raise
             finally:
-                if isinstance(subscription, AsyncGenerator):
-                    await subscription.aclose()
+                await polls.aclose()
             status = await self._status(handle)
             if status is None:
                 raise StreamNotFoundError(
@@ -507,6 +499,64 @@ class WorkflowStreamsHandle:
             if successor is None:
                 return
             run_id, offset = successor, 0
+
+    async def _poll(
+        self, handle: WorkflowHandle[Any, Any], topic: str, offset: int
+    ) -> AsyncGenerator[tuple[int, Payload], None]:
+        """Drive the shipped poll Update on one run until that run closes.
+
+        Written here rather than through ``WorkflowStreamClient.subscribe``
+        for two reasons. That loop swallows a cancellation of the caller's
+        task, so a consumer's ``asyncio.timeout`` or task cancel around a read
+        would end the subscription and let the read resubscribe forever; here
+        the cancellation leaves ``read()`` as what it was. And it follows
+        continue-as-new with offsets this provider does not carry across
+        runs, which is the outer loop's job.
+        """
+        cooldown = self._poll_cooldown.total_seconds()
+        while True:
+            try:
+                update = await handle.start_update(
+                    POLL_UPDATE_NAME,
+                    PollInput(topics=[topic], from_offset=offset),
+                    wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+                    result_type=PollResult,
+                )
+                result = await update.result()
+            except WorkflowUpdateRPCTimeoutOrCancelledError as error:
+                if isinstance(error.__cause__, asyncio.CancelledError):
+                    # The SDK wraps a cancelled await in this error; the
+                    # consumer cancelled us, so that is what comes out.
+                    raise asyncio.CancelledError() from error
+                # The RPC itself timed out while the run is still open.
+                continue
+            except WorkflowUpdateFailedError as error:
+                cause = getattr(error.cause, "type", None)
+                if cause == TRUNCATED_OFFSET_ERROR_TYPE:
+                    # The log was truncated past this position; zero means
+                    # from whatever the run still retains.
+                    offset = 0
+                    continue
+                if cause == STREAM_DRAINING_ERROR_TYPE:
+                    # Pollers are detached because the run is closing; the
+                    # next attempt learns how it closed.
+                    await asyncio.sleep(cooldown)
+                    continue
+                if cause == _UPDATE_OUTLIVED_RUN:
+                    return
+                raise
+            except RPCError as error:
+                # The run closed and its poll Update went with it, or the
+                # workflow does not exist; the caller describes to tell which.
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    raise
+                return
+            for item in result.items:
+                if item.topic == topic:
+                    yield item.offset, Payload.FromString(base64.b64decode(item.data))
+            offset = result.next_offset
+            if not result.more_ready and cooldown > 0:
+                await asyncio.sleep(cooldown)
 
     def _records(
         self, decoder: RecordDecoder, run_id: str, offset: int, payload: Payload

@@ -209,6 +209,39 @@ async def test_a_closed_run_serves_its_tail_by_query_and_the_read_ends(
         assert again[1].kind is RecordKind.FINISH
 
 
+async def test_a_bounded_read_is_cancelled_within_its_timeout(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, EchoLoop, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, workflow_id)
+
+        async def read_forever() -> None:
+            async for _ in stream.read(topic=DECISIONS, result_type=dict):
+                pass
+
+        # The run is open and nothing is published, so the read parks on the
+        # poll Update. The bound has to come out as a timeout rather than
+        # vanish into a resubscribe.
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(read_forever(), timeout=1)
+        assert asyncio.get_running_loop().time() - started < 10
+        # A reader task cancelled outright ends the same way.
+        task = asyncio.create_task(read_forever())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await stream.producer(topic=INPUTS, producer_id="model", attempt=1).finish()
+        await handle.signal(EchoLoop.release)
+        assert await handle.result() == 0
+
+
 @workflow.defn
 class Relay:
     """Publishes one record per run and continues as new once."""
