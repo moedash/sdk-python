@@ -64,6 +64,13 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, TypeVar, overload
 
+from temporalio.streams._errors import (
+    StreamCursorError,
+    StreamError,
+    StreamNotFoundError,
+    StreamProducerError,
+    StreamUnsupportedError,
+)
 from temporalio.streams._handles import (
     ReadSource,
     StreamReader,
@@ -101,10 +108,15 @@ __all__ = [
     "Producer",
     "ReadSource",
     "RecordKind",
+    "StreamCursorError",
+    "StreamError",
+    "StreamNotFoundError",
+    "StreamProducerError",
     "StreamProvider",
     "StreamProviderLifecycle",
     "StreamReader",
     "StreamRecord",
+    "StreamUnsupportedError",
     "StreamWriter",
     "Supersession",
     "WriteSink",
