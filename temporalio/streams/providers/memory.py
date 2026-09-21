@@ -28,7 +28,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -40,6 +40,7 @@ from temporalio.streams._errors import StreamCursorError
 from temporalio.streams._ids import topic_key
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
     WireRecord,
@@ -53,6 +54,8 @@ from temporalio.streams.providers import ProviderPlugin
 __all__ = ["MemoryProducer", "MemoryStreamHandle", "MemoryStreams"]
 
 _PROVIDER = "memory"
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +192,7 @@ class _MemoryWorkflowProvider:
         pass
 
 
-class MemoryProducer:
+class MemoryProducer(Generic[T]):
     """The outside producer, faithful to the contract."""
 
     def __init__(
@@ -227,7 +230,7 @@ class MemoryProducer:
             else self._producer_id
         )
 
-    async def append(self, *values: Any) -> Cursor:
+    async def append(self, *values: T) -> Cursor:
         """Append ``values`` and return the cursor of the last record as stored.
 
         A repeat returns where the original landed; an empty call returns
@@ -298,12 +301,13 @@ class MemoryStreamHandle:
     def read(
         self,
         *,
-        topic: str,
+        topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records on ``topic`` after ``after`` until the workflow closes."""
-        store = self._streams._topic(self._workflow_id, topic)
+        name, result_type = resolve_topic(topic, result_type)
+        store = self._streams._topic(self._workflow_id, name)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         start = self._streams._offset_after(after)
@@ -366,18 +370,24 @@ class MemoryStreamHandle:
             self._run_id is None and status == WorkflowExecutionStatus.CONTINUED_AS_NEW
         )
 
-    async def latest(self, *, topic: str) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The cursor of the newest record on ``topic``, for following from now."""
-        count = len(self._streams._topic(self._workflow_id, topic).records)
+        name, _ = resolve_topic(topic)
+        count = len(self._streams._topic(self._workflow_id, name).records)
         return mint_cursor(_PROVIDER, str(count - 1)) if count else BEGINNING
 
     def producer(
-        self, *, topic: str, producer_id: str = "", attempt: int = 0
-    ) -> MemoryProducer:
+        self,
+        *,
+        topic: str | StreamTopic[Any],
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> MemoryProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
-        store = self._streams._topic(self._workflow_id, topic)
+        name, _ = resolve_topic(topic)
+        store = self._streams._topic(self._workflow_id, name)
         producer_id, attempt = producer_identity(producer_id, attempt)
-        return MemoryProducer(store, self._converter, topic, producer_id, attempt)
+        return MemoryProducer(store, self._converter, name, producer_id, attempt)
 
 
 class MemoryStreams(ProviderPlugin):

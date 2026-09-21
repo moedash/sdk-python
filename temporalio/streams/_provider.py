@@ -9,7 +9,9 @@ usually implements both on one class; the split is what lets a language whose
 workflow code is bundled separately name the two halves in two packages.
 
 A provider only moves ``temporal.api.stream.v1.StreamRecord`` protos. The
-handles around it convert values, synthesize supersession and mint cursors.
+handles around it convert values, synthesize supersession and mint cursors,
+and turn a :class:`temporalio.streams.StreamTopic` into the plain name the
+provider sees, through :func:`temporalio.streams.resolve_topic`.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload
 
 from temporalio.api.stream.v1 import StreamRecord as WireRecord
 from temporalio.streams._record import BEGINNING, Cursor, StreamRecord
+from temporalio.streams._topic import StreamTopic
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -33,14 +36,16 @@ __all__ = [
 ]
 
 T = TypeVar("T")
+T_contra = TypeVar("T_contra", contravariant=True)
 
 
-class StreamProducer(Protocol):
+class StreamProducer(Protocol[T_contra]):
     """Appends to one topic from outside workflow code.
 
     Every append is visible as soon as the store accepts it, and carries the
     producer id, attempt and sequence that let a reader tell a retried append
-    from a new generation.
+    from a new generation. The type parameter is the topic definition's
+    value type; a producer on a string-named topic takes any value.
     """
 
     @property
@@ -53,7 +58,7 @@ class StreamProducer(Protocol):
         """The generation this producer is writing, or 0 when undeclared."""
         ...
 
-    async def append(self, *values: Any) -> Cursor | None:
+    async def append(self, *values: T_contra) -> Cursor | None:
         """Append ``values`` and return the cursor of the last record as the store holds it.
 
         A repeat of an earlier append (same producer, attempt and sequence) is
@@ -83,10 +88,18 @@ class StreamHandle(Protocol):
     """One workflow's stream, addressed by topic, from outside workflow code.
 
     A handle follows the workflow's execution chain unless it was opened with
-    a ``run_id``, in which case it is pinned to that run. A transport failure
-    surfaces as :class:`temporalio.service.RPCError`, never as the transport's
-    own exception type.
+    a ``run_id``, in which case it is pinned to that run. A topic is a
+    :class:`temporalio.streams.StreamTopic` definition, which carries the
+    record type, or a plain string with ``result_type=`` for a name decided
+    at runtime. A transport failure surfaces as
+    :class:`temporalio.service.RPCError`, never as the transport's own
+    exception type.
     """
+
+    @overload
+    def read(
+        self, *, topic: StreamTopic[T], after: Cursor = ...
+    ) -> AsyncGenerator[StreamRecord[T], None]: ...
 
     @overload
     def read(
@@ -101,7 +114,7 @@ class StreamHandle(Protocol):
     def read(
         self,
         *,
-        topic: str,
+        topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -117,6 +130,8 @@ class StreamHandle(Protocol):
         release whatever the provider parked against the store.
 
         Raises:
+            ValueError: ``result_type`` was passed with a topic definition,
+                or the topic is empty.
             StreamCursorError: ``after`` came from another provider or names
                 a record no longer retained. Raised by this call, not by the
                 first iteration.
@@ -125,7 +140,7 @@ class StreamHandle(Protocol):
         """
         ...
 
-    async def latest(self, *, topic: str) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The cursor of the newest record on ``topic``, or ``BEGINNING`` when empty.
 
         For a reader that wants to follow from now: ``read(after=latest())``
@@ -135,9 +150,23 @@ class StreamHandle(Protocol):
         """
         ...
 
+    @overload
     def producer(
-        self, *, topic: str, producer_id: str = "", attempt: int = 0
-    ) -> StreamProducer:
+        self, *, topic: StreamTopic[T], producer_id: str = ..., attempt: int = ...
+    ) -> StreamProducer[T]: ...
+
+    @overload
+    def producer(
+        self, *, topic: str, producer_id: str = ..., attempt: int = ...
+    ) -> StreamProducer[Any]: ...
+
+    def producer(
+        self,
+        *,
+        topic: str | StreamTopic[Any],
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> StreamProducer[Any]:
         """A producer on ``topic``.
 
         Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
@@ -189,7 +218,8 @@ class WorkflowStreamProvider(Protocol):
 
     Imports nothing that does I/O. The worker creates one per workflow
     instance through :meth:`StreamProvider.workflow_provider`, so state kept
-    here dies with the instance the way handlers do.
+    here dies with the instance the way handlers do. It sees topics by name;
+    the definitions are resolved before it is called.
     """
 
     def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
@@ -224,9 +254,11 @@ class WorkflowStreamProvider(Protocol):
 class StreamProvider(Protocol):
     """What a store ships. Also a :class:`temporalio.worker.Plugin` when it serves workers.
 
-    Construct one, pass it to ``Worker(plugins=[provider])`` and
-    ``Replayer(plugins=[provider])``, and open handles from it anywhere else.
-    Nothing is global: two workers in one process may hold two providers.
+    Construct one, pass it to ``Client.connect(plugins=[provider])`` so the
+    client and the workers built from it carry it, or to
+    ``Worker(plugins=[provider])`` and ``Replayer(plugins=[provider])`` for a
+    worker alone, and open handles from it anywhere else. Nothing is global:
+    two workers in one process may hold two providers.
     """
 
     def workflow_provider(self) -> WorkflowStreamProvider:

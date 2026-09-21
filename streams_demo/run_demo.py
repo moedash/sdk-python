@@ -48,7 +48,7 @@ EXPECTED_OUTPUT = 6
 async def collect_output(stream: StreamHandle, want: int) -> list[dict]:
     """Read ``want`` decisions off the workflow's stream from outside it."""
     seen: list[dict] = []
-    async for record in stream.read(topic=DECISIONS, result_type=dict):
+    async for record in stream.read(topic=DECISIONS):
         seen.append({"kind": record.kind.name, "value": record.value})
         if len(seen) >= want:
             break
@@ -150,7 +150,7 @@ async def main() -> int:
             # Ends by itself once the workflow is closed and the tail served.
             return [
                 r.value
-                async for r in stream.read(topic=RECEIPTS, result_type=dict)
+                async for r in stream.read(topic=RECEIPTS)
                 if r.kind is RecordKind.DATA
             ]
 

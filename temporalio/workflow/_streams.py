@@ -19,6 +19,7 @@ from typing import Any, Generic, TypeVar, cast, overload
 
 from temporalio.streams._provider import ReadSource, WorkflowStreamProvider, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import RecordDecoder, to_wire
 from temporalio.workflow._context import _Runtime, payload_converter
 from temporalio.workflow._sandbox import logger
@@ -71,7 +72,7 @@ class StreamReader(Generic[T]):
 
     @property
     def topic(self) -> str:
-        """The topic this reader is subscribed to."""
+        """The name of the topic this reader is subscribed to."""
         return self._topic
 
     def __aiter__(self) -> StreamReader[T]:
@@ -124,12 +125,14 @@ class StreamReader(Generic[T]):
         self._on_close()
 
 
-class StreamWriter:
+class StreamWriter(Generic[T]):
     """Publishes to one topic of this workflow's stream.
 
     A workflow can only publish transactionally to its own stream, on every
     provider. Writing to somebody else's stream is an activity's job, and it
-    gets the weaker guarantee that goes with doing I/O.
+    gets the weaker guarantee that goes with doing I/O. The type parameter is
+    the topic definition's value type; a writer on a string-named topic takes
+    any value.
     """
 
     def __init__(self, sink: WriteSink, topic: str) -> None:
@@ -140,10 +143,10 @@ class StreamWriter:
 
     @property
     def topic(self) -> str:
-        """The topic this writer is bound to."""
+        """The name of the topic this writer is bound to."""
         return self._topic
 
-    def publish(self, value: Any) -> None:
+    def publish(self, value: T) -> None:
         """Append ``value`` to this topic.
 
         Synchronous, because there is nothing to wait for inside a task: the
@@ -181,6 +184,10 @@ class StreamWriter:
 
 
 @overload
+def stream_reader(topic: StreamTopic[T], *, after: Cursor = ...) -> StreamReader[T]: ...
+
+
+@overload
 def stream_reader(
     topic: str, *, result_type: type[T], after: Cursor = ...
 ) -> StreamReader[T]: ...
@@ -193,65 +200,80 @@ def stream_reader(
 
 
 def stream_reader(
-    topic: str, *, result_type: type | None = None, after: Cursor = BEGINNING
+    topic: str | StreamTopic[Any],
+    *,
+    result_type: type | None = None,
+    after: Cursor = BEGINNING,
 ) -> StreamReader[Any]:
     """Subscribe this workflow to ``topic`` of its own stream.
 
-    One subscription per topic per run. A second call for the same topic
-    returns the reader already open on it, so records go to whichever loop
-    pulls first; such a call may pass neither ``after`` nor a different
-    ``result_type``. Adding a reader on a new topic is a new command, so gate
-    it with :func:`temporalio.workflow.patched` as you would a timer. A
+    ``topic`` is a :func:`temporalio.streams.topic` definition, which carries
+    the record type, or a plain string with ``result_type=`` for a name
+    decided at runtime. One subscription per topic per run. A second call
+    for the same topic returns the reader already open on it, so records go
+    to whichever loop pulls first; such a call may pass neither ``after`` nor
+    a different type. Adding a reader on a new topic is a new command, so
+    gate it with :func:`temporalio.workflow.patched` as you would a timer. A
     reader in a successor run starts a new subscription: nothing crosses
     continue-as-new implicitly.
 
     Args:
         topic: The topic, relative to this workflow's stream.
-        result_type: The value type, used as the decode hint.
-            :class:`temporalio.common.RawValue` returns the payload untouched.
+        result_type: The value type for a string-named topic, used as the
+            decode hint. :class:`temporalio.common.RawValue` returns the
+            payload untouched.
         after: Resume strictly after this record. Honoured on the first
             subscription of a run, because after that the recorded
             observations decide.
 
     Raises:
-        ValueError: ``topic`` is empty, or a reader on it is already open and
-            this call asked for a different position or type.
+        ValueError: ``topic`` is empty, ``result_type`` was passed with a
+            definition, or a reader on the topic is already open and this
+            call asked for a different position or type.
         temporalio.streams.StreamCursorError: ``after`` was minted by another
             provider.
     """
-    if not topic:
-        raise ValueError("topic must not be empty")
+    name, result_type = resolve_topic(topic, result_type)
     state: _WorkflowStreams = _Runtime.current().workflow_streams()
-    existing = state.readers.get(topic)
+    existing = state.readers.get(name)
     if existing is not None:
         if after != BEGINNING or result_type is not existing._result_type:
             raise ValueError(
-                f"topic {topic!r} already has a reader in this run; a second "
-                "stream_reader shares it and takes no after= or other result_type="
+                f"topic {name!r} already has a reader in this run; a second "
+                "stream_reader shares it and takes no after= or other type"
             )
         return existing
-    source = state.provider.open_reader(topic, after=after)
+    source = state.provider.open_reader(name, after=after)
 
     def forget() -> None:
-        state.readers.pop(topic, None)
+        state.readers.pop(name, None)
 
     reader: StreamReader[Any] = StreamReader(
-        source, topic=topic, result_type=result_type, after=after, on_close=forget
+        source, topic=name, result_type=result_type, after=after, on_close=forget
     )
-    state.readers[topic] = reader
+    state.readers[name] = reader
     return reader
 
 
-def stream_writer(topic: str) -> StreamWriter:
+@overload
+def stream_writer(topic: StreamTopic[T]) -> StreamWriter[T]: ...
+
+
+@overload
+def stream_writer(topic: str) -> StreamWriter[Any]: ...
+
+
+def stream_writer(topic: str | StreamTopic[Any]) -> StreamWriter[Any]:
     """Publish to ``topic`` of this workflow's stream.
 
     Args:
-        topic: The topic name. Encoding follows each published value.
+        topic: A :func:`temporalio.streams.topic` definition, whose value type
+            the writer's ``publish`` takes, or a plain string for a name
+            decided at runtime. Encoding follows each published value.
 
     Raises:
         ValueError: ``topic`` is empty.
     """
-    if not topic:
-        raise ValueError("topic must not be empty")
+    name, _ = resolve_topic(topic)
     provider = _Runtime.current().workflow_streams().provider
-    return StreamWriter(provider.open_writer(topic), topic)
+    return StreamWriter(provider.open_writer(name), name)
