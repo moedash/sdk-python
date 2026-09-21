@@ -229,7 +229,20 @@ class _WSWriteSink:
 
 
 class _WSWorkflowProvider:
-    """The workflow half: the shipped stream object of the running instance."""
+    """The workflow half: the shipped stream object of one workflow instance.
+
+    Made per instance by the worker, so the stream object it captures on
+    first use is this instance's, and the finish hook lets go of that one
+    rather than of whatever the thread's handler lookup answers at the time.
+    """
+
+    def __init__(self) -> None:
+        self._stream: WorkflowStream | None = None
+
+    def _own_stream(self) -> WorkflowStream:
+        if self._stream is None:
+            self._stream = _instance().stream
+        return self._stream
 
     def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
         _require_topic(topic)
@@ -242,26 +255,25 @@ class _WSWorkflowProvider:
                     f"cursor {after.token!r} names another run; a run's log is its own"
                 )
             start = named[1] + 1
-        return _WSReadSource(_instance().stream, topic, start, run_id)
+        return _WSReadSource(self._own_stream(), topic, start, run_id)
 
     def open_writer(self, topic: str) -> WriteSink:
         _require_topic(topic)
-        return _WSWriteSink(_instance().stream, topic)
+        return _WSWriteSink(self._own_stream(), topic)
 
     def on_workflow_start(self) -> None:
         # Registered before the first task completes, because an outside
         # reader can poll before workflow code has opened anything, and an
         # Update with no handler yet is rejected rather than held.
-        _instance()
+        self._own_stream()
 
     async def on_workflow_finish(self) -> None:
         # An Option 0 stream dies with its run, and a parked long-poll Update
         # would otherwise hold completion open. Same recipe the shipped
         # feature documents before a return or a continue-as-new.
-        stream = _registered_stream()
-        if stream is None:
+        if self._stream is None:
             return
-        stream.detach_pollers()
+        self._stream.detach_pollers()
         await workflow.wait_condition(workflow.all_handlers_finished)
 
 
