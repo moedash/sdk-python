@@ -49,8 +49,11 @@ from temporalio.streams import (
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.native import NativeStreams
+<<<<<<< HEAD
 from temporalio.streams.providers.redis import RedisStreams
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
+=======
+>>>>>>> origin/moe/AI-198-stream-client
 from tests.helpers import new_worker
 
 
@@ -105,6 +108,7 @@ class StreamHost:
         await workflow.wait_condition(lambda: self._released)
 
 
+<<<<<<< HEAD
 async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
     # No STREAMS_LIVE gate: the store is the workflow's own History, which the
     # test environment's server provides.
@@ -134,6 +138,8 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             await handle.terminate()
 
 
+=======
+>>>>>>> origin/moe/AI-198-stream-client
 async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
     # The store is a server built from the stream-carrying branch, which the
     # test environment's own server is not; TEMPORAL_ADDRESS names it.
@@ -163,6 +169,7 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
     await provider.close()
 
 
+<<<<<<< HEAD
 async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
     # The store is a Redis the test environment does not start; the server
     # is the environment's own unless TEMPORAL_ADDRESS names another.
@@ -197,14 +204,19 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
     await provider.close()
 
 
+=======
+>>>>>>> origin/moe/AI-198-stream-client
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
     "memory": _memory_case,
     "workflow_streams": _workflow_streams_case,
 }
 if os.environ.get("STREAMS_LIVE") == "native":
     SETUPS["native"] = _native_case
+<<<<<<< HEAD
 if os.environ.get("STREAMS_LIVE") == "redis":
     SETUPS["redis"] = _redis_case
+=======
+>>>>>>> origin/moe/AI-198-stream-client
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
