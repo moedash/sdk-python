@@ -115,13 +115,14 @@ async def main() -> None:
             echoes = retractions = 0
             # The read ends by itself once the workflow is closed and the tail
             # has been delivered, on every provider.
-            async for record in stream.read(topic=DECISIONS, result_type=dict):
+            async for record in stream.read(topic=DECISIONS):
                 print(
                     f"  {record.kind.name:11} {record.value} at {record.cursor.token}"
                 )
                 if record.kind is not RecordKind.DATA:
                     continue
-                if isinstance(record.value, dict) and "echo" in record.value:
+                assert record.value is not None
+                if record.value.echo is not None:
                     echoes += 1
                 else:
                     retractions += 1

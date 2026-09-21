@@ -8,10 +8,12 @@ Outside workflow code a stream is reached through a handle: an Activity asks
 its context with ``activity.stream_handle()``, which is its own workflow
 pinned to its run, and a backend asks its client with
 ``client.get_stream_handle(workflow_id)``. Both hand out the same handle,
-with the same verbs. A producer writes on its own account, visible as soon
-as the store accepts the record, under an identity that lets readers tell a
-retry from a new attempt: the Activity's producer takes the Activity's own id
-and attempt, a backend names its own.
+with the same verbs, and both refer to the topics defined once below, so the
+producer's ``append`` and the consumer's records are typed the same way. A
+producer writes on its own account, visible as soon as the store accepts the
+record, under an identity that lets readers tell a retry from a new attempt:
+the Activity's producer takes the Activity's own id and attempt, a backend
+names its own.
 
 The model Activity here fails halfway through its first attempt. Its retry
 starts over, and the consumer sees that as a ``SUPERSEDED`` record before the
@@ -22,17 +24,32 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
 
 from examples.streams import _setup
-from temporalio import activity, workflow
+from temporalio import activity, streams, workflow
 from temporalio.common import RetryPolicy
 from temporalio.streams import RecordKind
 from temporalio.worker import Worker
 
-INPUTS = "inputs"
-NOTES = "notes"
+
+@dataclass
+class Token:
+    """One piece of model output."""
+
+    n: int
+
+
+@dataclass
+class Note:
+    """A remark a backend attaches to the session."""
+
+    text: str
+
+
+INPUTS = streams.topic("inputs", Token)
+NOTES = streams.topic("notes", Note)
 
 
 @activity.defn
@@ -45,7 +62,7 @@ async def generate(count: int) -> None:
     """
     model = activity.stream_handle().producer(topic=INPUTS)
     for n in range(count):
-        await model.append({"token": n})
+        await model.append(Token(n))
         if n == 1 and activity.info().attempt == 1:
             raise RuntimeError("the model connection dropped")
     await model.finish()
@@ -95,13 +112,13 @@ async def main() -> None:
 
             # A backend producer names its own identity.
             notes = stream.producer(topic=NOTES, producer_id="operator", attempt=1)
-            await notes.append({"note": "reviewing this session"})
+            await notes.append(Note("reviewing this session"))
             await notes.finish()
 
             # A backend consumer keeps the tokens per attempt and drops an
             # attempt the moment a newer one starts writing.
-            tokens: dict[int, list[Any]] = {}
-            async for record in stream.read(topic=INPUTS, result_type=dict):
+            tokens: dict[int, list[int]] = {}
+            async for record in stream.read(topic=INPUTS):
                 if record.kind is RecordKind.SUPERSEDED:
                     assert record.supersession is not None
                     dropped = tokens.pop(record.supersession.previous_attempt, [])
@@ -114,13 +131,14 @@ async def main() -> None:
                     print(f"  {record.producer_id} attempt {record.attempt} finished")
                     break
                 assert record.value is not None
-                tokens.setdefault(record.attempt, []).append(record.value["token"])
+                tokens.setdefault(record.attempt, []).append(record.value.n)
             print(f"kept {tokens}")
 
-            async for record in stream.read(topic=NOTES, result_type=dict):
-                if record.kind is RecordKind.FINISH:
+            async for note in stream.read(topic=NOTES):
+                if note.kind is RecordKind.FINISH:
                     break
-                print(f"  note from {record.producer_id}: {record.value}")
+                assert note.value is not None
+                print(f"  note from {note.producer_id}: {note.value.text}")
 
             await handle.signal(Session.close)
             await handle.result()

@@ -1,6 +1,8 @@
 """The workflow and activities. Identical on every provider.
 
-Nothing here names a store, a transport, or an option. The loop reads its
+Nothing here names a store, a transport, or an option. The two topics are
+defined once, with the types their records carry, and the workflow, the
+Activity and the backend in ``run.py`` all refer to them. The loop reads its
 ``inputs`` topic, decides, publishes the decision, and runs an ordinary
 activity in the same workflow task, which is the shape the design doc calls
 Paths A, B and C together. The Activity that streams model output asks its
@@ -10,14 +12,31 @@ runtime, so the file is the same whichever provider the process registered.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 
-from temporalio import activity, workflow
+from temporalio import activity, streams, workflow
 from temporalio.common import RetryPolicy
 from temporalio.streams import RecordKind
 
-INPUTS = "inputs"
-DECISIONS = "decisions"
+
+@dataclass
+class Token:
+    """One piece of model output."""
+
+    n: int
+
+
+@dataclass
+class Decision:
+    """What the workflow decided about a token, or which attempt it retracted."""
+
+    echo: int | None = None
+    retracting_attempt: int | None = None
+
+
+INPUTS = streams.topic("inputs", Token)
+DECISIONS = streams.topic("decisions", Decision)
 
 
 @activity.defn
@@ -31,14 +50,14 @@ async def generate(count: int) -> None:
     """
     model = activity.stream_handle().producer(topic=INPUTS)
     for n in range(count):
-        await model.append({"n": n})
+        await model.append(Token(n))
     await model.finish()
 
 
 @activity.defn
-async def record_decision(decision: dict) -> str:
+async def record_decision(decision: Decision) -> str:
     """An ordinary activity, run from the same task that read and published."""
-    return f"recorded {decision['echo']}"
+    return f"recorded {decision.echo}"
 
 
 @workflow.defn
@@ -48,7 +67,7 @@ class Agent:
     @workflow.run
     async def run(self, count: int) -> int:
         """Decide on at most ``count`` inputs, then return how many landed."""
-        inputs = workflow.stream_reader(INPUTS, result_type=dict)
+        inputs = workflow.stream_reader(INPUTS)
         decisions = workflow.stream_writer(DECISIONS)
 
         generating = workflow.start_activity(
@@ -67,12 +86,12 @@ class Agent:
             if record.kind is RecordKind.SUPERSEDED:
                 assert record.supersession is not None
                 decisions.publish(
-                    {"retracting_attempt": record.supersession.previous_attempt}
+                    Decision(retracting_attempt=record.supersession.previous_attempt)
                 )
                 continue
             assert record.value is not None
             seen += 1
-            decision = {"echo": record.value["n"]}
+            decision = Decision(echo=record.value.n)
             decisions.publish(decision)
             await workflow.execute_activity(
                 record_decision,

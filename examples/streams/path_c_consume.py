@@ -5,33 +5,42 @@
     python -m examples.streams.path_c_consume redis --redis redis://127.0.0.1:6379
 
 The workflow reads its ``commands`` topic with ``workflow.stream_reader`` and
-runs an Activity for each record. A read is an observation the SDK records:
-what the reader handed to workflow code commits with the Workflow Task, so
-replay re-supplies the same records in the same order and each Activity
-result is matched to the command that caused it. The worker runs with the
-workflow cache off, so every Workflow Task rebuilds the workflow from History
-and the loop completing at all is the proof.
+runs an Activity for each record; the topic is defined once, so the reader's
+records and the Activity's argument share one type. A read is an observation
+the SDK records: what the reader handed to workflow code commits with the
+Workflow Task, so replay re-supplies the same records in the same order and
+each Activity result is matched to the command that caused it. The worker
+runs with the workflow cache off, so every Workflow Task rebuilds the
+workflow from History and the loop completing at all is the proof.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
 
 from examples.streams import _setup
-from temporalio import activity, workflow
+from temporalio import activity, streams, workflow
 from temporalio.streams import RecordKind
 from temporalio.worker import Worker
 
-COMMANDS = "commands"
+
+@dataclass
+class Command:
+    """One instruction from the console."""
+
+    op: str
+
+
+COMMANDS = streams.topic("commands", Command)
 
 
 @activity.defn
-async def apply(command: dict[str, Any]) -> str:
+async def apply(command: Command) -> str:
     """Carry out one command."""
-    return f"applied {command['op']}"
+    return f"applied {command.op}"
 
 
 @workflow.defn
@@ -41,7 +50,7 @@ class Controller:
     @workflow.run
     async def run(self) -> list[str]:
         """Return what was applied, in the order the commands arrived."""
-        commands = workflow.stream_reader(COMMANDS, result_type=dict)
+        commands = workflow.stream_reader(COMMANDS)
         applied: list[str] = []
         async for record in commands:
             if record.kind is RecordKind.FINISH:
@@ -79,7 +88,7 @@ async def main() -> None:
                 topic=COMMANDS, producer_id="console", attempt=1
             )
             for op in ("open", "resize", "close"):
-                await console.append({"op": op})
+                await console.append(Command(op))
                 # Spaced out, so the commands arrive across several tasks.
                 await asyncio.sleep(0.3)
             await console.finish()

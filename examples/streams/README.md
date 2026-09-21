@@ -1,20 +1,28 @@
 # Streams, by path
 
 One provider, registered once on the client. Workers built from that client
-inherit it, and every context asks for its stream the same way.
+inherit it, and every context asks for its stream the same way. A topic is
+defined once, with the type its records carry, and every context refers to
+that definition, so no call names a type again.
 
 ```python
 client = await Client.connect("localhost:7233", plugins=[provider])
+
+INPUTS = streams.topic("inputs", Token)
+DECISIONS = streams.topic("decisions", Decision)
 ```
 
 | Path | Who | Call | Example file |
 |---|---|---|---|
-| A: the workflow publishes | workflow code | `workflow.stream_writer(topic).publish(value)`, then `.finish()` | `path_a_publish.py` |
-| A: a backend follows | any process with a client | `client.get_stream_handle(workflow_id).read(topic=..., after=await stream.latest(topic=...))` | `path_a_publish.py` |
-| B: an Activity produces | activity code | `activity.stream_handle().producer(topic=...).append(...)` | `path_b_produce.py` |
-| B: a backend produces | any process with a client | `client.get_stream_handle(workflow_id).producer(topic=..., producer_id=..., attempt=...)` | `path_b_produce.py` |
-| B: a backend consumes | any process with a client | `client.get_stream_handle(workflow_id).read(topic=..., result_type=...)` | `path_b_produce.py` |
-| C: the workflow consumes | workflow code | `async for record in workflow.stream_reader(topic, result_type=...)` | `path_c_consume.py` |
+| A: the workflow publishes | workflow code | `workflow.stream_writer(DECISIONS).publish(Decision(...))`, then `.finish()` | `path_a_publish.py` |
+| A: a backend follows | any process with a client | `stream = client.get_stream_handle(workflow_id)`, then `stream.read(topic=DECISIONS, after=await stream.latest(topic=DECISIONS))` | `path_a_publish.py` |
+| B: an Activity produces | activity code | `activity.stream_handle().producer(topic=INPUTS).append(Token(...))` | `path_b_produce.py` |
+| B: a backend produces | any process with a client | `client.get_stream_handle(workflow_id).producer(topic=INPUTS, producer_id=..., attempt=...)` | `path_b_produce.py` |
+| B: a backend consumes | any process with a client | `client.get_stream_handle(workflow_id).read(topic=INPUTS)` | `path_b_produce.py` |
+| C: the workflow consumes | workflow code | `async for record in workflow.stream_reader(INPUTS)` | `path_c_consume.py` |
+
+A plain string names a topic decided at runtime, with `result_type=` on the
+call; the examples never need one.
 
 `agent.py` and `run.py` compose all three paths in one agent, on every provider
 and behind the Nexus front. `_setup.py` is the one place a store is named.
