@@ -43,6 +43,13 @@ to include examples, links to docs, or any other relevant information.
   Workflow Streams.
 - `ExternalStreamSubscription.records()` yields each value with the provider
   offset it was read from, for a reader that has to name where it got to.
+  can read, decide on, and write. `workflow.stream_reader()` and
+  `workflow.stream_writer()` are the workflow-side entry points, a provider is a
+  worker plugin passed as `Worker(plugins=[provider])`, and
+  `provider.get_stream_handle()` reads and appends from outside. The record on
+  the wire is `temporal.api.stream.v1.StreamRecord` on every provider.
+  `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
+  reference provider the conformance tests run against.
 
 - Added experimental External Workflow Streams in
   `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
