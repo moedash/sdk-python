@@ -49,6 +49,7 @@ from temporalio.streams import (
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.native import NativeStreams
+from temporalio.streams.providers.redis import RedisStreams
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from tests.helpers import new_worker
 
@@ -148,12 +149,43 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
     await provider.close()
 
 
+async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
+    # The store is a Redis the test environment does not start; the server
+    # is the environment's own unless TEMPORAL_ADDRESS names another.
+    address = os.environ.get("TEMPORAL_ADDRESS")
+    if address:
+        client = await Client.connect(
+            address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+        )
+    provider = RedisStreams(
+        url=os.environ.get("TEMPORAL_TEST_REDIS_URL")
+        or os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6379"),
+        # A prefix per setup, because the store keeps what earlier runs wrote.
+        key_prefix=f"streams-conformance-{uuid.uuid4().hex}",
+    )
+    hosts: dict[str, WorkflowHandle[Any, Any]] = {}
+    async with new_worker(client, StreamHost, plugins=[provider]) as worker:
+
+        async def host(workflow_id: str) -> None:
+            if workflow_id not in hosts:
+                hosts[workflow_id] = await client.start_workflow(
+                    StreamHost.run, id=workflow_id, task_queue=worker.task_queue
+                )
+
+        yield ProviderCase("redis", provider, client, host=host)
+        for handle in hosts.values():
+            await handle.terminate()
+    await provider.close()
+
+
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
     "memory": _memory_case,
     "workflow_streams": _workflow_streams_case,
 }
 if os.environ.get("STREAMS_LIVE") == "native":
     SETUPS["native"] = _native_case
+if os.environ.get("STREAMS_LIVE") == "redis":
+    SETUPS["redis"] = _redis_case
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
