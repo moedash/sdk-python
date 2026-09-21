@@ -2,8 +2,10 @@
 
 Runs the interface loop over the shipped Option 0 transport: an outside
 producer appends through the publish Signal, the workflow reads and
-republishes through its own state, and an outside consumer follows the poll
-Update while the run is open and the tail Query once it has closed.
+republishes through its own state, and an outside reader follows the poll
+Update while the run is open and the tail Query once it has closed. The
+outside-surface cases shared by every provider run from
+``test_streams_conformance``; this file covers what the transport adds.
 """
 
 from __future__ import annotations
@@ -11,23 +13,31 @@ from __future__ import annotations
 import asyncio
 import base64
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
-from temporalio import streams, workflow
+from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.contrib.workflow_streams import PublishInput
 from temporalio.converter import DataConverter
-from temporalio.streams import RecordKind, _frame
-from temporalio.streams.providers.workflow_streams import WorkflowStreamsProducer
+from temporalio.streams import RecordKind, Supersession
+from temporalio.streams._wire import WireRecord
+from temporalio.streams.providers.workflow_streams import (
+    WorkflowStreamsProducer,
+    WorkflowStreamsProvider,
+)
 from tests.helpers import new_worker
 
+INPUTS = "inputs"
+DECISIONS = "decisions"
 
-@pytest.fixture(autouse=True)
-def _workflow_streams_provider():  # pyright: ignore[reportUnusedFunction]
-    streams.configure(provider="workflow_streams")
+
+@pytest.fixture
+def provider() -> WorkflowStreamsProvider:
+    return WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
 
 
 @workflow.defn
@@ -40,7 +50,6 @@ class EchoLoop:
 
     def __init__(self) -> None:
         self._released = False
-        streams.prepare()
 
     @workflow.signal
     def release(self) -> None:
@@ -48,21 +57,19 @@ class EchoLoop:
 
     @workflow.run
     async def run(self) -> int:
-        inputs = streams.reader("inputs", type=dict)
-        decisions = streams.writer("decisions")
+        inputs = workflow.stream_reader(INPUTS, result_type=dict)
+        decisions = workflow.stream_writer(DECISIONS)
         seen = 0
         async for record in inputs:
             if record.kind is RecordKind.FINISH:
                 break
             if record.kind is not RecordKind.DATA:
                 continue
-            assert isinstance(record.value, dict)
+            assert record.value is not None
             seen += 1
-            await decisions.publish({"echo": record.value["n"]})
-        await decisions.finish()
+            decisions.publish({"echo": record.value["n"]})
+        decisions.finish()
         await workflow.wait_condition(lambda: self._released)
-        streams.drain()
-        await workflow.wait_condition(workflow.all_handlers_finished)
         return seen
 
 
@@ -79,10 +86,11 @@ async def take(records: Any, count: int, timeout: float = 30.0) -> list:
     return out
 
 
-async def _feed(client: Client, workflow_id: str) -> None:
-    producer = await streams.producer(
-        client, workflow_id=workflow_id, stream="inputs", producer_id="model", attempt=1
-    )
+async def _feed(
+    provider: WorkflowStreamsProvider, client: Client, workflow_id: str
+) -> None:
+    stream = provider.get_stream_handle(client, workflow_id)
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
     await producer.append({"n": 1}, {"n": 2})
     await producer.append({"n": 3})
     await producer.finish()
@@ -91,92 +99,77 @@ async def _feed(client: Client, workflow_id: str) -> None:
 ECHOED = [RecordKind.DATA, RecordKind.DATA, RecordKind.DATA, RecordKind.FINISH]
 
 
-async def test_interface_loop_over_workflow_streams(client: Client):
+async def test_interface_loop_over_workflow_streams(
+    client: Client, provider: WorkflowStreamsProvider
+):
     workflow_id = f"streams-ws-{uuid.uuid4().hex}"
-    async with new_worker(client, EchoLoop) as worker:
+    async with new_worker(client, EchoLoop, plugins=[provider]) as worker:
         handle = await client.start_workflow(
             EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
         )
-        await _feed(client, workflow_id)
+        await _feed(provider, client, workflow_id)
 
-        consumer = await streams.consumer(client, workflow_id=workflow_id)
-        records = await take(consumer.read(type=dict), 4)
+        stream = provider.get_stream_handle(client, workflow_id)
+        records = await take(stream.read(topic=DECISIONS, result_type=dict), 4)
         assert [r.kind for r in records] == ECHOED
         assert [r.value["echo"] for r in records[:3]] == [1, 2, 3]
+        assert all(r.topic == DECISIONS and r.producer_id == "" for r in records)
 
         await handle.signal(EchoLoop.release)
         assert await handle.result() == 3
 
 
-async def test_retried_producer_dedupes_and_new_attempt_supersedes(client: Client):
+async def test_retried_producer_dedupes_and_new_attempt_supersedes(
+    client: Client, provider: WorkflowStreamsProvider
+):
     workflow_id = f"streams-ws-{uuid.uuid4().hex}"
-    async with new_worker(client, EchoLoop) as worker:
+    async with new_worker(client, EchoLoop, plugins=[provider]) as worker:
         handle = await client.start_workflow(
             EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
         )
+        stream = provider.get_stream_handle(client, workflow_id)
 
-        first = await streams.producer(
-            client,
-            workflow_id=workflow_id,
-            stream="inputs",
-            producer_id="model",
-            attempt=1,
-        )
-        await first.append({"n": 1})
+        first = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        # Positions are learnt at read time on this transport.
+        assert await first.append({"n": 1}) is None
         # The retry of the same attempt re-sends its first batch.
-        retry = await streams.producer(
-            client,
-            workflow_id=workflow_id,
-            stream="inputs",
-            producer_id="model",
-            attempt=1,
-        )
-        assert await retry.append({"n": 1}) is None
-        second = await streams.producer(
-            client,
-            workflow_id=workflow_id,
-            stream="inputs",
-            producer_id="model",
-            attempt=2,
-        )
+        retry = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await retry.append({"n": 1})
+        second = stream.producer(topic=INPUTS, producer_id="model", attempt=2)
         await second.append({"n": 2})
 
-        consumer = await streams.consumer(
-            client, workflow_id=workflow_id, stream="inputs"
-        )
-        records = await take(consumer.read(type=dict), 3)
+        records = await take(stream.read(topic=INPUTS, result_type=dict), 3)
         assert records[0].kind is RecordKind.DATA and records[0].attempt == 1
         assert records[1].kind is RecordKind.SUPERSEDED
-        assert isinstance(records[1].value, streams.Supersession)
-        assert records[1].value.previous_attempt == 1
+        assert records[1].supersession == Supersession("model", 1, 2)
         assert records[2].kind is RecordKind.DATA and records[2].attempt == 2
-        # Inbound records carry no topic; the stream's name is the address.
-        assert all(r.topic == "" for r in records)
+        assert all(r.topic == INPUTS for r in records)
 
         await second.finish()
         await handle.signal(EchoLoop.release)
         await handle.result()
 
 
-async def test_cold_cache_serves_each_record_once(client: Client):
+async def test_cold_cache_serves_each_record_once(
+    client: Client, provider: WorkflowStreamsProvider
+):
     # Every task rebuilds the workflow from history, so the stream object
     # has to belong to the instance that is running: a stale one would carry
     # the previous instance's log and hand out every record twice.
     workflow_id = f"streams-ws-{uuid.uuid4().hex}"
-    async with new_worker(client, EchoLoop, max_cached_workflows=0) as worker:
+    async with new_worker(
+        client, EchoLoop, plugins=[provider], max_cached_workflows=0
+    ) as worker:
         handle = await client.start_workflow(
             EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
         )
-        await _feed(client, workflow_id)
+        await _feed(provider, client, workflow_id)
 
-        consumer = await streams.consumer(client, workflow_id=workflow_id)
-        records = await take(consumer.read(type=dict), 4)
+        stream = provider.get_stream_handle(client, workflow_id)
+        records = await take(stream.read(topic=DECISIONS, result_type=dict), 4)
         assert [r.kind for r in records] == ECHOED
         assert [r.value["echo"] for r in records[:3]] == [1, 2, 3]
-        inbound = await streams.consumer(
-            client, workflow_id=workflow_id, stream="inputs"
-        )
-        arrived = await take(inbound.read(type=dict), 4)
+        arrived = await take(stream.read(topic=INPUTS, result_type=dict), 4)
         assert [r.kind for r in arrived] == ECHOED
         assert [r.value["n"] for r in arrived[:3]] == [1, 2, 3]
 
@@ -184,32 +177,105 @@ async def test_cold_cache_serves_each_record_once(client: Client):
         assert await handle.result() == 3
 
 
-async def test_a_closed_run_serves_its_tail_by_query(client: Client):
+async def test_a_closed_run_serves_its_tail_by_query_and_the_read_ends(
+    client: Client, provider: WorkflowStreamsProvider
+):
     workflow_id = f"streams-ws-{uuid.uuid4().hex}"
-    async with new_worker(client, EchoLoop) as worker:
+    async with new_worker(client, EchoLoop, plugins=[provider]) as worker:
         handle = await client.start_workflow(
             EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
         )
-        await _feed(client, workflow_id)
+        await _feed(provider, client, workflow_id)
         await handle.signal(EchoLoop.release)
         assert await handle.result() == 3
 
         # Nothing polled while the run was open. The poll Update is gone with
-        # the run, so everything below arrives through the tail Query.
-        consumer = await streams.consumer(client, workflow_id=workflow_id)
-        records = await take(consumer.read(type=dict), 4)
+        # the run, so everything below arrives through the tail Query, and
+        # the read ends by itself once the tail is delivered.
+        stream = provider.get_stream_handle(client, workflow_id)
+
+        async def read_everything() -> list[Any]:
+            return [r async for r in stream.read(topic=DECISIONS, result_type=dict)]
+
+        records = await asyncio.wait_for(read_everything(), 30)
         assert [r.kind for r in records] == ECHOED
         assert [r.value["echo"] for r in records[:3]] == [1, 2, 3]
 
         checkpoint = records[1].cursor
-        resumed = await streams.consumer(client, workflow_id=workflow_id)
-        again = await take(resumed.read(type=dict, after=checkpoint), 2)
+        again = await take(
+            stream.read(topic=DECISIONS, result_type=dict, after=checkpoint), 2
+        )
         assert [r.value["echo"] for r in again[:1]] == [3]
         assert again[1].kind is RecordKind.FINISH
 
 
+@workflow.defn
+class Relay:
+    """Publishes one record per run and continues as new once."""
+
+    @workflow.run
+    async def run(self, run: int) -> None:
+        decisions = workflow.stream_writer(DECISIONS)
+        decisions.publish({"run": run})
+        if run == 0:
+            workflow.continue_as_new(run + 1)
+        decisions.finish()
+
+
+async def test_a_handle_without_a_run_id_reads_across_continue_as_new(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, Relay, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            Relay.run, 0, id=workflow_id, task_queue=worker.task_queue
+        )
+        await handle.result()
+        first_run = handle.first_execution_run_id
+        assert first_run is not None
+
+        chain = provider.get_stream_handle(client, workflow_id)
+
+        async def read_everything(stream: Any) -> list[Any]:
+            return [
+                (r.kind, r.value)
+                async for r in stream.read(topic=DECISIONS, result_type=dict)
+            ]
+
+        # Each run keeps its own log, so following the chain means reading
+        # the first run to its close and then the successor from its start.
+        assert await asyncio.wait_for(read_everything(chain), 30) == [
+            (RecordKind.DATA, {"run": 0}),
+            (RecordKind.DATA, {"run": 1}),
+            (RecordKind.FINISH, None),
+        ]
+        pinned = provider.get_stream_handle(client, workflow_id, run_id=first_run)
+        assert await asyncio.wait_for(read_everything(pinned), 30) == [
+            (RecordKind.DATA, {"run": 0}),
+        ]
+        # A cursor from the first run resumes into the successor.
+        records = await take(chain.read(topic=DECISIONS, result_type=dict), 1)
+        resumed = await asyncio.wait_for(
+            asyncio.ensure_future(
+                _values(
+                    chain.read(
+                        topic=DECISIONS, result_type=dict, after=records[0].cursor
+                    )
+                )
+            ),
+            30,
+        )
+        assert resumed == [{"run": 1}, None]
+
+
+async def _values(records: Any) -> list[Any]:
+    return [r.value async for r in records]
+
+
 class _FlakyHandle:
     """A workflow handle whose first Signal is accepted and then reported failed."""
+
+    id = "flaky"
 
     def __init__(self) -> None:
         self.sent: list[PublishInput] = []
@@ -225,26 +291,24 @@ class _FlakyHandle:
             )
 
 
-def _frames(
-    publish: PublishInput,
-) -> list[tuple[RecordKind, str, str, int, int, bytes]]:
+def _wires(publish: PublishInput) -> list[WireRecord]:
     out = []
     for entry in publish.items:
-        payload = Payload()
-        payload.ParseFromString(base64.b64decode(entry.data))
-        out.append(_frame.decode(payload.data))
+        payload = Payload.FromString(base64.b64decode(entry.data))
+        out.append(WireRecord.FromString(payload.data))
     return out
 
 
 def _sequences(sent: list[PublishInput]) -> list[tuple[int, list[int]]]:
     return [
-        (publish.sequence, [frame[4] for frame in _frames(publish)]) for publish in sent
+        (publish.sequence, [wire.sequence for wire in _wires(publish)])
+        for publish in sent
     ]
 
 
 def _producer(handle: _FlakyHandle) -> WorkflowStreamsProducer:
     return WorkflowStreamsProducer(
-        handle, DataConverter.default.payload_converter, "inputs", "", "model", 1
+        handle, DataConverter.default.payload_converter, INPUTS, "model", 1
     )
 
 
@@ -255,10 +319,11 @@ async def test_a_retried_append_after_an_ambiguous_failure_writes_once():
         await producer.append({"n": 1})
     await producer.append({"n": 1})
     await producer.append({"n": 2})
-    # The retry carries the same signal sequence and the same frame sequence
-    # as the failed send, so the shipped dedupe drops the copy; the batch
-    # after it continues the numbering.
+    # The retry carries the same signal sequence and the same record
+    # sequence as the failed send, so the shipped dedupe drops the copy; the
+    # batch after it continues the numbering.
     assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (2, [1])]
+    assert all(publish.publisher_id == "model#1" for publish in handle.sent)
 
 
 async def test_a_batch_whose_signal_failed_goes_out_before_the_next_one():
@@ -269,4 +334,4 @@ async def test_a_batch_whose_signal_failed_goes_out_before_the_next_one():
     await producer.append({"n": 2}, {"n": 3})
     await producer.finish()
     assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (2, [1, 2]), (3, [3])]
-    assert _frames(handle.sent[-1])[0][0] is RecordKind.FINISH
+    assert _wires(handle.sent[-1])[0].kind == int(RecordKind.FINISH)
