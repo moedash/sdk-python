@@ -14,6 +14,7 @@ See :py:class:`WorkflowStream` for the workflow-side stream object and
 
 from temporalio.contrib.workflow_streams._client import WorkflowStreamClient
 from temporalio.contrib.workflow_streams._stream import (
+    POLL_UPDATE_NAME,
     PUBLISH_SIGNAL_NAME,
     WorkflowStream,
 )
@@ -22,6 +23,8 @@ from temporalio.contrib.workflow_streams._topic_handle import (
     WorkflowTopicHandle,
 )
 from temporalio.contrib.workflow_streams._types import (
+    STREAM_DRAINING_ERROR_TYPE,
+    TRUNCATED_OFFSET_ERROR_TYPE,
     PollInput,
     PollResult,
     PublishEntry,
@@ -32,7 +35,10 @@ from temporalio.contrib.workflow_streams._types import (
 )
 
 __all__ = [
+    "POLL_UPDATE_NAME",
     "PUBLISH_SIGNAL_NAME",
+    "STREAM_DRAINING_ERROR_TYPE",
+    "TRUNCATED_OFFSET_ERROR_TYPE",
     "PollInput",
     "PollResult",
     "PublishEntry",
