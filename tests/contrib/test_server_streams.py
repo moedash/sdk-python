@@ -4,7 +4,7 @@ Both producers and the consumer, since the point of the surface is that an
 application does not have to know which of them wrote a given item. Needs a
 Temporal server built from the AI-198 branch:
 
-    TEMPORAL_STREAM_TARGET=localhost:7233 uv run pytest tests/contrib/test_server_streams.py
+    TEMPORAL_STREAM_TARGET=127.0.0.1:7333 uv run pytest tests/contrib/test_server_streams.py
 """
 
 from __future__ import annotations
@@ -154,3 +154,8 @@ async def test_a_reader_resumes_from_an_offset_it_was_given() -> None:
         )
     ]
     assert resumed == [item.data.text for item in first[2:]]
+
+    # The raw page carries the stored records themselves.
+    raw = await stream.poll_raw(topics=[TOPIC], from_offset=0, wait=False)
+    assert [item.data.topic for item in raw.items] == [TOPIC] * 5
+    assert raw.closed and raw.next_offset == raw.head_offset == 5
