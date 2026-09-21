@@ -27,6 +27,7 @@ import temporalio.common
 import temporalio.converter
 import temporalio.runtime
 import temporalio.service
+import temporalio.streams
 import temporalio.workflow
 from temporalio.service import (
     ConnectConfig,
@@ -155,6 +156,7 @@ class Client:
         grpc_compression: GrpcCompression = GrpcCompression.GZIP,
         payload_limits: PayloadLimitsConfig = PayloadLimitsConfig(),
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> Self:
         """Connect to a Temporal server.
 
@@ -220,6 +222,11 @@ class Client:
             payload_limits: Warning thresholds for outbound payload/memo sizes. Over-threshold
                 fields are logged but still sent. Set a threshold to 0 to disable it.
             header_codec_behavior: Encoding behavior for headers sent by the client.
+            stream_provider: Experimental. The stream provider
+                :py:meth:`get_stream_handle` opens handles from, see
+                :py:mod:`temporalio.streams`. A provider that is also a
+                :py:class:`Plugin` sets this itself when passed in ``plugins``,
+                and workers built from this client inherit it.
         """
         connect_config = temporalio.service.ConnectConfig(
             target_host=target_host,
@@ -256,6 +263,7 @@ class Client:
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
             header_codec_behavior=header_codec_behavior,
             plugins=plugins,
+            stream_provider=stream_provider,
         )
 
     def __init__(
@@ -269,6 +277,7 @@ class Client:
         default_workflow_query_reject_condition: None
         | (temporalio.common.QueryRejectCondition) = None,
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ):
         """Create a Temporal client from a service client.
 
@@ -283,6 +292,7 @@ class Client:
             interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
             header_codec_behavior=header_codec_behavior,
+            stream_provider=stream_provider,
         )
         self._initial_config = config.copy()
 
@@ -885,6 +895,36 @@ class Client:
             first_execution_run_id=first_execution_run_id,
             result_type=result_type,
         )
+
+    def get_stream_handle(
+        self, workflow_id: str, *, run_id: str | None = None
+    ) -> temporalio.streams.StreamHandle:
+        """Get a handle on a workflow's stream from the provider registered on this client.
+
+        Mirrors :py:meth:`get_workflow_handle`: without ``run_id`` the handle
+        follows the workflow's execution chain across continue-as-new, with
+        one it is pinned to that run. The provider is the one registered with
+        ``plugins=[provider]`` at :py:meth:`connect`, or passed as
+        ``stream_provider``. See :py:mod:`temporalio.streams`.
+
+        Args:
+            workflow_id: Workflow ID whose stream to get a handle to.
+            run_id: Run ID to pin the handle to.
+
+        Returns:
+            The stream handle.
+
+        Raises:
+            temporalio.streams.StreamUnsupportedError: No stream provider is
+                registered on this client.
+        """
+        provider = self._config.get("stream_provider")
+        if provider is None:
+            raise temporalio.streams.StreamUnsupportedError(
+                "no stream provider is registered on this client; connect with "
+                "plugins=[provider]"
+            )
+        return provider.get_stream_handle(self, workflow_id, run_id=run_id)
 
     def get_workflow_handle_for(
         self,
@@ -3032,3 +3072,4 @@ class ClientConfig(TypedDict, total=False):
         temporalio.common.QueryRejectCondition | None
     ]
     header_codec_behavior: Required[HeaderCodecBehavior]
+    stream_provider: temporalio.streams.StreamProvider | None

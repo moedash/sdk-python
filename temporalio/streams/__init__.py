@@ -30,15 +30,20 @@ The contract, in five statements:
    workflow and by outside consumers; which of those happen is the
    application's business.
 
-Workflow-side entry points live in :mod:`temporalio.workflow`:
-:func:`temporalio.workflow.stream_reader` and
-:func:`temporalio.workflow.stream_writer`. Outside a workflow, a handle comes
-from a provider instance: ``provider.get_stream_handle(client, workflow_id)``.
-A provider is an object; when it serves workers it is also a
-:class:`temporalio.worker.Plugin`, passed as ``Worker(plugins=[provider])``
-and ``Replayer(plugins=[provider])``. This module keeps the shared types, the
-errors and the protocols a provider implements; nothing here that workflow
-code imports does I/O.
+A provider is an object, registered once as a plugin:
+``Client.connect(plugins=[provider])``; workers built from that client inherit
+it, and ``Worker(plugins=[provider])`` or ``Replayer(plugins=[provider])``
+registers it on a worker alone. Each context then asks for its stream the
+same way. Workflow code uses :func:`temporalio.workflow.stream_reader` and
+:func:`temporalio.workflow.stream_writer`. An activity uses
+:func:`temporalio.activity.stream_handle`, which is its own workflow pinned
+to its run unless told otherwise. Any process holding a client uses
+:meth:`temporalio.client.Client.get_stream_handle`, which mirrors
+``get_workflow_handle``. The explicit form,
+``provider.get_stream_handle(client, workflow_id)``, stays for a process that
+talks to two stores. This module keeps the shared types, the errors and the
+protocols a provider implements; nothing here that workflow code imports does
+I/O.
 
 What the contract does not promise: that a :attr:`RecordKind.FINISH` record
 means the writing activity succeeded, that a superseded attempt's records can
