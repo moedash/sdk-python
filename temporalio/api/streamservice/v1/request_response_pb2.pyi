@@ -87,12 +87,11 @@ class AddMessagesInput(google.protobuf.message.Message):
     NAMESPACE_FIELD_NUMBER: builtins.int
     STREAM_ID_FIELD_NUMBER: builtins.int
     RUN_ID_FIELD_NUMBER: builtins.int
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     PRODUCER_ID_FIELD_NUMBER: builtins.int
     SEQUENCE_FIELD_NUMBER: builtins.int
     EXPECTED_OFFSET_FIELD_NUMBER: builtins.int
     USE_EXPECTED_OFFSET_FIELD_NUMBER: builtins.int
-    OWNER_EPOCH_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     stream_id: builtins.str
     run_id: builtins.str
@@ -100,10 +99,10 @@ class AddMessagesInput(google.protobuf.message.Message):
     a persistence lookup on every call. CreateStream returns it.
     """
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.streamservice.v1.message_pb2.StreamMessage
+        temporalio.api.streamservice.v1.message_pb2.StreamRecord
     ]: ...
     producer_id: builtins.str
     """Idempotency, all optional. Supply a producer identity and sequence, or an
@@ -115,36 +114,32 @@ class AddMessagesInput(google.protobuf.message.Message):
     by this repo's helper generator.
     """
     use_expected_offset: builtins.bool
-    owner_epoch: builtins.int
     def __init__(
         self,
         *,
         namespace: builtins.str = ...,
         stream_id: builtins.str = ...,
         run_id: builtins.str = ...,
-        messages: collections.abc.Iterable[
-            temporalio.api.streamservice.v1.message_pb2.StreamMessage
+        records: collections.abc.Iterable[
+            temporalio.api.streamservice.v1.message_pb2.StreamRecord
         ]
         | None = ...,
         producer_id: builtins.str = ...,
         sequence: builtins.int = ...,
         expected_offset: builtins.int = ...,
         use_expected_offset: builtins.bool = ...,
-        owner_epoch: builtins.int = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
             "expected_offset",
             b"expected_offset",
-            "messages",
-            b"messages",
             "namespace",
             b"namespace",
-            "owner_epoch",
-            b"owner_epoch",
             "producer_id",
             b"producer_id",
+            "records",
+            b"records",
             "run_id",
             b"run_id",
             "sequence",
@@ -331,7 +326,7 @@ class PollMessagesInput(google.protobuf.message.Message):
         self,
     ) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[builtins.str]:
         """Filters by exact topic. Offsets are assigned over the unfiltered stream, so
-        next_offset advances past filtered-out messages too.
+        next_offset advances past filtered-out records too.
         """
     wait_new_messages: builtins.bool
     """When set and the reader is caught up, block until something arrives, the
@@ -374,33 +369,39 @@ global___PollMessagesInput = PollMessagesInput
 class PollMessagesOutput(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     NEXT_OFFSET_FIELD_NUMBER: builtins.int
     HEAD_OFFSET_FIELD_NUMBER: builtins.int
     CLOSED_FIELD_NUMBER: builtins.int
     CLOSE_REASON_FIELD_NUMBER: builtins.int
+    RUN_ID_FIELD_NUMBER: builtins.int
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.streamservice.v1.message_pb2.StreamMessage
+        temporalio.api.streamservice.v1.message_pb2.StreamRecord
     ]: ...
     next_offset: builtins.int
     head_offset: builtins.int
     closed: builtins.bool
     @property
     def close_reason(self) -> temporal.api.common.v1.message_pb2.Payload: ...
+    run_id: builtins.str
+    """The execution holding the stream. A workflow task slice built from this
+    read names the run it came from.
+    """
     def __init__(
         self,
         *,
-        messages: collections.abc.Iterable[
-            temporalio.api.streamservice.v1.message_pb2.StreamMessage
+        records: collections.abc.Iterable[
+            temporalio.api.streamservice.v1.message_pb2.StreamRecord
         ]
         | None = ...,
         next_offset: builtins.int = ...,
         head_offset: builtins.int = ...,
         closed: builtins.bool = ...,
         close_reason: temporal.api.common.v1.message_pb2.Payload | None = ...,
+        run_id: builtins.str = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["close_reason", b"close_reason"]
@@ -414,10 +415,12 @@ class PollMessagesOutput(google.protobuf.message.Message):
             b"closed",
             "head_offset",
             b"head_offset",
-            "messages",
-            b"messages",
             "next_offset",
             b"next_offset",
+            "records",
+            b"records",
+            "run_id",
+            b"run_id",
         ],
     ) -> None: ...
 
@@ -564,7 +567,7 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
     WORKFLOW_ID_FIELD_NUMBER: builtins.int
     OWNER_RUN_ID_FIELD_NUMBER: builtins.int
     STREAM_NAME_FIELD_NUMBER: builtins.int
-    MESSAGES_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
     PRODUCER_ID_FIELD_NUMBER: builtins.int
     SEQUENCE_FIELD_NUMBER: builtins.int
     namespace: builtins.str
@@ -577,10 +580,10 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
     stream_name: builtins.str
     """Empty means the workflow's default output stream."""
     @property
-    def messages(
+    def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.streamservice.v1.message_pb2.StreamMessage
+        temporalio.api.streamservice.v1.message_pb2.StreamRecord
     ]: ...
     producer_id: builtins.str
     """Optional idempotency, as on AddMessagesInput."""
@@ -592,8 +595,8 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
         workflow_id: builtins.str = ...,
         owner_run_id: builtins.str = ...,
         stream_name: builtins.str = ...,
-        messages: collections.abc.Iterable[
-            temporalio.api.streamservice.v1.message_pb2.StreamMessage
+        records: collections.abc.Iterable[
+            temporalio.api.streamservice.v1.message_pb2.StreamRecord
         ]
         | None = ...,
         producer_id: builtins.str = ...,
@@ -602,14 +605,14 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "messages",
-            b"messages",
             "namespace",
             b"namespace",
             "owner_run_id",
             b"owner_run_id",
             "producer_id",
             b"producer_id",
+            "records",
+            b"records",
             "sequence",
             b"sequence",
             "stream_name",
@@ -724,18 +727,25 @@ class DeleteStreamInput(google.protobuf.message.Message):
 
     NAMESPACE_FIELD_NUMBER: builtins.int
     STREAM_ID_FIELD_NUMBER: builtins.int
+    FORCE_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     stream_id: builtins.str
+    force: builtins.bool
+    """Delete even while a workflow consumer is active. Without it the call is
+    refused, because the consumer's History depends on ranges the deletion
+    takes with it.
+    """
     def __init__(
         self,
         *,
         namespace: builtins.str = ...,
         stream_id: builtins.str = ...,
+        force: builtins.bool = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "namespace", b"namespace", "stream_id", b"stream_id"
+            "force", b"force", "namespace", b"namespace", "stream_id", b"stream_id"
         ],
     ) -> None: ...
 
@@ -1186,11 +1196,16 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
     NAMESPACE_FIELD_NUMBER: builtins.int
     STREAM_ID_FIELD_NUMBER: builtins.int
     CONSUMER_WORKFLOW_ID_FIELD_NUMBER: builtins.int
+    CONSUMER_RUN_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     stream_id: builtins.str
     consumer_workflow_id: builtins.str
-    """The workflow that will consume, which names the pin."""
+    """The workflow that will consume. Together with the run it names the pin,
+    so a later run of the same workflow id registers fresh rather than
+    inheriting a closed run's floor.
+    """
+    consumer_run_id: builtins.str
     start_offset: builtins.int
     """Negative means from wherever the stream is when the pin is taken. Resolved
     here, where the frontier is, and returned so the cursor records a fact.
@@ -1201,11 +1216,14 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
         namespace: builtins.str = ...,
         stream_id: builtins.str = ...,
         consumer_workflow_id: builtins.str = ...,
+        consumer_run_id: builtins.str = ...,
         start_offset: builtins.int = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "consumer_run_id",
+            b"consumer_run_id",
             "consumer_workflow_id",
             b"consumer_workflow_id",
             "namespace",
@@ -1223,33 +1241,22 @@ class RegisterStreamConsumerOutput(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     START_OFFSET_FIELD_NUMBER: builtins.int
-    COLLECTION_ID_FIELD_NUMBER: builtins.int
-    BUCKET_SIZE_FIELD_NUMBER: builtins.int
     KNOWN_HEAD_FIELD_NUMBER: builtins.int
     start_offset: builtins.int
-    collection_id: builtins.str
-    """What the consumer needs to address the log, all decided by the stream."""
-    bucket_size: builtins.int
     known_head: builtins.int
+    """The frontier at registration, so the cursor starts with a known head
+    instead of waiting for the first push.
+    """
     def __init__(
         self,
         *,
         start_offset: builtins.int = ...,
-        collection_id: builtins.str = ...,
-        bucket_size: builtins.int = ...,
         known_head: builtins.int = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "bucket_size",
-            b"bucket_size",
-            "collection_id",
-            b"collection_id",
-            "known_head",
-            b"known_head",
-            "start_offset",
-            b"start_offset",
+            "known_head", b"known_head", "start_offset", b"start_offset"
         ],
     ) -> None: ...
 
@@ -1305,8 +1312,36 @@ global___AdvanceConsumerHeadInput = AdvanceConsumerHeadInput
 class AdvanceConsumerHeadOutput(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
+    CONSUMER_CLOSED_FIELD_NUMBER: builtins.int
+    SUCCESSOR_RUN_ID_FIELD_NUMBER: builtins.int
+    SUCCESSOR_START_OFFSET_FIELD_NUMBER: builtins.int
+    consumer_closed: builtins.bool
+    """The run that held the pin is closed and no current run of the workflow
+    consumes the stream, so the stream can release the pin.
+    """
+    successor_run_id: builtins.str
+    """The run that held the pin is closed but a successor carries the
+    subscription, so the stream re-keys the pin to it, with the floor the
+    successor's cursor started from.
+    """
+    successor_start_offset: builtins.int
     def __init__(
         self,
+        *,
+        consumer_closed: builtins.bool = ...,
+        successor_run_id: builtins.str = ...,
+        successor_start_offset: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "consumer_closed",
+            b"consumer_closed",
+            "successor_run_id",
+            b"successor_run_id",
+            "successor_start_offset",
+            b"successor_start_offset",
+        ],
     ) -> None: ...
 
 global___AdvanceConsumerHeadOutput = AdvanceConsumerHeadOutput

@@ -4,22 +4,9 @@
 # is still defined in the server. See temporalio/client_stream.py.
 
 from .message_pb2 import (
-    STREAM_MESSAGE_KIND_DATA,
-    STREAM_MESSAGE_KIND_FLUSH,
-    STREAM_MESSAGE_KIND_UNSPECIFIED,
-    StreamMessage,
-    StreamMessageBatch,
-    StreamMessageKind,
+    StreamRecord,
+    StreamRecordBatch,
 )
-
-from .stream_state_pb2 import (
-    ConsumerCursor,
-    ProducerCursor,
-    StreamLifecycle,
-    StreamState,
-    WorkflowStreamCursor,
-)
-
 from .request_response_pb2 import (
     AddMessagesInput,
     AddMessagesOutput,
@@ -80,6 +67,14 @@ from .request_response_pb2 import (
     TruncateStreamRequest,
     TruncateStreamResponse,
 )
+from .stream_state_pb2 import (
+    ConsumerCursor,
+    ProducerCursor,
+    StreamBudget,
+    StreamLifecycle,
+    StreamState,
+    WorkflowStreamCursor,
+)
 
 __all__ = [
     "AddMessagesInput",
@@ -133,14 +128,11 @@ __all__ = [
     "RegisterStreamConsumerOutput",
     "RegisterStreamConsumerRequest",
     "RegisterStreamConsumerResponse",
-    "STREAM_MESSAGE_KIND_DATA",
-    "STREAM_MESSAGE_KIND_FLUSH",
-    "STREAM_MESSAGE_KIND_UNSPECIFIED",
+    "StreamBudget",
     "StreamLifecycle",
     "StreamListEntry",
-    "StreamMessage",
-    "StreamMessageBatch",
-    "StreamMessageKind",
+    "StreamRecord",
+    "StreamRecordBatch",
     "StreamState",
     "SubscribeWorkflowInput",
     "SubscribeWorkflowOutput",
