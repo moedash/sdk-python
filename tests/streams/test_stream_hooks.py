@@ -65,7 +65,13 @@ class _Body(WorkflowInboundInterceptor):
 
 
 _PARK = object()
-_INPUT = ExecuteWorkflowInput(type=object, run_fn=lambda: None, args=(), headers={})
+
+
+async def _unused_run_fn() -> None:
+    pass
+
+
+_INPUT = ExecuteWorkflowInput(type=object, run_fn=_unused_run_fn, args=(), headers={})
 
 
 @pytest.fixture
