@@ -909,5 +909,54 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
             workflows=[ContractLoop], plugins=[provider], stream_client=client
         ).replay_workflow(history)
         assert result.replay_failure is None
+
+        # Exported with its records, the reset run's history replays with no
+        # server: the slices come from both runs' streams.
+        bundle = await Replayer.fetch_stream_slices(client, history)
+        assert {s.run_id for s in bundle.stream_slices if s.records} == {
+            base_run,
+            reset_run,
+        }
+        restored = WorkflowHistory.from_json(workflow_id, bundle.to_json())
+        offline = await Replayer(
+            workflows=[ContractLoop], plugins=[provider]
+        ).replay_workflow(restored)
+        assert offline.replay_failure is None
+    finally:
+        await provider.close()
+
+
+async def test_an_exported_history_replays_offline_with_its_records() -> None:
+    """A history exported with its stream records is the whole replay input.
+
+    ``fetch_stream_slices`` captures the records while the stream is retained,
+    ``to_json`` writes them beside the events, ``from_json`` reads them back,
+    and a replayer with no client replays the result. A plain export carries
+    none and is refused with both remedies named.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    try:
+        history = await _drive_contract_loop(client)
+        assert "streamSlices" not in history.to_json()
+
+        bundle = await Replayer.fetch_stream_slices(client, history)
+        assert list(bundle.events) == list(history.events)
+        assert any(s.records for s in bundle.stream_slices)
+        text = bundle.to_json()
+        assert "streamSlices" in text
+        restored = WorkflowHistory.from_json(history.workflow_id, text)
+        assert list(restored.stream_slices) == list(bundle.stream_slices)
+        assert list(restored.events) == list(history.events)
+
+        offline = Replayer(workflows=[ContractLoop], plugins=[provider])
+        result = await offline.replay_workflow(restored)
+        assert result.replay_failure is None
+
+        # With the records stripped it is a plain export again.
+        stripped = WorkflowHistory(restored.workflow_id, restored.events)
+        with pytest.raises(RuntimeError, match="stream_client=") as raised:
+            await offline.replay_workflow(stripped)
+        assert "fetch_stream_slices" in str(raised.value)
     finally:
         await provider.close()

@@ -116,7 +116,11 @@ to include examples, links to docs, or any other relevant information.
   `StreamNotFoundError`. A handle without a run id follows a workflow reset as
   it follows a continue-as-new, reading the reset run from the floor its stream
   reports, and the replayer fetches the ranges recorded before a reset point
-  from the run the workflow was reset from.
+  from the run the workflow was reset from. For offline replay,
+  `Replayer.fetch_stream_slices(client, history)` attaches the records to a
+  `WorkflowHistory` while the stream is retained, `to_json()` and `from_json()`
+  carry them as `streamSlices` beside the events, and a history that carries
+  them replays with no server.
 
 ### Changed
 

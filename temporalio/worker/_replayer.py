@@ -75,13 +75,21 @@ class Replayer:
         A workflow that read a server-side stream cannot be replayed from its
         history alone. History records the offsets each Workflow Task consumed
         and never the records; on a live task the server re-supplies them from
-        the stream. ``stream_client`` is a client connected to the server that
-        still holds those streams. Given one, the replayer fetches every range
-        a history's completed tasks recorded from the stream service and hands
-        the records to the replay alongside the history, so the workflow sees
-        what it saw the first time. A range the stream no longer holds fails
-        that replay with :py:class:`temporalio.streams.StreamNotFoundError`.
-        Without a client, replaying such a history fails and says so.
+        the stream. Three cases:
+
+        * The history carries the records in
+          :py:attr:`temporalio.client.WorkflowHistory.stream_slices`, put
+          there by :py:meth:`fetch_stream_slices` while the stream was
+          retained and carried by ``to_json()`` and ``from_json()``. They are
+          handed to the replay and no server is contacted.
+        * The history carries none and ``stream_client`` is given: a client
+          connected to the server that still holds the streams. The replayer
+          fetches every range the completed tasks recorded from the stream
+          service and hands the records to the replay, so the workflow sees
+          what it saw the first time. A range the stream no longer holds fails
+          that replay with :py:class:`temporalio.streams.StreamNotFoundError`.
+        * The history carries none and there is no client: replaying it fails
+          and the message names both remedies.
 
         Note, unlike the worker, for the replayer the workflow_task_executor
         will default to a new thread pool executor with no max_workers set that
@@ -135,6 +143,31 @@ class Replayer:
             self._default_workflow_logic_flags.add(flag)
         else:
             self._default_workflow_logic_flags.discard(flag)
+
+    @staticmethod
+    async def fetch_stream_slices(
+        client: temporalio.client.Client, history: temporalio.client.WorkflowHistory
+    ) -> temporalio.client.WorkflowHistory:
+        """Return ``history`` with the stream records its tasks consumed attached.
+
+        History records only the offsets each Workflow Task consumed from a
+        server-side stream, so an export cannot be replayed without the
+        server that still holds the stream. This fetches every recorded range
+        from the stream service through ``client`` while the stream is
+        retained and returns a copy of ``history`` with the records in
+        :py:attr:`temporalio.client.WorkflowHistory.stream_slices`. Its
+        ``to_json()`` then carries them, and a replayer given the result, or a
+        ``from_json()`` of it, needs no server. Ranges recorded before a reset
+        point are fetched from the run the workflow was reset from.
+
+        Raises :py:class:`temporalio.streams.StreamNotFoundError` for a range
+        the stream no longer holds.
+        """
+        return temporalio.client.WorkflowHistory(
+            history.workflow_id,
+            history.events,
+            await _stream_slices(client, history),
+        )
 
     def config(self, *, active_config: bool = False) -> ReplayerConfig:
         """Config, as a dictionary, used to create this replayer.
@@ -398,18 +431,24 @@ class Replayer:
             async def replay_iterator() -> AsyncIterator[WorkflowReplayResult]:
                 async for history in histories:
                     # The records a consuming workflow read are not in its
-                    # history. Either fetch them from the stream service or
-                    # report here what is missing, rather than let Core fail
-                    # the first task on input it was never given.
+                    # history unless they were captured into it. Otherwise
+                    # fetch them from the stream service, or report here what
+                    # is missing, rather than let Core fail the first task on
+                    # input it was never given.
                     stream_slices: list[bytes] = []
-                    if stream_client is not None:
+                    if history.stream_slices:
+                        stream_slices = [
+                            s.SerializeToString() for s in history.stream_slices
+                        ]
+                    elif stream_client is not None:
                         try:
-                            stream_slices = await _stream_slices(stream_client, history)
+                            fetched = await _stream_slices(stream_client, history)
                         except temporalio.streams.StreamNotFoundError as err:
                             yield WorkflowReplayResult(
                                 history=history, replay_failure=err
                             )
                             continue
+                        stream_slices = [s.SerializeToString() for s in fetched]
                     else:
                         missing = _stream_records_missing(history)
                         if missing is not None:
@@ -528,16 +567,18 @@ def _stream_records_missing(history: temporalio.client.WorkflowHistory) -> str |
     return (
         f"workflow {history.workflow_id!r} consumed records from stream(s) "
         f"{', '.join(repr(s) for s in streams)} in {len(ranges)} task(s), and History "
-        "records only the offsets. Create the Replayer with stream_client= (a Client "
-        "connected to the server that still holds the streams) so the records can be "
-        "fetched from the stream service."
+        "records only the offsets. Either create the Replayer with stream_client= (a "
+        "Client connected to the server that still holds the streams) so the records "
+        "can be fetched from the stream service, or replay a history exported with "
+        "them: Replayer.fetch_stream_slices(client, history) attaches the records "
+        "while the stream is retained and WorkflowHistory.to_json() carries them."
     )
 
 
 async def _stream_slices(
     client: temporalio.client.Client, history: temporalio.client.WorkflowHistory
-) -> list[bytes]:
-    """Fetch the records the history's tasks consumed, as serialized ``StreamSlice`` messages.
+) -> list[temporalio.api.stream.v1.StreamSlice]:
+    """Fetch the records the history's tasks consumed, as ``StreamSlice`` messages.
 
     The shape is the one the server puts on a poll response when it re-supplies
     a cache miss: one slice per recorded range, tagged with the completion that
@@ -556,7 +597,7 @@ async def _stream_slices(
     # The handle that served each run's stream, so later ranges of the same
     # stream go straight to it.
     served_by: dict[tuple[str, str], Any] = {}
-    slices: list[bytes] = []
+    slices: list[temporalio.api.stream.v1.StreamSlice] = []
     for run_id, ranges in _eras(history):
         for event_id, consumed in ranges:
             stream_slice = temporalio.api.stream.v1.StreamSlice(
@@ -577,7 +618,7 @@ async def _stream_slices(
                 served_by[(run_id, consumed.stream_id)] = handle
                 stream_slice.run_id = owner_run_id or run_id
                 stream_slice.records.extend(records)
-            slices.append(stream_slice.SerializeToString())
+            slices.append(stream_slice)
     return slices
 
 
