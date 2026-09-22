@@ -521,7 +521,7 @@ def _eras(
 
     A reset copies the base run's history into the new run, so the ranges
     before the reset point were consumed from the base run's streams, and the
-    run they belong to is only named by the `WorkflowTaskFailed` event that
+    run they belong to is only named by the ``WorkflowTaskFailed`` event that
     marks the reset point, after them in the history. Ranges after the last
     reset point belong to the run itself, which that event names as well; a
     history with no reset point belongs to the run its start event names. This
