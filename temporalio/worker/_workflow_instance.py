@@ -95,6 +95,9 @@ logger = logging.getLogger(__name__)
 # Set to true to log all cases where we're ignoring things during delete
 LOG_IGNORE_DURING_DELETE = False
 
+# Core answers a query carrying this id on the query's own task, alone.
+_LEGACY_QUERY_ID = "legacy_query"
+
 
 def _is_workflow_terminal_command(
     command: temporalio.bridge.proto.workflow_commands.workflow_commands_pb2.WorkflowCommand,
@@ -2948,6 +2951,17 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         """
         runtime = self._external_stream_runtime
         if runtime is None or self._deleting:
+            return
+
+        # A legacy query is answered on a task of its own, and Core refuses any
+        # other command beside that answer. The activation ran no Workflow code,
+        # so the wait set it would report is the one the retained task already
+        # holds, and there is no observation delta to commit.
+        if any(
+            command.HasField("respond_to_query")
+            and command.respond_to_query.query_id == _LEGACY_QUERY_ID
+            for command in self._current_completion.successful.commands
+        ):
             return
 
         # First, because the boundary a Continue-As-New header has to carry is

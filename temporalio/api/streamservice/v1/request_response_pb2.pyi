@@ -385,7 +385,7 @@ class PollMessagesOutput(google.protobuf.message.Message):
     head_offset: builtins.int
     closed: builtins.bool
     @property
-    def close_reason(self) -> temporal.api.common.v1.message_pb2.Payload: ...
+    def close_reason(self) -> temporalio.api.common.v1.message_pb2.Payload: ...
     run_id: builtins.str
     """The execution holding the stream. A workflow task slice built from this
     read names the run it came from.
@@ -400,7 +400,7 @@ class PollMessagesOutput(google.protobuf.message.Message):
         next_offset: builtins.int = ...,
         head_offset: builtins.int = ...,
         closed: builtins.bool = ...,
-        close_reason: temporal.api.common.v1.message_pb2.Payload | None = ...,
+        close_reason: temporalio.api.common.v1.message_pb2.Payload | None = ...,
         run_id: builtins.str = ...,
     ) -> None: ...
     def HasField(
@@ -654,13 +654,13 @@ class CloseStreamInput(google.protobuf.message.Message):
     namespace: builtins.str
     stream_id: builtins.str
     @property
-    def reason(self) -> temporal.api.common.v1.message_pb2.Payload: ...
+    def reason(self) -> temporalio.api.common.v1.message_pb2.Payload: ...
     def __init__(
         self,
         *,
         namespace: builtins.str = ...,
         stream_id: builtins.str = ...,
-        reason: temporal.api.common.v1.message_pb2.Payload | None = ...,
+        reason: temporalio.api.common.v1.message_pb2.Payload | None = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["reason", b"reason"]
