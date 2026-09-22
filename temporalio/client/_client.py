@@ -3096,6 +3096,7 @@ class ClientConnectConfig(TypedDict, total=False):
     grpc_compression: GrpcCompression
     payload_limits: PayloadLimitsConfig
     header_codec_behavior: HeaderCodecBehavior
+    stream_provider: temporalio.streams.StreamProvider | None
 
 
 class ClientConfig(TypedDict, total=False):
