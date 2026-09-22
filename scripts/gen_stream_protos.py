@@ -86,6 +86,16 @@ FIX_PY = [
     (re.compile(r"temporalio\.api\.stream\.v1\."), "temporalio.api.streamservice.v1."),
     (re.compile(r"from temporal\.api\."), "from temporalio.api."),
     (re.compile(r"import temporal\.api\."), "import temporalio.api."),
+    # mypy-protobuf also writes the public API types fully qualified in the
+    # stubs, `temporal.api.common.v1.message_pb2.Payload`, which the import
+    # rewrites above do not reach. The `_pb2` suffix keeps this off the proto
+    # package names inside the serialized descriptors, which stay `temporal.api`.
+    # After the streamservice rewrite on purpose, so the public
+    # `temporal.api.stream.v1` package is not sent to the vendored one.
+    (
+        re.compile(r"\btemporal\.api\.(\w+)\.v1\.(\w+_pb2)\b"),
+        r"temporalio.api.\1.v1.\2",
+    ),
 ]
 
 
