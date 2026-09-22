@@ -36,12 +36,12 @@ class StreamRecord(google.protobuf.message.Message):
         VALUE_FIELD_NUMBER: builtins.int
         key: builtins.str
         @property
-        def value(self) -> temporal.api.common.v1.message_pb2.Payload: ...
+        def value(self) -> temporalio.api.common.v1.message_pb2.Payload: ...
         def __init__(
             self,
             *,
             key: builtins.str = ...,
-            value: temporal.api.common.v1.message_pb2.Payload | None = ...,
+            value: temporalio.api.common.v1.message_pb2.Payload | None = ...,
         ) -> None: ...
         def HasField(
             self, field_name: typing_extensions.Literal["value", b"value"]
@@ -60,12 +60,12 @@ class StreamRecord(google.protobuf.message.Message):
     PRODUCER_ID_FIELD_NUMBER: builtins.int
     ATTEMPT_FIELD_NUMBER: builtins.int
     @property
-    def body(self) -> temporal.api.common.v1.message_pb2.Payload: ...
+    def body(self) -> temporalio.api.common.v1.message_pb2.Payload: ...
     @property
     def metadata(
         self,
     ) -> google.protobuf.internal.containers.MessageMap[
-        builtins.str, temporal.api.common.v1.message_pb2.Payload
+        builtins.str, temporalio.api.common.v1.message_pb2.Payload
     ]:
         """Producer-supplied provenance, stored as sent."""
     topic: builtins.str
@@ -73,7 +73,7 @@ class StreamRecord(google.protobuf.message.Message):
     """The producer's position within its attempt, or -1 when unnumbered. Stored
     as sent; the global offset is what orders the stream.
     """
-    kind: temporal.api.stream.v1.message_pb2.StreamRecordKind.ValueType
+    kind: temporalio.api.stream.v1.message_pb2.StreamRecordKind.ValueType
     """Settled to DATA on append when left unspecified, so a retry hashes the
     same bytes and a reader never sees the zero value.
     """
@@ -93,14 +93,14 @@ class StreamRecord(google.protobuf.message.Message):
     def __init__(
         self,
         *,
-        body: temporal.api.common.v1.message_pb2.Payload | None = ...,
+        body: temporalio.api.common.v1.message_pb2.Payload | None = ...,
         metadata: collections.abc.Mapping[
-            builtins.str, temporal.api.common.v1.message_pb2.Payload
+            builtins.str, temporalio.api.common.v1.message_pb2.Payload
         ]
         | None = ...,
         topic: builtins.str = ...,
         sequence: builtins.int = ...,
-        kind: temporal.api.stream.v1.message_pb2.StreamRecordKind.ValueType = ...,
+        kind: temporalio.api.stream.v1.message_pb2.StreamRecordKind.ValueType = ...,
         offset: builtins.int = ...,
         producer_id: builtins.str = ...,
         attempt: builtins.int = ...,

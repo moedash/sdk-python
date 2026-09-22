@@ -92,7 +92,7 @@ class StreamState(google.protobuf.message.Message):
     """Truncation floor. Offsets below this are gone."""
     closed: builtins.bool
     @property
-    def close_reason(self) -> temporal.api.common.v1.message_pb2.Payload: ...
+    def close_reason(self) -> temporalio.api.common.v1.message_pb2.Payload: ...
     @property
     def producers(
         self,
@@ -135,7 +135,7 @@ class StreamState(google.protobuf.message.Message):
         head_offset: builtins.int = ...,
         base_offset: builtins.int = ...,
         closed: builtins.bool = ...,
-        close_reason: temporal.api.common.v1.message_pb2.Payload | None = ...,
+        close_reason: temporalio.api.common.v1.message_pb2.Payload | None = ...,
         producers: collections.abc.Mapping[builtins.str, global___ProducerCursor]
         | None = ...,
         consumers: collections.abc.Mapping[builtins.str, global___ConsumerCursor]
