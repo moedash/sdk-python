@@ -25,6 +25,7 @@ producers alike and read from either side.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
@@ -36,7 +37,7 @@ import temporalio.converter
 from temporalio import workflow
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.streams._errors import StreamCursorError
+from temporalio.streams._errors import StreamCursorError, StreamProducerError
 from temporalio.streams._ids import topic_key
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
@@ -65,6 +66,15 @@ def _wake(future: asyncio.Future[None]) -> None:
         future.set_result(None)
 
 
+def _fingerprint(bodies: list[bytes]) -> bytes:
+    """A digest of one append's content, length-delimited so a split cannot collide."""
+    digest = hashlib.sha256()
+    for body in bodies:
+        digest.update(len(body).to_bytes(8, "big"))
+        digest.update(body)
+    return digest.digest()
+
+
 class _Topic:
     """One topic's records, and the waiters parked on its tail."""
 
@@ -72,8 +82,9 @@ class _Topic:
         self.records: list[bytes] = []
         # Dedupe identity is (producer#attempt, first sequence of the append),
         # the same pair the storage providers use, mapped to where the batch
-        # landed so a repeat can answer with the original position.
-        self.seen: dict[tuple[str, int], tuple[int, int]] = {}
+        # landed and a digest of what it held, so a repeat answers with the
+        # original position and a divergent one is told apart from it.
+        self.seen: dict[tuple[str, int], tuple[int, int, bytes]] = {}
         # Each waiter is parked with the loop it belongs to. A workflow's
         # publish runs on the workflow thread, and waking a foreign loop's
         # future from there needs call_soon_threadsafe or the loop stays
@@ -89,16 +100,32 @@ class _Topic:
     ) -> tuple[int, int]:
         """Store ``wires`` and return where they landed as ``(first offset, count)``.
 
-        With a ``writer``, a repeat of ``(writer, sequence)`` stores nothing
-        and returns where the original landed.
+        With a ``writer``, a repeat of ``(writer, sequence)`` carrying the same
+        content stores nothing and returns where the original landed.
+
+        Raises:
+            StreamProducerError: ``(writer, sequence)`` is held with different
+                content.
         """
         key = (writer or "", sequence)
-        if writer is not None and key in self.seen:
-            return self.seen[key]
-        first = len(self.records)
-        self.records.extend(wire.SerializeToString() for wire in wires)
+        # Deterministic so the digest of one append does not depend on how
+        # protobuf happened to order a payload's metadata map.
+        bodies = [wire.SerializeToString(deterministic=True) for wire in wires]
+        content = _fingerprint(bodies)
         if writer is not None:
-            self.seen[key] = (first, len(wires))
+            held = self.seen.get(key)
+            if held is not None:
+                first, count, seen_content = held
+                if seen_content != content:
+                    raise StreamProducerError(
+                        f"producer sequence {sequence} already used with different "
+                        f"content by {writer!r}"
+                    )
+                return first, count
+        first = len(self.records)
+        self.records.extend(bodies)
+        if writer is not None:
+            self.seen[key] = (first, len(wires), content)
         waiters, self._waiters = self._waiters, []
         for loop, future in waiters:
             loop.call_soon_threadsafe(_wake, future)
@@ -114,6 +141,10 @@ class _Topic:
         try:
             await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError:
+            pass
+        finally:
+            # Dropped on every exit, cancellation included, so a reader that
+            # aclose()s while parked here leaves nothing behind on the topic.
             self._waiters = [w for w in self._waiters if w[1] is not future]
 
 
@@ -233,8 +264,11 @@ class MemoryProducer(Generic[T]):
     async def append(self, *values: T) -> Cursor:
         """Append ``values`` and return the cursor of the last record as stored.
 
-        A repeat returns where the original landed; an empty call returns
-        the position of this producer's last record.
+        A repeat of the same content returns where the original landed; an
+        empty call returns the position of this producer's last record.
+
+        Raises:
+            StreamProducerError: This sequence is held with different content.
         """
         if not values:
             return self._last

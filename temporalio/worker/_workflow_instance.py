@@ -1353,6 +1353,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def workflow_is_continue_as_new_suggested(self) -> bool:
         return self._continue_as_new_suggested
 
+    def workflow_is_evicting(self) -> bool:
+        return self._deleting
+
     def workflow_is_target_worker_deployment_version_changed(self) -> bool:
         return self._target_worker_deployment_version_changed
 

@@ -61,9 +61,15 @@ class StreamProducer(Protocol[T_contra]):
     async def append(self, *values: T_contra) -> Cursor | None:
         """Append ``values`` and return the cursor of the last record as the store holds it.
 
-        A repeat of an earlier append (same producer, attempt and sequence) is
-        written once and returns the position the original landed at. An
-        empty call writes nothing and returns the same value a repeat would:
+        A repeat of an earlier append (same producer, attempt and sequence)
+        carrying the same content is written once and returns the position the
+        original landed at. A repeat carrying different content is a conflict,
+        not a retry: it raises :class:`StreamProducerError` and writes nothing,
+        because the store cannot tell which of the two the reader was meant to
+        see. A provider that cannot compare content says so in its own
+        documentation rather than picking one silently.
+
+        An empty call writes nothing and returns the same value a repeat would:
         the position of this producer's last record, or ``BEGINNING`` when it
         has written none. ``None`` means one thing only: this provider learns
         positions at read time, and a caller that needs one positions itself
@@ -281,5 +287,12 @@ class StreamProvider(Protocol):
         A provider that keeps a connection pool or an HTTP session open needs
         a moment where the process says it is done; this is it. A provider
         that holds nothing returns at once.
+
+        The application calls this, not the worker and not the client. One
+        provider serves the workers built from a client and every handle
+        opened outside them, so no single one of those owns its lifetime and
+        a worker shutting down would close a connection its siblings are
+        still reading through. A provider that outlives the process it was
+        made in is the application's to close.
         """
         ...

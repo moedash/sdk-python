@@ -11,11 +11,13 @@ which capabilities it lacks, so the cases marked ``reports_positions`` are
 skipped with a reason on a provider whose ``append()`` learns positions at
 read time.
 
-What this file pins down is the contract: the record on the wire, producer
-identity, retry deduplication, positions, supersession, topic addressing,
-cursor resumption, cursor ownership, and store keys that cannot collide. The
-workflow-side handles and the two rules about Workflow Tasks live in
-``test_streams_workflow``.
+What this file pins down is what a provider owes: producer identity, retry
+deduplication, positions, supersession, topic addressing, cursor resumption,
+cursor ownership, and releasing a read the caller stopped early. Every case
+here goes through the public surface, so a new provider answers this file and
+nothing else. The shared pieces no provider implements are unit-tested in
+``test_streams_internals``; the workflow-side handles and the two rules about
+Workflow Tasks live in ``test_streams_workflow``.
 """
 
 from __future__ import annotations
@@ -31,20 +33,17 @@ import pytest
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.common import RawValue
-from temporalio.converter import DataConverter
 from temporalio.streams import (
     BEGINNING,
     Cursor,
     RecordKind,
     StreamCursorError,
     StreamHandle,
+    StreamProducerError,
     StreamProvider,
     Supersession,
-    _ids,
-    _wire,
     topic,
 )
-from temporalio.streams._policy import AttemptTracker
 from temporalio.streams.providers.memory import MemoryStreams
 
 # Defined once and shared by every case, the way an application shares them
@@ -65,6 +64,8 @@ class ProviderCase:
     client: Client | None = None
     reports_positions: bool = True
     """``append()`` returns where the records landed."""
+    detects_divergent_retries: bool = True
+    """``append()`` compares a repeat's content with what it already holds."""
     host: Callable[[str], Awaitable[None]] | None = None
     """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
 
@@ -97,6 +98,7 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
+    "detects_divergent_retries": lambda case: case.detects_divergent_retries,
 }
 
 
@@ -128,77 +130,6 @@ async def take(records: Any, count: int, timeout: float = 5.0) -> list:
 
     await asyncio.wait_for(_collect(), timeout)
     return out
-
-
-def test_record_roundtrips_through_the_wire():
-    converter = DataConverter.default.payload_converter
-    wire = _wire.to_wire(
-        converter,
-        topic="decisions",
-        kind=RecordKind.DATA,
-        value={"n": 1},
-        producer_id="model",
-        attempt=3,
-        sequence=7,
-    )
-    parsed = _wire.WireRecord.FromString(wire.SerializeToString())
-    record = _wire.from_wire(converter, Cursor("memory:0"), parsed, dict)
-    assert (
-        record.kind,
-        record.topic,
-        record.producer_id,
-        record.attempt,
-        record.sequence,
-        record.value,
-    ) == (RecordKind.DATA, "decisions", "model", 3, 7, {"n": 1})
-    assert record.supersession is None
-    finish = _wire.to_wire(converter, topic="decisions", kind=RecordKind.FINISH)
-    assert not finish.HasField("body")
-    assert _wire.from_wire(converter, Cursor("memory:1"), finish, dict).value is None
-
-
-def test_a_stored_supersession_is_not_a_record():
-    converter = DataConverter.default.payload_converter
-    wire = _wire.WireRecord(topic="t", kind=int(RecordKind.SUPERSEDED))  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="synthesized"):
-        _wire.from_wire(converter, Cursor("memory:0"), wire, None)
-
-
-def test_an_unset_kind_is_read_as_data():
-    converter = DataConverter.default.payload_converter
-    wire = _wire.WireRecord(topic="t", body=converter.to_payloads([{"n": 1}])[0])
-    record = _wire.from_wire(converter, Cursor("memory:0"), wire, dict)
-    assert record.kind is RecordKind.DATA
-    assert record.value == {"n": 1}
-
-
-def test_supersession_is_synthesized_from_observations():
-    attempts = AttemptTracker()
-    assert attempts.note("model", 1, topic="t", previous=BEGINNING) is None
-    superseded = attempts.note("model", 2, topic="t", previous=Cursor("memory:0"))
-    assert superseded is not None
-    assert superseded.kind is RecordKind.SUPERSEDED
-    assert superseded.supersession == Supersession("model", 1, 2)
-    assert superseded.value is None
-    # Positioned before the triggering record, so a resume after it delivers
-    # that record next.
-    assert superseded.cursor == Cursor("memory:0")
-    # The same attempt again is not a new generation.
-    assert attempts.note("model", 2, topic="t", previous=Cursor("memory:1")) is None
-
-
-def test_topic_keys_cannot_collide():
-    # A colon in a workflow id must not make two addresses one key.
-    assert _ids.topic_key("a:b", "c") != _ids.topic_key("a", "b:c")
-    assert _ids.topic_key("a%3Ab", "c") != _ids.topic_key("a:b", "c")
-    assert _ids.topic_key("wf", "inputs") == "wf:inputs"
-
-
-def test_cursors_name_their_provider():
-    assert _wire.cursor_position(BEGINNING, provider="memory") is None
-    assert _wire.cursor_position(Cursor("memory:42"), provider="memory") == "42"
-    with pytest.raises(StreamCursorError):
-        _wire.cursor_position(Cursor("redis:1700000000000-0"), provider="memory")
 
 
 async def test_append_read_roundtrip(case: ProviderCase):
@@ -267,6 +198,48 @@ async def test_retried_append_is_stored_once(case: ProviderCase):
 
     records = await take(stream.read(topic=OUT), 2)
     assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
+
+
+@pytest.mark.detects_divergent_retries
+async def test_a_divergent_retry_is_refused(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    first = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await first.append({"id": "r1"})
+
+    # Same producer, attempt and sequence, different content. The store has no
+    # way to know which of the two the reader was meant to see, so it says so
+    # rather than answering with the position of the one it kept.
+    retry = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    with pytest.raises(StreamProducerError):
+        await retry.append({"id": "other"})
+
+    # And it wrote nothing: the producer that owns the sequence carries on
+    # past the original, with no second record wedged in front of it.
+    await first.append({"id": "r2"})
+    records = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
+
+
+async def test_closing_a_read_early_releases_it(case: ProviderCase):
+    # A read with nothing left to hand over waits against the store. Closing
+    # the generator is how a caller that stops early says so, and it has to
+    # let go of whatever it parked instead of hanging on it.
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await producer.append({"n": 1})
+
+    records = stream.read(topic=OUT)
+    assert (await asyncio.wait_for(records.__anext__(), 5.0)).value == {"n": 1}
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(records.__anext__(), 0.5)
+    await asyncio.wait_for(records.aclose(), 5.0)
+
+    # The topic is untouched by the close: a new read still sees everything.
+    await producer.append({"n": 2})
+    again = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in again] == [{"n": 1}, {"n": 2}]
 
 
 async def test_new_attempt_supersedes_the_old_one(case: ProviderCase):
