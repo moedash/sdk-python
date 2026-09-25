@@ -45,9 +45,32 @@ class ProviderPlugin(
     interceptor that calls the workflow half's lifecycle hooks.
     """
 
+    def _claim(self, held: StreamProvider | None) -> StreamProvider:
+        """This provider, unless another one already holds the slot.
+
+        There is one slot and it decides where every workflow on the thing
+        being configured reads and publishes. A last-write-wins here would
+        silently drop a provider the user passed by hand or a second provider
+        plugin, so say it instead; a process that talks to two stores opens
+        the other one's handles from the provider object.
+
+        Raises:
+            ValueError: Another provider already holds the slot.
+        """
+        if held is not None and held is not self:
+            raise ValueError(
+                f"stream provider {held!r} is already registered; pass one provider "
+                f"and open the other's handles from the object itself"
+            )
+        return self
+
     def configure_client(self, config: ClientConfig) -> ClientConfig:
-        """Set this provider as the client's ``stream_provider``."""
-        config["stream_provider"] = self
+        """Set this provider as the client's ``stream_provider``.
+
+        Raises:
+            ValueError: Another provider already holds the slot.
+        """
+        config["stream_provider"] = self._claim(config.get("stream_provider"))
         return config
 
     async def connect_service_client(
@@ -59,13 +82,21 @@ class ProviderPlugin(
         return await next(config)
 
     def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
-        """Set this provider as the worker's ``stream_provider``."""
-        config["stream_provider"] = self
+        """Set this provider as the worker's ``stream_provider``.
+
+        Raises:
+            ValueError: Another provider already holds the slot.
+        """
+        config["stream_provider"] = self._claim(config.get("stream_provider"))
         return config
 
     def configure_replayer(self, config: ReplayerConfig) -> ReplayerConfig:
-        """Set this provider as the replayer's ``stream_provider``."""
-        config["stream_provider"] = self
+        """Set this provider as the replayer's ``stream_provider``.
+
+        Raises:
+            ValueError: Another provider already holds the slot.
+        """
+        config["stream_provider"] = self._claim(config.get("stream_provider"))
         return config
 
     async def run_worker(
