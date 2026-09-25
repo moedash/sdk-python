@@ -61,9 +61,15 @@ class StreamProducer(Protocol[T_contra]):
     async def append(self, *values: T_contra) -> Cursor | None:
         """Append ``values`` and return the cursor of the last record as the store holds it.
 
-        A repeat of an earlier append (same producer, attempt and sequence) is
-        written once and returns the position the original landed at. An
-        empty call writes nothing and returns the same value a repeat would:
+        A repeat of an earlier append (same producer, attempt and sequence)
+        carrying the same content is written once and returns the position the
+        original landed at. A repeat carrying different content is a conflict,
+        not a retry: it raises :class:`StreamProducerError` and writes nothing,
+        because the store cannot tell which of the two the reader was meant to
+        see. A provider that cannot compare content says so in its own
+        documentation rather than picking one silently.
+
+        An empty call writes nothing and returns the same value a repeat would:
         the position of this producer's last record, or ``BEGINNING`` when it
         has written none. ``None`` means one thing only: this provider learns
         positions at read time, and a caller that needs one positions itself

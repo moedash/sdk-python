@@ -10,7 +10,7 @@ instance and which capabilities it lacks, so the cases marked
 ``append()`` learns positions at read time.
 
 What this file pins down is what a provider owes: producer identity, retry
-deduplication, positions, supersession, topic addressing, cursor resumption
+deduplication, positions, supersession, topic addressing, cursor resumption,
 and cursor ownership. Every case here goes through the public surface, so a new provider answers this file and
 nothing else. The shared pieces no provider implements are unit-tested in
 ``test_streams_internals``; the workflow-side handles and the two rules about
@@ -36,6 +36,7 @@ from temporalio.streams import (
     RecordKind,
     StreamCursorError,
     StreamHandle,
+    StreamProducerError,
     StreamProvider,
     Supersession,
     topic,
@@ -59,6 +60,8 @@ class ProviderCase:
     provider: StreamProvider
     reports_positions: bool = True
     """``append()`` returns where the records landed."""
+    detects_divergent_retries: bool = True
+    """``append()`` compares a repeat's content with what it already holds."""
 
     async def open(
         self, workflow_id: str, *, run_id: str | None = None
@@ -83,6 +86,7 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
+    "detects_divergent_retries": lambda case: case.detects_divergent_retries,
 }
 
 
@@ -180,6 +184,27 @@ async def test_retried_append_is_stored_once(case: ProviderCase):
     await retry.append({"id": "r1"})
     await retry.append({"id": "r2"})
 
+    records = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
+
+
+@pytest.mark.detects_divergent_retries
+async def test_a_divergent_retry_is_refused(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    first = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await first.append({"id": "r1"})
+
+    # Same producer, attempt and sequence, different content. The store has no
+    # way to know which of the two the reader was meant to see, so it says so
+    # rather than answering with the position of the one it kept.
+    retry = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    with pytest.raises(StreamProducerError):
+        await retry.append({"id": "other"})
+
+    # And it wrote nothing: the producer that owns the sequence carries on
+    # past the original, with no second record wedged in front of it.
+    await first.append({"id": "r2"})
     records = await take(stream.read(topic=OUT), 2)
     assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
 
