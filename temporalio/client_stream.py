@@ -39,6 +39,7 @@ from typing import Any, TypeVar
 import google.protobuf.duration_pb2
 import grpc
 import grpc.aio
+from google.protobuf.message import Message
 
 import temporalio.api.streamservice.v1 as stream
 from temporalio.api.stream.v1 import StreamRecord
@@ -110,36 +111,58 @@ class Page:
     run_id: str = ""
 
 
+def _copy_by_name(source: Message, target: Message, *, skip: frozenset[str]) -> None:
+    """Copy every field ``source`` has set onto the field of ``target`` with that name.
+
+    By descriptor rather than field by field, so a field added to
+    ``StreamRecord`` crosses in both directions without anybody remembering to
+    add a line here. A field the target does not have raises, which is the
+    answer a reader wants: better a loud failure than a body that arrives
+    without the thing that described it.
+    """
+    fields = target.DESCRIPTOR.fields_by_name
+    for descriptor, value in source.ListFields():
+        if descriptor.name in skip:
+            continue
+        if descriptor.name not in fields:
+            raise ValueError(
+                f"{source.DESCRIPTOR.full_name}.{descriptor.name} has no counterpart "
+                f"on {target.DESCRIPTOR.full_name}"
+            )
+        field = getattr(target, descriptor.name)
+        if descriptor.message_type is not None and (
+            descriptor.message_type.GetOptions().map_entry
+        ):
+            holds_message = (
+                descriptor.message_type.fields_by_name["value"].message_type is not None
+            )
+            for key, item in value.items():
+                if holds_message:
+                    field[key].CopyFrom(item)
+                else:
+                    field[key] = item
+        elif hasattr(field, "extend"):
+            # A plain repeated field; maps answered above and everything else
+            # takes an assignment or a CopyFrom.
+            field.extend(value)
+        elif descriptor.type == descriptor.TYPE_MESSAGE:
+            field.CopyFrom(value)
+        else:
+            setattr(target, descriptor.name, value)
+
+
 def _to_service(record: StreamRecord) -> stream.StreamRecord:
-    # Field for field the public record; the stored shape only adds the offset
-    # a read assigns. An unset body stays unset so a FINISH record reads back
-    # as one.
-    out = stream.StreamRecord(
-        topic=record.topic,
-        kind=record.kind,
-        producer_id=record.producer_id,
-        attempt=record.attempt,
-        sequence=record.sequence,
-    )
-    if record.HasField("body"):
-        out.body.CopyFrom(record.body)
-    for key, value in record.metadata.items():
-        out.metadata[key].CopyFrom(value)
+    # The stored shape is the public record plus the offset a read assigns.
+    # An unset body stays unset, so a FINISH record reads back as one.
+    out = stream.StreamRecord()
+    _copy_by_name(record, out, skip=frozenset())
     return out
 
 
 def _to_public(record: stream.StreamRecord) -> StreamEntry:
-    out = StreamRecord(
-        topic=record.topic,
-        kind=record.kind,
-        producer_id=record.producer_id,
-        attempt=record.attempt,
-        sequence=record.sequence,
-    )
-    if record.HasField("body"):
-        out.body.CopyFrom(record.body)
-    for key, value in record.metadata.items():
-        out.metadata[key].CopyFrom(value)
+    out = StreamRecord()
+    # The offset is the store's, not the record's; it rides on the entry.
+    _copy_by_name(record, out, skip=frozenset({"offset"}))
     return StreamEntry(record=out, offset=record.offset)
 
 
