@@ -22,7 +22,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamRecord, StreamRecordKind
 from temporalio.client_stream import StreamClient, StreamHandle
 from temporalio.service import RPCError
-from temporalio.streams import StreamNotFoundError
+from temporalio.streams import StreamNotFoundError, StreamProducerError
 
 TARGET = os.environ.get("TEMPORAL_STREAM_TARGET")
 
@@ -190,3 +190,22 @@ async def test_failures_surface_as_sdk_errors(streams: StreamClient) -> None:
         await missing.describe()
     with pytest.raises((StreamNotFoundError, RPCError)):
         await missing.append(rec(b"x"))
+
+
+# A producer that asked to be deduplicated and could not be is a condition of
+# its own, not a bare argument error: the store already holds that sequence.
+async def test_a_producer_conflict_is_a_stream_producer_error(
+    stream: StreamHandle,
+) -> None:
+    await stream.append(rec(b"one"), producer_id="p1", sequence=0)
+    # Same producer and sequence, different content. The server cannot know
+    # which of the two the reader was meant to see.
+    with pytest.raises(StreamProducerError, match="different content"):
+        await stream.append(rec(b"other"), producer_id="p1", sequence=0)
+    # And a sequence behind the one it accepted last.
+    await stream.append(rec(b"two"), producer_id="p1", sequence=1)
+    with pytest.raises(StreamProducerError, match="stale producer sequence"):
+        await stream.append(rec(b"three"), producer_id="p1", sequence=0)
+
+    entries, _ = await stream.read()
+    assert data(entries) == [b"one", b"two"]

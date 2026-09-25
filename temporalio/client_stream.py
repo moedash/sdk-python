@@ -22,7 +22,9 @@ change before this is a real feature:
   here rather than by the machinery that normally handles that.
 
 A failed call raises :class:`temporalio.streams.StreamNotFoundError` when the
-server answers ``NOT_FOUND`` and :class:`temporalio.service.RPCError`
+server answers ``NOT_FOUND``,
+:class:`temporalio.streams.StreamProducerError` when it refuses a producer
+sequence it already holds, and :class:`temporalio.service.RPCError`
 otherwise, never the transport's own exception type.
 """
 
@@ -42,7 +44,7 @@ import temporalio.api.streamservice.v1 as stream
 from temporalio.api.stream.v1 import StreamRecord
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.streams import StreamNotFoundError
+from temporalio.streams import StreamNotFoundError, StreamProducerError
 
 __all__ = [
     "Appended",
@@ -56,6 +58,12 @@ __all__ = [
 ]
 
 _T = TypeVar("_T")
+
+# The server refuses a producer sequence it already holds with a message and
+# no typed detail, so the phrase is the only thing to match on. Both refusals
+# it sends carry it: a repeat with different content, and one behind the
+# sequence it accepted last.
+_PRODUCER_CONFLICT = "producer sequence"
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,11 @@ def _translate(error: grpc.aio.AioRpcError) -> Exception:
     details = error.details() or code.name
     if code is grpc.StatusCode.NOT_FOUND:
         return StreamNotFoundError(details)
+    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_CONFLICT in details:
+        # A producer sequence the store already holds, either with different
+        # content or behind the one it accepted last. The caller asked to be
+        # deduplicated and could not be, which is a condition of its own.
+        return StreamProducerError(details)
     raw = b""
     # The aio metadata iterates as (key, value) pairs at runtime, whatever
     # shape the stubs give its items.
