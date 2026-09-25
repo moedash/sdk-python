@@ -107,8 +107,8 @@ class StreamRecord(Generic[T]):
     """Who wrote it, or empty when the owning workflow wrote it itself."""
     attempt: int = 0
     """The producer's attempt, or 0 when it did not declare one."""
-    sequence: int = -1
-    """The producer's position within its attempt, or -1 when unnumbered."""
+    sequence: int = 0
+    """The producer's position within its attempt, or 0 when it does not number."""
     value: T | None = None
     """The published value. Set on ``DATA`` only."""
     supersession: Supersession | None = None
