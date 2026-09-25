@@ -33,6 +33,27 @@ to include examples, links to docs, or any other relevant information.
   is `temporal.api.stream.v1.StreamRecord` on every provider.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against.
+- **Experimental**: server-side streams. A workflow publishes to a stream it
+  owns with a command the server applies in its Workflow Task's commit, and
+  reads the ranges the server delivers on its Workflow Tasks, through
+  `temporalio.workflow.append_stream_records`, `subscribe_stream` and
+  `read_stream_records`. `temporalio.client_stream` and
+  `temporalio.contrib.server_streams` reach the same stream from outside a
+  workflow, and `temporalio.streams.providers.native.NativeStreams` puts it
+  behind the shared stream interface with one owned stream per topic. Requires
+  a server that serves the stream service. `Replayer(stream_client=)` replays a
+  workflow that read such a stream while the server still holds it: History
+  records only the offsets each task consumed, so the replayer fetches the
+  records from the stream service and hands them to the replay with the
+  history. A range the stream no longer holds fails the replay with
+  `StreamNotFoundError`. A handle without a run id follows a workflow reset as
+  it follows a continue-as-new, reading the reset run from the floor its stream
+  reports, and the replayer fetches the ranges recorded before a reset point
+  from the run the workflow was reset from. For offline replay,
+  `Replayer.fetch_stream_slices(client, history)` attaches the records to a
+  `WorkflowHistory` while the stream is retained, `to_json()` and `from_json()`
+  carry them as `streamSlices` beside the events, and a history that carries
+  them replays with no server.
 
 ### Changed
 
