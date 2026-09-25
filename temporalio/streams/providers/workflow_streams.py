@@ -15,8 +15,20 @@ The mapping, in one place:
   code stores and returns that ``Payload`` untouched, so the body's own
   encoding never meets the transport.
 - Producer identity dedupes through the shipped publisher state: the
-  publisher id is ``producer#attempt`` and every publish Signal carries a
-  monotonic sequence, so a retried batch drops and a new attempt passes.
+  publisher id is ``producer#attempt`` and every publish Signal carries the
+  sequence its records end at, so a retried batch drops and a new attempt
+  passes.
+
+  What this transport cannot keep is the rest of that rule. A publish is a
+  Signal, which has no response, so the dedupe decision is taken in the
+  workflow and there is nowhere to report it. A repeat that carries
+  *different* content at a sequence the log already holds is therefore
+  dropped rather than refused with
+  :class:`temporalio.streams.StreamProducerError`, the way the memory and
+  native providers refuse it. Raising in the Signal handler is not an
+  alternative: it would fail the Workflow Task on every replay and the
+  caller would still learn nothing. A caller that needs a divergent retry to
+  be caught wants a provider whose append is a request and a response.
 - ``append()`` returns ``None``. The Signal transport learns positions at
   read time, so a caller that wants to follow from now asks ``latest()``.
 - A log belongs to one run and is not carried across continue-as-new, so a
@@ -321,7 +333,6 @@ class WorkflowStreamsProducer(Generic[T]):
         self._producer_id = producer_id
         self._attempt = attempt
         self._sequence = 0
-        self._signal_sequence = 0
         self._pending: tuple[list[PublishEntry], int] | None = None
 
     @property
@@ -391,7 +402,11 @@ class WorkflowStreamsProducer(Generic[T]):
         await self._signal(entries, next_sequence)
 
     async def _signal(self, entries: list[PublishEntry], next_sequence: int) -> None:
-        signal_sequence = self._signal_sequence + 1
+        # The dedupe sequence is where this producer's records end, not how
+        # many signals it has sent. The two differ once a retry batches its
+        # records differently from the send it is repeating, and a counter of
+        # signals then either drops a batch of new records or lets records
+        # that are already there through a second time.
         self._pending = (entries, next_sequence)
         try:
             await self._handle.signal(
@@ -399,7 +414,7 @@ class WorkflowStreamsProducer(Generic[T]):
                 PublishInput(
                     items=entries,
                     publisher_id=self._publisher_id,
-                    sequence=signal_sequence,
+                    sequence=next_sequence,
                 ),
             )
         except RPCError as error:
@@ -409,7 +424,6 @@ class WorkflowStreamsProducer(Generic[T]):
                     "cannot be appended to"
                 ) from error
             raise
-        self._signal_sequence = signal_sequence
         self._sequence = next_sequence
         self._pending = None
 

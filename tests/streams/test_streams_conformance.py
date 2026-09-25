@@ -69,6 +69,8 @@ class ProviderCase:
     client: Client | None = None
     reports_positions: bool = True
     """``append()`` returns where the records landed."""
+    detects_divergent_retries: bool = True
+    """``append()`` compares a repeat's content with what it already holds."""
     host: Callable[[str], Awaitable[None]] | None = None
     """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
 
@@ -134,6 +136,10 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             provider,
             client,
             reports_positions=False,
+            # A publish is a Signal, so the dedupe decision is taken in the
+            # workflow with nowhere to report it. See the module docstring of
+            # the provider.
+            detects_divergent_retries=False,
             host=host,
         )
         for handle in hosts.values():
@@ -147,6 +153,7 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
+    "detects_divergent_retries": lambda case: case.detects_divergent_retries,
 }
 
 

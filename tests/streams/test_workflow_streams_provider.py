@@ -366,5 +366,40 @@ async def test_a_batch_whose_signal_failed_goes_out_before_the_next_one():
         await producer.append({"n": 1})
     await producer.append({"n": 2}, {"n": 3})
     await producer.finish()
-    assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (2, [1, 2]), (3, [3])]
+    assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (3, [1, 2]), (4, [3])]
     assert _wires(handle.sent[-1])[0].kind == int(RecordKind.FINISH)
+
+
+class _PlainHandle:
+    """A workflow handle that accepts every Signal and remembers it."""
+
+    id = "plain"
+
+    def __init__(self) -> None:
+        self.sent: list[PublishInput] = []
+
+    async def signal(self, name: str, arg: PublishInput) -> None:
+        del name
+        self.sent.append(arg)
+
+
+async def test_the_dedupe_sequence_names_where_the_records_end():
+    # The shipped handler drops a batch whose sequence it has already passed,
+    # so the sequence has to say how far this producer's records reach. A
+    # count of signals does not: a retry that batches its records differently
+    # from the send it repeats then carries a sequence the workflow has not
+    # seen, and the records it already holds go in a second time.
+    first = _PlainHandle()
+    original = _producer(first)  # type: ignore[arg-type]
+    await original.append({"n": 1}, {"n": 2})
+
+    second = _PlainHandle()
+    retry = _producer(second)  # type: ignore[arg-type]
+    await retry.append({"n": 1})
+    await retry.append({"n": 2})
+    await retry.append({"n": 3})
+
+    # The original ended at record 1, so its sequence is 2. Neither half of
+    # the retry's re-split reaches past it, and only the new record does.
+    assert _sequences(first.sent) == [(2, [0, 1])]
+    assert _sequences(second.sent) == [(1, [0]), (2, [1]), (3, [2])]
