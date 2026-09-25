@@ -1,5 +1,6 @@
 """Testing utilities for OpenAI agents."""
 
+import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
@@ -73,7 +74,9 @@ class ResponseBuilders:
         return ResponseBuilders.model_response(
             ResponseFunctionToolCall(
                 arguments=arguments,
-                call_id="call",
+                # The Agents SDK rejects two invocations sharing one completed
+                # call id, and a script that calls two tools would hand them one.
+                call_id=f"call-{uuid.uuid4()}",
                 name=name,
                 type="function_call",
                 id="id",
