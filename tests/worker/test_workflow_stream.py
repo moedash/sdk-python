@@ -286,3 +286,12 @@ def test_a_task_over_the_batch_limits_is_split_into_commands() -> None:
     stub.publish(big, big, record(b"y" * room))
     stub.flush()
     assert [len(c.append_stream_records.records) for c in stub.commands] == [2, 1]
+
+
+async def test_the_continuity_failure_says_what_to_do_about_it() -> None:
+    buffer = _StreamBuffer("s")
+    buffer.extend([record(b"one")], 0, 1)
+    with pytest.raises(RuntimeError) as failed:
+        buffer.extend([record(b"two")], 5, 6)
+    # The task fails and keeps failing, so the message has to name the way out.
+    assert "Reset the workflow" in str(failed.value)

@@ -276,6 +276,27 @@ _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], A
 # Match the server's per-batch limits. A record over its limit is refused where
 # it is published, because a rejected command would be reissued on every
 # replay; a task's records are split into commands that fit the batch limits.
+#
+# Copied rather than learned: the activation does not carry them and the
+# server does not report them, so this is a second copy of a number somebody
+# else owns. If the server lowers one, or makes it per namespace, the split
+# here stops fitting and the command is rejected on every replay, which is
+# the failure the split exists to avoid. Carrying them on the activation is
+# what would fix that, and it needs a Core and server change.
+_STREAM_CONTINUITY_REMEDY = (
+    "This fails the Workflow Task and will keep failing it, because the range "
+    "is recorded as consumed and will not be sent again. Reset the workflow to "
+    "before the subscription to start its stream reading over, or terminate it "
+    "if its output is no longer wanted."
+)
+
+_STREAM_CONTINUITY_REMEDY = (
+    "This fails the Workflow Task and will keep failing it, because the range "
+    "is recorded as consumed and will not be sent again. Reset the workflow to "
+    "before the subscription to start its stream reading over, or terminate it "
+    "if its output is no longer wanted."
+)
+
 _MAX_STREAM_RECORDS_PER_BATCH = 1000
 _MAX_STREAM_RECORD_BYTES = 1 << 20
 _MAX_STREAM_BATCH_BYTES = 2 << 20
@@ -345,12 +366,13 @@ class _StreamBuffer:
         if to_offset - from_offset != len(records):
             raise RuntimeError(
                 f"stream {self._stream_id!r} delivered {len(records)} records "
-                f"for offsets [{from_offset}, {to_offset})"
+                f"for offsets [{from_offset}, {to_offset}). {_STREAM_CONTINUITY_REMEDY}"
             )
         if self._next_offset is not None and from_offset != self._next_offset:
             raise RuntimeError(
                 f"stream {self._stream_id!r} delivered offsets [{from_offset}, "
-                f"{to_offset}) but the last range ended at {self._next_offset}"
+                f"{to_offset}) but the last range ended at {self._next_offset}. "
+                f"{_STREAM_CONTINUITY_REMEDY}"
             )
         self._next_offset = to_offset
         # An empty range still counts as a delivery, but there is nothing to
