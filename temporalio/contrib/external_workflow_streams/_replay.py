@@ -252,7 +252,9 @@ async def _read_range(
     """
     try:
         return await backend.read_range(key, run.first_offset, run.last_offset)
-    except StreamStorageError:
+    except (StreamStorageError, StreamIntegrityError):
+        # A backend that can tell the range is gone reports the loss itself;
+        # wrapping it would file a permanent loss under a transient failure.
         raise
     except Exception as err:
         # Not integrity loss: nothing has been shown to be missing, only
