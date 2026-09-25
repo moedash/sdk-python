@@ -290,6 +290,7 @@ class Replayer:
                 default_workflow_logic_flags=frozenset(
                     self._default_workflow_logic_flags
                 ),
+                stream_provider=self._config.get("stream_provider"),
             )
             external_storage = data_converter.external_storage
             storage_driver_types = (
