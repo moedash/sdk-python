@@ -209,7 +209,9 @@ class MemoryProducer(Generic[T]):
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
-        self._sequence = 0
+        # One-based, because zero on the wire says the producer does not
+        # number its records and this one does.
+        self._sequence = 1
         self._last = BEGINNING
 
     @property

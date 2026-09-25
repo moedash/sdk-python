@@ -218,7 +218,7 @@ async def test_append_read_roundtrip(case: ProviderCase):
     assert [r.value for r in records[:2]] == [{"id": "r1"}, {"id": "r2"}]
     assert records[2].value is None
     assert all(r.producer_id == "model" and r.attempt == 1 for r in records)
-    assert [r.sequence for r in records] == [0, 1, 2]
+    assert [r.sequence for r in records] == [1, 2, 3]
     assert all(r.topic == OUT.name for r in records)
 
 
