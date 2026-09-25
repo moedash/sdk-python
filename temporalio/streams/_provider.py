@@ -287,5 +287,12 @@ class StreamProvider(Protocol):
         A provider that keeps a connection pool or an HTTP session open needs
         a moment where the process says it is done; this is it. A provider
         that holds nothing returns at once.
+
+        The application calls this, not the worker and not the client. One
+        provider serves the workers built from a client and every handle
+        opened outside them, so no single one of those owns its lifetime and
+        a worker shutting down would close a connection its siblings are
+        still reading through. A provider that outlives the process it was
+        made in is the application's to close.
         """
         ...
