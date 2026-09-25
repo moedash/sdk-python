@@ -267,11 +267,23 @@ class NativeProducer(Generic[T]):
 class NativeStreamHandle:
     """One workflow's topics from outside, over the stream service."""
 
-    def __init__(self, client: Client, workflow_id: str, run_id: str | None) -> None:
-        """Address ``workflow_id``'s topics, pinned to ``run_id`` when one is given."""
+    def __init__(
+        self,
+        client: Client,
+        workflow_id: str,
+        run_id: str | None,
+        *,
+        opened: set[tuple[str, str]] | None = None,
+    ) -> None:
+        """Address ``workflow_id``'s topics, pinned to ``run_id`` when one is given.
+
+        ``opened`` is where this handle records the shared channel it used, so
+        the provider that made it closes that one and no other.
+        """
         self._client = client
         self._workflow_id = workflow_id
         self._run_id = run_id
+        self._opened = set() if opened is None else opened
         self._converter = client.data_converter.payload_converter
         self._codec = client.data_converter.payload_codec
         self._streams: StreamClient | None = None
@@ -280,10 +292,12 @@ class NativeStreamHandle:
         # Resolved on first use, because the shared channel belongs to the
         # running loop and a handle may be made before there is one.
         if self._streams is None:
-            self._streams = shared_client(
+            key = (
                 self._client.service_client.config.target_host,
                 self._client.namespace,
             )
+            self._streams = shared_client(*key)
+            self._opened.add(key)
         return self._streams
 
     def _stream(self, topic: str, run_id: str) -> WorkflowStreamHandle:
@@ -445,8 +459,14 @@ class NativeStreams(ProviderPlugin):
     Takes no options: the streams are on the server the client is already
     connected to. Construct one, pass it to the worker as a plugin and open
     handles from it anywhere else; :meth:`close` releases the channels this
-    process opened to the stream service.
+    provider opened to the stream service.
     """
+
+    def __init__(self) -> None:
+        """Create the provider."""
+        # What this provider's handles opened, so closing it leaves another
+        # provider's channels on the same loop alone.
+        self._opened: set[tuple[str, str]] = set()
 
     def workflow_provider(self) -> _NativeWorkflowProvider:
         """The workflow half, over the server's commands and delivered ranges."""
@@ -456,8 +476,14 @@ class NativeStreams(ProviderPlugin):
         self, client: Client, workflow_id: str, *, run_id: str | None = None
     ) -> NativeStreamHandle:
         """A handle on ``workflow_id``'s topics; without ``run_id`` it follows the chain."""
-        return NativeStreamHandle(client, workflow_id, run_id)
+        return NativeStreamHandle(client, workflow_id, run_id, opened=self._opened)
 
     async def close(self) -> None:
-        """Close the channels this process opened to the stream service."""
-        await close_shared_clients()
+        """Close the channels this provider opened to the stream service.
+
+        The application calls this; no worker or client owns the provider's
+        lifetime, because one provider serves the workers built from a client
+        and every handle opened outside them.
+        """
+        await close_shared_clients(*self._opened)
+        self._opened.clear()
