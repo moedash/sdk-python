@@ -394,6 +394,32 @@ async def test_a_finished_topic_stays_finished_across_writers(
 
 
 @workflow.defn
+class NoStreams:
+    """Touches no stream at all, on a worker that has a provider."""
+
+    @workflow.run
+    async def run(self) -> str:
+        await asyncio.sleep(0)
+        return "done"
+
+
+@pytest.mark.usefixtures("provider")
+async def test_a_workflow_that_touches_no_stream_runs_unchanged(client: Client):
+    hooked = HookedMemory()
+    async with new_worker(client, NoStreams, plugins=[hooked]) as worker:
+        result = await client.execute_workflow(
+            NoStreams.run,
+            id=f"streams-wf-{uuid.uuid4().hex}",
+            task_queue=worker.task_queue,
+        )
+    assert result == "done"
+    # The interceptor is installed per worker, not per workflow, so the hooks
+    # still bracket a run that never opened a reader or a writer. A provider's
+    # hooks therefore have to be cheap and safe on a workflow that uses none.
+    assert [kind for kind, _ in hooked.calls] == ["start", "finish"]
+
+
+@workflow.defn
 class ForeignCursor:
     """Resumes from a cursor another provider minted."""
 
