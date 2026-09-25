@@ -81,18 +81,13 @@ class _StreamHooksInterceptor(WorkflowInboundInterceptor):
         except GeneratorExit:
             raise
         except BaseException:
-            if not _evicting(runtime):
+            # Eviction cancels the primary task the same way a workflow
+            # cancellation does, and only the cancellation is a run ending.
+            if not runtime.workflow_is_evicting():
                 await provider.on_workflow_finish()
             raise
         await provider.on_workflow_finish()
         return result
-
-
-def _evicting(runtime: temporalio.workflow._Runtime) -> bool:
-    # Eviction cancels the primary task the same way a workflow cancellation
-    # does; the flag the instance sets before cancelling is what tells them
-    # apart, and only the cancellation is a run ending.
-    return bool(getattr(runtime, "_deleting", False))
 
 
 # Value was chosen abitrarily as a small number that allows some concurrency and prevents

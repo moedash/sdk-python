@@ -346,6 +346,16 @@ class _Runtime(ABC):
     def workflow_is_continue_as_new_suggested(self) -> bool: ...
 
     @abstractmethod
+    def workflow_is_evicting(self) -> bool:
+        """Whether this instance is being dropped from the cache rather than ending.
+
+        Eviction cancels the primary task the way a workflow cancellation
+        does, so anything that runs on the way out has to be able to tell the
+        two apart. Instance state must not be touched while this is true.
+        """
+        ...
+
+    @abstractmethod
     def workflow_is_target_worker_deployment_version_changed(self) -> bool: ...
 
     @abstractmethod
