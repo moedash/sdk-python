@@ -57,8 +57,7 @@ from ._asyncio import (
     as_completed,
     wait,
 )
-from ._context import (
-    DeliveredStreamRecord,
+from ._context import (  # noqa: F401
     Info,
     ParentInfo,
     RootInfo,
@@ -66,7 +65,6 @@ from ._context import (
     _current_update_info,
     _Runtime,
     _set_current_update_info,
-    append_stream_records,
     cancellation_reason,
     current_update_info,
     deprecate_patch,
@@ -88,11 +86,9 @@ from ._context import (
     payload_converter,
     random,
     random_seed,
-    read_stream_records,
     register_random_seed_callback,
     set_current_details,
     sleep,
-    subscribe_stream,
     time,
     time_ns,
     upsert_memo,
@@ -100,6 +96,21 @@ from ._context import (
     uuid4,
     uuid7,
     wait_condition,
+)
+from ._context import (
+    _append_stream_records as _append_stream_records,
+)
+from ._context import (
+    _close_stream_records as _close_stream_records,
+)
+from ._context import (
+    _DeliveredStreamRecord as _DeliveredStreamRecord,
+)
+from ._context import (
+    _read_stream_records as _read_stream_records,
+)
+from ._context import (
+    _subscribe_stream as _subscribe_stream,
 )
 from ._definition import (
     DynamicWorkflowConfig,
@@ -237,10 +248,6 @@ __all__ = [
     "upsert_search_attributes",
     "uuid4",
     "uuid7",
-    "DeliveredStreamRecord",
-    "read_stream_records",
-    "append_stream_records",
-    "subscribe_stream",
     "wait_condition",
     "DynamicWorkflowConfig",
     "defn",

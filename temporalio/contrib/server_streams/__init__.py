@@ -4,7 +4,9 @@ This is the same surface as :mod:`temporalio.contrib.workflow_streams`, backed
 by a Temporal-owned log instead of by Signals and Updates. An application swaps
 the import and keeps its code: publishing from a Workflow is still a plain
 call, publishing from an Activity is still a buffered handle, and a consumer
-still subscribes by topic from an offset.
+still subscribes by topic from an offset. An Activity's appends carry its own
+id and attempt, so a retried Activity's repeat is deduplicated by the server
+rather than written twice.
 
 What changes is underneath. A publish is a Workflow Command whose payload never
 enters History, so History gets one fixed-size event per Workflow Task rather
@@ -128,7 +130,7 @@ class WorkflowTopicHandle(Generic[T]):
         transition. The Worker's payload codec applies to the body as it does
         to any other payload the Workflow sends.
         """
-        workflow.append_stream_records(
+        workflow._append_stream_records(
             [_record(workflow.payload_converter(), self._name, value)]
         )
 
@@ -220,6 +222,7 @@ class WorkflowStreamClient:
         *,
         codec: PayloadCodec | None = None,
         describe: Callable[[], Awaitable[WorkflowExecutionDescription]] | None = None,
+        producer_id: str = "",
     ) -> None:
         """Prefer :meth:`create` or :meth:`from_within_activity`.
 
@@ -227,13 +230,18 @@ class WorkflowStreamClient:
         a namespace whose payloads are encoded agrees with the Worker, whose
         payload visitor applies the same codec to the Workflow's publishes.
         ``describe`` is how an unpinned handle learns which run it follows;
-        see :meth:`WorkflowStreamHandle.pin`.
+        see :meth:`WorkflowStreamHandle.pin`. ``producer_id`` is who the
+        appends are written as; without one they are at-least-once, because
+        the server has nothing to deduplicate a retry against.
         """
         self._handle = handle
         self._converter = converter
         self._codec = codec
         self._batch_interval = batch_interval
         self._describe = describe
+        self._producer_id = producer_id
+        self._sequence = 0
+        self._pending: tuple[list[StreamRecord], int] | None = None
         self._buffered: list[tuple[str, Any]] = []
         self._flusher: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
@@ -247,13 +255,16 @@ class WorkflowStreamClient:
         *,
         owner_run_id: str = "",
         batch_interval: timedelta = DEFAULT_BATCH_INTERVAL,
+        producer_id: str = "",
     ) -> WorkflowStreamClient:
         """Open the stream owned by ``workflow_id``.
 
         Without ``owner_run_id`` the current run is looked up on the first
         call and the handle pinned to it, so a reader following across a
         continue-as-new sees the run end rather than being moved to the
-        successor's stream at a stale offset.
+        successor's stream at a stale offset. Without ``producer_id`` the
+        appends are at-least-once; inside an Activity,
+        :meth:`from_within_activity` supplies one.
         """
         return cls(
             _stream_client(client).workflow_stream(
@@ -263,6 +274,7 @@ class WorkflowStreamClient:
             batch_interval,
             codec=client.data_converter.payload_codec,
             describe=client.get_workflow_handle(workflow_id).describe,
+            producer_id=producer_id,
         )
 
     @classmethod
@@ -277,12 +289,14 @@ class WorkflowStreamClient:
                 "Workflow"
             )
         # The Activity's output belongs to the run that scheduled it, and the
-        # Activity already knows which run that is.
+        # Activity already knows which run that is. Its id and attempt are
+        # also what lets the server drop a batch a retried Activity re-sends.
         return cls.create(
             activity.client(),
             info.workflow_id,
             owner_run_id=info.workflow_run_id or "",
             batch_interval=batch_interval,
+            producer_id=f"{info.activity_id}#{info.attempt}",
         )
 
     async def __aenter__(self) -> WorkflowStreamClient:
@@ -380,16 +394,38 @@ class WorkflowStreamClient:
         )
 
     async def flush(self) -> None:
-        """Append everything buffered as one batch."""
-        pending, self._buffered = self._buffered, []
-        if not pending:
-            return
+        """Append everything buffered as one batch.
+
+        A batch whose append failed stays pending and goes out again on the
+        next flush under the sequence it already had, so an append the server
+        did accept is deduplicated and one it never saw still lands. Nothing
+        comes off the buffer until there is a batch to replace it with.
+
+        Raises:
+            temporalio.streams.StreamProducerError: The server holds this
+                producer's sequence with different content.
+        """
+        if self._pending is not None:
+            records, sequence = self._pending
+        else:
+            if not self._buffered:
+                return
+            await self._pin()
+            # Encoded before the buffer is cleared, so a converter failure
+            # leaves the values where the caller can still see them.
+            records = [
+                await self._encoded(_record(self._converter, topic, value))
+                for topic, value in self._buffered
+            ]
+            sequence = self._sequence
+            self._buffered = []
+            self._pending = (records, sequence)
         await self._pin()
-        records = [
-            await self._encoded(_record(self._converter, topic, value))
-            for topic, value in pending
-        ]
-        await self._handle.append(*records)
+        await self._handle.append(
+            *records, producer_id=self._producer_id, sequence=sequence
+        )
+        self._sequence = sequence + len(records)
+        self._pending = None
 
     def _buffer(self, topic: str, value: Any) -> None:
         self._buffered.append((topic, value))
