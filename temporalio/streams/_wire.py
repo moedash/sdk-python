@@ -43,7 +43,7 @@ def to_wire(
     value: Any = None,
     producer_id: str = "",
     attempt: int = 0,
-    sequence: int = -1,
+    sequence: int = 0,
 ) -> WireRecord:
     """Build the record a provider stores or ships.
 
