@@ -197,10 +197,10 @@ class _CommandStub:
     def commands(self) -> list[WorkflowCommand]:
         return self._current_completion.successful.commands
 
-    def publish(self, *records: api_stream.StreamRecord, stream_id: str = "") -> None:
+    def publish(self, *records: api_stream.StreamRecord, stream_name: str = "") -> None:
         instance: Any = self
         _WorkflowInstanceImpl.workflow_append_stream_records(
-            instance, stream_id, list(records)
+            instance, stream_name, list(records)
         )
 
     def flush(self) -> None:
@@ -214,13 +214,13 @@ def test_a_tasks_publishes_on_one_stream_become_one_command() -> None:
     stub = _CommandStub()
     stub.publish(record(b"a"), record(b"b"))
     stub.publish(record(b"c"))
-    stub.publish(record(b"d"), stream_id="other")
+    stub.publish(record(b"d"), stream_name="other")
     assert stub.commands == []
 
     stub.flush()
 
     by_stream = {
-        command.append_stream_records.stream_id: [
+        command.append_stream_records.stream_name: [
             r.body.data for r in command.append_stream_records.records
         ]
         for command in stub.commands

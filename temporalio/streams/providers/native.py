@@ -147,7 +147,7 @@ class _NativeWriteSink:
         # Held by the runtime until the task completes, when the task's
         # records on this topic become one command the server applies with
         # the task: rule 1 through the server's own commit.
-        workflow._append_stream_records([record], stream_id=self._topic)
+        workflow._append_stream_records([record], stream_name=self._topic)
 
 
 class _NativeWorkflowProvider:

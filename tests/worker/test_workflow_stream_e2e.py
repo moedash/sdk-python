@@ -286,9 +286,9 @@ class PublishAndRead:
     async def run(self) -> list[str]:
         workflow._append_stream_records(
             [_record(b"alpha", "progress"), _record(b"beta", "progress")],
-            stream_id="output",
+            stream_name="output",
         )
-        workflow._append_stream_records([_record(b"gamma")], stream_id="output")
+        workflow._append_stream_records([_record(b"gamma")], stream_name="output")
         # A name this workflow has not written yet still names a stream it
         # owns, so subscribing creates the one the later publish lands in.
         workflow._subscribe_stream("output", start_offset=0)
