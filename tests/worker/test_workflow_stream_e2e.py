@@ -960,3 +960,108 @@ async def test_an_exported_history_replays_offline_with_its_records() -> None:
         assert "fetch_stream_slices" in str(raised.value)
     finally:
         await provider.close()
+
+
+async def test_a_chain_of_two_resets_is_followed_to_its_end() -> None:
+    """A run reset, and that run reset again: what a chain-following read walks.
+
+    Resetting the same run twice is not a thing the server allows; the first
+    reset terminates it and the second is refused. So "reset more than once"
+    means a chain, base into A into B, and each run names only the one after
+    it. A chain-following read walks it one link at a time and stops at the
+    end, which is also the answer to whether it can loop: a reset always
+    makes a run that has never been reset itself.
+    """
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "reset2-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "reset2-wf-" + uuid.uuid4().hex[:8]
+
+    async def reset(run_id: str, reason: str) -> str:
+        # The last completed task of the run, whatever it did: a reset run
+        # picks up from there, and what matters here is the chain it makes.
+        completion_id = 0
+        async for event in client.get_workflow_handle(
+            workflow_id, run_id=run_id
+        ).fetch_history_events():
+            if event.HasField("workflow_task_completed_event_attributes"):
+                completion_id = event.event_id
+        assert completion_id
+        answer = await client.workflow_service.reset_workflow_execution(
+            ResetWorkflowExecutionRequest(
+                namespace=client.namespace,
+                workflow_execution=WorkflowExecution(
+                    workflow_id=workflow_id, run_id=run_id
+                ),
+                reason=reason,
+                workflow_task_finish_event_id=completion_id,
+                request_id=uuid.uuid4().hex,
+            )
+        )
+        return answer.run_id
+
+    async def reset_run_of(run_id: str) -> str:
+        described = await client.get_workflow_handle(
+            workflow_id, run_id=run_id
+        ).describe()
+        return described.raw_description.workflow_extended_info.reset_run_id
+
+    try:
+        async with Worker(client, task_queue=task_queue, workflows=[ContractLoop]):
+            base = await client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=task_queue
+            )
+            base_run = base.result_run_id
+            assert base_run
+            await _feed_two(client, workflow_id)
+            base_stream = client.get_stream_handle(workflow_id, run_id=base_run)
+            await take(
+                base_stream.read(topic=DECISIONS, result_type=dict), 2, timeout=60
+            )
+
+            first = await reset(base_run, "the first reset")
+            second = await reset(first, "the second reset")
+            assert len({base_run, first, second}) == 3
+
+            # Each link names the one after it and nothing else. The last has
+            # not been reset, so the walk ends there rather than going round.
+            assert await reset_run_of(base_run) == first
+            assert await reset_run_of(first) == second
+            assert not await reset_run_of(second)
+
+            # Let the end of the chain finish so a read can reach an end.
+            carry_on = client.get_stream_handle(workflow_id).producer(
+                topic=INPUTS, producer_id="model2", attempt=1
+            )
+            await carry_on.append({"n": 4})
+            await carry_on.finish()
+            await asyncio.wait_for(
+                client.get_workflow_handle(workflow_id, run_id=second).result(), 60
+            )
+
+            # The walk itself: one link at a time, ending at the run that was
+            # not reset. A middle run may have published nothing, so this is
+            # asked of the provider rather than read off the records.
+            handle = client.get_stream_handle(workflow_id)
+            walked = [base_run]
+            while True:
+                onward = await handle._successor(DECISIONS, walked[-1])  # type: ignore[attr-defined]
+                if onward is None:
+                    break
+                assert onward[0] not in walked, "the chain must not double back"
+                walked.append(onward[0])
+            assert walked == [base_run, first, second]
+
+            # And a chain-following read ends, having crossed the same runs
+            # and repeated none of them.
+            decisions = await asyncio.wait_for(
+                _collect(client, workflow_id, DECISIONS, None), 60
+            )
+            seen: list[str] = []
+            for _, run, _ in decisions:
+                if not seen or seen[-1] != run:
+                    seen.append(run)
+            assert seen == sorted(set(seen), key=walked.index)
+            assert seen[0] == base_run and seen[-1] == second
+    finally:
+        await provider.close()
