@@ -315,12 +315,14 @@ class _Runtime(ABC):
     ) -> temporalio.common.WorkerDeploymentVersion | None: ...
 
     @abstractmethod
-    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None: ...
+    def workflow_subscribe_stream(
+        self, stream_name_or_id: str, start_offset: int
+    ) -> None: ...
 
     @abstractmethod
     def workflow_append_stream_records(
         self,
-        stream_id: str,
+        stream_name: str,
         records: Sequence[temporalio.api.stream.v1.StreamRecord],
     ) -> None: ...
 
@@ -969,7 +971,7 @@ async def sleep(duration: float | timedelta, *, summary: str | None = None) -> N
 
 
 def _subscribe_stream(  # type: ignore[reportUnusedFunction]
-    stream_id: str, *, start_offset: int = 0
+    stream_name_or_id: str, *, start_offset: int = 0
 ) -> None:
     """Subscribe this workflow to a server-side stream.
 
@@ -979,26 +981,27 @@ def _subscribe_stream(  # type: ignore[reportUnusedFunction]
     cursor, though it does write one event. Calling it on every replay is
     harmless because replay matches the command to the event already recorded.
 
-    Only the stream id and start offset go to the server. The rest of the
+    Only the name or id and the start offset go to the server. The rest of the
     stream's addressing is resolved there, because a workflow cannot look it up
     without doing I/O and a value it carried would be a reading rather than a
     fact. A name this workflow has not written yet names a stream it owns, and
     subscribing creates it.
 
     Args:
-        stream_id: Stream to consume: the name of one this workflow owns, or
-            the id of a standalone stream.
+        stream_name_or_id: Stream to consume: the name of one this workflow
+            owns, or the id of a standalone stream. The server tries them in
+            that order.
         start_offset: Where to start. Negative means from wherever the stream is
             when the subscription is registered; the server resolves that once
             and records it, so replay does not resolve it again.
     """
-    _Runtime.current().workflow_subscribe_stream(stream_id, start_offset)
+    _Runtime.current().workflow_subscribe_stream(stream_name_or_id, start_offset)
 
 
 def _append_stream_records(  # type: ignore[reportUnusedFunction]
     records: Sequence[temporalio.api.stream.v1.StreamRecord],
     *,
-    stream_id: str = "",
+    stream_name: str = "",
 ) -> None:
     """Publish records to a server-side stream this workflow owns.
 
@@ -1013,14 +1016,15 @@ def _append_stream_records(  # type: ignore[reportUnusedFunction]
     Args:
         records: Records to append, in order. The server stores each with an
             empty ``producer_id``, because the workflow is the producer.
-        stream_id: Stream to publish to. Empty means the workflow's default
-            output stream.
+        stream_name: Name of a stream this workflow owns, created on first
+            use. Empty means the workflow's default output stream. A workflow
+            cannot append to a stream another execution owns.
 
     Raises:
         ValueError: ``records`` is empty or one of them is over the server's
             per-record size limit.
     """
-    _Runtime.current().workflow_append_stream_records(stream_id, records)
+    _Runtime.current().workflow_append_stream_records(stream_name, records)
 
 
 @dataclass(frozen=True)

@@ -1499,18 +1499,22 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
 
-    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None:
+    def workflow_subscribe_stream(
+        self, stream_name_or_id: str, start_offset: int
+    ) -> None:
         # Reissued on every replay, so the buffer has to exist before the first
         # range arrives and the command has to be harmless the second time. A
         # repeat subscription leaves the server-side cursor where it is.
-        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
+        self._stream_buffers.setdefault(
+            stream_name_or_id, _StreamBuffer(stream_name_or_id)
+        )
         command = self._add_command()
-        command.subscribe_stream.stream_id = stream_id
+        command.subscribe_stream.stream_name_or_id = stream_name_or_id
         command.subscribe_stream.start_offset = start_offset
 
     def workflow_append_stream_records(
         self,
-        stream_id: str,
+        stream_name: str,
         records: Sequence[temporalio.api.stream.v1.StreamRecord],
     ) -> None:
         self._assert_not_read_only("append stream records")
@@ -1530,7 +1534,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             kept.append(copy)
         # Held until the task completes, so a task's publishes on one stream
         # become one command and one History event however many there were.
-        self._stream_appends.setdefault(stream_id, []).extend(kept)
+        self._stream_appends.setdefault(stream_name, []).extend(kept)
 
     def _flush_stream_appends(self) -> None:
         appends, self._stream_appends = self._stream_appends, {}
@@ -1544,10 +1548,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             if _is_completion_command(command):
                 insert_at = index
                 break
-        for stream_id, records in appends.items():
+        for stream_name, records in appends.items():
             for batch in _stream_batches(records):
                 command = temporalio.bridge.proto.workflow_commands.WorkflowCommand()
-                command.append_stream_records.stream_id = stream_id
+                command.append_stream_records.stream_name = stream_name
                 command.append_stream_records.records.extend(batch)
                 commands.insert(insert_at, command)
                 insert_at += 1
