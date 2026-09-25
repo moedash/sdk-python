@@ -14,6 +14,7 @@ import nexusrpc
 from nexusrpc import InputT, OutputT
 
 import temporalio.api.common.v1
+import temporalio.api.stream.v1
 import temporalio.common
 import temporalio.converter
 
@@ -312,6 +313,21 @@ class _Runtime(ABC):
     def workflow_get_current_deployment_version(
         self,
     ) -> temporalio.common.WorkerDeploymentVersion | None: ...
+
+    @abstractmethod
+    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None: ...
+
+    @abstractmethod
+    def workflow_append_stream_records(
+        self,
+        stream_id: str,
+        records: Sequence[temporalio.api.stream.v1.StreamRecord],
+    ) -> None: ...
+
+    @abstractmethod
+    async def workflow_read_stream_records(
+        self, stream_id: str, max_records: int
+    ) -> list[DeliveredStreamRecord]: ...
 
     @abstractmethod
     def workflow_get_current_history_length(self) -> int: ...
@@ -947,6 +963,87 @@ async def sleep(duration: float | timedelta, *, summary: str | None = None) -> N
         ),
         summary=summary,
     )
+
+
+def subscribe_stream(stream_id: str, *, start_offset: int = 0) -> None:
+    """Subscribe this workflow to a server-side stream.
+
+    From here on its Workflow Tasks carry the ranges it has not consumed yet,
+    and :func:`read_stream_records` returns them. Safe to call again: a second
+    subscription to a stream this run already consumes does not move its
+    cursor, though it does write one event. Calling it on every replay is
+    harmless because replay matches the command to the event already recorded.
+
+    Only the stream id and start offset go to the server. The rest of the
+    stream's addressing is resolved there, because a workflow cannot look it up
+    without doing I/O and a value it carried would be a reading rather than a
+    fact. A name this workflow has not written yet names a stream it owns, and
+    subscribing creates it.
+
+    Args:
+        stream_id: Stream to consume: the name of one this workflow owns, or
+            the id of a standalone stream.
+        start_offset: Where to start. Negative means from wherever the stream is
+            when the subscription is registered; the server resolves that once
+            and records it, so replay does not resolve it again.
+    """
+    _Runtime.current().workflow_subscribe_stream(stream_id, start_offset)
+
+
+def append_stream_records(
+    records: Sequence[temporalio.api.stream.v1.StreamRecord],
+    *,
+    stream_id: str = "",
+) -> None:
+    """Publish records to a server-side stream this workflow owns.
+
+    Returns at once. The records become one command when this Workflow Task
+    completes, so they are visible when the task is accepted and never if it
+    fails. Their bodies go to the stream's own log rather than into History,
+    which gets one fixed-size event naming the offset range, so a task that
+    publishes a thousand records costs History the same as one that publishes
+    one. Readers do not have to exist yet, and adding one costs the writer
+    nothing.
+
+    Args:
+        records: Records to append, in order. The server stores each with an
+            empty ``producer_id``, because the workflow is the producer.
+        stream_id: Stream to publish to. Empty means the workflow's default
+            output stream.
+
+    Raises:
+        ValueError: ``records`` is empty or one of them is over the server's
+            per-record size limit.
+    """
+    _Runtime.current().workflow_append_stream_records(stream_id, records)
+
+
+@dataclass(frozen=True)
+class DeliveredStreamRecord:
+    """One record a consuming workflow was given, with where it sat."""
+
+    record: temporalio.api.stream.v1.StreamRecord
+    offset: int
+    """Its position in the whole stream, which is what a reader resumes from."""
+
+
+async def read_stream_records(
+    stream_id: str, *, max_records: int = 0
+) -> list[DeliveredStreamRecord]:
+    """Read the next records of a server-side stream this workflow consumes.
+
+    Waits until at least one record is available. Ranges arrive on Workflow
+    Tasks, and only the offsets they covered are written to History, so this is
+    deterministic on replay: the server re-supplies the same ranges by reading
+    the stream again. Subscribe first with :func:`subscribe_stream`; this only
+    reads what has already been delivered to this workflow.
+
+    Args:
+        stream_id: Stream to read from.
+        max_records: Most records to return at once, or 0 for everything
+            available.
+    """
+    return await _Runtime.current().workflow_read_stream_records(stream_id, max_records)
 
 
 async def wait_condition(
