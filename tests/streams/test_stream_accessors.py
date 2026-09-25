@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any
 
@@ -120,3 +121,46 @@ async def test_stream_handle_needs_a_provider_on_the_worker():
 
     with pytest.raises(StreamUnsupportedError, match="plugins="):
         await ActivityEnvironment().run(ask)
+
+
+@activity.defn
+def ask_from_a_sync_activity() -> str:
+    try:
+        activity.stream_handle()
+    except RuntimeError as error:
+        return str(error)
+    return "opened"
+
+
+@workflow.defn
+class RunsASyncActivity:
+    """Runs the `def` activity that reaches for a handle."""
+
+    @workflow.run
+    async def run(self) -> str:
+        return await workflow.execute_activity(
+            ask_from_a_sync_activity, start_to_close_timeout=timedelta(seconds=30)
+        )
+
+
+async def test_a_sync_activity_is_told_it_cannot_have_a_handle(
+    client: Client, provider: MemoryStreams
+):
+    # The worker has a provider. What a `def` activity is missing is the
+    # client, so that is what the error has to say, rather than sending the
+    # reader to register a provider that is already there.
+    registered = _with_provider(client, provider)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        async with new_worker(
+            registered,
+            RunsASyncActivity,
+            activities=[ask_from_a_sync_activity],
+            activity_executor=executor,
+        ) as worker:
+            result = await registered.execute_workflow(
+                RunsASyncActivity.run,
+                id=f"streams-wf-{uuid.uuid4().hex}",
+                task_queue=worker.task_queue,
+            )
+    assert "only available in `async def` activities" in result
+    assert "plugins=" not in result

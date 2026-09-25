@@ -672,6 +672,7 @@ class _ActivityWorker:
                 stream_provider=(
                     self._stream_provider if not running_activity.sync else None
                 ),
+                sync=running_activity.sync,
             )
         )
         temporalio.activity.logger.debug("Starting activity")
@@ -948,6 +949,7 @@ def _execute_sync_activity(
             runtime_metric_meter=runtime_metric_meter,
             client=None,
             cancellation_details=cancellation_details,
+            sync=True,
         )
     )
     if not cancel_thread_raiser:
