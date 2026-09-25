@@ -11,7 +11,8 @@ instance and which capabilities it lacks, so the cases marked
 
 What this file pins down is what a provider owes: producer identity, retry
 deduplication, positions, supersession, topic addressing, cursor resumption,
-and cursor ownership. Every case here goes through the public surface, so a new provider answers this file and
+cursor ownership, and releasing a read the caller stopped early. Every case
+here goes through the public surface, so a new provider answers this file and
 nothing else. The shared pieces no provider implements are unit-tested in
 ``test_streams_internals``; the workflow-side handles and the two rules about
 Workflow Tasks live in ``test_streams_workflow``.
@@ -207,6 +208,27 @@ async def test_a_divergent_retry_is_refused(case: ProviderCase):
     await first.append({"id": "r2"})
     records = await take(stream.read(topic=OUT), 2)
     assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
+
+
+async def test_closing_a_read_early_releases_it(case: ProviderCase):
+    # A read with nothing left to hand over waits against the store. Closing
+    # the generator is how a caller that stops early says so, and it has to
+    # let go of whatever it parked instead of hanging on it.
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await producer.append({"n": 1})
+
+    records = stream.read(topic=OUT)
+    assert (await asyncio.wait_for(records.__anext__(), 5.0)).value == {"n": 1}
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(records.__anext__(), 0.5)
+    await asyncio.wait_for(records.aclose(), 5.0)
+
+    # The topic is untouched by the close: a new read still sees everything.
+    await producer.append({"n": 2})
+    again = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in again] == [{"n": 1}, {"n": 2}]
 
 
 async def test_new_attempt_supersedes_the_old_one(case: ProviderCase):

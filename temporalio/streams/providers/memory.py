@@ -141,6 +141,10 @@ class _Topic:
         try:
             await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError:
+            pass
+        finally:
+            # Dropped on every exit, cancellation included, so a reader that
+            # aclose()s while parked here leaves nothing behind on the topic.
             self._waiters = [w for w in self._waiters if w[1] is not future]
 
 
