@@ -391,10 +391,14 @@ class AppendStreamRecords(google.protobuf.message.Message):
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
-    STREAM_ID_FIELD_NUMBER: builtins.int
+    STREAM_NAME_FIELD_NUMBER: builtins.int
     RECORDS_FIELD_NUMBER: builtins.int
-    stream_id: builtins.str
-    """Empty means the workflow's default output stream."""
+    stream_name: builtins.str
+    """Name of a stream this workflow owns, scoped to the workflow. Created on
+    first use. Empty means the workflow's default output stream. A workflow
+    cannot append to a stream in another execution, so this is never the id
+    of a standalone stream.
+    """
     @property
     def records(
         self,
@@ -404,7 +408,7 @@ class AppendStreamRecords(google.protobuf.message.Message):
     def __init__(
         self,
         *,
-        stream_id: builtins.str = ...,
+        stream_name: builtins.str = ...,
         records: collections.abc.Iterable[
             temporalio.api.stream.v1.message_pb2.StreamRecord
         ]
@@ -413,7 +417,7 @@ class AppendStreamRecords(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "records", b"records", "stream_id", b"stream_id"
+            "records", b"records", "stream_name", b"stream_name"
         ],
     ) -> None: ...
 
@@ -430,23 +434,32 @@ class SubscribeStream(google.protobuf.message.Message):
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
-    STREAM_ID_FIELD_NUMBER: builtins.int
+    STREAM_NAME_OR_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
-    stream_id: builtins.str
+    stream_name_or_id: builtins.str
+    """Stream to consume, named either way round: a stream this workflow owns
+    by the name it appends under, a stream in another execution by its id.
+    The server tries them in that order, so a workflow that owns a stream
+    under this name cannot reach a standalone stream with the same id. When
+    neither exists the workflow gets a stream of its own by that name, which
+    is how a reader subscribes before the first record is written.
+    """
     start_offset: builtins.int
-    """Negative means from wherever the stream is when the subscription is
-    registered. The server resolves that once and records it.
+    """Where to start, as an absolute offset. Any negative value means the head
+    of the stream as of registration, and they all mean the same thing. The
+    server resolves it and records the result, so replay does not resolve it
+    again.
     """
     def __init__(
         self,
         *,
-        stream_id: builtins.str = ...,
+        stream_name_or_id: builtins.str = ...,
         start_offset: builtins.int = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "start_offset", b"start_offset", "stream_id", b"stream_id"
+            "start_offset", b"start_offset", "stream_name_or_id", b"stream_name_or_id"
         ],
     ) -> None: ...
 
