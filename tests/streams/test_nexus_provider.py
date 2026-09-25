@@ -21,12 +21,14 @@ import asyncio
 import base64
 import dataclasses
 import gc
+import http.client
 import json
 import os
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
+from unittest import mock
 
 import nexusrpc
 import nexusrpc.handler
@@ -736,3 +738,47 @@ async def test_the_handler_does_not_grow_a_lock_per_address():
     assert len(handler._read_locks) == 0  # pyright: ignore[reportPrivateUsage]
     assert len(handler._append_locks) == 0  # pyright: ignore[reportPrivateUsage]
     await handler.close()
+
+
+def test_the_read_bounds_are_checked_where_they_are_set():
+    # The contract accepts a wait up to a minute and a batch up to a
+    # thousand; past that the endpoint answers with a payload validation
+    # error, which is neither a stream condition nor an RPC failure.
+    with pytest.raises(ValueError, match="read_wait"):
+        NexusStreams(endpoint="e", read_wait=timedelta(minutes=2))
+    with pytest.raises(ValueError, match="read_wait"):
+        NexusStreams(endpoint="e", read_wait=timedelta(seconds=-1))
+    with pytest.raises(ValueError, match="max_records"):
+        NexusStreams(endpoint="e", max_records=0)
+    with pytest.raises(ValueError, match="max_records"):
+        NexusStreams(endpoint="e", max_records=1001)
+    NexusStreams(endpoint="e", read_wait=timedelta(seconds=60), max_records=1000)
+
+
+def test_a_socket_failure_never_reaches_the_caller_as_a_timeout():
+    # urllib wraps only the request in URLError, so a read timeout comes out
+    # of getresponse() as builtins.TimeoutError, which on 3.11 and later is
+    # asyncio.TimeoutError and would be taken for the caller's own deadline.
+    def _raise(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise TimeoutError("the socket read timed out")
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
+            nexus._post(  # pyright: ignore[reportPrivateUsage]
+                "http://127.0.0.1:1/x", b"{}", {}, timedelta(seconds=1)
+            )
+
+    def _disconnect(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise http.client.RemoteDisconnected("the endpoint hung up")
+
+    with mock.patch("urllib.request.urlopen", _disconnect):
+        with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
+            nexus._post(  # pyright: ignore[reportPrivateUsage]
+                "http://127.0.0.1:1/x", b"{}", {}, timedelta(seconds=1)
+            )
+
+    # A url urllib cannot even build a request from does not escape either.
+    with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
+        nexus._post("not a url", b"{}", {}, timedelta(seconds=1))  # pyright: ignore[reportPrivateUsage]

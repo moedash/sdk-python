@@ -52,6 +52,7 @@ HTTP or urllib exception.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import time
@@ -126,6 +127,13 @@ _DEFAULT_SUBSCRIPTION_IDLE = timedelta(seconds=60)
 _QUEUE_DEPTH = 1000
 _APPEND_TIMEOUT = timedelta(seconds=30)
 _ROUND_TRIP_MARGIN = timedelta(seconds=5)
+# What ReadInput accepts in temporal_streams.nexusrpc.yaml. Repeated here so
+# a caller's mistake is refused where it was made rather than on the wire.
+_MIN_READ_WAIT = timedelta(0)
+_MAX_READ_WAIT = timedelta(milliseconds=60_000)
+_MIN_MAX_RECORDS = 1
+_MAX_MAX_RECORDS = 1000
+
 _definition = nexusrpc.get_service_definition(TemporalStreams)
 if _definition is None:  # pragma: no cover
     raise RuntimeError("the generated stream service carries no nexus definition")
@@ -605,19 +613,25 @@ def _post(
     url: str, body: bytes, headers: Mapping[str, str], timeout: timedelta
 ) -> bytes:
     timeout_ms = int(timeout.total_seconds() * 1000)
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            # Tells the server how long the handler may park, so it does not
-            # time the call out ahead of a wait the caller asked for.
-            "Request-Timeout": f"{timeout_ms}ms",
-            **headers,
-        },
-        method="POST",
-    )
+    # Everything is inside the try, because urllib wraps only the request in
+    # URLError: a bad url raises from Request(), and a socket timeout or a
+    # dropped connection raises from getresponse() and read() as
+    # builtins.TimeoutError or an http.client exception. On 3.11 and later
+    # TimeoutError is asyncio.TimeoutError, so letting one out would be
+    # indistinguishable from the caller's own wait_for expiring.
     try:
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                # Tells the server how long the handler may park, so it does
+                # not time the call out ahead of a wait the caller asked for.
+                "Request-Timeout": f"{timeout_ms}ms",
+                **headers,
+            },
+            method="POST",
+        )
         with urllib.request.urlopen(
             request, timeout=(timeout + _ROUND_TRIP_MARGIN).total_seconds()
         ) as response:
@@ -629,6 +643,10 @@ def _post(
     except urllib.error.URLError as error:
         raise _EndpointFailure(
             f"stream endpoint unreachable at {url}: {error.reason}", None
+        ) from error
+    except (TimeoutError, http.client.HTTPException, OSError, ValueError) as error:
+        raise _EndpointFailure(
+            f"stream endpoint at {url} did not answer: {error!r}", None
         ) from error
 
 
@@ -810,6 +828,13 @@ class NexusStreamHandle:
         The token is opaque here, so a cursor from another store is refused by
         the store behind the endpoint and raises
         :class:`temporalio.streams.StreamCursorError` on the first iteration.
+
+        ``aclose()`` on the result releases nothing at the endpoint at once.
+        The contract carries no unsubscribe operation, so the handler cannot
+        be told; it reclaims the parked read when it has gone idle, which is
+        a minute by default. Until then the subscription and its long poll on
+        the store stay, and a caller that stops and starts many reads on one
+        topic should expect that lag rather than an immediate release.
         """
         topic, result_type = resolve_topic(topic, result_type)
         return self._read(topic, after, result_type)
@@ -930,6 +955,20 @@ class NexusStreams(StreamProvider, temporalio.client.Plugin):
         # refuses an out-of-range value with a payload validation error that
         # is neither a StreamError nor an RPCError, a long way from the line
         # that got it wrong.
+        if not _MIN_READ_WAIT <= read_wait <= _MAX_READ_WAIT:
+            raise ValueError(
+                f"read_wait must be between {_MIN_READ_WAIT} and {_MAX_READ_WAIT}, "
+                f"got {read_wait}"
+            )
+        if read_wait.microseconds % 1000:
+            raise ValueError(
+                f"read_wait is carried in whole milliseconds, got {read_wait}"
+            )
+        if not _MIN_MAX_RECORDS <= max_records <= _MAX_MAX_RECORDS:
+            raise ValueError(
+                f"max_records must be between {_MIN_MAX_RECORDS} and "
+                f"{_MAX_MAX_RECORDS}, got {max_records}"
+            )
         self._endpoint = endpoint
         self._http_address = http_address.rstrip("/")
         self._headers = dict(headers or {})
