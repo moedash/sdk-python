@@ -113,11 +113,26 @@ class _NativeReadSource:
     async def next_batch(self) -> list[tuple[Cursor, WireRecord]]:
         if self._closed:
             raise StopAsyncIteration
-        delivered = await workflow.read_stream_records(self._stream_id)
+        delivered = await workflow._read_stream_records(self._stream_id)
+        if self._closed:
+            # Closed while this was parked; the buffer woke it with nothing.
+            raise StopAsyncIteration
         return [(_cursor(self._run_id, item.offset), item.record) for item in delivered]
 
     def close(self) -> None:
+        """Stop reading, and stop keeping what the server keeps delivering.
+
+        The server has no unsubscribe command, so ranges keep arriving on
+        every Workflow Task for the life of the run. What this ends is the
+        reading and the keeping: nothing further is held for this stream, so
+        a run that closes a reader early does not grow for the rest of its
+        life. The subscription itself, and the delivery it costs each task,
+        stay until the run ends.
+        """
+        if self._closed:
+            return
         self._closed = True
+        workflow._close_stream_records(self._stream_id)
 
 
 class _NativeWriteSink:
@@ -128,7 +143,7 @@ class _NativeWriteSink:
         # Held by the runtime until the task completes, when the task's
         # records on this topic become one command the server applies with
         # the task: rule 1 through the server's own commit.
-        workflow.append_stream_records([record], stream_id=self._topic)
+        workflow._append_stream_records([record], stream_id=self._topic)
 
 
 class _NativeWorkflowProvider:
@@ -145,7 +160,7 @@ class _NativeWorkflowProvider:
                     f"cursor {after.token!r} names another run; a run's stream is its own"
                 )
             start = named[1] + 1
-        workflow.subscribe_stream(topic, start_offset=start)
+        workflow._subscribe_stream(topic, start_offset=start)
         return _NativeReadSource(topic, run_id)
 
     def open_writer(self, topic: str) -> WriteSink:

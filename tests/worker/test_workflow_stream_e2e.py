@@ -270,18 +270,18 @@ class PublishAndRead:
 
     @workflow.run
     async def run(self) -> list[str]:
-        workflow.append_stream_records(
+        workflow._append_stream_records(
             [_record(b"alpha", "progress"), _record(b"beta", "progress")],
             stream_id="output",
         )
-        workflow.append_stream_records([_record(b"gamma")], stream_id="output")
+        workflow._append_stream_records([_record(b"gamma")], stream_id="output")
         # A name this workflow has not written yet still names a stream it
         # owns, so subscribing creates the one the later publish lands in.
-        workflow.subscribe_stream("output", start_offset=0)
+        workflow._subscribe_stream("output", start_offset=0)
 
         received: list[str] = []
         while len(received) < 3:
-            for item in await workflow.read_stream_records("output"):
+            for item in await workflow._read_stream_records("output"):
                 received.append(item.record.body.data.decode())
         return received
 
@@ -331,10 +331,10 @@ class ConsumeAcrossTasks:
 
     @workflow.run
     async def run(self, stream_id: str, expected: int) -> list[str]:
-        workflow.subscribe_stream(stream_id, start_offset=0)
+        workflow._subscribe_stream(stream_id, start_offset=0)
         seen: list[str] = []
         while len(seen) < expected:
-            for item in await workflow.read_stream_records(stream_id):
+            for item in await workflow._read_stream_records(stream_id):
                 seen.append(item.record.body.data.decode())
         return seen
 

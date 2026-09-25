@@ -288,6 +288,37 @@ def test_a_task_over_the_batch_limits_is_split_into_commands() -> None:
     assert [len(c.append_stream_records.records) for c in stub.commands] == [2, 1]
 
 
+async def test_a_closed_buffer_keeps_nothing_and_still_checks_continuity() -> None:
+    # There is no unsubscribe command, so the server keeps delivering for the
+    # life of the run. A reader that closed would otherwise grow the instance
+    # for the rest of it.
+    buffer = _StreamBuffer("s")
+    buffer.extend([record(b"one")], 0, 1)
+    assert len(buffer) == 1
+
+    buffer.close()
+    assert buffer.closed
+    assert len(buffer) == 0, "what it held is let go of, not kept for nobody"
+
+    buffer.extend([record(b"two"), record(b"three")], 1, 3)
+    assert len(buffer) == 0
+    # Continuity is still tracked across what it dropped, so a range that
+    # repeats or skips is caught rather than passing unnoticed.
+    with pytest.raises(RuntimeError, match="last range ended at 3"):
+        buffer.extend([record(b"four")], 9, 10)
+    buffer.extend([record(b"four")], 3, 4)
+
+
+async def test_closing_a_buffer_wakes_a_reader_parked_on_it() -> None:
+    buffer = _StreamBuffer("s")
+    waiter = buffer.wait_future()
+    buffer.close()
+    # Woken rather than left parked: the reader has to unwind, and nothing
+    # will ever arrive for it again.
+    await asyncio.wait_for(waiter, 5)
+    assert waiter.done()
+
+
 async def test_the_continuity_failure_says_what_to_do_about_it() -> None:
     buffer = _StreamBuffer("s")
     buffer.extend([record(b"one")], 0, 1)
@@ -295,3 +326,28 @@ async def test_the_continuity_failure_says_what_to_do_about_it() -> None:
         buffer.extend([record(b"two")], 5, 6)
     # The task fails and keeps failing, so the message has to name the way out.
     assert "Reset the workflow" in str(failed.value)
+
+
+def test_the_raw_workflow_stream_api_is_not_public() -> None:
+    # A second workflow surface taking raw stream ids and raw protos, beside
+    # the typed one, is not what an application should reach for. It stays
+    # reachable under its private name, which is what the provider and the
+    # contrib surface use.
+    import temporalio.workflow as wf
+
+    for name in (
+        "subscribe_stream",
+        "append_stream_records",
+        "read_stream_records",
+        "DeliveredStreamRecord",
+    ):
+        assert name not in wf.__all__
+        assert not hasattr(wf, name)
+    for name in (
+        "_subscribe_stream",
+        "_append_stream_records",
+        "_read_stream_records",
+        "_close_stream_records",
+        "_DeliveredStreamRecord",
+    ):
+        assert hasattr(wf, name)

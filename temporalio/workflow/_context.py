@@ -325,9 +325,12 @@ class _Runtime(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def workflow_close_stream_records(self, stream_id: str) -> None: ...
+
+    @abstractmethod
     async def workflow_read_stream_records(
         self, stream_id: str, max_records: int
-    ) -> list[DeliveredStreamRecord]: ...
+    ) -> list[_DeliveredStreamRecord]: ...
 
     @abstractmethod
     def workflow_get_current_history_length(self) -> int: ...
@@ -965,11 +968,13 @@ async def sleep(duration: float | timedelta, *, summary: str | None = None) -> N
     )
 
 
-def subscribe_stream(stream_id: str, *, start_offset: int = 0) -> None:
+def _subscribe_stream(  # type: ignore[reportUnusedFunction]
+    stream_id: str, *, start_offset: int = 0
+) -> None:
     """Subscribe this workflow to a server-side stream.
 
     From here on its Workflow Tasks carry the ranges it has not consumed yet,
-    and :func:`read_stream_records` returns them. Safe to call again: a second
+    and :func:`_read_stream_records` returns them. Safe to call again: a second
     subscription to a stream this run already consumes does not move its
     cursor, though it does write one event. Calling it on every replay is
     harmless because replay matches the command to the event already recorded.
@@ -990,7 +995,7 @@ def subscribe_stream(stream_id: str, *, start_offset: int = 0) -> None:
     _Runtime.current().workflow_subscribe_stream(stream_id, start_offset)
 
 
-def append_stream_records(
+def _append_stream_records(  # type: ignore[reportUnusedFunction]
     records: Sequence[temporalio.api.stream.v1.StreamRecord],
     *,
     stream_id: str = "",
@@ -1019,7 +1024,7 @@ def append_stream_records(
 
 
 @dataclass(frozen=True)
-class DeliveredStreamRecord:
+class _DeliveredStreamRecord:
     """One record a consuming workflow was given, with where it sat."""
 
     record: temporalio.api.stream.v1.StreamRecord
@@ -1027,15 +1032,29 @@ class DeliveredStreamRecord:
     """Its position in the whole stream, which is what a reader resumes from."""
 
 
-async def read_stream_records(
+def _close_stream_records(stream_id: str) -> None:  # type: ignore[reportUnusedFunction]
+    """Say this workflow wants no more of ``stream_id``.
+
+    There is no unsubscribe command, so the server keeps delivering for the
+    life of the run; this drops what arrives instead of holding it for a
+    reader that has gone. Deterministic on replay, because the same workflow
+    code closes at the same point and the same ranges are dropped.
+
+    Args:
+        stream_id: Stream to stop keeping records for.
+    """
+    _Runtime.current().workflow_close_stream_records(stream_id)
+
+
+async def _read_stream_records(  # type: ignore[reportUnusedFunction]
     stream_id: str, *, max_records: int = 0
-) -> list[DeliveredStreamRecord]:
+) -> list[_DeliveredStreamRecord]:
     """Read the next records of a server-side stream this workflow consumes.
 
     Waits until at least one record is available. Ranges arrive on Workflow
     Tasks, and only the offsets they covered are written to History, so this is
     deterministic on replay: the server re-supplies the same ranges by reading
-    the stream again. Subscribe first with :func:`subscribe_stream`; this only
+    the stream again. Subscribe first with :func:`_subscribe_stream`; this only
     reads what has already been delivered to this workflow.
 
     Args:

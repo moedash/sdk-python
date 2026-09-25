@@ -290,13 +290,6 @@ _STREAM_CONTINUITY_REMEDY = (
     "if its output is no longer wanted."
 )
 
-_STREAM_CONTINUITY_REMEDY = (
-    "This fails the Workflow Task and will keep failing it, because the range "
-    "is recorded as consumed and will not be sent again. Reset the workflow to "
-    "before the subscription to start its stream reading over, or terminate it "
-    "if its output is no longer wanted."
-)
-
 _MAX_STREAM_RECORDS_PER_BATCH = 1000
 _MAX_STREAM_RECORD_BYTES = 1 << 20
 _MAX_STREAM_BATCH_BYTES = 2 << 20
@@ -344,12 +337,35 @@ class _StreamBuffer:
 
     def __init__(self, stream_id: str = "") -> None:
         self._stream_id = stream_id
-        self._records: list[temporalio.workflow.DeliveredStreamRecord] = []
+        self._records: list[temporalio.workflow._DeliveredStreamRecord] = []
         self._waiters: list[asyncio.Future] = []
         # Where the next range has to start. Unknown until the first one
         # arrives, because a subscription may start wherever the stream is and
         # the server is the one that resolves that.
         self._next_offset: int | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Whether workflow code has said it wants no more of this stream."""
+        return self._closed
+
+    def close(self) -> None:
+        """Stop keeping what arrives, and let go of what is held. Idempotent.
+
+        There is no unsubscribe command, so the server keeps delivering for
+        the life of the run. Holding those records would grow the instance
+        without bound for a reader nobody will read again. Dropping them is
+        replay-safe because the close happens at the same point of the same
+        workflow code every time, so the same ranges are dropped; continuity
+        is still tracked, so a range that repeats or skips is still caught.
+        """
+        self._closed = True
+        self._records = []
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def extend(
         self,
@@ -376,8 +392,10 @@ class _StreamBuffer:
             )
         self._next_offset = to_offset
         # An empty range still counts as a delivery, but there is nothing to
-        # hand a reader, so only a non-empty one wakes anyone.
-        if not records:
+        # hand a reader, so only a non-empty one wakes anyone. A closed buffer
+        # counts the range and keeps nothing: continuity is still checked
+        # above, and nobody is left to read what it held.
+        if not records or self._closed:
             return
         # Offsets are dense inside a delivered range and the range arrives in
         # order, so counting from its start is the position rather than an
@@ -388,7 +406,7 @@ class _StreamBuffer:
             kept = temporalio.api.stream.v1.StreamRecord()
             kept.CopyFrom(record)
             self._records.append(
-                temporalio.workflow.DeliveredStreamRecord(
+                temporalio.workflow._DeliveredStreamRecord(
                     record=kept, offset=from_offset + index
                 )
             )
@@ -397,12 +415,12 @@ class _StreamBuffer:
             if not waiter.done():
                 waiter.set_result(None)
 
-    def take(self) -> list[temporalio.workflow.DeliveredStreamRecord]:
+    def take(self) -> list[temporalio.workflow._DeliveredStreamRecord]:
         taken, self._records = self._records, []
         return taken
 
     def put_back(
-        self, records: Sequence[temporalio.workflow.DeliveredStreamRecord]
+        self, records: Sequence[temporalio.workflow._DeliveredStreamRecord]
     ) -> None:
         """Return an unread tail to the front of the buffer."""
         self._records[:0] = records
@@ -1534,15 +1552,18 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 commands.insert(insert_at, command)
                 insert_at += 1
 
+    def workflow_close_stream_records(self, stream_id: str) -> None:
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id)).close()
+
     async def workflow_read_stream_records(
         self, stream_id: str, max_records: int
-    ) -> list[temporalio.workflow.DeliveredStreamRecord]:
+    ) -> list[temporalio.workflow._DeliveredStreamRecord]:
         # Ranges arrive on Workflow Tasks, and a query activation carries none,
         # so without this the read waits on a future nothing can resolve and the
         # query times out with nothing to say why.
         self._assert_not_read_only("read stream")
         buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
-        while not len(buffer):
+        while not len(buffer) and not buffer.closed:
             await buffer.wait_future()
         taken = buffer.take()
         if max_records and len(taken) > max_records:
