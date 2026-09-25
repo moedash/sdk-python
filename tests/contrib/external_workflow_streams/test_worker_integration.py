@@ -301,6 +301,72 @@ async def test_a_blocked_workflow_retains_its_task_rather_than_completing_it(
             await handle.terminate()
 
 
+@workflow.defn
+class ParkedQueryWorkflow:
+    """Blocks on an empty stream with a short idle timeout, so the task parks."""
+
+    def __init__(self) -> None:
+        self._seen: list[str] = []
+
+    @workflow.run
+    async def run(self) -> list[str]:
+        tokens = external_stream.with_options(idle_timeout=timedelta(seconds=1)).topic(
+            "tokens", type=str
+        )
+        async for token in tokens.subscribe():
+            self._seen.append(token)
+            break
+        return self._seen
+
+    @workflow.query
+    def seen(self) -> list[str]:
+        return self._seen
+
+
+async def test_a_query_against_a_parked_workflow_is_answered(
+    client: Client, backend: MemoryStreamBackend
+) -> None:
+    """A parked Run has no open Workflow Task, so its query travels alone.
+
+    The server dispatches it on a task of its own, and Core allows nothing
+    beside the answer on that task. The wait set is still registered from the
+    parked task, so reporting it again with the answer made Core refuse the
+    completion, and the query never returned.
+    """
+    task_queue = f"tq-{uuid.uuid4()}"
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[ParkedQueryWorkflow],
+        external_stream_backend=backend,
+    ):
+        handle = await client.start_workflow(
+            ParkedQueryWorkflow.run,
+            id=f"wf-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        # Past the idle timeout the retained task is reported and the Run
+        # waits for a wake with no task open.
+        await asyncio.sleep(3)
+
+        assert await asyncio.wait_for(handle.query(ParkedQueryWorkflow.seen), 10) == []
+
+        description = await handle.describe()
+        key = StreamKey(
+            client.namespace,
+            handle.id,
+            description.raw_description.workflow_execution_info.first_run_id,
+            "tokens",
+        )
+        await publish(backend, key, ["first"])
+        assert await asyncio.wait_for(handle.result(), 60) == ["first"]
+
+        events = [e async for e in handle.fetch_history_events()]
+        assert not any(
+            e.HasField("workflow_task_failed_event_attributes") for e in events
+        ), "a Workflow Task failed while the query was outstanding"
+
+
 async def test_a_workflow_without_a_configured_backend_says_so(
     client: Client,
 ) -> None:
