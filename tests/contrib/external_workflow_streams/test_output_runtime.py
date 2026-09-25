@@ -168,7 +168,9 @@ def backend() -> _OutputMemoryBackend:
 
 
 @pytest.fixture
-def runtime(backend: _OutputMemoryBackend) -> WorkflowStreamRuntime:
+async def runtime(backend: _OutputMemoryBackend) -> WorkflowStreamRuntime:
+    # The manager captures the loop it is built on, which in the Worker is the
+    # Worker's own. A sync fixture has none to capture.
     manager = StreamSubscriptionManager(
         backend=backend,
         notify_ready=_notify,
