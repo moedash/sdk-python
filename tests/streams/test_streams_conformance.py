@@ -5,9 +5,11 @@ tree can stand up. The memory provider always runs, with no server and no
 store. A storage provider adds itself to ``SETUPS``, behind its own
 ``STREAMS_LIVE`` gate when it needs a store the test environment does not
 start: its setup receives the environment's client and hands back a provider
-instance and which capabilities it lacks, so the cases marked
-``reports_positions`` are skipped with a reason on a provider whose
-``append()`` learns positions at read time.
+instance, the client the cases should use, a ``host`` that starts the
+workflow owning a stream when the store lives inside a running workflow, and
+which capabilities it lacks, so the cases marked ``reports_positions`` are
+skipped with a reason on a provider whose ``append()`` learns positions at
+read time.
 
 What this file pins down is the contract: the record on the wire, producer
 identity, retry deduplication, positions, supersession, topic addressing,
@@ -20,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,12 +62,21 @@ class ProviderCase:
 
     name: str
     provider: StreamProvider
+    client: Client | None = None
     reports_positions: bool = True
     """``append()`` returns where the records landed."""
+    host: Callable[[str], Awaitable[None]] | None = None
+    """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
 
     async def open(
         self, workflow_id: str, *, run_id: str | None = None
     ) -> StreamHandle:
+        if self.host is not None:
+            await self.host(workflow_id)
+        if self.client is not None:
+            # A storage provider's setup registers the provider on the client,
+            # so the cases go through the accessor an application uses.
+            return self.client.get_stream_handle(workflow_id, run_id=run_id)
         # Only the memory provider gets here, and it takes no client.
         return self.provider.get_stream_handle(
             None,  # type: ignore[arg-type]
