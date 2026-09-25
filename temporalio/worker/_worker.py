@@ -24,6 +24,7 @@ import temporalio.client
 import temporalio.common
 import temporalio.runtime
 import temporalio.service
+import temporalio.streams
 from temporalio.common import (
     HeaderCodecBehavior,
     VersioningBehavior,
@@ -153,6 +154,7 @@ class Worker:
         disable_payload_error_limit: bool = False,
         max_workflow_task_external_storage_concurrency: int = _DEFAULT_WORKFLOW_TASK_EXTERNAL_STORAGE_CONCURRENCY,
         external_stream_backend: Any | None = None,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> None:
         """Create a worker to process workflows and/or activities.
 
@@ -354,6 +356,10 @@ class Worker:
                 Defaults to 3. Adjust this value based on your workload's needs.
                 Please report any issues you encounter with this setting or if you
                 feel the default should be changed.
+            stream_provider: Experimental. The stream provider that workflows
+                on this worker read and publish through, see
+                :py:mod:`temporalio.streams`. A provider that is also a
+                :py:class:`Plugin` sets this itself when passed in ``plugins``.
                 WARNING: This setting is experimental.
 
         """
@@ -404,6 +410,7 @@ class Worker:
             disable_payload_error_limit=disable_payload_error_limit,
             max_workflow_task_external_storage_concurrency=max_workflow_task_external_storage_concurrency,
             external_stream_backend=external_stream_backend,
+            stream_provider=stream_provider,
         )
 
         plugins_from_client = cast(
@@ -487,6 +494,11 @@ class Worker:
 
         # Prepend applicable client interceptors to the given ones
         client_config = config["client"].config(active_config=True)  # type: ignore[reportTypedDictNotRequiredAccess]
+        # A provider registered on the client serves its workers too, so one
+        # registration covers every context that asks for a stream.
+        stream_provider = config.get("stream_provider") or client_config.get(
+            "stream_provider"
+        )
         interceptors_from_client = cast(
             list[Interceptor],
             [i for i in client_config["interceptors"] if isinstance(i, Interceptor)],
@@ -524,6 +536,7 @@ class Worker:
                 interceptors=interceptors,
                 metric_meter=self._runtime.metric_meter,
                 client=client,
+                stream_provider=stream_provider,
                 encode_headers=(
                     client_config["header_codec_behavior"] == HeaderCodecBehavior.CODEC
                 ),
@@ -593,6 +606,7 @@ class Worker:
                 != HeaderCodecBehavior.NO_CODEC,
                 max_workflow_task_external_storage_concurrency=max_workflow_task_external_storage_concurrency,
                 external_stream_backend=self._external_stream_backend,
+                stream_provider=stream_provider,
             )
 
         tuner = config.get("tuner")
@@ -1080,6 +1094,7 @@ class WorkerConfig(TypedDict, total=False):
     disable_payload_error_limit: bool
     max_workflow_task_external_storage_concurrency: int
     external_stream_backend: Any | None
+    stream_provider: temporalio.streams.StreamProvider | None
 
 
 def _warn_if_activity_executor_max_workers_is_inconsistent(
