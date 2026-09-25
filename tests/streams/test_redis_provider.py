@@ -7,7 +7,11 @@ import asyncio
 import pytest
 
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
-from temporalio.streams.providers.redis import _drive, _outside_position
+from temporalio.streams.providers.redis import (
+    _drive,
+    _outside_position,
+    _workflow_position,
+)
 
 
 def test_outside_cursors_name_output_positions():
@@ -43,3 +47,17 @@ def test_a_publish_that_would_wait_fails_loudly():
             _drive(publish())
 
     asyncio.run(run())
+
+
+def test_workflow_cursors_name_input_positions():
+    assert _workflow_position(BEGINNING) is None
+    position = _workflow_position(Cursor("redis:in:1700000000000-3"))
+    assert position is not None and position.token == "1700000000000-3"
+    # An outside cursor names the output stream, whose entry ids are not the
+    # input stream's, so it cannot seed a workflow reader.
+    with pytest.raises(StreamCursorError, match="output stream"):
+        _workflow_position(Cursor("redis:1700000000000-3"))
+    with pytest.raises(StreamCursorError):
+        _workflow_position(Cursor("memory:3"))
+    with pytest.raises(StreamCursorError):
+        _workflow_position(Cursor("redis:in:not-an-id"))

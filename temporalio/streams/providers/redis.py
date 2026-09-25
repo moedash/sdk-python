@@ -23,9 +23,11 @@ The mapping, in one place:
   is ``producer#attempt`` and every record carries a sequence, so a retried
   batch is dropped with the original position and a new attempt passes.
 - Cursors are ``redis:<ms>-<seq>`` on the outside surface and name a position
-  in the output stream. A workflow-side record carries ``redis:in:<ms>-<seq>``
-  for information only: the transport starts a run's subscription where the
-  chain left off, so a workflow reader cannot resume from a cursor.
+  in the output stream. A workflow-side record carries ``redis:in:<ms>-<seq>``,
+  a position in the input stream, and only that form seeds a workflow reader:
+  the two streams number their entries independently, so an outside cursor
+  cannot stand in for one. A reader opened without a cursor starts where the
+  chain's predecessor run committed, which is the transport's own rule.
 - Streams are keyed by the chain's first run, so a handle follows continue-as-
   new by construction and ``run_id`` only decides whose close ends a read.
 - A task's publishes are staged as one batch. The transport's own per-task
@@ -84,7 +86,6 @@ from temporalio.streams._errors import (
     StreamError,
     StreamNotFoundError,
     StreamProducerError,
-    StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
@@ -139,6 +140,26 @@ def _outside_position(after: Cursor) -> Offset | None:
             f"cursor {after.token!r} does not name a Redis stream position"
         )
     return Offset(token)
+
+
+def _workflow_position(after: Cursor) -> Offset | None:
+    """The input-stream offset a workflow reader's cursor names, or ``None`` for BEGINNING."""
+    token = cursor_position(after, provider=_PROVIDER)
+    if token is None:
+        return None
+    if token.startswith(_INPUT_PREFIX):
+        entry = token[len(_INPUT_PREFIX) :]
+        if _REDIS_ID.fullmatch(entry):
+            return Offset(entry)
+    elif _REDIS_ID.fullmatch(token):
+        raise StreamCursorError(
+            f"cursor {after.token!r} names a position in the topic's output stream; "
+            "a workflow reader follows the input stream, whose entry ids differ, so "
+            "pass a cursor a workflow reader returned"
+        )
+    raise StreamCursorError(
+        f"cursor {after.token!r} does not name a Redis stream position"
+    )
 
 
 def _drive(coroutine: Coroutine[Any, Any, None]) -> None:
@@ -209,12 +230,14 @@ class _RedisWorkflowProvider:
 
     def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
         _require_topic(topic)
-        if cursor_position(after, provider=_PROVIDER) is not None:
-            raise StreamUnsupportedError(
-                "the redis provider starts a run's subscription where the chain "
-                "left off; it cannot resume a workflow reader from a cursor"
-            )
-        return _RedisReadSource(self._input.topic(topic, type=bytes).subscribe())
+        position = _workflow_position(after)
+        # Without a position the transport resumes where the chain's
+        # predecessor run committed; with one, that is where the wait starts
+        # and what the marker's header records.
+        start = None if position is None else AFTER(position)
+        return _RedisReadSource(
+            self._input.topic(topic, type=bytes).subscribe(start_cursor=start)
+        )
 
     def open_writer(self, topic: str) -> WriteSink:
         _require_topic(topic)
