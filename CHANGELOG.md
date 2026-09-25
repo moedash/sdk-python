@@ -18,6 +18,21 @@ to include examples, links to docs, or any other relevant information.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve empty activations in the shared External Workflow Streams input and
+  output replay schedule. Workflows that read input, publish decisions, and
+  schedule Activities now reproduce that schedule during replay. Inconsistent
+  prerelease markers are rejected explicitly rather than guessing where omitted
+  activations belonged.
+- Resume external input waits when cold replay encounters a wake in an already
+  loaded History page, including Workers with workflow caching disabled.
+- Avoid an unnecessary output replacement Workflow Task after stream input has
+  resumed the Workflow and it is waiting on an Activity or timer.
+- Keep an incomplete retained external stream task alive when workflow caching
+  is disabled; evict it after its normal task boundary instead of repeatedly
+  interrupting input readiness with shutdown markers.
+
 ### Added
 
 - Added experimental External Workflow Streams in

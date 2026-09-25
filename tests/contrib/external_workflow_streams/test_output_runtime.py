@@ -16,6 +16,7 @@ import temporalio.bridge.proto.workflow_activation
 import temporalio.bridge.proto.workflow_completion
 import temporalio.converter
 import temporalio.workflow
+from temporalio.contrib.external_workflow_streams._annotation import decode_annotation
 from temporalio.contrib.external_workflow_streams._backend import StreamKey
 from temporalio.contrib.external_workflow_streams._errors import (
     ExternalStreamCapacityError,
@@ -1064,3 +1065,67 @@ def test_input_and_output_share_one_replay_segment_drain_schedule() -> None:
         "abandon-output",
         "end-input",
     ]
+
+
+def test_ambiguous_legacy_combined_schedule_is_rejected_before_drain() -> None:
+    runtime = _CombinedReplayRuntime()
+    driver = _CombinedReplayDriver(runtime)
+    output = SimpleNamespace(segments=(object(), object(), object(), object()))
+    job = SimpleNamespace(output=output, HasField=lambda field: field == "output")
+
+    apply_replay = cast(Any, _WorkflowInstanceImpl._apply_replay_external_streams)
+    with pytest.raises(
+        temporalio.workflow.NondeterminismError, match="incompatible input and output"
+    ):
+        apply_replay(driver, job)
+
+    assert runtime.events == ["begin-output"]
+
+
+@pytest.mark.parametrize("subscription_exists", [False, True])
+async def test_combined_marker_preserves_empty_input_activations(
+    runtime: WorkflowStreamRuntime, subscription_exists: bool
+) -> None:
+    key = runtime.stream_key("inputs")
+    if subscription_exists:
+        runtime.begin_activation(1)
+        runtime.register(wait_id=1, stream_key=key)
+        runtime.take_observation_delta()
+        runtime.add_terminal()
+
+    deltas = []
+    try:
+        for index in range(4):
+            runtime.begin_activation(7)
+            if index == 1 and not subscription_exists:
+                runtime.register(wait_id=1, stream_key=key)
+            if index in (1, 3):
+                record = StreamRecord(
+                    RecordKind.DATA, b"input", "producer", index
+                ).placed_at(Offset(f"{index}-0"))
+                runtime.record_delivery(1, record)
+                await runtime.publish_output(
+                    topic="events",
+                    value=str(index),
+                    value_type=str,
+                    kind=RecordKind.DATA,
+                    max_publish_latency=timedelta(seconds=1),
+                    max_records=10,
+                    max_logical_bytes=10_000,
+                )
+            delta = runtime.take_observation_delta()
+            if delta is not None:
+                deltas.append(delta)
+        deltas.append(runtime.add_terminal())
+        staged = await runtime.stage_output(7)
+        annotation = decode_annotation(b"".join(deltas))
+
+        assert [bool(segment.runs) for segment in annotation.segments] == [
+            False,
+            True,
+            False,
+            True,
+        ]
+        assert staged.segment_record_counts == ((0,), (1,), (0,), (1,))
+    finally:
+        await runtime._manager.shutdown()
