@@ -1,8 +1,8 @@
 """Unit tests for the pieces under ``temporalio.streams`` that no provider owns.
 
-The wire format, the supersession policy, the store key and the cursor prefix
-are shared by every provider and implemented once, so they are tested once,
-here, against the private modules. What a provider owes
+The wire format, the supersession policy, the store key, the cursor prefix and
+the plugin registration are shared by every provider and implemented once, so
+they are tested once, here, against the private modules. What a provider owes
 is in ``test_streams_conformance``; keeping the two apart is what makes that
 file answerable by a new provider.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from temporalio.client import ClientConfig
 from temporalio.converter import DataConverter
 from temporalio.streams import (
     BEGINNING,
@@ -22,6 +23,8 @@ from temporalio.streams import (
     _wire,
 )
 from temporalio.streams._policy import AttemptTracker
+from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.worker import ReplayerConfig, WorkerConfig
 
 
 def test_record_roundtrips_through_the_wire():
@@ -93,3 +96,24 @@ def test_cursors_name_their_provider():
     assert _wire.cursor_position(Cursor("memory:42"), provider="memory") == "42"
     with pytest.raises(StreamCursorError):
         _wire.cursor_position(Cursor("redis:1700000000000-0"), provider="memory")
+
+
+def test_registering_a_provider_twice_is_refused():
+    # There is one slot on each of the three, and a user who passes a provider
+    # by hand and a provider plugin, or two provider plugins, meant both.
+    first, second = MemoryStreams(), MemoryStreams()
+    with pytest.raises(ValueError, match="already registered"):
+        second.configure_client(ClientConfig(stream_provider=first))  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="already registered"):
+        second.configure_worker(WorkerConfig(stream_provider=first))  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="already registered"):
+        second.configure_replayer(ReplayerConfig(stream_provider=first))  # type: ignore[typeddict-item]
+
+
+def test_registering_the_same_provider_twice_is_fine():
+    # A worker built from a client that already carries the plugin configures
+    # it again with the same object, which is not a conflict.
+    provider = MemoryStreams()
+    config = provider.configure_client(ClientConfig(stream_provider=provider))  # type: ignore[typeddict-item]
+    assert config.get("stream_provider") is provider
+    assert provider.configure_client(ClientConfig()).get("stream_provider") is provider  # type: ignore[typeddict-item]
