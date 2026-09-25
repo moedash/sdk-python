@@ -85,7 +85,8 @@ logger = logging.getLogger(__name__)
 # Set to true to log all cases where we're ignoring things during delete
 LOG_IGNORE_DURING_DELETE = False
 
-# Core answers a query carrying this id on the query's own task, alone.
+# Core answers a query carrying this id on the query's own task, alone. Held in
+# step with LEGACY_QUERY_ID in sdk-core, crates/sdk-core/src/worker/workflow/mod.rs.
 _LEGACY_QUERY_ID = "legacy_query"
 
 
