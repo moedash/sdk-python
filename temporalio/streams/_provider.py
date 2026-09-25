@@ -132,8 +132,12 @@ class StreamHandle(Protocol):
         sees every record exactly once. The read ends when the owning
         execution, or its chain, is closed and every retained record after
         ``after`` has been delivered; until then it waits. The result is a
-        generator, so a caller that stops early can ``aclose()`` it and
-        release whatever the provider parked against the store.
+        generator, so a caller that stops early should ``aclose()`` it. How
+        much that releases is the provider's to say: one that holds only
+        local state lets go at once, and one that parked something on a
+        store it cannot un-park says in its own documentation what it
+        releases and when. Read the provider's ``read`` before relying on an
+        immediate release.
 
         Raises:
             ValueError: ``result_type`` was passed with a topic definition,
