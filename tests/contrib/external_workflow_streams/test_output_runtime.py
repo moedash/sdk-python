@@ -1131,3 +1131,70 @@ async def test_combined_marker_preserves_empty_input_activations(
         assert staged.segment_record_counts == ((0,), (1,), (0,), (1,))
     finally:
         await runtime._manager.shutdown()
+
+
+class _SchedulingStub:
+    """The two calls the activation's job dispatch makes on the instance."""
+
+    def __init__(self, *, single_batch: bool) -> None:
+        self._single_batch_activation = single_batch
+        self.events: list[str] = []
+
+    def _apply(self, job: Any) -> None:
+        self.events.append(f"apply-{job.name}")
+
+    def _run_once(self, *, check_conditions: bool) -> None:
+        self.events.append(f"drain({check_conditions})")
+
+
+def _job(name: str) -> Any:
+    return SimpleNamespace(name=name)
+
+
+def _dispatch(stub: _SchedulingStub, job_sets: list[list[Any]], replay: list[Any]):
+    cast(Any, _WorkflowInstanceImpl._apply_activation_jobs)(stub, job_sets, replay)
+
+
+@pytest.mark.parametrize("single_batch", [False, True])
+def test_a_replay_marker_rides_the_patch_set_drain(single_batch: bool) -> None:
+    """A marker beside patch jobs alone must not earn a second drain.
+
+    A patch job set drains once, and that drain is the first one that can
+    publish, so the install belongs in front of it. Behind it the activation
+    runs two drains where the recorded task ran one, and every
+    ``wait_condition`` predicate fires an extra time.
+    """
+    stub = _SchedulingStub(single_batch=single_batch)
+    _dispatch(stub, [[_job("patch")], [], [], []], [_job("marker")])
+
+    assert stub.events == ["apply-patch", "apply-marker", "drain(False)"]
+
+
+def test_a_marker_still_waits_for_the_signal_set_it_precedes() -> None:
+    stub = _SchedulingStub(single_batch=False)
+    _dispatch(stub, [[_job("patch")], [_job("signal")], [], []], [_job("marker")])
+
+    assert stub.events == [
+        "apply-patch",
+        "drain(False)",
+        "apply-signal",
+        "apply-marker",
+        "drain(True)",
+    ]
+
+
+def test_a_query_only_activation_answers_after_the_marker() -> None:
+    stub = _SchedulingStub(single_batch=False)
+    _dispatch(stub, [[], [], [], [_job("query")]], [_job("marker")])
+
+    assert stub.events == ["apply-query", "apply-marker", "drain(False)"]
+
+
+@pytest.mark.parametrize("single_batch", [False, True])
+def test_a_marker_alone_drains_once_without_checking_conditions(
+    single_batch: bool,
+) -> None:
+    stub = _SchedulingStub(single_batch=single_batch)
+    _dispatch(stub, [[], [], [], []], [_job("marker")])
+
+    assert stub.events == ["apply-marker", "drain(False)"]

@@ -564,43 +564,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 self._workflow_input = self._make_workflow_input(start_job)
 
             try:
-                if self._single_batch_activation:
-                    # Applying every job before giving workflow tasks a chance to
-                    # run prevents their order in the activation from hiding state
-                    # that arrived in the same workflow task.
-                    for job_set in job_sets:
-                        for job in job_set:
-                            # Let errors bubble out of these to the caller to fail the task
-                            self._apply(job)
-                    for job in replay_jobs:
-                        self._apply(job)
-                    if any(job_sets) or replay_jobs:
-                        self._run_once(
-                            check_conditions=bool(job_sets[1] or job_sets[2])
-                        )
-                else:
-                    # Preserve the legacy scheduling order for histories which do
-                    # not contain the single-batch workflow logic flag.
-                    replay_pending = bool(replay_jobs)
-                    for index, job_set in enumerate(job_sets):
-                        if not job_set:
-                            continue
-                        for job in job_set:
-                            # Let errors bubble out of these to the caller to fail the task
-                            self._apply(job)
-                        if replay_pending and index >= 1:
-                            for job in replay_jobs:
-                                self._apply(job)
-                            replay_pending = False
-
-                        # Run one iteration of the loop. We do not allow conditions to
-                        # be checked in patch jobs (first index) or query jobs (last
-                        # index).
-                        self._run_once(check_conditions=index == 1 or index == 2)
-                    if replay_pending:
-                        for job in replay_jobs:
-                            self._apply(job)
-                        self._run_once(check_conditions=True)
+                self._apply_activation_jobs(job_sets, replay_jobs)
             except BaseException:
                 # An error is already on its way out, so the replay is *abandoned*
                 # rather than closed. Closing runs `verify_replay_consumed`, which
@@ -704,6 +668,66 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._warn_if_unfinished_handlers()
 
         return self._current_completion
+
+    def _apply_activation_jobs(
+        self,
+        job_sets: list[
+            list[temporalio.bridge.proto.workflow_activation.WorkflowActivationJob]
+        ],
+        replay_jobs: list[
+            temporalio.bridge.proto.workflow_activation.WorkflowActivationJob
+        ],
+    ) -> None:
+        """Apply one activation's jobs and run the drains they earn.
+
+        An external stream replay marker is installed in front of the first
+        drain that can publish. A drain that publishes ahead of the install has
+        its records wiped by it and fails the manifest check, and an install
+        that earns a drain of its own makes the activation run one more drain
+        than the task the marker was written for.
+        """
+        if self._single_batch_activation:
+            # Applying every job before giving workflow tasks a chance to
+            # run prevents their order in the activation from hiding state
+            # that arrived in the same workflow task.
+            for job_set in job_sets:
+                for job in job_set:
+                    # Let errors bubble out of these to the caller to fail the task
+                    self._apply(job)
+            for job in replay_jobs:
+                self._apply(job)
+            if any(job_sets) or replay_jobs:
+                self._run_once(check_conditions=bool(job_sets[1] or job_sets[2]))
+            return
+
+        # Preserve the legacy scheduling order for histories which do
+        # not contain the single-batch workflow logic flag.
+        replay_pending = bool(replay_jobs)
+        # When nothing at index 1 or above will drain, the patch set's drain is
+        # the first one that can publish, so the install joins that set instead
+        # of adding a drain behind it.
+        first_draining_index = 1 if any(job_sets[1:]) else 0
+        for index, job_set in enumerate(job_sets):
+            if not job_set:
+                continue
+            for job in job_set:
+                # Let errors bubble out of these to the caller to fail the task
+                self._apply(job)
+            if replay_pending and index >= first_draining_index:
+                for job in replay_jobs:
+                    self._apply(job)
+                replay_pending = False
+
+            # Run one iteration of the loop. We do not allow conditions to
+            # be checked in patch jobs (first index) or query jobs (last
+            # index).
+            self._run_once(check_conditions=index == 1 or index == 2)
+        if replay_pending:
+            # No job set drained, so the marker's drain is this one, under the
+            # conditions rule the single-batch branch gives the same activation.
+            for job in replay_jobs:
+                self._apply(job)
+            self._run_once(check_conditions=False)
 
     def _apply(
         self, job: temporalio.bridge.proto.workflow_activation.WorkflowActivationJob
