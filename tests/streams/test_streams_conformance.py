@@ -156,11 +156,17 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
 async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
     # The store is a server built from the stream-carrying branch, which the
     # test environment's own server is not; TEMPORAL_ADDRESS names it.
+    # Without it the cases would reach a server that has no stream service and
+    # fail on the wire, which says nothing about the provider.
     address = os.environ.get("TEMPORAL_ADDRESS")
-    if address:
-        client = await Client.connect(
-            address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+    if not address:
+        pytest.skip(
+            "STREAMS_LIVE=native needs TEMPORAL_ADDRESS naming a server with the "
+            "stream service"
         )
+    client = await Client.connect(
+        address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+    )
     provider = NativeStreams()
     # Registered once, on the client: the host's worker inherits it and the
     # cases open handles through client.get_stream_handle.
@@ -240,6 +246,15 @@ async def case(
             if request.node.get_closest_marker(marker) and not supported(provider_case):
                 pytest.skip(f"the {provider_case.name} provider does not {marker}")
         yield provider_case
+
+
+async def test_the_native_setup_skips_without_a_server_address(
+    monkeypatch: pytest.MonkeyPatch, client: Client
+):
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    setup = _native_case(client)
+    with pytest.raises(pytest.skip.Exception, match="TEMPORAL_ADDRESS"):
+        await setup.__anext__()
 
 
 def new_workflow_id() -> str:
