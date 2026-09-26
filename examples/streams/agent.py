@@ -12,6 +12,7 @@ runtime, so the file is the same whichever provider the process registered.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -67,7 +68,6 @@ class Agent:
     @workflow.run
     async def run(self, count: int) -> int:
         """Decide on at most ``count`` inputs, then return how many landed."""
-        inputs = workflow.stream_reader(INPUTS)
         decisions = workflow.stream_writer(DECISIONS)
 
         generating = workflow.start_activity(
@@ -78,9 +78,31 @@ class Agent:
             # retrying forever while every attempt streams from the start.
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
+        consuming = asyncio.create_task(self._consume(count, decisions))
 
+        # Raced rather than awaited in turn: an attempt that fails writes no
+        # FINISH, so a generator that exhausts its attempts leaves the reader
+        # waiting forever. Its failure ends the run with its cause instead.
+        done, _ = await workflow.wait(
+            [consuming, generating], return_when=asyncio.FIRST_COMPLETED
+        )
+        if generating in done and consuming not in done:
+            try:
+                await generating
+            except BaseException:
+                consuming.cancel()
+                raise
+        seen = await consuming
+        await generating
+
+        decisions.finish()
+        return seen
+
+    async def _consume(
+        self, count: int, decisions: workflow.StreamWriter[Decision]
+    ) -> int:
         seen = 0
-        async for record in inputs:
+        async for record in workflow.stream_reader(INPUTS):
             if record.kind is RecordKind.FINISH:
                 break
             if record.kind is RecordKind.SUPERSEDED:
@@ -100,9 +122,4 @@ class Agent:
             )
             if seen >= count:
                 break
-        # A generator that exhausted its attempts fails the run with its cause
-        # here, rather than being forgotten once the loop has what it wanted.
-        await generating
-
-        decisions.finish()
         return seen
