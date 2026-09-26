@@ -58,6 +58,26 @@ to include examples, links to docs, or any other relevant information.
   `temporalio.contrib.workflow_streams` without naming it. Records are the
   `StreamRecord` proto inside the shipped item payload, and a handle without a
   run id follows continue-as-new run by run.
+- **Experimental**: `temporalio.streams.providers.workflow_streams` serves the
+  stream interface over the shipped Workflow Streams transport, so a workflow
+  reads and publishes through `temporalio.contrib.workflow_streams` without
+  naming it.
+- **Experimental**: `temporalio.streams.providers.nexus` puts one Nexus
+  endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store. Its contract is defined in
+  `temporal_streams.nexusrpc.yaml` and the bindings are generated from it.
+  Configure it with `data_converter=` to run a payload codec on the caller
+  side, so records are encoded before they leave the process.
+- Added `examples/streams`, one agent loop that runs unchanged on every
+  stream provider and on the Nexus front.
+- Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
+- **Experimental**: server-side streams. A workflow reads a stream the server
+  delivers on its Workflow Tasks and publishes with a command, through
+  `temporalio.workflow.read_stream`, `subscribe_stream` and
+  `add_stream_messages`. `temporalio.client_stream` and
+  `temporalio.contrib.server_streams` reach the same stream from outside a
+  workflow, and `temporalio.streams.providers.native` puts it behind the shared
+  stream interface. Requires a server that serves the stream service.
 - **Experimental**: `temporalio.streams.providers.nexus.NexusStreams` puts one
   Nexus endpoint in front of a storage provider, so a caller reaches a stream
   through the endpoint and never names the store, and
