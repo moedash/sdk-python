@@ -27,6 +27,7 @@ import temporalio.common
 import temporalio.converter
 import temporalio.converter._extstore
 import temporalio.exceptions
+import temporalio.streams
 import temporalio.workflow
 from temporalio.bridge.worker import PollShutdownError
 from temporalio.converter import StorageDriverStoreContext, StorageDriverWorkflowInfo
@@ -38,6 +39,7 @@ from ._debugger import (
     _relax_sandbox_for_debugger,
 )
 from ._interceptor import (
+    ExecuteWorkflowInput,
     Interceptor,
     WorkflowInboundInterceptor,
     WorkflowInterceptorClassInput,
@@ -57,6 +59,43 @@ logger = logging.getLogger(__name__)
 
 # Set to true to log all activations and completions
 LOG_PROTOS = False
+
+
+class _StreamHooksInterceptor(WorkflowInboundInterceptor):
+    """Brackets the workflow function with the stream provider's lifecycle hooks.
+
+    Installed by the worker when it has a stream provider, so no workflow
+    code has to call anything before it runs or before it returns. The finish
+    hook runs when the function returns, raises or continues as new, because
+    a provider that parked a reader against the run has to let go either way.
+    It does not run when the run is being evicted from the cache or when the
+    abandoned coroutine is collected: neither is the workflow ending, the
+    instance's state is not to be touched during eviction, and at collection
+    time the runtime on the thread belongs to whichever workflow happens to
+    be running, so the hook would act on that one.
+    """
+
+    async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
+        runtime = temporalio.workflow._Runtime.current()
+        provider = runtime.workflow_streams().provider
+        provider.on_workflow_start()
+        try:
+            result = await self.next.execute_workflow(input)
+        except GeneratorExit:
+            raise
+        except BaseException:
+            if not _evicting(runtime):
+                await provider.on_workflow_finish()
+            raise
+        await provider.on_workflow_finish()
+        return result
+
+
+def _evicting(runtime: temporalio.workflow._Runtime) -> bool:
+    # Eviction cancels the primary task the same way a workflow cancellation
+    # does; the flag the instance sets before cancelling is what tells them
+    # apart, and only the cancellation is a run ending.
+    return bool(getattr(runtime, "_deleting", False))
 
 
 # Value was chosen abitrarily as a small number that allows some concurrency and prevents
@@ -158,6 +197,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         default_workflow_logic_flags: frozenset[_WorkflowLogicFlag] | None = None,
         external_stream_backend: Any | None = None,
         client: Any = None,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> None:
         # Debug mode is enabled if specified or if the TEMPORAL_DEBUG env var is truthy
         debug_mode = debug_mode or bool(os.environ.get("TEMPORAL_DEBUG"))
@@ -216,6 +256,11 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 __temporal_assert_local_activity_valid=assert_local_activity_valid,
             )
         )
+        self._stream_provider = stream_provider
+        if stream_provider is not None:
+            # Innermost, so the lifecycle hooks bracket the workflow function
+            # itself, after every user interceptor has done its own setup.
+            self._interceptor_classes.append(_StreamHooksInterceptor)
 
         # External Workflow Streams. The manager is per-Worker and owns the
         # backend connection and watcher tasks; it is created lazily on the
@@ -968,6 +1013,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             default_workflow_logic_flags=frozenset(self._default_workflow_logic_flags),
             external_stream_runtime=runtime,
             external_streams_configured=self._external_streams_configured,
+            stream_provider=self._stream_provider,
         )
         if defn.sandboxed:
             return self._workflow_runner.create_instance(det)

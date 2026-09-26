@@ -15,3 +15,6 @@ temporalio/bridge/temporal_sdk_bridge*
 tags
 /.claude
 tmpclaude-*
+
+# Demo run output, written per provider; the numbers live in the doc.
+streams_demo/results-*/
