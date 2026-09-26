@@ -551,7 +551,9 @@ class RedisProducer(Generic[T]):
         self._producer_id = producer_id
         self._attempt = attempt
         self._converter = client.data_converter.payload_converter
-        self._sequence = 0
+        # One-based, because zero on the wire says the producer does not
+        # number its records and this one does.
+        self._sequence = 1
         self._last = BEGINNING
         self._input: Any = None
         self._output: Any = None
