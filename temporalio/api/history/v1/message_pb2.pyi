@@ -1574,6 +1574,7 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
     IDENTITY_FIELD_NUMBER: builtins.int
     RETRY_STATE_FIELD_NUMBER: builtins.int
     WORKER_VERSION_FIELD_NUMBER: builtins.int
+    CAUSE_FIELD_NUMBER: builtins.int
     @property
     def failure(self) -> temporalio.api.failure.v1.message_pb2.Failure:
         """Failure details"""
@@ -1589,6 +1590,8 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
         """Version info of the worker who processed this workflow task.
         Deprecated. This field should be cleaned up when versioning-2 API is removed. [cleanup-experimental-wv]
         """
+    cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType
+    """Why did the task fail? When unset, the failure is treated as an unspecified activity failure."""
     def __init__(
         self,
         *,
@@ -1599,6 +1602,7 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
         retry_state: temporalio.api.enums.v1.workflow_pb2.RetryState.ValueType = ...,
         worker_version: temporalio.api.common.v1.message_pb2.WorkerVersionStamp
         | None = ...,
+        cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -1609,6 +1613,8 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "cause",
+            b"cause",
             "failure",
             b"failure",
             "identity",
