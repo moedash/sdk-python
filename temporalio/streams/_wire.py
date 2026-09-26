@@ -43,7 +43,7 @@ def to_wire(
     value: Any = None,
     producer_id: str = "",
     attempt: int = 0,
-    sequence: int = -1,
+    sequence: int = 0,
 ) -> WireRecord:
     """Build the record a provider stores or ships.
 
@@ -118,7 +118,7 @@ class RecordDecoder:
         self._result_type = result_type
         self._previous = after
         self._warn = warn
-        self._attempts = AttemptTracker()
+        self._attempts = AttemptTracker(warn)
 
     def decode(self, cursor: Cursor, wire: WireRecord) -> list[StreamRecord[Any]]:
         """The records to yield for one stored record, in order."""

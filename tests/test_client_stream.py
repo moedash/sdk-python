@@ -22,7 +22,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamRecord, StreamRecordKind
 from temporalio.client_stream import StreamClient, StreamHandle
 from temporalio.service import RPCError
-from temporalio.streams import StreamNotFoundError
+from temporalio.streams import StreamNotFoundError, StreamProducerError
 
 TARGET = os.environ.get("TEMPORAL_STREAM_TARGET")
 
@@ -119,6 +119,7 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     sent.producer_id = "model"
     sent.attempt = 2
     sent.sequence = 7
+    sent.kind = StreamRecordKind.STREAM_RECORD_KIND_DATA
     sent.metadata["trace"].CopyFrom(Payload(data=b"abc"))
     finish = StreamRecord(
         topic="t", kind=StreamRecordKind.STREAM_RECORD_KIND_FINISH, producer_id="model"
@@ -137,6 +138,12 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     assert got.metadata["trace"].data == b"abc"
     assert entries[1].record.kind == StreamRecordKind.STREAM_RECORD_KIND_FINISH
     assert not entries[1].record.HasField("body")
+
+
+async def test_an_unset_kind_reads_back_as_data(stream: StreamHandle) -> None:
+    await stream.append(rec(b"x"))
+    entries, _ = await stream.read()
+    assert entries[0].record.kind == StreamRecordKind.STREAM_RECORD_KIND_DATA
 
 
 # A closed stream stays readable, which is what removes the shutdown handshake
@@ -190,3 +197,22 @@ async def test_failures_surface_as_sdk_errors(streams: StreamClient) -> None:
         await missing.describe()
     with pytest.raises((StreamNotFoundError, RPCError)):
         await missing.append(rec(b"x"))
+
+
+# A producer that asked to be deduplicated and could not be is a condition of
+# its own, not a bare argument error: the store already holds that sequence.
+async def test_a_producer_conflict_is_a_stream_producer_error(
+    stream: StreamHandle,
+) -> None:
+    await stream.append(rec(b"one"), producer_id="p1", sequence=0)
+    # Same producer and sequence, different content. The server cannot know
+    # which of the two the reader was meant to see.
+    with pytest.raises(StreamProducerError, match="different content"):
+        await stream.append(rec(b"other"), producer_id="p1", sequence=0)
+    # And a sequence behind the one it accepted last.
+    await stream.append(rec(b"two"), producer_id="p1", sequence=1)
+    with pytest.raises(StreamProducerError, match="stale producer sequence"):
+        await stream.append(rec(b"three"), producer_id="p1", sequence=0)
+
+    entries, _ = await stream.read()
+    assert data(entries) == [b"one", b"two"]

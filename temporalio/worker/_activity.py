@@ -665,13 +665,14 @@ class _ActivityWorker:
                     if not running_activity.cancel_thread_raiser
                     else running_activity.cancel_thread_raiser.shielded
                 ),
-                payload_converter_class_or_instance=data_converter.payload_converter,
+                payload_converter_class_or_instance=data_converter._get_internal_payload_converter(),
                 runtime_metric_meter=None if sync_non_threaded else self._metric_meter,
                 client=self._client if not running_activity.sync else None,
                 cancellation_details=running_activity.cancellation_details,
                 stream_provider=(
                     self._stream_provider if not running_activity.sync else None
                 ),
+                sync=running_activity.sync,
             )
         )
         temporalio.activity.logger.debug("Starting activity")
@@ -853,7 +854,7 @@ class _ActivityInboundImpl(ActivityInboundInterceptor):
             # The payload converter is the already instantiated one for thread
             # or the picklable class for non-thread
             payload_converter_class_or_instance = (
-                self._worker._data_converter.payload_converter
+                self._worker._data_converter._get_internal_payload_converter()
                 if isinstance(input.executor, concurrent.futures.ThreadPoolExecutor)
                 else self._worker._data_converter.payload_converter_class
             )
@@ -948,6 +949,7 @@ def _execute_sync_activity(
             runtime_metric_meter=runtime_metric_meter,
             client=None,
             cancellation_details=cancellation_details,
+            sync=True,
         )
     )
     if not cancel_thread_raiser:

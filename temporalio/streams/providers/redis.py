@@ -15,7 +15,10 @@ The mapping, in one place:
   output stream, where the workflow's own promoted batches land, so an
   outside reader sees the producer's records and the workflow's in one order
   and a workflow reading the topic misses nothing however early the producer
-  started. The cost is one more append per record and one wake per batch.
+  started. Both keys are written by one script, so a record is on both or on
+  neither: split across two calls, a crash between them leaves a record the
+  workflow consumes and no outside reader can ever see. The cost is one more
+  append per record and one wake per batch.
 - A record rides as the transport's payload: the serialized ``StreamRecord``
   proto as a ``binary/plain`` value, which the worker's codec encodes and
   decodes like any other payload.
@@ -49,7 +52,7 @@ import re
 import time
 from collections.abc import AsyncGenerator, Coroutine, Sequence
 from datetime import timedelta
-from typing import Any, Generic, TypeVar
+from typing import Any, Final, Generic, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -79,6 +82,9 @@ from temporalio.contrib.external_workflow_streams import (
 from temporalio.contrib.external_workflow_streams import (
     StreamError as TransportStreamError,
 )
+from temporalio.contrib.external_workflow_streams import (
+    StreamRecord as TransportRecord,
+)
 from temporalio.contrib.external_workflow_streams._backend import (
     DEFAULT_WATCH_BLOCK,
     StreamKey,
@@ -87,13 +93,20 @@ from temporalio.contrib.external_workflow_streams._codec import StreamPayloadCod
 from temporalio.contrib.external_workflow_streams._errors import StreamIntegrityError
 from temporalio.contrib.external_workflow_streams._output_backend import (
     OutputStage,
+    OutputStageConflictError,
     OutputStageManifest,
+    OutputStageNotFoundError,
+    OutputStageResolutionError,
     StagedOutputRecord,
 )
 from temporalio.contrib.external_workflow_streams._output_client import (
     _reconcile_output_stage,
 )
-from temporalio.contrib.external_workflow_streams._redis import RedisStreamBackend
+from temporalio.contrib.external_workflow_streams._redis import (
+    RedisStreamBackend,
+    _content_hash,
+    _text,
+)
 from temporalio.converter import WorkflowSerializationContext
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import (
@@ -184,6 +197,115 @@ def _entry_id(token: str | bytes) -> tuple[int, int]:
     return int(ms), int(seq or 0)
 
 
+#: Append one record to a topic's two keys, or to neither.
+#:
+#: The provider's own write, not the transport's: the transport appends one key at a
+#: time, and the two calls that would take are not one failure. A record on the input
+#: key alone is one the workflow consumes and no outside reader can ever see, and a
+#: producer that comes back with a fresh sequence never heals it.
+#:
+#: Both idempotency hashes are read before either stream is touched, so a key already
+#: used with different bytes refuses the pair rather than half-writing it. Either half
+#: already present is reused, which is what settles a pair some earlier call left
+#: half-written. The retention trims ride along rather than costing their own round
+#: trips, and they are exact for the reason the backend's own trims are.
+_PAIRED_APPEND_LUA: Final = """
+local minid = ARGV[1]
+local maxlen = ARGV[2]
+local function placed(idem, key, digest)
+  local existing = redis.call('HGET', idem, key)
+  if not existing then
+    return nil
+  end
+  local sep = string.find(existing, '|')
+  if string.sub(existing, sep + 1) ~= digest then
+    return 'conflict'
+  end
+  return string.sub(existing, 1, sep - 1)
+end
+local input = placed(KEYS[2], ARGV[3], ARGV[4])
+local output = placed(KEYS[4], ARGV[3], ARGV[4])
+if input == 'conflict' or output == 'conflict' then
+  return {'conflict', '', ''}
+end
+local fields = {unpack(ARGV, 5)}
+if not input then
+  input = redis.call('XADD', KEYS[1], '*', unpack(fields))
+  redis.call('HSET', KEYS[2], ARGV[3], input .. '|' .. ARGV[4])
+end
+if not output then
+  output = redis.call('XADD', KEYS[3], '*', unpack(fields))
+  redis.call('HSET', KEYS[4], ARGV[3], output .. '|' .. ARGV[4])
+end
+if minid ~= '' then
+  redis.call('XTRIM', KEYS[1], 'MINID', minid)
+  redis.call('XTRIM', KEYS[3], 'MINID', minid)
+end
+if maxlen ~= '' then
+  redis.call('XTRIM', KEYS[1], 'MAXLEN', maxlen)
+  redis.call('XTRIM', KEYS[3], 'MAXLEN', maxlen)
+end
+return {'ok', input, output}
+"""
+
+
+class _PairedAppend:
+    """One logical record on a topic's input and output keys, in one Redis call."""
+
+    def __init__(self, backend: RedisStreamBackend) -> None:
+        """Bind to ``backend``'s client and key layout."""
+        self._backend = backend
+        self._script = backend._client.register_script(_PAIRED_APPEND_LUA)
+
+    async def write(
+        self,
+        *,
+        input_key: StreamKey,
+        output_key: StreamKey,
+        record: TransportRecord,
+    ) -> Offset:
+        """Append ``record`` to both keys and return where it landed on the output key.
+
+        A repeat of the same ``(session, sequence)`` with the same bytes returns the
+        original positions and writes nothing, so a call whose answer was lost is
+        settled by making it again.
+        """
+        args: list[Any] = [
+            self._minid().encode(),
+            self._maxlen().encode(),
+            str(record.idempotency_key).encode(),
+            _content_hash(record).encode(),
+        ]
+        for name, value in sorted(record.to_fields().items()):
+            args.append(name.encode())
+            args.append(value)
+        outcome, _, output = await self._script(
+            keys=[
+                self._backend.stream_key(input_key),
+                self._backend._idempotency_key(input_key),
+                self._backend.stream_key(output_key),
+                self._backend._idempotency_key(output_key),
+            ],
+            args=args,
+        )
+        if _text(outcome) == "conflict":
+            raise AppendConflictError(record.idempotency_key)
+        return Offset(_text(output))
+
+    def _minid(self) -> str:
+        retention = getattr(self._backend, "_retention", None)
+        if retention is None:
+            return ""
+        # The worker's clock names the floor, so a skewed worker shifts the window by
+        # its skew, the same as the backend's own trim.
+        floor = int((time.time() - retention.total_seconds()) * 1000)
+        return f"{max(floor, 0)}-0"
+
+    def _maxlen(self) -> str:
+        max_len = getattr(self._backend, "_max_len", None)
+        return "" if max_len is None else str(max_len)
+
+
 class _RetainingBackend(RedisStreamBackend):
     """The transport's Redis backend, trimming the key behind every append it makes.
 
@@ -223,6 +345,18 @@ class _RetainingBackend(RedisStreamBackend):
     async def stage_output(
         self, manifest: OutputStageManifest, records: Sequence[StagedOutputRecord]
     ) -> OutputStage:
+        # A stage is invisible until its task commits, and the trim has no consumer
+        # floor to hold it: a window at or below the batch takes entries out of the
+        # stage that was just written, and the commit then fails on a missing record
+        # for as long as the task retries. Flooring the trim instead would need the
+        # floor this provider deliberately does not keep, and would not hold anyway,
+        # because the trim that removes the stage is not the one that staged it.
+        if self._max_len is not None and manifest.record_count >= self._max_len:
+            raise ValueError(
+                f"this task publishes {manifest.record_count} records and max_len is "
+                f"{self._max_len}: the window has to exceed the largest batch a task "
+                "publishes, or the batch is trimmed before it commits"
+            )
         stage = await super().stage_output(manifest, records)
         await self._trim(manifest.stream_key)
         return stage
@@ -245,14 +379,11 @@ class _RetainingBackend(RedisStreamBackend):
         A record at or after the first retained entry is there. On an emptied
         stream the last id Redis generated says whether the record ever was.
         """
-        from redis.exceptions import ResponseError
-
-        try:
-            info = await self._client.xinfo_stream(self.stream_key(key))
-        except ResponseError as error:
-            if "no such key" in str(error).lower():
-                return True
-            raise
+        name = self.stream_key(key)
+        if not await self._client.exists(name):
+            # Nothing was ever written under this key, so nothing was trimmed from it.
+            return True
+        info = await self._client.xinfo_stream(name)
         wanted = _entry_id(offset.token)
         first = info.get("first-entry")
         if first:
@@ -376,8 +507,22 @@ async def _chain(client: Client, workflow_id: str) -> WorkflowChainKey:
     )
 
 
+#: A chain still has a consumer while a run is in either of these: a run that
+#: continued as new hands the stream to its successor rather than ending it.
+_STILL_CONSUMING: Final = (
+    WorkflowExecutionStatus.RUNNING,
+    WorkflowExecutionStatus.CONTINUED_AS_NEW,
+)
+
+
 def _storage_error(error: Exception, what: str) -> StreamError:
     return StreamError(f"{what}: {error}")
+
+
+def _integrity_error(error: Exception, what: str) -> StreamError:
+    # Named as a loss rather than a transient read failure, because no retry brings
+    # a trimmed record back and the caller's next move is different.
+    return StreamNotFoundError(f"{what}: {error}")
 
 
 class RedisProducer(Generic[T]):
@@ -406,10 +551,14 @@ class RedisProducer(Generic[T]):
         self._producer_id = producer_id
         self._attempt = attempt
         self._converter = client.data_converter.payload_converter
-        self._sequence = 0
+        # One-based, because zero on the wire says the producer does not
+        # number its records and this one does.
+        self._sequence = 1
         self._last = BEGINNING
         self._input: Any = None
         self._output: Any = None
+        self._pair: _PairedAppend | None = None
+        self._codec: StreamPayloadCodec[bytes] | None = None
 
     @property
     def producer_id(self) -> str:
@@ -501,16 +650,36 @@ class RedisProducer(Generic[T]):
             ) from error
         self._output = output.topic(self._topic, type=bytes)
         self._input = input_.topic(self._topic, type=bytes)
+        self._pair = _PairedAppend(backend)
+        self._codec = StreamPayloadCodec(
+            self._client.data_converter.with_context(
+                WorkflowSerializationContext(
+                    namespace=chain.namespace, workflow_id=chain.workflow_id
+                )
+            ),
+            bytes,
+        )
 
     async def _write(self, records: list[WireRecord]) -> Cursor:
         await self._connect()
+        assert self._pair is not None and self._codec is not None
         last: Offset | None = None
         try:
-            for record in records:
-                frame = record.SerializeToString()
-                await self._input.publish(frame, wake=False)
-                placed = await self._output.publish(frame)
-                last = placed.offset
+            for index, record in enumerate(records):
+                # Built here rather than handed to the transport's publish, which
+                # appends one key per call. The identity is the same one the transport
+                # would derive, so a record either side already holds is reused.
+                staged = TransportRecord(
+                    kind=TransportRecordKind.DATA,
+                    payload=await self._codec.encode(record.SerializeToString()),
+                    producer_session_id=self._session,
+                    sequence=self._sequence + index,
+                )
+                last = await self._pair.write(
+                    input_key=self._input.stream_key,
+                    output_key=self._output.stream_key,
+                    record=staged,
+                )
             await self._wake()
         except AppendConflictError as error:
             raise StreamProducerError(
@@ -544,7 +713,8 @@ class RedisProducer(Generic[T]):
 
         Asked for a few seconds rather than once: the server refuses the wake
         while the execution is closing, and at that moment its status is
-        still the running one.
+        still the running one. A run that continued as new has not gone: the
+        streams are keyed by the chain, so its successor is the consumer now.
         """
         handle = self._client.get_workflow_handle(self._workflow_id)
         deadline = time.monotonic() + 5
@@ -555,7 +725,7 @@ class RedisProducer(Generic[T]):
                 if error.status == RPCStatusCode.NOT_FOUND:
                     return True
                 raise
-            if status is not None and status != WorkflowExecutionStatus.RUNNING:
+            if status is not None and status not in _STILL_CONSUMING:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -594,7 +764,19 @@ class RedisStreamHandle:
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
+        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes.
+
+        Two refusals and they do not land together. A cursor another provider minted,
+        or one naming the workflow's own input log, is refused by this call: reading
+        the token needs nothing from the store. A well-formed cursor the retention has
+        trimmed is refused on the first step of the generator, because answering that
+        needs a round trip and this call is not a coroutine. Neither yields a record
+        first.
+
+        Raises:
+            StreamCursorError: The cursor is another provider's, or names the
+                workflow's input log.
+        """
         topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
@@ -635,6 +817,11 @@ class RedisStreamHandle:
                     max_records=_READ_BATCH,
                     block=self._streams._poll,
                 )
+            except StreamIntegrityError as error:
+                # Integrity loss is permanent, and the taxonomy the transport builds
+                # on it is the difference between a retry that clears and one that
+                # never will. Filed as a store read, an operator retries forever.
+                raise _integrity_error(error, "the store lost records") from error
             except TransportStreamError as error:
                 raise _storage_error(error, "the store could not be read") from error
             for placed in result.records:
@@ -653,12 +840,31 @@ class RedisStreamHandle:
                 # A staged batch whose task History has not settled yet is a
                 # barrier: nothing past it is read until History says whether
                 # the task was accepted.
-                resolved = await _reconcile_output_stage(
-                    backend=backend,
-                    client=self._client,
-                    workflow_id=self._workflow_id,
-                    manifest=result.pending.manifest,
-                )
+                try:
+                    resolved = await _reconcile_output_stage(
+                        backend=backend,
+                        client=self._client,
+                        workflow_id=self._workflow_id,
+                        manifest=result.pending.manifest,
+                    )
+                except StreamIntegrityError as error:
+                    raise _integrity_error(
+                        error, "a staged batch lost records"
+                    ) from error
+                except (
+                    OutputStageConflictError,
+                    OutputStageNotFoundError,
+                    OutputStageResolutionError,
+                ) as error:
+                    # The transport's own stage vocabulary does not cross the public
+                    # surface: to a reader this is a batch that cannot be settled.
+                    raise _storage_error(
+                        error, "a staged batch could not be settled"
+                    ) from error
+                except TransportStreamError as error:
+                    raise _storage_error(
+                        error, "a staged batch could not be settled"
+                    ) from error
                 if not resolved:
                     await asyncio.sleep(self._streams._poll.total_seconds())
                 continue
@@ -685,12 +891,16 @@ class RedisStreamHandle:
             return False
         # The streams are keyed by the chain, so a run that continued as new
         # is not the end unless the handle was pinned to it.
-        return not (
-            self._run_id is None and status == WorkflowExecutionStatus.CONTINUED_AS_NEW
-        )
+        return not (self._run_id is None and status in _STILL_CONSUMING)
 
     async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
-        """The cursor of the newest committed record on ``topic``, for following from now."""
+        """The cursor of the newest committed record on ``topic``, for following from now.
+
+        ``BEGINNING`` when the topic holds no committed record, which a topic whose
+        records retention has all trimmed answers too: the two are the same state to
+        a reader, and a read from it starts at the first record retained after it
+        rather than at the tail the caller asked to follow from.
+        """
         topic, _ = resolve_topic(topic)
         backend = self._streams._require_backend()
         chain = await _chain(self._client, self._workflow_id)

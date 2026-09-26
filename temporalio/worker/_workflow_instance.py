@@ -73,6 +73,11 @@ from temporalio.nexus.system.workflow_service._system_nexus_interceptor import (
 from temporalio.service import __version__
 
 from ..api.failure.v1.message_pb2 import Failure
+from ..workflow._event_groups import (
+    _capture_event_group_markers,
+    _inbound_event_group,
+    _inbound_update_event_group,
+)
 from . import _command_aware_visitor
 from ._interceptor import (
     ContinueAsNewInput,
@@ -92,10 +97,18 @@ from ._interceptor import (
 
 logger = logging.getLogger(__name__)
 
+QUERY_HANDLER_NOT_FOUND = "expected but not found"
+"""The phrase a query for an unregistered handler comes back with.
+
+A caller that has to recognise the condition has only the failure message to
+go on, so it matches this constant rather than a copy of the sentence.
+"""
+
 # Set to true to log all cases where we're ignoring things during delete
 LOG_IGNORE_DURING_DELETE = False
 
-# Core answers a query carrying this id on the query's own task, alone.
+# Core answers a query carrying this id on the query's own task, alone. Held in
+# step with LEGACY_QUERY_ID in sdk-core, crates/sdk-core/src/worker/workflow/mod.rs.
 _LEGACY_QUERY_ID = "legacy_query"
 
 
@@ -305,6 +318,20 @@ _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], A
 # Match the server's per-batch limits. A record over its limit is refused where
 # it is published, because a rejected command would be reissued on every
 # replay; a task's records are split into commands that fit the batch limits.
+#
+# Copied rather than learned: the activation does not carry them and the
+# server does not report them, so this is a second copy of a number somebody
+# else owns. If the server lowers one, or makes it per namespace, the split
+# here stops fitting and the command is rejected on every replay, which is
+# the failure the split exists to avoid. Carrying them on the activation is
+# what would fix that, and it needs a Core and server change.
+_STREAM_CONTINUITY_REMEDY = (
+    "This fails the Workflow Task and will keep failing it, because the range "
+    "is recorded as consumed and will not be sent again. Reset the workflow to "
+    "before the subscription to start its stream reading over, or terminate it "
+    "if its output is no longer wanted."
+)
+
 _MAX_STREAM_RECORDS_PER_BATCH = 1000
 _MAX_STREAM_RECORD_BYTES = 1 << 20
 _MAX_STREAM_BATCH_BYTES = 2 << 20
@@ -352,12 +379,35 @@ class _StreamBuffer:
 
     def __init__(self, stream_id: str = "") -> None:
         self._stream_id = stream_id
-        self._records: list[temporalio.workflow.DeliveredStreamRecord] = []
+        self._records: list[temporalio.workflow._DeliveredStreamRecord] = []
         self._waiters: list[asyncio.Future] = []
         # Where the next range has to start. Unknown until the first one
         # arrives, because a subscription may start wherever the stream is and
         # the server is the one that resolves that.
         self._next_offset: int | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Whether workflow code has said it wants no more of this stream."""
+        return self._closed
+
+    def close(self) -> None:
+        """Stop keeping what arrives, and let go of what is held. Idempotent.
+
+        There is no unsubscribe command, so the server keeps delivering for
+        the life of the run. Holding those records would grow the instance
+        without bound for a reader nobody will read again. Dropping them is
+        replay-safe because the close happens at the same point of the same
+        workflow code every time, so the same ranges are dropped; continuity
+        is still tracked, so a range that repeats or skips is still caught.
+        """
+        self._closed = True
+        self._records = []
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def extend(
         self,
@@ -374,17 +424,20 @@ class _StreamBuffer:
         if to_offset - from_offset != len(records):
             raise RuntimeError(
                 f"stream {self._stream_id!r} delivered {len(records)} records "
-                f"for offsets [{from_offset}, {to_offset})"
+                f"for offsets [{from_offset}, {to_offset}). {_STREAM_CONTINUITY_REMEDY}"
             )
         if self._next_offset is not None and from_offset != self._next_offset:
             raise RuntimeError(
                 f"stream {self._stream_id!r} delivered offsets [{from_offset}, "
-                f"{to_offset}) but the last range ended at {self._next_offset}"
+                f"{to_offset}) but the last range ended at {self._next_offset}. "
+                f"{_STREAM_CONTINUITY_REMEDY}"
             )
         self._next_offset = to_offset
         # An empty range still counts as a delivery, but there is nothing to
-        # hand a reader, so only a non-empty one wakes anyone.
-        if not records:
+        # hand a reader, so only a non-empty one wakes anyone. A closed buffer
+        # counts the range and keeps nothing: continuity is still checked
+        # above, and nobody is left to read what it held.
+        if not records or self._closed:
             return
         # Offsets are dense inside a delivered range and the range arrives in
         # order, so counting from its start is the position rather than an
@@ -395,7 +448,7 @@ class _StreamBuffer:
             kept = temporalio.api.stream.v1.StreamRecord()
             kept.CopyFrom(record)
             self._records.append(
-                temporalio.workflow.DeliveredStreamRecord(
+                temporalio.workflow._DeliveredStreamRecord(
                     record=kept, offset=from_offset + index
                 )
             )
@@ -404,12 +457,12 @@ class _StreamBuffer:
             if not waiter.done():
                 waiter.set_result(None)
 
-    def take(self) -> list[temporalio.workflow.DeliveredStreamRecord]:
+    def take(self) -> list[temporalio.workflow._DeliveredStreamRecord]:
         taken, self._records = self._records, []
         return taken
 
     def put_back(
-        self, records: Sequence[temporalio.workflow.DeliveredStreamRecord]
+        self, records: Sequence[temporalio.workflow._DeliveredStreamRecord]
     ) -> None:
         """Return an unread tail to the front of the buffer."""
         self._records[:0] = records
@@ -711,43 +764,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 self._workflow_input = self._make_workflow_input(start_job)
 
             try:
-                if self._single_batch_activation:
-                    # Applying every job before giving workflow tasks a chance to
-                    # run prevents their order in the activation from hiding state
-                    # that arrived in the same workflow task.
-                    for job_set in job_sets:
-                        for job in job_set:
-                            # Let errors bubble out of these to the caller to fail the task
-                            self._apply(job)
-                    for job in replay_jobs:
-                        self._apply(job)
-                    if any(job_sets) or replay_jobs:
-                        self._run_once(
-                            check_conditions=bool(job_sets[1] or job_sets[2])
-                        )
-                else:
-                    # Preserve the legacy scheduling order for histories which do
-                    # not contain the single-batch workflow logic flag.
-                    replay_pending = bool(replay_jobs)
-                    for index, job_set in enumerate(job_sets):
-                        if not job_set:
-                            continue
-                        for job in job_set:
-                            # Let errors bubble out of these to the caller to fail the task
-                            self._apply(job)
-                        if replay_pending and index >= 1:
-                            for job in replay_jobs:
-                                self._apply(job)
-                            replay_pending = False
-
-                        # Run one iteration of the loop. We do not allow conditions to
-                        # be checked in patch jobs (first index) or query jobs (last
-                        # index).
-                        self._run_once(check_conditions=index == 1 or index == 2)
-                    if replay_pending:
-                        for job in replay_jobs:
-                            self._apply(job)
-                        self._run_once(check_conditions=True)
+                self._apply_activation_jobs(job_sets, replay_jobs)
             except BaseException:
                 # An error is already on its way out, so the replay is *abandoned*
                 # rather than closed. Closing runs `verify_replay_consumed`, which
@@ -854,6 +871,66 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._warn_if_unfinished_handlers()
 
         return self._current_completion
+
+    def _apply_activation_jobs(
+        self,
+        job_sets: list[
+            list[temporalio.bridge.proto.workflow_activation.WorkflowActivationJob]
+        ],
+        replay_jobs: list[
+            temporalio.bridge.proto.workflow_activation.WorkflowActivationJob
+        ],
+    ) -> None:
+        """Apply one activation's jobs and run the drains they earn.
+
+        An external stream replay marker is installed in front of the first
+        drain that can publish. A drain that publishes ahead of the install has
+        its records wiped by it and fails the manifest check, and an install
+        that earns a drain of its own makes the activation run one more drain
+        than the task the marker was written for.
+        """
+        if self._single_batch_activation:
+            # Applying every job before giving workflow tasks a chance to
+            # run prevents their order in the activation from hiding state
+            # that arrived in the same workflow task.
+            for job_set in job_sets:
+                for job in job_set:
+                    # Let errors bubble out of these to the caller to fail the task
+                    self._apply(job)
+            for job in replay_jobs:
+                self._apply(job)
+            if any(job_sets) or replay_jobs:
+                self._run_once(check_conditions=bool(job_sets[1] or job_sets[2]))
+            return
+
+        # Preserve the legacy scheduling order for histories which do
+        # not contain the single-batch workflow logic flag.
+        replay_pending = bool(replay_jobs)
+        # When nothing at index 1 or above will drain, the patch set's drain is
+        # the first one that can publish, so the install joins that set instead
+        # of adding a drain behind it.
+        first_draining_index = 1 if any(job_sets[1:]) else 0
+        for index, job_set in enumerate(job_sets):
+            if not job_set:
+                continue
+            for job in job_set:
+                # Let errors bubble out of these to the caller to fail the task
+                self._apply(job)
+            if replay_pending and index >= first_draining_index:
+                for job in replay_jobs:
+                    self._apply(job)
+                replay_pending = False
+
+            # Run one iteration of the loop. We do not allow conditions to
+            # be checked in patch jobs (first index) or query jobs (last
+            # index).
+            self._run_once(check_conditions=index == 1 or index == 2)
+        if replay_pending:
+            # No job set drained, so the marker's drain is this one, under the
+            # conditions rule the single-batch branch gives the same activation.
+            for job in replay_jobs:
+                self._apply(job)
+            self._run_once(check_conditions=False)
 
     def _apply(
         self, job: temporalio.bridge.proto.workflow_activation.WorkflowActivationJob
@@ -980,7 +1057,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 command = None  # type: ignore
 
                 # Run the handler
-                success = await self._inbound.handle_update_handler(handler_input)
+                with _inbound_update_event_group(job.id).scope():
+                    success = await self._inbound.handle_update_handler(handler_input)
                 result_payloads = self._workflow_context_payload_converter.to_payloads(
                     [success]
                 )
@@ -1308,7 +1386,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     if not defn:
                         known_queries = sorted([k for k in self._queries.keys() if k])
                         raise RuntimeError(
-                            f"Query handler for '{job.query_type}' expected but not found, "
+                            f"Query handler for '{job.query_type}' "
+                            f"{QUERY_HANDLER_NOT_FOUND}, "
                             f"known queries: [{' '.join(known_queries)}]"
                         )
 
@@ -1558,9 +1637,11 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     )
                 )
                 if serialization_context is not None:
-                    payload_converter = temporalio.nexus.system._get_payload_converter(
-                        self._payload_converter_with_context(serialization_context),
-                        self._failure_converter_with_context(serialization_context),
+                    payload_converter = (
+                        temporalio.nexus.system._get_system_nexus_payload_converter(
+                            self._payload_converter_with_context(serialization_context),
+                            self._failure_converter_with_context(serialization_context),
+                        )
                     )
             [output] = self._convert_payloads(
                 [result.completed],
@@ -1758,6 +1839,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         versioning_intent: temporalio.workflow.VersioningIntent | None,
         initial_versioning_behavior: temporalio.workflow.ContinueAsNewVersioningBehavior
         | None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> NoReturn:
         self._assert_not_read_only("continue as new")
         # Use definition if callable
@@ -1787,6 +1869,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 arg_types=arg_types,
                 versioning_intent=versioning_intent,
                 initial_versioning_behavior=initial_versioning_behavior,
+                event_groups=event_groups,
             )
         )
 
@@ -1814,18 +1897,22 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
 
-    def workflow_subscribe_stream(self, stream_id: str, start_offset: int) -> None:
+    def workflow_subscribe_stream(
+        self, stream_name_or_id: str, start_offset: int
+    ) -> None:
         # Reissued on every replay, so the buffer has to exist before the first
         # range arrives and the command has to be harmless the second time. A
         # repeat subscription leaves the server-side cursor where it is.
-        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
+        self._stream_buffers.setdefault(
+            stream_name_or_id, _StreamBuffer(stream_name_or_id)
+        )
         command = self._add_command()
-        command.subscribe_stream.stream_id = stream_id
+        command.subscribe_stream.stream_name_or_id = stream_name_or_id
         command.subscribe_stream.start_offset = start_offset
 
     def workflow_append_stream_records(
         self,
-        stream_id: str,
+        stream_name: str,
         records: Sequence[temporalio.api.stream.v1.StreamRecord],
     ) -> None:
         self._assert_not_read_only("append stream records")
@@ -1845,7 +1932,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             kept.append(copy)
         # Held until the task completes, so a task's publishes on one stream
         # become one command and one History event however many there were.
-        self._stream_appends.setdefault(stream_id, []).extend(kept)
+        self._stream_appends.setdefault(stream_name, []).extend(kept)
 
     def _flush_stream_appends(self) -> None:
         appends, self._stream_appends = self._stream_appends, {}
@@ -1859,23 +1946,26 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             if _is_completion_command(command):
                 insert_at = index
                 break
-        for stream_id, records in appends.items():
+        for stream_name, records in appends.items():
             for batch in _stream_batches(records):
                 command = temporalio.bridge.proto.workflow_commands.WorkflowCommand()
-                command.append_stream_records.stream_id = stream_id
+                command.append_stream_records.stream_name = stream_name
                 command.append_stream_records.records.extend(batch)
                 commands.insert(insert_at, command)
                 insert_at += 1
 
+    def workflow_close_stream_records(self, stream_id: str) -> None:
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id)).close()
+
     async def workflow_read_stream_records(
         self, stream_id: str, max_records: int
-    ) -> list[temporalio.workflow.DeliveredStreamRecord]:
+    ) -> list[temporalio.workflow._DeliveredStreamRecord]:
         # Ranges arrive on Workflow Tasks, and a query activation carries none,
         # so without this the read waits on a future nothing can resolve and the
         # query times out with nothing to say why.
         self._assert_not_read_only("read stream")
         buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
-        while not len(buffer):
+        while not len(buffer) and not buffer.closed:
             await buffer.wait_future()
         taken = buffer.take()
         if max_records and len(taken) > max_records:
@@ -1932,6 +2022,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def workflow_is_continue_as_new_suggested(self) -> bool:
         return self._continue_as_new_suggested
 
+    def workflow_is_evicting(self) -> bool:
+        return self._deleting
+
     def workflow_is_target_worker_deployment_version_changed(self) -> bool:
         return self._target_worker_deployment_version_changed
 
@@ -1965,7 +2058,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             type_hint,  # type: ignore[arg-type]
         )
 
-    def workflow_upsert_memo(self, updates: Mapping[str, Any]) -> None:
+    def workflow_upsert_memo(
+        self,
+        updates: Mapping[str, Any],
+        *,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
+    ) -> None:
         # Converting before creating a command so that we don't leave a partial command in case of conversion failure.
         update_payloads = {}
         removals = []
@@ -1981,7 +2079,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         if not update_payloads and not removals:
             return
 
+        markers = _capture_event_group_markers(event_groups)
+
         command = self._add_command()
+        command.event_group_markers.extend(markers)
         fields = command.modify_workflow_properties.upserted_memo.fields
 
         # Updating memo inside info by downcasting to mutable mapping.
@@ -2025,7 +2126,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._metric_meter = _ReplaySafeMetricMeter(metric_meter)
         return self._metric_meter
 
-    def workflow_patch(self, id: str, *, deprecated: bool) -> bool:
+    def workflow_patch(
+        self,
+        id: str,
+        *,
+        deprecated: bool,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
+    ) -> bool:
         self._assert_not_read_only("patch")
         # We use a previous memoized result of this if present. If this is being
         # deprecated, we can still use memoized result and skip the command.
@@ -2049,7 +2156,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             use_patch = True
         self._patches_memoized[id] = use_patch
         if use_patch:
+            markers = _capture_event_group_markers(event_groups)
+
             command = self._add_command()
+            command.event_group_markers.extend(markers)
             command.set_patch_marker.patch_id = id
             command.set_patch_marker.deprecated = deprecated
         return use_patch
@@ -2150,6 +2260,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         activity_id: str | None,
         versioning_intent: temporalio.workflow.VersioningIntent | None,
         summary: str | None = None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
         priority: temporalio.common.Priority = temporalio.common.Priority.default,
     ) -> temporalio.workflow.ActivityHandle[Any]:
         self._assert_not_read_only("start activity")
@@ -2187,6 +2298,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 ret_type=ret_type,
                 versioning_intent=versioning_intent,
                 summary=summary,
+                event_groups=event_groups,
                 priority=priority,
             )
         )
@@ -2215,6 +2327,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         versioning_intent: temporalio.workflow.VersioningIntent | None,
         static_summary: str | None = None,
         static_details: str | None = None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
         priority: temporalio.common.Priority = temporalio.common.Priority.default,
     ) -> temporalio.workflow.ChildWorkflowHandle[Any, Any]:
         # Use definition if callable
@@ -2255,6 +2368,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 versioning_intent=versioning_intent,
                 static_summary=static_summary,
                 static_details=static_details,
+                event_groups=event_groups,
                 priority=priority,
             )
         )
@@ -2272,6 +2386,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         cancellation_type: temporalio.workflow.ActivityCancellationType,
         activity_id: str | None,
         summary: str | None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> temporalio.workflow.ActivityHandle[Any]:
         # Get activity definition if it's callable
         name: str
@@ -2305,6 +2420,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 local_retry_threshold=local_retry_threshold,
                 cancellation_type=cancellation_type,
                 summary=summary,
+                event_groups=event_groups,
                 headers={},
                 arg_types=arg_types,
                 ret_type=ret_type,
@@ -2324,6 +2440,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         cancellation_type: temporalio.workflow.NexusOperationCancellationType,
         headers: Mapping[str, str] | None,
         summary: str | None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> temporalio.workflow.NexusOperationHandle[OutputT]:
         if temporalio.nexus.system.is_system_endpoint(endpoint):
             return await _start_system_nexus_operation(
@@ -2340,6 +2457,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     cancellation_type=cancellation_type,
                     headers=None,
                     summary=summary,
+                    event_groups=event_groups,
                 ),
             )
         return await self._outbound.start_nexus_operation(
@@ -2355,6 +2473,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 cancellation_type=cancellation_type,
                 headers=headers,
                 summary=summary,
+                event_groups=event_groups,
             )
         )
 
@@ -2381,8 +2500,14 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             temporalio.common.SearchAttributes
             | Sequence[temporalio.common.SearchAttributeUpdate]
         ),
+        *,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> None:
-        v = self._add_command().upsert_workflow_search_attributes
+        markers = _capture_event_group_markers(event_groups)
+
+        command = self._add_command()
+        command.event_group_markers.extend(markers)
+        v = command.upsert_workflow_search_attributes
 
         # Update the attrs on info, casting to their mutable forms first
         mut_attrs = cast(
@@ -2482,7 +2607,11 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     )
 
     async def workflow_sleep(
-        self, duration: float, *, summary: str | None = None
+        self,
+        duration: float,
+        *,
+        summary: str | None = None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> None:
         user_metadata = (
             temporalio.api.sdk.v1.UserMetadata(
@@ -2491,10 +2620,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             if summary
             else None
         )
+        markers = _capture_event_group_markers(event_groups)
+
         fut = self.create_future()
         timer_handle = self._timer_impl(
             duration,
-            _TimerOptions(user_metadata=user_metadata),
+            _TimerOptions(user_metadata=user_metadata, event_group_markers=markers),
             lambda: fut.set_result(None) if not fut.done() else None,
         )
         fut.add_done_callback(
@@ -2508,6 +2639,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         *,
         timeout: float | None = None,
         timeout_summary: str | None = None,
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> None:
         self._assert_not_read_only("wait condition")
         cancellation_requested_before = self._cancel_reason is not None
@@ -2534,10 +2666,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             if timeout_summary
             else None
         )
+        markers = _capture_event_group_markers(event_groups)
         ctxvars = contextvars.copy_context()
 
         async def in_context():
-            _TimerOptionsCtxVar.set(_TimerOptions(user_metadata=user_metadata))
+            _TimerOptionsCtxVar.set(
+                _TimerOptions(user_metadata=user_metadata, event_group_markers=markers)
+            )
             await asyncio.wait_for(fut, timeout)
 
         try:
@@ -2644,8 +2779,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 except _ActivityDoBackoffError as err:
                     # We have to sleep then reschedule. Note this sleep can be
                     # cancelled like any other timer.
-                    await asyncio.sleep(
-                        err.backoff.backoff_duration.ToTimedelta().total_seconds()
+                    await self.workflow_sleep(
+                        err.backoff.backoff_duration.ToTimedelta().total_seconds(),
+                        event_groups=input.event_groups,
                     )
                     handle._apply_schedule_command(err.backoff)
                     # We have to put the handle back on the pending activity
@@ -2668,6 +2804,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             )
         )
         payloads = payload_converter.to_payloads(input.args) if input.args else None
+        markers = _capture_event_group_markers(input.event_groups)
+
         command = self._add_command()
         v = command.signal_external_workflow_execution
         v.child_workflow_id = input.child_workflow_id
@@ -2676,6 +2814,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             v.args.extend(payloads)
         if input.headers:
             temporalio.common._apply_headers(input.headers, v.headers)
+        command.event_group_markers.extend(markers)
+
         await self._signal_external_workflow(command)
 
     async def _outbound_signal_external_workflow(
@@ -2688,6 +2828,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             )
         )
         payloads = payload_converter.to_payloads(input.args) if input.args else None
+        markers = _capture_event_group_markers(input.event_groups)
+
         command = self._add_command()
         v = command.signal_external_workflow_execution
         v.workflow_execution.namespace = input.namespace
@@ -2699,6 +2841,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             v.args.extend(payloads)
         if input.headers:
             temporalio.common._apply_headers(input.headers, v.headers)
+        command.event_group_markers.extend(markers)
+
         await self._signal_external_workflow(command)
 
     async def _outbound_start_child_workflow(
@@ -2784,18 +2928,20 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 input.operation_name,
                 input.input,
             )
-            user_payload_converter = self._workflow_context_payload_converter
+            internal_payload_converter = self._workflow_context_payload_converter
             user_failure_converter = self._workflow_context_failure_converter
             if serialization_context is not None:
-                user_payload_converter = self._payload_converter_with_context(
+                internal_payload_converter = self._payload_converter_with_context(
                     serialization_context
                 )
                 user_failure_converter = self._failure_converter_with_context(
                     serialization_context
                 )
-            payload_converter = temporalio.nexus.system._get_payload_converter(
-                user_payload_converter,
-                user_failure_converter,
+            payload_converter = (
+                temporalio.nexus.system._get_system_nexus_payload_converter(
+                    internal_payload_converter,
+                    user_failure_converter,
+                )
             )
             failure_converter = user_failure_converter
         else:
@@ -3579,8 +3725,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         def done_callback(_f: Any):
             self._in_progress_signals.pop(id, None)
 
+        async def run_signal() -> None:
+            with _inbound_event_group(job.originating_event_id).scope():
+                await self._inbound.handle_signal(input)
+
         task = self.create_task(
-            self._run_top_level_workflow_function(self._inbound.handle_signal(input)),
+            self._run_top_level_workflow_function(run_signal()),
             name=f"signal: {job.signal_name}",
         )
         task.add_done_callback(done_callback)
@@ -3723,6 +3873,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         def apply_cancel(
             _err: asyncio.CancelledError,
         ) -> None:
+            # `cancel_signal_workflow` is a Core-only command and apply only if the Signal command
+            # has not yet been sent to the server. The cancel request itself can't produce a WFT
+            # command. Hence there's no point in attaching Event Groups or User Metadata to it.
             command = self._add_command()
             command.cancel_signal_workflow.seq = seq
 
@@ -3849,10 +4002,22 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         if delay < 0:
             raise RuntimeError("Attempting to schedule timer with negative delay")
 
+        if options.event_group_markers is None:
+            options = _TimerOptions(
+                user_metadata=options.user_metadata,
+                event_group_markers=_capture_event_group_markers(None),
+            )
+
         # Create, schedule, and return
         seq = self._next_seq("timer")
         handle = _TimerHandle(
-            seq, self.time() + delay, options, callback, args, self, context
+            seq,
+            self.time() + delay,
+            options,
+            callback,
+            args,
+            self,
+            context,
         )
         handle._apply_start_command(self._add_command(), delay)
         self._pending_timers[seq] = handle
@@ -4145,6 +4310,7 @@ class _WorkflowOutboundImpl(
 @dataclass(frozen=True)
 class _TimerOptions:
     user_metadata: temporalio.api.sdk.v1.UserMetadata | None = None
+    event_group_markers: Sequence[temporalio.api.sdk.v1.EventGroupMarker] | None = None
 
 
 _TimerOptionsCtxVar: contextvars.ContextVar[_TimerOptions] = contextvars.ContextVar(
@@ -4157,7 +4323,7 @@ class _TimerHandle(asyncio.TimerHandle):
         self,
         seq: int,
         when: float,
-        options: _TimerOptions | None,
+        options: _TimerOptions,
         callback: Callable[..., Any],
         args: Sequence[Any],
         loop: asyncio.AbstractEventLoop,
@@ -4173,8 +4339,9 @@ class _TimerHandle(asyncio.TimerHandle):
         delay: float,
     ) -> None:
         command.start_timer.seq = self._seq
-        if self._options and self._options.user_metadata:
+        if self._options.user_metadata:
             command.user_metadata.CopyFrom(self._options.user_metadata)
+        command.event_group_markers.extend(self._options.event_group_markers or ())
         command.start_timer.start_to_fire_timeout.FromNanoseconds(int(delay * 1e9))
 
     def _apply_cancel_command(
@@ -4182,6 +4349,7 @@ class _TimerHandle(asyncio.TimerHandle):
         command: temporalio.bridge.proto.workflow_commands.WorkflowCommand,
     ) -> None:
         command.cancel_timer.seq = self._seq
+        command.event_group_markers.extend(self._options.event_group_markers or ())
 
 
 class _ActivityDoBackoffError(BaseException):
@@ -4222,6 +4390,7 @@ class _ActivityHandle(temporalio.workflow.ActivityHandle[Any]):
                 is_local=isinstance(self._input, StartLocalActivityInput),
             )
         )
+        self._event_group_markers = _capture_event_group_markers(input.event_groups)
 
     def cancel(self, msg: Any | None = None) -> bool:
         # Allow the cancel to go through for the task even if we're deleting,
@@ -4309,6 +4478,7 @@ class _ActivityHandle(temporalio.workflow.ActivityHandle[Any]):
             command.user_metadata.summary.CopyFrom(
                 self._payload_converter.to_payload(self._input.summary)
             )
+        command.event_group_markers.extend(self._event_group_markers)
         v.cancellation_type = cast(
             temporalio.bridge.proto.workflow_commands.ActivityCancellationType.ValueType,
             int(self._input.cancellation_type),
@@ -4353,6 +4523,7 @@ class _ActivityHandle(temporalio.workflow.ActivityHandle[Any]):
             command.request_cancel_activity.seq = self._seq
         else:
             command.request_cancel_local_activity.seq = self._seq
+        command.event_group_markers.extend(self._event_group_markers)
 
 
 class _ChildWorkflowHandle(temporalio.workflow.ChildWorkflowHandle[Any, Any]):
@@ -4381,6 +4552,7 @@ class _ChildWorkflowHandle(temporalio.workflow.ChildWorkflowHandle[Any, Any]):
         self._failure_converter = self._instance._failure_converter_with_context(
             workflow_context
         )
+        self._event_group_markers = _capture_event_group_markers(input.event_groups)
 
     @property
     def id(self) -> str:
@@ -4396,6 +4568,7 @@ class _ChildWorkflowHandle(temporalio.workflow.ChildWorkflowHandle[Any, Any]):
         arg: Any = temporalio.common._arg_unset,
         *,
         args: Sequence[Any] = [],
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> None:
         self._instance._assert_not_read_only("signal child handle")
         await self._instance._outbound.signal_child_workflow(
@@ -4406,6 +4579,7 @@ class _ChildWorkflowHandle(temporalio.workflow.ChildWorkflowHandle[Any, Any]):
                 args=temporalio.common._arg_or_args(arg, args),
                 child_workflow_id=self._input.id,
                 headers={},
+                event_groups=event_groups,
             )
         )
 
@@ -4485,6 +4659,7 @@ class _ChildWorkflowHandle(temporalio.workflow.ChildWorkflowHandle[Any, Any]):
             command.user_metadata.details.CopyFrom(
                 self._payload_converter.to_payload(self._input.static_details)
             )
+        command.event_group_markers.extend(self._event_group_markers)
         if self._input.priority:
             v.priority.CopyFrom(self._input.priority._to_proto())
 
@@ -4498,6 +4673,7 @@ class _ChildWorkflowHandle(temporalio.workflow.ChildWorkflowHandle[Any, Any]):
         v = command.cancel_child_workflow_execution
         v.child_workflow_seq = self._seq
         v.reason = reason
+        command.event_group_markers.extend(self._event_group_markers)
 
 
 class _ExternalWorkflowHandle(temporalio.workflow.ExternalWorkflowHandle[Any]):
@@ -4526,6 +4702,7 @@ class _ExternalWorkflowHandle(temporalio.workflow.ExternalWorkflowHandle[Any]):
         arg: Any = temporalio.common._arg_unset,
         *,
         args: Sequence[Any] = [],
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
     ) -> None:
         self._instance._assert_not_read_only("signal external handle")
         await self._instance._outbound.signal_external_workflow(
@@ -4538,18 +4715,29 @@ class _ExternalWorkflowHandle(temporalio.workflow.ExternalWorkflowHandle[Any]):
                 workflow_id=self._id,
                 workflow_run_id=self._run_id,
                 headers={},
+                event_groups=event_groups,
             )
         )
 
-    async def cancel(self, *, reason: str = "") -> None:
+    async def cancel(
+        self,
+        *,
+        reason: str = "",
+        event_groups: Sequence[temporalio.workflow.EventGroup] | None = None,
+    ) -> None:
         self._instance._assert_not_read_only("cancel external handle")
+
+        markers = _capture_event_group_markers(event_groups)
+
         command = self._instance._add_command()
+        command.event_group_markers.extend(markers)
         v = command.request_cancel_external_workflow_execution
         v.workflow_execution.namespace = self._instance._info.namespace
         v.workflow_execution.workflow_id = self._id
         if self._run_id:
             v.workflow_execution.run_id = self._run_id
         v.reason = reason
+
         await self._instance._cancel_external_workflow(command)
 
 
@@ -4571,6 +4759,7 @@ class _NexusOperationHandle(temporalio.workflow.NexusOperationHandle[OutputT]):
         self._result_fut: asyncio.Future[OutputT | None] = instance.create_future()
         self._payload_converter = payload_converter
         self._failure_converter = failure_converter
+        self._event_group_markers = _capture_event_group_markers(input.event_groups)
 
     @property
     def operation_token(self) -> str | None:
@@ -4634,12 +4823,14 @@ class _NexusOperationHandle(temporalio.workflow.NexusOperationHandle[OutputT]):
             command.user_metadata.summary.CopyFrom(
                 self._payload_converter.to_payload(self._input.summary)
             )
+        command.event_group_markers.extend(self._event_group_markers)
 
     def _apply_cancel_command(
         self,
         command: temporalio.bridge.proto.workflow_commands.WorkflowCommand,
     ) -> None:
         command.request_cancel_nexus_operation.seq = self._seq
+        command.event_group_markers.extend(self._event_group_markers)
 
 
 class _ContinueAsNewError(temporalio.workflow.ContinueAsNewError):
@@ -4649,6 +4840,7 @@ class _ContinueAsNewError(temporalio.workflow.ContinueAsNewError):
         super().__init__("Continue as new")
         self._instance = instance
         self._input = input
+        self._event_group_markers = _capture_event_group_markers(input.event_groups)
 
     def _apply_command(self) -> None:
         # Convert arguments before creating command in case it raises error
@@ -4704,6 +4896,7 @@ class _ContinueAsNewError(temporalio.workflow.ContinueAsNewError):
                 "temporalio.api.enums.v1.ContinueAsNewVersioningBehavior.ValueType",
                 int(self._input.initial_versioning_behavior),
             )
+        command.event_group_markers.extend(self._event_group_markers)
 
 
 def _encode_search_attributes(

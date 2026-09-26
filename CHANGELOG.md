@@ -20,6 +20,23 @@ to include examples, links to docs, or any other relevant information.
 
 ### Added
 
+- **Experimental**: `temporalio.contrib.google_adk_agents` now supports ADK v2
+  graph workflows, dynamic `@node` workflows, and durable HITL.
+- **Experimental**: Experimental support for _Event Groups_. **Event Groups** is a new form of
+  Workflow-level metadata that allows for improved visibility into a Workflow execution's history
+  by grouping logically related Events together based on user-defined or system-inferred criteria.
+  `workflow.create_event_group(...)` takes the Event Group's ID as its first and only required
+  argument; the user-provided ID is used verbatim and should not contain sensitive information.
+  The label is optional and passed as a keyword argument; it is a codec-encoded Payload.
+
+- Added `workflow.Info.original_execution_run_id`, the run ID recorded on the workflow
+  execution started event. Unlike `run_id`, this value is preserved across workflow resets.
+
+- **Experimental**: `temporalio.contrib.strands` now supports durable,
+  Workflow-isolated Strands sandboxes through `TemporalSandbox` and
+  worker-side factories registered with `StrandsPlugin(sandboxes=...)`.
+
+- Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
 - **Experimental**: `temporalio.streams` defines one stream interface a workflow
   can read, decide on, and write. A provider is registered once as a plugin,
   `Client.connect(plugins=[provider])`, and workers built from that client
@@ -29,42 +46,12 @@ to include examples, links to docs, or any other relevant information.
   anywhere a client is held. A topic is a typed definition,
   `streams.topic("inputs", Token)`, shared by workflow, activity and client
   code; a plain string names a topic decided at runtime. The record on the wire
-  is `temporal.api.stream.v1.StreamRecord` on every provider.
-  `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
-  reference provider the conformance tests run against, and
-  `temporalio.streams.providers.redis.RedisStreams` serves the same interface
-  over External Workflow Streams, one topic as an input and an output stream.
-- `ExternalStreamSubscription.records()` yields each value with the provider
-  offset it was read from, for a reader that has to name where it got to.
-
-- Added experimental External Workflow Streams in
-  `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
-  stored in a configured external backend instead of Temporal History, with a
-  Redis Streams provider included. Workflows subscribe with `external_stream`,
-  external processes publish with `ExternalStreamProducer`, and Workers are
-  configured with `external_stream_backend`.
-
-- Added the output direction for External Workflow Streams.
-  Workflows publish with `external_output_stream`, Activities and external
-  processes use `ExternalOutputStreamProducer`, and external consumers resume
-  through `ExternalOutputStreamClient`. Workflow output is staged outside
-  History and becomes readable only after its compact Workflow Task marker is
-  committed.
-- **Experimental**: server-side streams. A workflow reads a stream the server
-  delivers on its Workflow Tasks and publishes with a command, through
-  `temporalio.workflow.read_stream`, `subscribe_stream` and
-  `add_stream_messages`. `temporalio.client_stream` and
-  `temporalio.contrib.server_streams` reach the same stream from outside a
-  workflow, and `temporalio.streams.providers.native` puts it behind the shared
-  stream interface. Requires a server that serves the stream service.
-  reference provider the conformance tests run against.
-  can read, decide on, and write. `workflow.stream_reader()` and
-  `workflow.stream_writer()` are the workflow-side entry points, a provider is a
-  worker plugin passed as `Worker(plugins=[provider])`, and
-  `provider.get_stream_handle()` reads and appends from outside. The record on
-  the wire is `temporal.api.stream.v1.StreamRecord` on every provider.
+  is `temporal.api.stream.v1.StreamRecord` on every provider, and
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against.
+- **Experimental**: `temporalio.streams.providers.redis.RedisStreams` serves the
+  stream interface over External Workflow Streams, holding one topic as an
+  input and an output stream.
 - **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
   serves the stream interface over the shipped Workflow Streams transport as a
   worker plugin, so a workflow reads and publishes through
@@ -121,12 +108,33 @@ to include examples, links to docs, or any other relevant information.
   `WorkflowHistory` while the stream is retained, `to_json()` and `from_json()`
   carry them as `streamSlices` beside the events, and a history that carries
   them replays with no server.
+- Added experimental External Workflow Streams in
+  `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
+  stored in a configured external backend instead of Temporal History, with a
+  Redis Streams provider included. Workflows subscribe with `external_stream`,
+  external processes publish with `ExternalStreamProducer`, and Workers are
+  configured with `external_stream_backend`.
+- Added the output direction for External Workflow Streams.
+  Workflows publish with `external_output_stream`, Activities and external
+  processes use `ExternalOutputStreamProducer`, and external consumers resume
+  through `ExternalOutputStreamClient`. Workflow output is staged outside
+  History and becomes readable only after its compact Workflow Task marker is
+  committed.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
+- Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
 
 ### Changed
 
 ### Deprecated
 
 ### :boom: Breaking Changes
+
+- The `google-adk` extra now requires `google-adk>=2.8.0,<3`, up from `>=2.2.0`.
+- `temporalio.contrib.google_adk_agents`: ADK-generated ids and retry jitter now draw from the
+  workflow's deterministic random stream. A workflow started under an earlier release that calls
+  `workflow.random()` or `workflow.uuid4()` after ADK code may not replay deterministically
+  across the upgrade; drain such workflows or use worker versioning.
 
 ### Fixed
 
@@ -142,8 +150,18 @@ to include examples, links to docs, or any other relevant information.
 - Keep an incomplete retained external stream task alive when workflow caching
   is disabled; evict it after its normal task boundary instead of repeatedly
   interrupting input readiness with shutdown markers.
+- `GoogleAdkPlugin` now passes the optional `anthropic`, `litellm`, and `openai` SDKs through
+  the workflow sandbox.
+- `contrib.deepagents`: prevent duplicate input messages after continue-as-new.
+- `DataConverter.payload_converter` and current workflow and activity payload converter accessors
+  now return the configured converter without SDK-internal transfer type conversion.
+- Restore pickling of Pydantic data converters, preserving the type adapter cache
+  size limit while excluding cached adapters.
 - Current workflow and activity payload converter accessors now return the configured converter
   without SDK-internal transfer type conversion.
+- A Nexus operation's user metadata is now serialized with `NexusSerializationContext`, the same way
+  workflow and activity user metadata are serialized with theirs. This covers the static summary
+  sent when starting an operation, and the summary and details read back from a description.
 
 ### Security
 
