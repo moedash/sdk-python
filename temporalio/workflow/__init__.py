@@ -111,6 +111,10 @@ from ._definition import (
     init,
     run,
 )
+from ._event_groups import (
+    EventGroup,
+    create_event_group,
+)
 from ._exceptions import (
     ContinueAsNewVersioningBehavior,
     NondeterminismError,
@@ -207,6 +211,7 @@ __all__ = [
     "ParentInfo",
     "RootInfo",
     "UpdateInfo",
+    "cancellation_reason",
     "current_update_info",
     "deprecate_patch",
     "extern_functions",
@@ -214,7 +219,6 @@ __all__ = [
     "get_last_completion_result",
     "get_last_failure",
     "has_last_completion_result",
-    "cancellation_reason",
     "in_workflow",
     "info",
     "instance",
@@ -247,10 +251,12 @@ __all__ = [
     "dynamic_config",
     "init",
     "run",
+    "EventGroup",
+    "create_event_group",
+    "ContinueAsNewVersioningBehavior",
     "NondeterminismError",
     "ReadOnlyContextError",
     "VersioningIntent",
-    "ContinueAsNewVersioningBehavior",
     "HandlerUnfinishedPolicy",
     "UnfinishedSignalHandlersWarning",
     "UnfinishedUpdateHandlersWarning",

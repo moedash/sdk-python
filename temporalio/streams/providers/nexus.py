@@ -52,11 +52,13 @@ HTTP or urllib exception.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import time
 import urllib.error
 import urllib.request
+import weakref
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -125,6 +127,12 @@ _DEFAULT_SUBSCRIPTION_IDLE = timedelta(seconds=60)
 _QUEUE_DEPTH = 1000
 _APPEND_TIMEOUT = timedelta(seconds=30)
 _ROUND_TRIP_MARGIN = timedelta(seconds=5)
+# What ReadInput accepts in temporal_streams.nexusrpc.yaml. Repeated here so
+# a caller's mistake is refused where it was made rather than on the wire.
+_MIN_READ_WAIT = timedelta(0)
+_MAX_READ_WAIT = timedelta(milliseconds=60_000)
+_MIN_MAX_RECORDS = 1
+_MAX_MAX_RECORDS = 1000
 
 _definition = nexusrpc.get_service_definition(TemporalStreams)
 if _definition is None:  # pragma: no cover
@@ -213,6 +221,7 @@ class _ProducerState:
     batch_index: int
     sequence: int
     last_cursor: str | None
+    finished: bool = False
 
 
 @nexusrpc.handler.service_handler(service=TemporalStreams)
@@ -247,7 +256,15 @@ class TemporalStreamsHandler:
         )
         self._max_producers = max_producers
         self._subscriptions: dict[tuple[str, str, str], _Subscription] = {}
-        self._read_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        # Held weakly, and by the call that is using one for as long as it
+        # runs. A strong map would keep an entry per address ever read or
+        # appended to, and nothing would ever reach it again.
+        self._read_locks: weakref.WeakValueDictionary[
+            tuple[str, str, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
+        self._append_locks: weakref.WeakValueDictionary[
+            tuple[str, str, str, str, int], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self._subscription_idle = subscription_idle.total_seconds()
 
     def _stream(self, workflow_id: str, run_id: str | None) -> StreamHandle:
@@ -286,6 +303,17 @@ class TemporalStreamsHandler:
             input.producer_id,
             input.attempt,
         )
+        # The repeat check and the commit have an await between them, so two
+        # in-flight copies of one batch would both pass the check and both
+        # reach the store. The read path serialises per address for the same
+        # reason.
+        lock = self._append_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await self._append_locked(input, key)
+
+    async def _append_locked(
+        self, input: AppendInput, key: tuple[str, str, str, str, int]
+    ) -> AppendOutput:
         state = self._producers.get(key)
         if state is None:
             if input.batch_index != 1 or input.sequence != 0:
@@ -317,6 +345,11 @@ class TemporalStreamsHandler:
                 f"batch {input.batch_index} skips ahead of {state.batch_index} for "
                 f"producer {input.producer_id!r} attempt {input.attempt}"
             )
+        elif state.finished:
+            raise StreamProducerError(
+                f"producer {input.producer_id!r} attempt {input.attempt} already "
+                "finished this topic; open a new attempt"
+            )
         if input.sequence != state.sequence:
             raise StreamProducerError(
                 f"sequence {input.sequence} does not continue at {state.sequence} for "
@@ -329,13 +362,15 @@ class TemporalStreamsHandler:
             cursor = appended.token if appended is not None else None
         if input.finish:
             await state.delegate.finish()
-            self._producers.pop(key, None)
-            return AppendOutput(cursor=cursor)
         # Recorded only once the store accepted the batch, so a failed append
-        # is not mistaken for a repeat when the caller retries it.
+        # is not mistaken for a repeat when the caller retries it. A finish is
+        # recorded the same way rather than dropping the state: a lost
+        # response would otherwise leave the caller with a batch it can
+        # neither repeat nor abandon.
         state.batch_index = input.batch_index
         state.sequence += len(payloads)
         state.last_cursor = cursor
+        state.finished = state.finished or bool(input.finish)
         self._producers[key] = state
         self._producers.move_to_end(key)
         while len(self._producers) > self._max_producers:
@@ -405,7 +440,14 @@ class TemporalStreamsHandler:
                 if subscription is not None:
                     await self._drop(key)
                 subscription = self._subscribe(key, stream, input.topic, after)
-            records, next_token = await self._drain(subscription, max_records, wait)
+            try:
+                records, next_token = await self._drain(subscription, max_records, wait)
+            except Exception:
+                # The pump failed. Keeping the subscription would answer the
+                # caller's retry from the same token with end of stream, so a
+                # transient read failure would read as the stream ending.
+                await self._drop(key)
+                raise
             subscription.position = next_token
             subscription.last_used = time.monotonic()
             done = (
@@ -483,8 +525,10 @@ class TemporalStreamsHandler:
             records.append(self._wire(record))
             next_token = record.cursor.token
         if not records and subscription.failure is not None:
-            failure, subscription.failure = subscription.failure, None
-            raise failure
+            # Left on the subscription rather than cleared: the caller is
+            # answered with the failure and the subscription is dropped, so
+            # there is nothing for a second reader of it to be misled by.
+            raise subscription.failure
         return records, next_token
 
     @staticmethod
@@ -511,7 +555,6 @@ class TemporalStreamsHandler:
         """
         for key in list(self._subscriptions):
             await self._drop(key)
-        self._read_locks.clear()
 
     async def _drop(self, key: tuple[str, str, str]) -> None:
         subscription = self._subscriptions.pop(key, None)
@@ -530,7 +573,6 @@ class TemporalStreamsHandler:
             if lock is not None and lock.locked():
                 continue
             await self._drop(key)
-            self._read_locks.pop(key, None)
 
 
 class _EndpointFailure(Exception):
@@ -571,19 +613,25 @@ def _post(
     url: str, body: bytes, headers: Mapping[str, str], timeout: timedelta
 ) -> bytes:
     timeout_ms = int(timeout.total_seconds() * 1000)
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            # Tells the server how long the handler may park, so it does not
-            # time the call out ahead of a wait the caller asked for.
-            "Request-Timeout": f"{timeout_ms}ms",
-            **headers,
-        },
-        method="POST",
-    )
+    # Everything is inside the try, because urllib wraps only the request in
+    # URLError: a bad url raises from Request(), and a socket timeout or a
+    # dropped connection raises from getresponse() and read() as
+    # builtins.TimeoutError or an http.client exception. On 3.11 and later
+    # TimeoutError is asyncio.TimeoutError, so letting one out would be
+    # indistinguishable from the caller's own wait_for expiring.
     try:
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                # Tells the server how long the handler may park, so it does
+                # not time the call out ahead of a wait the caller asked for.
+                "Request-Timeout": f"{timeout_ms}ms",
+                **headers,
+            },
+            method="POST",
+        )
         with urllib.request.urlopen(
             request, timeout=(timeout + _ROUND_TRIP_MARGIN).total_seconds()
         ) as response:
@@ -595,6 +643,10 @@ def _post(
     except urllib.error.URLError as error:
         raise _EndpointFailure(
             f"stream endpoint unreachable at {url}: {error.reason}", None
+        ) from error
+    except (TimeoutError, http.client.HTTPException, OSError, ValueError) as error:
+        raise _EndpointFailure(
+            f"stream endpoint at {url} did not answer: {error!r}", None
         ) from error
 
 
@@ -633,8 +685,11 @@ class _Front:
     ) -> _OutputT:
         # The contract types carry their own JSON encoding, so the raw caller
         # and the worker serving the operation agree on the body without
-        # either of them spelling the fields out.
-        contract = temporalio.converter.DataConverter.default.payload_converter
+        # either of them spelling the fields out. That encoding is a transfer
+        # type hook, which only the internal converter applies.
+        contract = (
+            temporalio.converter.DataConverter.default._get_internal_payload_converter()
+        )
         url = f"{await self._base_url()}/{operation}"
         try:
             raw = await asyncio.to_thread(
@@ -776,6 +831,13 @@ class NexusStreamHandle:
         The token is opaque here, so a cursor from another store is refused by
         the store behind the endpoint and raises
         :class:`temporalio.streams.StreamCursorError` on the first iteration.
+
+        ``aclose()`` on the result releases nothing at the endpoint at once.
+        The contract carries no unsubscribe operation, so the handler cannot
+        be told; it reclaims the parked read when it has gone idle, which is
+        a minute by default. Until then the subscription and its long poll on
+        the store stay, and a caller that stops and starts many reads on one
+        topic should expect that lag rather than an immediate release.
         """
         topic, result_type = resolve_topic(topic, result_type)
         return self._read(topic, after, result_type)
@@ -892,6 +954,24 @@ class NexusStreams(StreamProvider, temporalio.client.Plugin):
         """
         if not endpoint:
             raise ValueError("endpoint must not be empty")
+        # Checked here rather than on the first read, because the contract
+        # refuses an out-of-range value with a payload validation error that
+        # is neither a StreamError nor an RPCError, a long way from the line
+        # that got it wrong.
+        if not _MIN_READ_WAIT <= read_wait <= _MAX_READ_WAIT:
+            raise ValueError(
+                f"read_wait must be between {_MIN_READ_WAIT} and {_MAX_READ_WAIT}, "
+                f"got {read_wait}"
+            )
+        if read_wait.microseconds % 1000:
+            raise ValueError(
+                f"read_wait is carried in whole milliseconds, got {read_wait}"
+            )
+        if not _MIN_MAX_RECORDS <= max_records <= _MAX_MAX_RECORDS:
+            raise ValueError(
+                f"max_records must be between {_MIN_MAX_RECORDS} and "
+                f"{_MAX_MAX_RECORDS}, got {max_records}"
+            )
         self._endpoint = endpoint
         self._http_address = http_address.rstrip("/")
         self._headers = dict(headers or {})

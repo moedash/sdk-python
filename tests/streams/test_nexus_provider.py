@@ -20,12 +20,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
+import gc
+import http.client
 import json
 import os
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
+from unittest import mock
 
 import nexusrpc
 import nexusrpc.handler
@@ -198,7 +201,9 @@ def _in_process_endpoint(
     then reported as a transport failure, the ambiguous case a retry has to
     survive.
     """
-    contract = temporalio.converter.DataConverter.default.payload_converter
+    contract = (
+        temporalio.converter.DataConverter.default._get_internal_payload_converter()
+    )
     loop = asyncio.get_running_loop()
     failing = set(fail_after_applying or [])
 
@@ -587,3 +592,195 @@ async def test_the_read_ends_when_the_store_ends_it(
         (RecordKind.DATA, {"echo": 3}),
         (RecordKind.FINISH, None),
     ]
+
+
+class _SlowStore(MemoryStreams):
+    """The memory store with a real await inside ``append``.
+
+    The handler's repeat check and its commit have an await between them.
+    Without a gate there, two in-flight copies of one batch both finish the
+    check before either commits and both reach the store.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.appends = 0
+
+    def get_stream_handle(
+        self, client: Any, workflow_id: str, *, run_id: str | None = None
+    ) -> Any:
+        handle = super().get_stream_handle(client, workflow_id, run_id=run_id)
+        outer = self
+        make_producer = handle.producer
+
+        def producer(**kwargs: Any) -> Any:
+            delegate = make_producer(**kwargs)
+            inner_append = delegate.append
+
+            async def append(*values: Any) -> Any:
+                outer.appends += 1
+                await outer.gate.wait()
+                return await inner_append(*values)
+
+            delegate.append = append  # type: ignore[method-assign]
+            return delegate
+
+        handle.producer = producer  # type: ignore[method-assign]
+        return handle
+
+
+async def test_two_copies_of_one_batch_reach_the_store_once():
+    store = _SlowStore()
+    handler = TemporalStreamsHandler(store, None)
+    both = asyncio.gather(
+        _dispatch(handler, APPEND_OPERATION, _append("wf", 1, {"n": 1})),
+        _dispatch(handler, APPEND_OPERATION, _append("wf", 1, {"n": 1})),
+    )
+    await asyncio.sleep(0.1)
+    store.gate.set()
+    first, second = await asyncio.wait_for(both, 10)
+    # One of them wrote and the other was answered from the state it left.
+    # Counted at the store because a store that dedupes by itself would hide
+    # a second commit the handler should never have made.
+    assert store.appends == 1
+    assert first.cursor == second.cursor
+    assert await _stored(store, "wf") == [{"n": 1}]
+
+
+async def test_a_finished_batch_can_be_retried():
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
+    await _dispatch(handler, APPEND_OPERATION, _append("wf", 1, {"n": 1}))
+    finished = await _dispatch(
+        handler, APPEND_OPERATION, _append("wf", 2, {"n": 2}, finish=True)
+    )
+    # The caller never saw the answer. The byte-identical retry has to be
+    # answerable, because a finish the caller cannot repeat is a batch it can
+    # neither complete nor abandon.
+    again = await _dispatch(
+        handler, APPEND_OPERATION, _append("wf", 2, {"n": 2}, finish=True)
+    )
+    assert again.cursor == finished.cursor
+    assert await _stored(store, "wf") == [{"n": 1}, {"n": 2}]
+    # And the attempt is over: a batch after the finish is refused rather
+    # than landing behind the marker.
+    with pytest.raises(nexusrpc.HandlerError) as after:
+        await _dispatch(handler, APPEND_OPERATION, _append("wf", 3, {"n": 3}))
+    assert "already finished" in str(after.value)
+
+
+class _FailingReadStore(MemoryStreams):
+    """A store whose read fails once, the way a transient store failure does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def get_stream_handle(
+        self, client: Any, workflow_id: str, *, run_id: str | None = None
+    ) -> Any:
+        handle = super().get_stream_handle(client, workflow_id, run_id=run_id)
+        outer = self
+
+        def read(**kwargs: Any) -> Any:
+            outer.reads += 1
+            if outer.reads == 1:
+
+                async def failing() -> AsyncIterator[Any]:
+                    for record in cast("list[Any]", []):
+                        yield record
+                    raise RuntimeError("the store went away")
+
+                return failing()
+            return MemoryStreams.get_stream_handle(
+                outer, client, workflow_id, run_id=run_id
+            ).read(**kwargs)
+
+        handle.read = read  # type: ignore[method-assign]
+        return handle
+
+
+async def test_a_failed_read_is_not_reported_as_the_end_of_the_stream():
+    store = _FailingReadStore()
+    handler = TemporalStreamsHandler(store, None)
+    await (
+        store.get_stream_handle(None, "wf")
+        .producer(topic=INPUTS, producer_id="model", attempt=1)
+        .append({"n": 1})
+    )
+
+    request = ReadInput(workflow_id="wf", topic=INPUTS, wait_ms=200, max_records=10)
+    with pytest.raises(RuntimeError, match="the store went away"):
+        await _dispatch(handler, READ_OPERATION, request)
+    # The retry from the same token has to re-subscribe rather than be
+    # answered done=True off the subscription the failed pump left behind.
+    answer = await _dispatch(handler, READ_OPERATION, request)
+    assert [WireRecord.FromString(r.record).sequence for r in answer.records] == [1]
+    assert answer.done is False
+    await handler.close()
+
+
+async def test_the_handler_does_not_grow_a_lock_per_address():
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
+    for index in range(25):
+        workflow_id = f"wf-{index}"
+        await _dispatch(
+            handler, APPEND_OPERATION, _append(workflow_id, 1, {"n": index})
+        )
+        await _dispatch(
+            handler,
+            READ_OPERATION,
+            ReadInput(workflow_id=workflow_id, topic=INPUTS, wait_ms=0, max_records=1),
+        )
+    gc.collect()
+    # Held weakly, so an address nobody is reading or appending to leaves
+    # nothing behind. A strong map would hold one entry per address forever.
+    assert len(handler._read_locks) == 0  # pyright: ignore[reportPrivateUsage]
+    assert len(handler._append_locks) == 0  # pyright: ignore[reportPrivateUsage]
+    await handler.close()
+
+
+def test_the_read_bounds_are_checked_where_they_are_set():
+    # The contract accepts a wait up to a minute and a batch up to a
+    # thousand; past that the endpoint answers with a payload validation
+    # error, which is neither a stream condition nor an RPC failure.
+    with pytest.raises(ValueError, match="read_wait"):
+        NexusStreams(endpoint="e", read_wait=timedelta(minutes=2))
+    with pytest.raises(ValueError, match="read_wait"):
+        NexusStreams(endpoint="e", read_wait=timedelta(seconds=-1))
+    with pytest.raises(ValueError, match="max_records"):
+        NexusStreams(endpoint="e", max_records=0)
+    with pytest.raises(ValueError, match="max_records"):
+        NexusStreams(endpoint="e", max_records=1001)
+    NexusStreams(endpoint="e", read_wait=timedelta(seconds=60), max_records=1000)
+
+
+def test_a_socket_failure_never_reaches_the_caller_as_a_timeout():
+    # urllib wraps only the request in URLError, so a read timeout comes out
+    # of getresponse() as builtins.TimeoutError, which on 3.11 and later is
+    # asyncio.TimeoutError and would be taken for the caller's own deadline.
+    def _raise(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise TimeoutError("the socket read timed out")
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
+            nexus._post(  # pyright: ignore[reportPrivateUsage]
+                "http://127.0.0.1:1/x", b"{}", {}, timedelta(seconds=1)
+            )
+
+    def _disconnect(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise http.client.RemoteDisconnected("the endpoint hung up")
+
+    with mock.patch("urllib.request.urlopen", _disconnect):
+        with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
+            nexus._post(  # pyright: ignore[reportPrivateUsage]
+                "http://127.0.0.1:1/x", b"{}", {}, timedelta(seconds=1)
+            )
+
+    # A url urllib cannot even build a request from does not escape either.
+    with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
+        nexus._post("not a url", b"{}", {}, timedelta(seconds=1))  # pyright: ignore[reportPrivateUsage]

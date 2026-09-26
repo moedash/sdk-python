@@ -84,18 +84,13 @@ class _StreamHooksInterceptor(WorkflowInboundInterceptor):
         except GeneratorExit:
             raise
         except BaseException:
-            if not _evicting(runtime):
+            # Eviction cancels the primary task the same way a workflow
+            # cancellation does, and only the cancellation is a run ending.
+            if not runtime.workflow_is_evicting():
                 await provider.on_workflow_finish()
             raise
         await provider.on_workflow_finish()
         return result
-
-
-def _evicting(runtime: temporalio.workflow._Runtime) -> bool:
-    # Eviction cancels the primary task the same way a workflow cancellation
-    # does; the flag the instance sets before cancelling is what tells them
-    # apart, and only the cancellation is a run ending.
-    return bool(getattr(runtime, "_deleting", False))
 
 
 # Value was chosen abitrarily as a small number that allows some concurrency and prevents
@@ -668,7 +663,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 try:
                     data_converter.failure_converter.to_failure(
                         err,
-                        data_converter.payload_converter,
+                        data_converter._get_internal_payload_converter(),
                         failure,
                     )
                 except Exception as inner_err:
@@ -684,7 +679,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 try:
                     data_converter.failure_converter.to_failure(
                         err,
-                        data_converter.payload_converter,
+                        data_converter._get_internal_payload_converter(),
                         completion.failed.failure,
                     )
                 except Exception as inner_err:
@@ -963,6 +958,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             first_execution_run_id=init.first_execution_run_id,
             headers=dict(init.headers),
             namespace=self._namespace,
+            original_execution_run_id=init.original_execution_run_id or act.run_id,
             parent=parent,
             root=root,
             raw_memo=dict(init.memo.fields),
@@ -998,7 +994,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         runtime = self._create_external_stream_runtime(act, init)
         self._external_stream_runtimes[act.run_id] = runtime
         det = WorkflowInstanceDetails(
-            payload_converter_factory=self._data_converter._new_payload_converter,
+            # Sharing the underlying converter could let another workflow's state
+            # affect conversion and replay, so each instance needs a fresh one.
+            payload_converter_factory=self._data_converter._new_internal_payload_converter,
             failure_converter_class=self._data_converter.failure_converter_class,
             interceptor_classes=self._interceptor_classes,
             defn=defn,
