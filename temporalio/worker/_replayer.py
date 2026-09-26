@@ -88,6 +88,13 @@ class Replayer:
           service and hands the records to the replay, so the workflow sees
           what it saw the first time. A range the stream no longer holds fails
           that replay with :py:class:`temporalio.streams.StreamNotFoundError`.
+          Only the client's target host and namespace are read: the stream
+          service is reached on a channel of its own, opened without TLS or
+          an API key, so a client connected to Temporal Cloud names the right
+          address and still cannot authenticate. That is a prototype limit of
+          :py:mod:`temporalio.client_stream`, which is where it will be
+          lifted. The replayer closes the channel it opened when the replay
+          is finished.
         * The history carries none and there is no client: replaying it fails
           and the message names both remedies.
 
@@ -272,6 +279,7 @@ class Replayer:
         pusher = None
         workflow_worker_task = None
         bridge_worker_scope = None
+        stream_client = self._config.get("stream_client")
 
         try:
             last_replay_failure: Exception | None
@@ -425,8 +433,6 @@ class Replayer:
             # Start worker
             workflow_worker_task = asyncio.create_task(workflow_worker.run())
 
-            stream_client = self._config.get("stream_client")
-
             # Yield iterator
             async def replay_iterator() -> AsyncIterator[WorkflowReplayResult]:
                 async for history in histories:
@@ -491,6 +497,18 @@ class Replayer:
 
             yield replay_iterator()
         finally:
+            # The stream channel is opened by the fetch, on this loop, and is
+            # the replayer's to close: nothing else in the process asked for
+            # it, and leaving it open outlives the replay it served.
+            if stream_client is not None:
+                from temporalio.client_stream import close_shared_clients
+
+                await close_shared_clients(
+                    (
+                        stream_client.service_client.config.target_host,
+                        stream_client.namespace,
+                    )
+                )
             # Close the pusher
             if pusher is not None:
                 pusher.close()

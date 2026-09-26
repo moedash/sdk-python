@@ -22,7 +22,9 @@ change before this is a real feature:
   here rather than by the machinery that normally handles that.
 
 A failed call raises :class:`temporalio.streams.StreamNotFoundError` when the
-server answers ``NOT_FOUND`` and :class:`temporalio.service.RPCError`
+server answers ``NOT_FOUND``,
+:class:`temporalio.streams.StreamProducerError` when it refuses a producer
+sequence it already holds, and :class:`temporalio.service.RPCError`
 otherwise, never the transport's own exception type.
 """
 
@@ -37,12 +39,13 @@ from typing import Any, TypeVar
 import google.protobuf.duration_pb2
 import grpc
 import grpc.aio
+from google.protobuf.message import Message
 
 import temporalio.api.streamservice.v1 as stream
 from temporalio.api.stream.v1 import StreamRecord
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.streams import StreamNotFoundError
+from temporalio.streams import StreamNotFoundError, StreamProducerError
 
 __all__ = [
     "Appended",
@@ -56,6 +59,12 @@ __all__ = [
 ]
 
 _T = TypeVar("_T")
+
+# The server refuses a producer sequence it already holds with a message and
+# no typed detail, so the phrase is the only thing to match on. Both refusals
+# it sends carry it: a repeat with different content, and one behind the
+# sequence it accepted last.
+_PRODUCER_CONFLICT = "producer sequence"
 
 
 @dataclass(frozen=True)
@@ -102,36 +111,58 @@ class Page:
     run_id: str = ""
 
 
+def _copy_by_name(source: Message, target: Message, *, skip: frozenset[str]) -> None:
+    """Copy every field ``source`` has set onto the field of ``target`` with that name.
+
+    By descriptor rather than field by field, so a field added to
+    ``StreamRecord`` crosses in both directions without anybody remembering to
+    add a line here. A field the target does not have raises, which is the
+    answer a reader wants: better a loud failure than a body that arrives
+    without the thing that described it.
+    """
+    fields = target.DESCRIPTOR.fields_by_name
+    for descriptor, value in source.ListFields():
+        if descriptor.name in skip:
+            continue
+        if descriptor.name not in fields:
+            raise ValueError(
+                f"{source.DESCRIPTOR.full_name}.{descriptor.name} has no counterpart "
+                f"on {target.DESCRIPTOR.full_name}"
+            )
+        field = getattr(target, descriptor.name)
+        if descriptor.message_type is not None and (
+            descriptor.message_type.GetOptions().map_entry
+        ):
+            holds_message = (
+                descriptor.message_type.fields_by_name["value"].message_type is not None
+            )
+            for key, item in value.items():
+                if holds_message:
+                    field[key].CopyFrom(item)
+                else:
+                    field[key] = item
+        elif hasattr(field, "extend"):
+            # A plain repeated field; maps answered above and everything else
+            # takes an assignment or a CopyFrom.
+            field.extend(value)
+        elif descriptor.type == descriptor.TYPE_MESSAGE:
+            field.CopyFrom(value)
+        else:
+            setattr(target, descriptor.name, value)
+
+
 def _to_service(record: StreamRecord) -> stream.StreamRecord:
-    # Field for field the public record; the stored shape only adds the offset
-    # a read assigns. An unset body stays unset so a FINISH record reads back
-    # as one.
-    out = stream.StreamRecord(
-        topic=record.topic,
-        kind=record.kind,
-        producer_id=record.producer_id,
-        attempt=record.attempt,
-        sequence=record.sequence,
-    )
-    if record.HasField("body"):
-        out.body.CopyFrom(record.body)
-    for key, value in record.metadata.items():
-        out.metadata[key].CopyFrom(value)
+    # The stored shape is the public record plus the offset a read assigns.
+    # An unset body stays unset, so a FINISH record reads back as one.
+    out = stream.StreamRecord()
+    _copy_by_name(record, out, skip=frozenset())
     return out
 
 
 def _to_public(record: stream.StreamRecord) -> StreamEntry:
-    out = StreamRecord(
-        topic=record.topic,
-        kind=record.kind,
-        producer_id=record.producer_id,
-        attempt=record.attempt,
-        sequence=record.sequence,
-    )
-    if record.HasField("body"):
-        out.body.CopyFrom(record.body)
-    for key, value in record.metadata.items():
-        out.metadata[key].CopyFrom(value)
+    out = StreamRecord()
+    # The offset is the store's, not the record's; it rides on the entry.
+    _copy_by_name(record, out, skip=frozenset({"offset"}))
     return StreamEntry(record=out, offset=record.offset)
 
 
@@ -140,6 +171,11 @@ def _translate(error: grpc.aio.AioRpcError) -> Exception:
     details = error.details() or code.name
     if code is grpc.StatusCode.NOT_FOUND:
         return StreamNotFoundError(details)
+    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_CONFLICT in details:
+        # A producer sequence the store already holds, either with different
+        # content or behind the one it accepted last. The caller asked to be
+        # deduplicated and could not be, which is a condition of its own.
+        return StreamProducerError(details)
     raw = b""
     # The aio metadata iterates as (key, value) pairs at runtime, whatever
     # shape the stubs give its items.
@@ -603,12 +639,22 @@ def shared_client(target_host: str, namespace: str) -> StreamClient:
     return existing
 
 
-async def close_shared_clients() -> None:
-    """Close every shared client this loop opened.
+async def close_shared_clients(*keys: tuple[str, str]) -> None:
+    """Close the shared clients this loop opened for ``keys``, or all of them.
 
-    For a process that is done with streams, and for tests, which open a
-    loop per case and would otherwise leave a channel behind on each.
+    A provider closes the ones it opened, named by ``(target host,
+    namespace)``: another provider on the same loop may still be reading
+    through a channel of its own, and taking that out from under it is not
+    this one's to do. With no keys it closes every one, which is what a
+    process finished with streams wants, and what a test that opened a loop
+    of its own wants.
     """
-    per_loop = _shared.pop(asyncio.get_running_loop(), {})
-    for client in per_loop.values():
+    loop = asyncio.get_running_loop()
+    if not keys:
+        per_loop = _shared.pop(loop, {})
+        closing = list(per_loop.values())
+    else:
+        per_loop = _shared.get(loop, {})
+        closing = [per_loop.pop(key) for key in keys if key in per_loop]
+    for client in closing:
         await client.close()

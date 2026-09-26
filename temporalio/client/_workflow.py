@@ -1725,20 +1725,26 @@ class WorkflowHistory:
         Returns:
             Workflow history
         """
-        if isinstance(history, str):
-            history = json.loads(history)
         parsed = _history_from_json(history)
-        slices: list[temporalio.api.stream.v1.StreamSlice] = []
+        raw: Any = []
         if isinstance(history, dict):
             raw = history.get("streamSlices") or history.get("stream_slices") or []
-            for entry in raw:
-                slices.append(
-                    google.protobuf.json_format.ParseDict(
-                        entry,
-                        temporalio.api.stream.v1.StreamSlice(),
-                        ignore_unknown_fields=True,
-                    )
-                )
+        elif '"streamSlices"' in history or '"stream_slices"' in history:
+            # Read again only when the text mentions them. Almost every
+            # history has none, and handing the parsed dict to
+            # _history_from_json instead would make it deep-copy an export
+            # that can be very large.
+            decoded = json.loads(history)
+            if isinstance(decoded, dict):
+                raw = decoded.get("streamSlices") or decoded.get("stream_slices") or []
+        slices: list[temporalio.api.stream.v1.StreamSlice] = [
+            google.protobuf.json_format.ParseDict(
+                entry,
+                temporalio.api.stream.v1.StreamSlice(),
+                ignore_unknown_fields=True,
+            )
+            for entry in raw
+        ]
         return WorkflowHistory(workflow_id, parsed.events, slices)
 
     def to_json(self) -> str:
