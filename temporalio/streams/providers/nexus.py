@@ -685,8 +685,11 @@ class _Front:
     ) -> _OutputT:
         # The contract types carry their own JSON encoding, so the raw caller
         # and the worker serving the operation agree on the body without
-        # either of them spelling the fields out.
-        contract = temporalio.converter.DataConverter.default.payload_converter
+        # either of them spelling the fields out. That encoding is a transfer
+        # type hook, which only the internal converter applies.
+        contract = (
+            temporalio.converter.DataConverter.default._get_internal_payload_converter()
+        )
         url = f"{await self._base_url()}/{operation}"
         try:
             raw = await asyncio.to_thread(

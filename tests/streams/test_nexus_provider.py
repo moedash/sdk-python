@@ -201,7 +201,9 @@ def _in_process_endpoint(
     then reported as a transport failure, the ambiguous case a retry has to
     survive.
     """
-    contract = temporalio.converter.DataConverter.default.payload_converter
+    contract = (
+        temporalio.converter.DataConverter.default._get_internal_payload_converter()
+    )
     loop = asyncio.get_running_loop()
     failing = set(fail_after_applying or [])
 
