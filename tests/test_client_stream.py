@@ -119,6 +119,7 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     sent.producer_id = "model"
     sent.attempt = 2
     sent.sequence = 7
+    sent.kind = StreamRecordKind.STREAM_RECORD_KIND_DATA
     sent.metadata["trace"].CopyFrom(Payload(data=b"abc"))
     finish = StreamRecord(
         topic="t", kind=StreamRecordKind.STREAM_RECORD_KIND_FINISH, producer_id="model"
@@ -137,6 +138,12 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     assert got.metadata["trace"].data == b"abc"
     assert entries[1].record.kind == StreamRecordKind.STREAM_RECORD_KIND_FINISH
     assert not entries[1].record.HasField("body")
+
+
+async def test_an_unset_kind_reads_back_as_data(stream: StreamHandle) -> None:
+    await stream.append(rec(b"x"))
+    entries, _ = await stream.read()
+    assert entries[0].record.kind == StreamRecordKind.STREAM_RECORD_KIND_DATA
 
 
 # A closed stream stays readable, which is what removes the shutdown handshake
