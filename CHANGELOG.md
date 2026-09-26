@@ -55,6 +55,19 @@ to include examples, links to docs, or any other relevant information.
   `temporalio.contrib.workflow_streams` without naming it. Records are the
   `StreamRecord` proto inside the shipped item payload, and a handle without a
   run id follows continue-as-new run by run.
+- **Experimental**: `temporalio.streams.providers.workflow_streams` serves the
+  stream interface over the shipped Workflow Streams transport, so a workflow
+  reads and publishes through `temporalio.contrib.workflow_streams` without
+  naming it.
+- **Experimental**: `temporalio.streams.providers.nexus.NexusStreams` puts one
+  Nexus endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store, and
+  `TemporalStreamsHandler` serves that endpoint by fronting the provider's own
+  handles. Its contract is defined in `temporal_streams.nexusrpc.yaml` and the
+  bindings are generated from it; a record crosses as the serialized
+  `StreamRecord` proto. Configure the front with `data_converter=` to run a
+  payload codec on the caller side, so records are encoded before they leave
+  the process.
 
 ### Changed
 
