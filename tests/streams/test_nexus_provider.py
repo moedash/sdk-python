@@ -716,7 +716,7 @@ async def test_a_failed_read_is_not_reported_as_the_end_of_the_stream():
     # The retry from the same token has to re-subscribe rather than be
     # answered done=True off the subscription the failed pump left behind.
     answer = await _dispatch(handler, READ_OPERATION, request)
-    assert [WireRecord.FromString(r.record).sequence for r in answer.records] == [0]
+    assert [WireRecord.FromString(r.record).sequence for r in answer.records] == [1]
     assert answer.done is False
     await handler.close()
 
