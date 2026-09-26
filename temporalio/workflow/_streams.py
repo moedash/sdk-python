@@ -35,6 +35,10 @@ class _WorkflowStreams:
     def __init__(self, provider: WorkflowStreamProvider) -> None:
         self.provider = provider
         self.readers: dict[str, StreamReader[Any]] = {}
+        # Finishing is a statement about the topic, not about the writer
+        # object that made it, and stream_writer() hands out a new object on
+        # every call. Rebuilt in order on replay, so it stays deterministic.
+        self.finished: set[str] = set()
 
 
 class StreamReader(Generic[T]):
@@ -135,11 +139,11 @@ class StreamWriter(Generic[T]):
     any value.
     """
 
-    def __init__(self, sink: WriteSink, topic: str) -> None:
+    def __init__(self, sink: WriteSink, topic: str, finished: set[str]) -> None:
         """Prefer :func:`temporalio.workflow.stream_writer`."""
         self._sink = sink
         self._topic = topic
-        self._finished = False
+        self._finished = finished
 
     @property
     def topic(self) -> str:
@@ -156,9 +160,10 @@ class StreamWriter(Generic[T]):
         through pre-encoded.
 
         Raises:
-            ValueError: :meth:`finish` was already called on this writer.
+            ValueError: The topic was already finished in this run, by this
+                writer or by another one on the same topic.
         """
-        if self._finished:
+        if self._topic in self._finished:
             raise ValueError(f"topic {self._topic!r} was already finished")
         self._sink.publish(
             to_wire(
@@ -173,11 +178,13 @@ class StreamWriter(Generic[T]):
         """Write ``FINISH`` for this workflow on this topic. Idempotent.
 
         Says this workflow has nothing more to send on the topic. It does not
-        say the workflow succeeded, and it does not end anyone's read.
+        say the workflow succeeded, and it does not end anyone's read. The
+        marker belongs to the topic, so a second writer on the same topic in
+        the same run finds it already written.
         """
-        if self._finished:
+        if self._topic in self._finished:
             return
-        self._finished = True
+        self._finished.add(self._topic)
         self._sink.publish(
             to_wire(payload_converter(), topic=self._topic, kind=RecordKind.FINISH)
         )
@@ -266,6 +273,9 @@ def stream_writer(topic: str) -> StreamWriter[Any]: ...
 def stream_writer(topic: str | StreamTopic[Any]) -> StreamWriter[Any]:
     """Publish to ``topic`` of this workflow's stream.
 
+    Every call returns a new writer, and they all share the run's record of
+    which topics were finished, so ``finish()`` on one is seen by the next.
+
     Args:
         topic: A :func:`temporalio.streams.topic` definition, whose value type
             the writer's ``publish`` takes, or a plain string for a name
@@ -275,5 +285,5 @@ def stream_writer(topic: str | StreamTopic[Any]) -> StreamWriter[Any]:
         ValueError: ``topic`` is empty.
     """
     name, _ = resolve_topic(topic)
-    provider = _Runtime.current().workflow_streams().provider
-    return StreamWriter(provider.open_writer(name), name)
+    state = _Runtime.current().workflow_streams()
+    return StreamWriter(state.provider.open_writer(name), name, state.finished)

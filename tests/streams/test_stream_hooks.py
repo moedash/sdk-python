@@ -20,6 +20,7 @@ from temporalio.worker._interceptor import (
     WorkflowInboundInterceptor,
 )
 from temporalio.worker._workflow import _StreamHooksInterceptor
+from temporalio.worker._workflow_instance import _WorkflowInstanceImpl
 
 
 class _Provider:
@@ -39,14 +40,23 @@ class _Streams:
 
 
 class _FakeRuntime:
-    """Only what the interceptor reads: the stream state and the eviction flag."""
+    """Only what the interceptor reads, and only through the runtime interface.
 
-    def __init__(self, provider: _Provider, *, deleting: bool = False) -> None:
+    It deliberately carries no ``_deleting`` attribute. An interceptor that
+    reads the eviction state by attribute name instead of by method would see
+    a runtime that is never evicting here, and the eviction case below would
+    catch it.
+    """
+
+    def __init__(self, provider: _Provider, *, evicting: bool = False) -> None:
         self._streams = _Streams(provider)
-        self._deleting = deleting
+        self._evicting = evicting
 
     def workflow_streams(self) -> _Streams:
         return self._streams
+
+    def workflow_is_evicting(self) -> bool:
+        return self._evicting
 
 
 class _Body(WorkflowInboundInterceptor):
@@ -85,7 +95,7 @@ async def provider() -> Any:
 
 def _evicting(fake: _Provider) -> None:
     loop = asyncio.get_running_loop()
-    workflow._Runtime.set_on_loop(loop, _FakeRuntime(fake, deleting=True))  # type: ignore[arg-type]
+    workflow._Runtime.set_on_loop(loop, _FakeRuntime(fake, evicting=True))  # type: ignore[arg-type]
 
 
 async def test_the_finish_hook_runs_on_return(provider: _Provider):
@@ -137,3 +147,11 @@ async def test_the_finish_hook_does_not_run_during_eviction(provider: _Provider)
             _INPUT
         )
     assert provider.calls == ["start"]
+
+
+def test_the_runtime_answers_the_eviction_question_itself():
+    # The interceptor asks the runtime rather than reading a private field,
+    # so the coupling is declared on the base class and the real instance has
+    # to answer it or fail to construct.
+    assert "workflow_is_evicting" in workflow._Runtime.__abstractmethods__
+    assert "workflow_is_evicting" not in _WorkflowInstanceImpl.__abstractmethods__

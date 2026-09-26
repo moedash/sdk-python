@@ -95,8 +95,13 @@ class StreamRecord(google.protobuf.message.Message):
     SEQUENCE_FIELD_NUMBER: builtins.int
     @property
     def body(self) -> temporalio.api.common.v1.message_pb2.Payload:
-        """The value the producer published, stored as sent. A payload codec
-        applies here as it does to any other payload.
+        """The value the producer published, stored as sent.
+
+        A payload codec applies on the paths this API owns: the append command on
+        RespondWorkflowTaskCompleted, and the slices on PollWorkflowTaskQueue.
+        Records a producer writes or reads through the stream service take a
+        different path, whose messages are not part of this API yet and so are
+        outside what a codec-applying proxy walks.
         """
     @property
     def metadata(
@@ -116,8 +121,9 @@ class StreamRecord(google.protobuf.message.Message):
     producer as superseding what the earlier one wrote.
     """
     sequence: builtins.int
-    """The producer's position within its attempt, or -1 when unnumbered.
-    Stored as sent; the server does not assign, validate or order by it.
+    """The producer's position within its attempt, zero when it does not number
+    its records. Stored as sent; the server does not assign, validate or
+    order by it, and the stream's own offsets are what order a read.
     """
     def __init__(
         self,
@@ -173,15 +179,24 @@ class StreamSlice(google.protobuf.message.Message):
     RECORDS_FIELD_NUMBER: builtins.int
     WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
+    """The stream, as the subscribing command addressed it: either the name of
+    a stream the consuming Workflow owns or the id of one in another
+    execution.
+    """
     run_id: builtins.str
     """Run id of the execution that owns the stream. Set on both a slice for the
     task being started and a re-supplied one.
     """
     from_offset: builtins.int
-    """Inclusive."""
+    """Inclusive.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
     to_offset: builtins.int
     """Exclusive. Equal to from_offset when the subscription observed nothing,
     which is a fact replay has to reproduce rather than an absence of one.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
     """
     @property
     def records(
@@ -241,10 +256,20 @@ class StreamRange(google.protobuf.message.Message):
     FROM_OFFSET_FIELD_NUMBER: builtins.int
     TO_OFFSET_FIELD_NUMBER: builtins.int
     stream_id: builtins.str
+    """The stream, as the subscribing command addressed it: either the name of
+    a stream the consuming Workflow owns or the id of one in another
+    execution.
+    """
     from_offset: builtins.int
-    """Inclusive."""
+    """Inclusive.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
     to_offset: builtins.int
-    """Exclusive."""
+    """Exclusive.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
     def __init__(
         self,
         *,
