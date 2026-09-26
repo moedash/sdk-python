@@ -23,6 +23,7 @@ new attempt's first token, so it can drop what the earlier attempt produced.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -117,28 +118,33 @@ async def main() -> None:
 
             # A backend consumer keeps the tokens per attempt and drops an
             # attempt the moment a newer one starts writing.
+            # Both reads stop at FINISH while the run is still open, so each one
+            # is closed on the way out rather than left for the collector.
             tokens: dict[int, list[int]] = {}
-            async for record in stream.read(topic=INPUTS):
-                if record.kind is RecordKind.SUPERSEDED:
-                    assert record.supersession is not None
-                    dropped = tokens.pop(record.supersession.previous_attempt, [])
-                    print(
-                        f"  attempt {record.supersession.previous_attempt} superseded"
-                    )
-                    print(f"  dropped {dropped}")
-                    continue
-                if record.kind is RecordKind.FINISH:
-                    print(f"  {record.producer_id} attempt {record.attempt} finished")
-                    break
-                assert record.value is not None
-                tokens.setdefault(record.attempt, []).append(record.value.n)
+            async with contextlib.aclosing(stream.read(topic=INPUTS)) as records:
+                async for record in records:
+                    if record.kind is RecordKind.SUPERSEDED:
+                        assert record.supersession is not None
+                        attempt = record.supersession.previous_attempt
+                        dropped = tokens.pop(attempt, [])
+                        print(f"  attempt {attempt} superseded")
+                        print(f"  dropped {dropped}")
+                        continue
+                    if record.kind is RecordKind.FINISH:
+                        print(
+                            f"  {record.producer_id} attempt {record.attempt} finished"
+                        )
+                        break
+                    assert record.value is not None
+                    tokens.setdefault(record.attempt, []).append(record.value.n)
             print(f"kept {tokens}")
 
-            async for note in stream.read(topic=NOTES):
-                if note.kind is RecordKind.FINISH:
-                    break
-                assert note.value is not None
-                print(f"  note from {note.producer_id}: {note.value.text}")
+            async with contextlib.aclosing(stream.read(topic=NOTES)) as notes_read:
+                async for note in notes_read:
+                    if note.kind is RecordKind.FINISH:
+                        break
+                    assert note.value is not None
+                    print(f"  note from {note.producer_id}: {note.value.text}")
 
             await handle.signal(Session.close)
             await handle.result()
