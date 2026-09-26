@@ -11,7 +11,11 @@ producer's land in one log in the order the server accepted them.
 A cursor names the run as well as the offset, because an owned stream belongs
 to one run and a successor's starts over at zero. A handle without a run id
 reads run after run, learning from the poll that a run's stream is closed and
-from the run's close event who came next; with a run id it is pinned.
+from the run's close event who came next; with a run id it is pinned. A run
+that was reset is followed too: its close event does not name the run reset
+from it, describe does, and that run's streams continue the base run's offset
+space where it inherited a subscription, so the read resumes at the floor the
+stream reports rather than at zero.
 
 Prototype support for AI-198. It needs a server built from that branch and
 opens its own gRPC channel to it, because sdk-core does not know the stream
@@ -329,7 +333,12 @@ class NativeStreamHandle:
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
+        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes.
+
+        The chain is followed across continue-as-new and across a reset: a
+        run reset from a closed one is read next, from the floor its stream
+        reports. A handle pinned to a run that was reset ends with that run.
+        """
         topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
@@ -369,10 +378,10 @@ class NativeStreamHandle:
                     break
             if self._run_id is not None:
                 return
-            successor = await self._successor(run_id)
-            if successor is None:
+            following = await self._successor(topic, run_id)
+            if following is None:
                 return
-            run_id, offset = successor, 0
+            run_id, offset = following
 
     async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The cursor of the newest record on ``topic``, naming the run it was read from.
@@ -443,31 +452,84 @@ class NativeStreamHandle:
         try:
             async for event in handle.fetch_history_events(page_size=1):
                 attributes = event.workflow_execution_started_event_attributes
-                return attributes.continued_execution_run_id or None
+                if attributes.continued_execution_run_id:
+                    return attributes.continued_execution_run_id
+                # A reset run's start event is the base run's, copied, and the
+                # original run id it carries is kept across resets, so it names
+                # the run the chain of resets began from.
+                original = attributes.original_execution_run_id
+                if original and original != run_id:
+                    return original
+                return None
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
         # The run's History is gone: the chain's retained part starts here.
         return None
 
-    async def _successor(self, run_id: str) -> str | None:
+    async def _successor(self, topic: str, run_id: str) -> tuple[str, int] | None:
+        """The run that carries on after ``run_id``, and where its stream starts.
+
+        A continue-as-new names its successor in the close event, and the
+        successor's streams start at zero. A reset does not: the base run is
+        closed with no word of the reset in its own History, and only describe
+        names the run reset from it. That run reads on streams of its own that
+        continue the base run's offset space where it inherited a subscription,
+        and such a stream refuses any offset below its floor, so the read
+        resumes at the floor the stream reports.
+        """
         handle = self._client.get_workflow_handle(self._workflow_id, run_id=run_id)
         events = handle.fetch_history_events(
             event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT
         )
+        closed = False
         try:
             async for event in events:
+                closed = True
                 if event.HasField(
                     "workflow_execution_continued_as_new_event_attributes"
                 ):
                     attributes = (
                         event.workflow_execution_continued_as_new_event_attributes
                     )
-                    return attributes.new_execution_run_id or None
+                    if not attributes.new_execution_run_id:
+                        return None
+                    return attributes.new_execution_run_id, 0
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
-        return None
+            return None
+        if not closed:
+            return None
+        reset_run = await self._reset_run(run_id)
+        if reset_run is None:
+            return None
+        return reset_run, await self._floor(topic, reset_run)
+
+    async def _reset_run(self, run_id: str) -> str | None:
+        """The run ``run_id`` was reset into, which only describe reports."""
+        handle = self._client.get_workflow_handle(self._workflow_id, run_id=run_id)
+        try:
+            description = await handle.describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                return None
+            raise
+        extended = description.raw_description.workflow_extended_info
+        return extended.reset_run_id or None
+
+    async def _floor(self, topic: str, run_id: str) -> int:
+        """The first offset a run's stream holds.
+
+        A stream the run inherited a subscription to exists from the reset on
+        and starts at the inherited offset. One the base run only published to
+        is created on the run's first publish, at zero, and does not exist
+        before that.
+        """
+        try:
+            return (await self._stream(topic, run_id).describe()).base_offset
+        except StreamNotFoundError:
+            return 0
 
 
 class NativeStreams(ProviderPlugin):
