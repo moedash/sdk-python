@@ -525,7 +525,8 @@ class _StubHandle:
         error = self._events_error
 
         async def _events() -> AsyncIterator[Any]:
-            for event in ():
+            events: tuple[Any, ...] = ()
+            for event in events:
                 yield event
             if error is not None:
                 raise error
