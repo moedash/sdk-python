@@ -471,7 +471,7 @@ async def test_a_retried_append_after_an_ambiguous_failure_writes_once():
     # The retry carries the same signal sequence and the same record
     # sequence as the failed send, so the shipped dedupe drops the copy; the
     # batch after it continues the numbering.
-    assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (2, [1])]
+    assert _sequences(handle.sent) == [(2, [1]), (2, [1]), (3, [2])]
     assert all(publish.publisher_id == "model#1" for publish in handle.sent)
 
 
@@ -482,7 +482,7 @@ async def test_a_batch_whose_signal_failed_goes_out_before_the_next_one():
         await producer.append({"n": 1})
     await producer.append({"n": 2}, {"n": 3})
     await producer.finish()
-    assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (3, [1, 2]), (4, [3])]
+    assert _sequences(handle.sent) == [(2, [1]), (2, [1]), (4, [2, 3]), (5, [4])]
     assert _wires(handle.sent[-1])[0].kind == int(RecordKind.FINISH)
 
 
@@ -618,7 +618,7 @@ async def test_the_dedupe_sequence_names_where_the_records_end():
     await retry.append({"n": 2})
     await retry.append({"n": 3})
 
-    # The original ended at record 1, so its sequence is 2. Neither half of
+    # The original ended at record 2, so its sequence is 3. Neither half of
     # the retry's re-split reaches past it, and only the new record does.
-    assert _sequences(first.sent) == [(2, [0, 1])]
-    assert _sequences(second.sent) == [(1, [0]), (2, [1]), (3, [2])]
+    assert _sequences(first.sent) == [(3, [1, 2])]
+    assert _sequences(second.sent) == [(2, [1]), (3, [2]), (4, [3])]
