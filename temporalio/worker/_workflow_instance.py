@@ -58,7 +58,9 @@ import temporalio.common
 import temporalio.converter
 import temporalio.exceptions
 import temporalio.nexus.system
+import temporalio.streams
 import temporalio.workflow
+import temporalio.workflow._streams
 from temporalio.converter import StorageDriverStoreContext, StorageDriverWorkflowInfo
 from temporalio.converter._payload_converter import (
     _TemporalTransferTypePayloadConverter,
@@ -184,6 +186,7 @@ class WorkflowInstanceDetails:
     default_workflow_logic_flags: frozenset[_WorkflowLogicFlag] = field(
         default_factory=lambda: _DEFAULT_ENABLED_WORKFLOW_LOGIC_FLAGS
     )
+    stream_provider: temporalio.streams.StreamProvider | None = None
 
 
 class WorkflowInstance(ABC):
@@ -303,6 +306,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             det.worker_level_failure_exception_types
         )
         self._patch_activation_callback = det.patch_activation_callback
+        self._stream_provider = det.stream_provider
+        self._streams: temporalio.workflow._streams._WorkflowStreams | None = None
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
@@ -1358,6 +1363,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def workflow_is_continue_as_new_suggested(self) -> bool:
         return self._continue_as_new_suggested
 
+    def workflow_is_evicting(self) -> bool:
+        return self._deleting
+
     def workflow_is_target_worker_deployment_version_changed(self) -> bool:
         return self._target_worker_deployment_version_changed
 
@@ -1809,6 +1817,20 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 event_groups=event_groups,
             )
         )
+
+    def workflow_streams(self) -> temporalio.workflow._streams._WorkflowStreams:
+        if self._streams is None:
+            if self._stream_provider is None:
+                raise RuntimeError(
+                    "no stream provider is configured on this worker; pass one with "
+                    "Worker(plugins=[provider]) or stream_provider="
+                )
+            # The workflow half is made per instance, so whatever it keeps
+            # dies with the instance the way handlers do.
+            self._streams = temporalio.workflow._streams._WorkflowStreams(
+                self._stream_provider.workflow_provider()
+            )
+        return self._streams
 
     def workflow_time_ns(self) -> int:
         return self._time_ns
