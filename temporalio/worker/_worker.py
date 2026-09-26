@@ -24,6 +24,7 @@ import temporalio.client
 import temporalio.common
 import temporalio.runtime
 import temporalio.service
+import temporalio.streams
 from temporalio.common import (
     HeaderCodecBehavior,
     VersioningBehavior,
@@ -152,6 +153,8 @@ class Worker:
         ),
         disable_payload_error_limit: bool = False,
         max_workflow_task_external_storage_concurrency: int = _DEFAULT_WORKFLOW_TASK_EXTERNAL_STORAGE_CONCURRENCY,
+        external_stream_backend: Any | None = None,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> None:
         """Create a worker to process workflows and/or activities.
 
@@ -277,6 +280,16 @@ class Worker:
             graceful_shutdown_timeout: Amount of time after shutdown is called
                 that activities are given to complete before their tasks are
                 cancelled.
+            external_stream_backend: External Workflow Stream provider instance.
+                The provider must declare ``guarantees_immutability = True``;
+                Worker construction fails otherwise. Input subscriptions use
+                ``StreamBackend``. Workflow-originated output additionally
+                requires the provider to implement ``OutputStreamBackend``;
+                input-only providers remain supported.
+
+                .. warning::
+                    This option and the External Workflow Streams feature are
+                    experimental.
             workflow_failure_exception_types: The types of exceptions that, if a
                 workflow-thrown exception extends, will cause the
                 workflow/update to fail instead of suspending the workflow via
@@ -343,6 +356,10 @@ class Worker:
                 Defaults to 3. Adjust this value based on your workload's needs.
                 Please report any issues you encounter with this setting or if you
                 feel the default should be changed.
+            stream_provider: Experimental. The stream provider that workflows
+                on this worker read and publish through, see
+                :py:mod:`temporalio.streams`. A provider that is also a
+                :py:class:`Plugin` sets this itself when passed in ``plugins``.
                 WARNING: This setting is experimental.
 
         """
@@ -392,6 +409,8 @@ class Worker:
             nexus_task_poller_behavior=nexus_task_poller_behavior,
             disable_payload_error_limit=disable_payload_error_limit,
             max_workflow_task_external_storage_concurrency=max_workflow_task_external_storage_concurrency,
+            external_stream_backend=external_stream_backend,
+            stream_provider=stream_provider,
         )
 
         plugins_from_client = cast(
@@ -417,6 +436,20 @@ class Worker:
         Client is safe to take separately since it can't be modified by worker plugins.
         """
         self._config = config
+
+        # The external stream backend is validated here rather than lazily so
+        # that a provider which cannot guarantee record immutability fails
+        # Worker construction, before any Workflow can consume through it.
+        self._external_stream_backend = config.get("external_stream_backend")
+        if self._external_stream_backend is not None:
+            from temporalio.contrib.external_workflow_streams._backend import (
+                _validate_backend,
+            )
+
+            self._external_stream_backend = _validate_backend(
+                self._external_stream_backend
+            )
+
         if not (
             config.get("activities")
             or config.get("nexus_service_handlers")
@@ -461,6 +494,11 @@ class Worker:
 
         # Prepend applicable client interceptors to the given ones
         client_config = config["client"].config(active_config=True)  # type: ignore[reportTypedDictNotRequiredAccess]
+        # A provider registered on the client serves its workers too, so one
+        # registration covers every context that asks for a stream.
+        stream_provider = config.get("stream_provider") or client_config.get(
+            "stream_provider"
+        )
         interceptors_from_client = cast(
             list[Interceptor],
             [i for i in client_config["interceptors"] if isinstance(i, Interceptor)],
@@ -498,6 +536,7 @@ class Worker:
                 interceptors=interceptors,
                 metric_meter=self._runtime.metric_meter,
                 client=client,
+                stream_provider=stream_provider,
                 encode_headers=(
                     client_config["header_codec_behavior"] == HeaderCodecBehavior.CODEC
                 ),
@@ -538,6 +577,7 @@ class Worker:
 
             self._workflow_worker = _WorkflowWorker(
                 bridge_worker=lambda: self._bridge_worker,
+                client=client,
                 namespace=config["client"].namespace,  # type: ignore[reportTypedDictNotRequiredAccess]
                 task_queue=config["task_queue"],  # type: ignore[reportTypedDictNotRequiredAccess]
                 workflows=workflows,
@@ -565,6 +605,8 @@ class Worker:
                 encode_headers=client_config["header_codec_behavior"]
                 != HeaderCodecBehavior.NO_CODEC,
                 max_workflow_task_external_storage_concurrency=max_workflow_task_external_storage_concurrency,
+                external_stream_backend=self._external_stream_backend,
+                stream_provider=stream_provider,
             )
 
         tuner = config.get("tuner")
@@ -868,6 +910,20 @@ class Worker:
             f"Beginning worker shutdown, will wait {graceful_timeout} before cancelling activities"
         )
 
+        # Ask Core what state each streaming Run is in, before shutdown is
+        # initiated. This is the first half of P20's sweep and it has to be here:
+        # an idle cached Run has no pending work, so Core's workflow-state lane
+        # finishes on the first input after the shutdown token is cancelled, and
+        # every Run-status probe from then on answers RunNotFound. That answer
+        # owes a wake just as NoOpenWorkflowTask does, so a sweep that probes
+        # later still sends its wake and still looks correct -- while Parked (no
+        # wake needed) and WftOpen (C15b's, not ours to race) stop being
+        # reachable answers at all. Only the asking happens here; the wakes go
+        # out below, once the pollers have stopped, because offering a Run to a
+        # task queue this Worker is still polling is not a hand-off.
+        if self._workflow_worker:
+            await self._workflow_worker.probe_external_stream_runs()
+
         # Initiate core worker shutdown
         self._bridge_worker.initiate_shutdown()
 
@@ -900,6 +956,23 @@ class Worker:
             await self._activity_worker.wait_all_completed()
         if self._nexus_worker:
             await self._nexus_worker.wait_all_completed()
+
+        # Send the wakes the probe above found owed, then tear down external
+        # stream subscriptions. This is the second half of P20's obligation and
+        # it happens here rather than inside the workflow worker's poll loop
+        # because both shutdown paths have to reach it: the poll drain above only
+        # replaces a worker task whose run() raised, so a clean shutdown would
+        # otherwise leave every Run registered, its watchers running, and its
+        # owed wake Signals unsent.
+        #
+        # After the wait above, so per-Run teardown stays driven by
+        # RemoveFromCache: every activation, eviction included, has been
+        # answered by now, so a FinalizeExternalStreams in flight was answered
+        # before the manager's state for that Run disappears. Before
+        # finalize_shutdown, because a Run the probe phase never reached is
+        # probed here and that still needs the bridge worker.
+        if self._workflow_worker:
+            await self._workflow_worker.shutdown_external_streams()
 
         # Do final shutdown
         try:
@@ -1020,6 +1093,8 @@ class WorkerConfig(TypedDict, total=False):
     nexus_task_poller_behavior: PollerBehavior
     disable_payload_error_limit: bool
     max_workflow_task_external_storage_concurrency: int
+    external_stream_backend: Any | None
+    stream_provider: temporalio.streams.StreamProvider | None
 
 
 def _warn_if_activity_executor_max_workers_is_inconsistent(

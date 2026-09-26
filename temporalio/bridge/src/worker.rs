@@ -14,12 +14,13 @@ use temporalio_common::protos::coresdk::{
     nexus::NexusTaskCompletion, ActivityHeartbeat, ActivityTaskCompletion,
 };
 use temporalio_common::protos::temporal::api::history::v1::History;
+use temporalio_common::protos::temporal::api::stream::v1::StreamSlice;
 use temporalio_common::protos::temporal::api::worker::v1::{PluginInfo, StorageDriverInfo};
 use temporalio_sdk_core::replay::{HistoryForReplay, ReplayWorkerInput};
 use temporalio_sdk_core::{
-    PollError, SlotInfo, SlotInfoTrait, SlotKind, SlotKindType, SlotMarkUsedContext,
-    SlotReleaseContext, SlotReservationContext, SlotSupplier as SlotSupplierTrait,
-    SlotSupplierPermit, WorkflowErrorType,
+    ExternalStreamReadyResult, ExternalStreamRunStatus, PollError, SlotInfo, SlotInfoTrait,
+    SlotKind, SlotKindType, SlotMarkUsedContext, SlotReleaseContext, SlotReservationContext,
+    SlotSupplier as SlotSupplierTrait, SlotSupplierPermit, WorkflowErrorType,
 };
 use tokio::sync::mpsc::{channel, Sender};
 use tokio_stream::wrappers::ReceiverStream;
@@ -671,6 +672,63 @@ impl WorkerRef {
         Ok(())
     }
 
+    /// Tell Core a record is buffered for one external stream wait.
+    ///
+    /// **Synchronous and blocking**, like `record_activity_heartbeat`, but unlike it
+    /// **acknowledged**: the caller is a watcher whose next action -- keep waiting, re-probe, send
+    /// a wake Signal, or tear itself down -- depends entirely on which of the five results comes
+    /// back, so a fire-and-forget send would leave it unable to tell "Core will activate" from
+    /// "nothing here will".
+    ///
+    /// Synchronous rather than a Python awaitable on purpose. There is one watcher per
+    /// subscription and they do not share an event loop, and a future produced by
+    /// `future_into_py` is bound to the loop that created it -- so an awaitable here would work
+    /// from the worker's own loop and hang from anywhere else. Blocking with the GIL released is
+    /// safe: the answer comes off Core's serialized local-input lane, which does no I/O.
+    ///
+    /// Returns one of `Accepted`, `Stale`, `Parked`, `NoOpenWorkflowTask`, `RunNotFound`.
+    fn notify_external_stream_ready(
+        &self,
+        py: Python<'_>,
+        run_id: String,
+        wait_id: u32,
+        wait_generation: u64,
+    ) -> PyResult<&'static str> {
+        let worker = self.worker.as_ref().unwrap().clone();
+        // Deliberately *not* `enter_sync!`: entering the tokio handle would put this thread in an
+        // async context, and `Handle::block_on` panics there.
+        let handle = self.runtime.core.tokio_handle();
+        let result = py.detach(move || {
+            handle.block_on(worker.notify_external_stream_ready(&run_id, wait_id, wait_generation))
+        });
+        Ok(match result {
+            ExternalStreamReadyResult::Accepted => "Accepted",
+            ExternalStreamReadyResult::Stale => "Stale",
+            ExternalStreamReadyResult::Parked => "Parked",
+            ExternalStreamReadyResult::NoOpenWorkflowTask => "NoOpenWorkflowTask",
+            ExternalStreamReadyResult::RunNotFound => "RunNotFound",
+        })
+    }
+
+    /// Ask what state a run's external stream wait set is in, changing nothing.
+    ///
+    /// Deliberately not the readiness call: readiness means "a record is buffered", so probing
+    /// with it would assert something false and manufacture a spurious activation on the way out
+    /// of a shutting-down worker.
+    ///
+    /// Returns one of `WftOpen`, `Parked`, `NoOpenWorkflowTask`, `RunNotFound`.
+    fn external_stream_run_status(&self, py: Python<'_>, run_id: String) -> PyResult<&'static str> {
+        let worker = self.worker.as_ref().unwrap().clone();
+        let handle = self.runtime.core.tokio_handle();
+        let status = py.detach(move || handle.block_on(worker.external_stream_run_status(&run_id)));
+        Ok(match status {
+            ExternalStreamRunStatus::WftOpen => "WftOpen",
+            ExternalStreamRunStatus::Parked => "Parked",
+            ExternalStreamRunStatus::NoOpenWorkflowTask => "NoOpenWorkflowTask",
+            ExternalStreamRunStatus::RunNotFound => "RunNotFound",
+        })
+    }
+
     fn request_workflow_eviction(&self, run_id: &str) -> PyResult<()> {
         enter_sync!(self.runtime);
         self.worker
@@ -950,14 +1008,24 @@ impl HistoryPusher {
 
 #[pymethods]
 impl HistoryPusher {
+    /// Feed one history to the replay worker. `stream_slices` are serialized
+    /// `temporal.api.stream.v1.StreamSlice` messages carrying the records the
+    /// history's completed tasks consumed, which History itself never holds.
+    #[pyo3(signature = (workflow_id, history_proto, stream_slices = Vec::new()))]
     fn push_history<'p>(
         &self,
         py: Python<'p>,
         workflow_id: &str,
         history_proto: &Bound<'_, PyBytes>,
+        stream_slices: Vec<Bound<'p, PyBytes>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let history = History::decode(history_proto.as_bytes())
             .map_err(|err| PyValueError::new_err(format!("Invalid proto: {err}")))?;
+        let slices = stream_slices
+            .iter()
+            .map(|slice| StreamSlice::decode(slice.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| PyValueError::new_err(format!("Invalid stream slice proto: {err}")))?;
         let wfid = workflow_id.to_string();
         let tx = if let Some(tx) = self.tx.as_ref() {
             tx.clone()
@@ -968,7 +1036,7 @@ impl HistoryPusher {
         };
         // We accept this doesn't have logging/tracing
         self.runtime.future_into_py(py, async move {
-            tx.send(HistoryForReplay::new(history, wfid))
+            tx.send(HistoryForReplay::new(history, wfid).with_stream_slices(slices))
                 .await
                 .map_err(|_| {
                     PyRuntimeError::new_err(

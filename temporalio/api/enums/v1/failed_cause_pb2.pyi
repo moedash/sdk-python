@@ -188,6 +188,21 @@ class _WorkflowTaskFailedCauseEnumTypeWrapper(
         _WorkflowTaskFailedCause.ValueType
     )  # 40
     """A workflow task failed because the request exceeded a size limit."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 41
+    """A workflow task completed with an invalid AppendStreamRecords command."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 42
+    """A workflow task completed with an invalid SubscribeStream command."""
+    WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 43
+    """A workflow task could not be started because a stream range it consumed and recorded in
+    History can no longer be served, for example after truncation or because it exceeds the
+    replay bound. Check the workflow task failure message for more information.
+    """
 
 class WorkflowTaskFailedCause(
     _WorkflowTaskFailedCause, metaclass=_WorkflowTaskFailedCauseEnumTypeWrapper
@@ -346,7 +361,85 @@ WORKFLOW_TASK_FAILED_CAUSE_WORKFLOW_PAUSE_REQUESTED_BEFORE_TASK_STARTED: (
 """A workflow task is failed because the workflow is paused before the task is started."""
 WORKFLOW_TASK_FAILED_CAUSE_REQUEST_TOO_LARGE: WorkflowTaskFailedCause.ValueType  # 40
 """A workflow task failed because the request exceeded a size limit."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 41
+"""A workflow task completed with an invalid AppendStreamRecords command."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 42
+"""A workflow task completed with an invalid SubscribeStream command."""
+WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
+    WorkflowTaskFailedCause.ValueType
+)  # 43
+"""A workflow task could not be started because a stream range it consumed and recorded in
+History can no longer be served, for example after truncation or because it exceeds the
+replay bound. Check the workflow task failure message for more information.
+"""
 global___WorkflowTaskFailedCause = WorkflowTaskFailedCause
+
+class _ActivityTaskFailedCause:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _ActivityTaskFailedCauseEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+        _ActivityTaskFailedCause.ValueType
+    ],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    ACTIVITY_TASK_FAILED_CAUSE_UNSPECIFIED: _ActivityTaskFailedCause.ValueType  # 0
+    ACTIVITY_TASK_FAILED_CAUSE_PAYLOADS_TOO_LARGE: (
+        _ActivityTaskFailedCause.ValueType
+    )  # 1
+    """A payload-bearing field on a request the worker sent for this activity task exceeded the
+    per-field size limit configured on the server for the namespace.
+    Check the activity task failure message for more information.
+    """
+    ACTIVITY_TASK_FAILED_CAUSE_EXTERNAL_STORAGE_FAILURE: (
+        _ActivityTaskFailedCause.ValueType
+    )  # 2
+    """The worker failed to offload a payload to, or retrieve one from, external storage while
+    processing this activity task.
+    Check the activity task failure message for more information.
+    """
+    ACTIVITY_TASK_FAILED_CAUSE_ACTIVITY_WORKER_UNHANDLED_FAILURE: (
+        _ActivityTaskFailedCause.ValueType
+    )  # 3
+    """The default cause for an activity task failure reported by a worker; a more specific cause
+    takes precedence whenever the condition is recognized.
+    Check the activity task failure message for more information.
+    """
+
+class ActivityTaskFailedCause(
+    _ActivityTaskFailedCause, metaclass=_ActivityTaskFailedCauseEnumTypeWrapper
+):
+    """Activity tasks can fail for various reasons. Note that some of these reasons can only originate
+    from the server, and some of them can only originate from the SDK/worker.
+    """
+
+ACTIVITY_TASK_FAILED_CAUSE_UNSPECIFIED: ActivityTaskFailedCause.ValueType  # 0
+ACTIVITY_TASK_FAILED_CAUSE_PAYLOADS_TOO_LARGE: ActivityTaskFailedCause.ValueType  # 1
+"""A payload-bearing field on a request the worker sent for this activity task exceeded the
+per-field size limit configured on the server for the namespace.
+Check the activity task failure message for more information.
+"""
+ACTIVITY_TASK_FAILED_CAUSE_EXTERNAL_STORAGE_FAILURE: (
+    ActivityTaskFailedCause.ValueType
+)  # 2
+"""The worker failed to offload a payload to, or retrieve one from, external storage while
+processing this activity task.
+Check the activity task failure message for more information.
+"""
+ACTIVITY_TASK_FAILED_CAUSE_ACTIVITY_WORKER_UNHANDLED_FAILURE: (
+    ActivityTaskFailedCause.ValueType
+)  # 3
+"""The default cause for an activity task failure reported by a worker; a more specific cause
+takes precedence whenever the condition is recognized.
+Check the activity task failure message for more information.
+"""
+global___ActivityTaskFailedCause = ActivityTaskFailedCause
 
 class _StartChildWorkflowExecutionFailedCause:
     ValueType = typing.NewType("ValueType", builtins.int)
@@ -511,6 +604,8 @@ class _ResourceExhaustedCauseEnumTypeWrapper(
         _ResourceExhaustedCause.ValueType
     )  # 10
     """Limits related to Worker Deployments are reached."""
+    RESOURCE_EXHAUSTED_CAUSE_BANDWIDTH_LIMIT: _ResourceExhaustedCause.ValueType  # 11
+    """Namespace exceeds bandwidth limit."""
 
 class ResourceExhaustedCause(
     _ResourceExhaustedCause, metaclass=_ResourceExhaustedCauseEnumTypeWrapper
@@ -541,6 +636,8 @@ RESOURCE_EXHAUSTED_CAUSE_WORKER_DEPLOYMENT_LIMITS: (
     ResourceExhaustedCause.ValueType
 )  # 10
 """Limits related to Worker Deployments are reached."""
+RESOURCE_EXHAUSTED_CAUSE_BANDWIDTH_LIMIT: ResourceExhaustedCause.ValueType  # 11
+"""Namespace exceeds bandwidth limit."""
 global___ResourceExhaustedCause = ResourceExhaustedCause
 
 class _ResourceExhaustedScope:

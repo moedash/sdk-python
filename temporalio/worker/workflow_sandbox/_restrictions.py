@@ -464,6 +464,13 @@ SandboxMatcher.all_uses_runtime = SandboxMatcher(use={"*"}, only_runtime=True)
 
 SandboxRestrictions.passthrough_modules_minimum = {
     "grpc",
+    # The External Workflow Streams subscription manager. It owns the Worker's
+    # backend connections, its watcher tasks, and the buffers the Workflow
+    # thread pops from -- all of which live on the Worker's own asyncio loop.
+    # Re-importing it inside the sandbox would give the Workflow a second,
+    # empty manager watching nothing, so only an opaque handle to the real one
+    # may cross the boundary.
+    "temporalio.contrib.external_workflow_streams._manager",
     # Due to some side-effecting calls made on import, these need to be
     # allowed
     "pathlib",
@@ -778,6 +785,34 @@ SandboxRestrictions.invalid_module_members_default = SandboxMatcher(
         "xmlrpc": SandboxMatcher.all_uses,
         "zipfile": SandboxMatcher(
             children={"ZipFile": SandboxMatcher(use={"extract", "extractall"})}
+        ),
+        "temporalio": SandboxMatcher(
+            children={
+                "contrib": SandboxMatcher(
+                    children={
+                        # External stream provider instances hold connections
+                        # and credentials and live on the Worker, outside the
+                        # sandbox. Workflow code uses the backend configured on
+                        # its Worker; it never constructs or imports one, and a
+                        # provider reached from in here would be a second
+                        # instance that no watcher owns.
+                        "external_workflow_streams": SandboxMatcher(
+                            children={
+                                "_redis": SandboxMatcher(
+                                    match_self=True,
+                                    leaf_message=(
+                                        "External stream providers may not be "
+                                        "imported from Workflow code. Register "
+                                        "the provider on the Worker with "
+                                        "external_stream_backend=... instead."
+                                    ),
+                                ),
+                            },
+                            access={"RedisStreamBackend"},
+                        ),
+                    }
+                ),
+            }
         ),
         "zoneinfo": SandboxMatcher(
             children={

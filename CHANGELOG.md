@@ -37,6 +37,72 @@ to include examples, links to docs, or any other relevant information.
   worker-side factories registered with `StrandsPlugin(sandboxes=...)`.
 
 - Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
+- **Experimental**: `temporalio.streams` defines one stream interface a workflow
+  can read, decide on, and write. A provider is registered once as a plugin,
+  `Client.connect(plugins=[provider])`, and workers built from that client
+  inherit it; each context then asks for its stream the same way:
+  `workflow.stream_reader()` and `workflow.stream_writer()` in workflow code,
+  `activity.stream_handle()` in an activity, and `client.get_stream_handle()`
+  anywhere a client is held. A topic is a typed definition,
+  `streams.topic("inputs", Token)`, shared by workflow, activity and client
+  code; a plain string names a topic decided at runtime. The record on the wire
+  is `temporal.api.stream.v1.StreamRecord` on every provider, and
+  `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
+  reference provider the conformance tests run against.
+- **Experimental**: `temporalio.streams.providers.redis.RedisStreams` serves the
+  stream interface over External Workflow Streams, holding one topic as an
+  input and an output stream.
+- **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
+  serves the stream interface over the shipped Workflow Streams transport as a
+  worker plugin, so a workflow reads and publishes through
+  `temporalio.contrib.workflow_streams` without naming it. Records are the
+  `StreamRecord` proto inside the shipped item payload, and a handle without a
+  run id follows continue-as-new run by run.
+- **Experimental**: `temporalio.streams.providers.nexus.NexusStreams` puts one
+  Nexus endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store, and
+  `TemporalStreamsHandler` serves that endpoint by fronting the provider's own
+  handles. Its contract is defined in `temporal_streams.nexusrpc.yaml` and the
+  bindings are generated from it; a record crosses as the serialized
+  `StreamRecord` proto. Configure the front with `data_converter=` to run a
+  payload codec on the caller side, so records are encoded before they leave
+  the process.
+- **Experimental**: server-side streams. A workflow publishes to a stream it
+  owns with a command the server applies in its Workflow Task's commit, and
+  reads the ranges the server delivers on its Workflow Tasks, through
+  `temporalio.workflow.append_stream_records`, `subscribe_stream` and
+  `read_stream_records`. `temporalio.client_stream` and
+  `temporalio.contrib.server_streams` reach the same stream from outside a
+  workflow, and `temporalio.streams.providers.native.NativeStreams` puts it
+  behind the shared stream interface with one owned stream per topic. Requires
+  a server that serves the stream service. `Replayer(stream_client=)` replays a
+  workflow that read such a stream while the server still holds it: History
+  records only the offsets each task consumed, so the replayer fetches the
+  records from the stream service and hands them to the replay with the
+  history. A range the stream no longer holds fails the replay with
+  `StreamNotFoundError`. A handle without a run id follows a workflow reset as
+  it follows a continue-as-new, reading the reset run from the floor its stream
+  reports, and the replayer fetches the ranges recorded before a reset point
+  from the run the workflow was reset from. For offline replay,
+  `Replayer.fetch_stream_slices(client, history)` attaches the records to a
+  `WorkflowHistory` while the stream is retained, `to_json()` and `from_json()`
+  carry them as `streamSlices` beside the events, and a history that carries
+  them replays with no server.
+- Added experimental External Workflow Streams in
+  `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
+  stored in a configured external backend instead of Temporal History, with a
+  Redis Streams provider included. Workflows subscribe with `external_stream`,
+  external processes publish with `ExternalStreamProducer`, and Workers are
+  configured with `external_stream_backend`.
+- Added the output direction for External Workflow Streams.
+  Workflows publish with `external_output_stream`, Activities and external
+  processes use `ExternalOutputStreamProducer`, and external consumers resume
+  through `ExternalOutputStreamClient`. Workflow output is staged outside
+  History and becomes readable only after its compact Workflow Task marker is
+  committed.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
+- Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
 
 ### Changed
 
@@ -52,6 +118,18 @@ to include examples, links to docs, or any other relevant information.
 
 ### Fixed
 
+- Preserve empty activations in the shared External Workflow Streams input and
+  output replay schedule. Workflows that read input, publish decisions, and
+  schedule Activities now reproduce that schedule during replay. Inconsistent
+  prerelease markers are rejected explicitly rather than guessing where omitted
+  activations belonged.
+- Resume external input waits when cold replay encounters a wake in an already
+  loaded History page, including Workers with workflow caching disabled.
+- Avoid an unnecessary output replacement Workflow Task after stream input has
+  resumed the Workflow and it is waiting on an Activity or timer.
+- Keep an incomplete retained external stream task alive when workflow caching
+  is disabled; evict it after its normal task boundary instead of repeatedly
+  interrupting input readiness with shutdown markers.
 - `GoogleAdkPlugin` now passes the optional `anthropic`, `litellm`, and `openai` SDKs through
   the workflow sandbox.
 - `contrib.deepagents`: prevent duplicate input messages after continue-as-new.

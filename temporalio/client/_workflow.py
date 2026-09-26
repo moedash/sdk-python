@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import warnings
 from asyncio import Future
 from collections.abc import (
@@ -31,6 +32,7 @@ from typing_extensions import Self
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.api.history.v1
+import temporalio.api.stream.v1
 import temporalio.api.update.v1
 import temporalio.api.workflow.v1
 import temporalio.api.workflowservice.v1
@@ -1681,6 +1683,20 @@ class WorkflowHistory:
     events: Sequence[temporalio.api.history.v1.HistoryEvent]
     """History events for the workflow."""
 
+    stream_slices: Sequence[temporalio.api.stream.v1.StreamSlice] = ()
+    """The stream records the workflow's completed tasks consumed, if captured.
+
+    History records only the offsets each Workflow Task consumed from a
+    server-side stream; the records live in the stream. A history whose tasks
+    consumed records and that carries none here cannot be replayed without the
+    server that still holds the stream. One slice per recorded range, tagged
+    with the ``WorkflowTaskCompleted`` event that recorded it, in the shape the
+    server puts on a poll response.
+    :py:meth:`temporalio.worker.Replayer.fetch_stream_slices` fills it while
+    the stream is retained, and :py:meth:`to_json` and :py:meth:`from_json`
+    carry it, so an exported history file is the whole replay input.
+    """
+
     @property
     def run_id(self) -> str:
         """Run ID extracted from the first event."""
@@ -1702,31 +1718,62 @@ class WorkflowHistory:
         Args:
             workflow_id: The workflow's ID
             history: A string or parsed-to-dict representation of workflow
-                history
+                history. A ``streamSlices`` list beside ``events``, as
+                :py:meth:`to_json` writes one, is read into
+                :py:attr:`stream_slices`.
 
         Returns:
             Workflow history
         """
         parsed = _history_from_json(history)
-        return WorkflowHistory(workflow_id, parsed.events)
+        raw: Any = []
+        if isinstance(history, dict):
+            raw = history.get("streamSlices") or history.get("stream_slices") or []
+        elif '"streamSlices"' in history or '"stream_slices"' in history:
+            # Read again only when the text mentions them. Almost every
+            # history has none, and handing the parsed dict to
+            # _history_from_json instead would make it deep-copy an export
+            # that can be very large.
+            decoded = json.loads(history)
+            if isinstance(decoded, dict):
+                raw = decoded.get("streamSlices") or decoded.get("stream_slices") or []
+        slices: list[temporalio.api.stream.v1.StreamSlice] = [
+            google.protobuf.json_format.ParseDict(
+                entry,
+                temporalio.api.stream.v1.StreamSlice(),
+                ignore_unknown_fields=True,
+            )
+            for entry in raw
+        ]
+        return WorkflowHistory(workflow_id, parsed.events, slices)
 
     def to_json(self) -> str:
         """Convert this history to JSON.
 
-        Note, this does not include the workflow ID.
+        Note, this does not include the workflow ID. The stream slices, when
+        there are any, are written as a ``streamSlices`` list beside the
+        events; without them the output is the history proto's JSON alone.
         """
-        return google.protobuf.json_format.MessageToJson(
-            temporalio.api.history.v1.History(events=self.events)
-        )
+        if not self.stream_slices:
+            return google.protobuf.json_format.MessageToJson(
+                temporalio.api.history.v1.History(events=self.events)
+            )
+        return json.dumps(self.to_json_dict(), indent=2)
 
     def to_json_dict(self) -> dict[str, Any]:
         """Convert this history to JSON-compatible dict.
 
-        Note, this does not include the workflow ID.
+        Note, this does not include the workflow ID. See :py:meth:`to_json`
+        for how the stream slices are carried.
         """
-        return google.protobuf.json_format.MessageToDict(
+        out = google.protobuf.json_format.MessageToDict(
             temporalio.api.history.v1.History(events=self.events)
         )
+        if self.stream_slices:
+            out["streamSlices"] = [
+                google.protobuf.json_format.MessageToDict(s) for s in self.stream_slices
+            ]
+        return out
 
 
 @dataclass

@@ -14,6 +14,7 @@ import nexusrpc
 from nexusrpc import InputT, OutputT
 
 import temporalio.api.common.v1
+import temporalio.api.stream.v1
 import temporalio.common
 import temporalio.converter
 
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from ._event_groups import EventGroup
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
     from ._nexus import NexusOperationCancellationType, NexusOperationHandle
+    from ._streams import _WorkflowStreams
     from ._workflow_ops import (
         ChildWorkflowCancellationType,
         ChildWorkflowHandle,
@@ -322,6 +324,26 @@ class _Runtime(ABC):
     ) -> temporalio.common.WorkerDeploymentVersion | None: ...
 
     @abstractmethod
+    def workflow_subscribe_stream(
+        self, stream_name_or_id: str, start_offset: int
+    ) -> None: ...
+
+    @abstractmethod
+    def workflow_append_stream_records(
+        self,
+        stream_name: str,
+        records: Sequence[temporalio.api.stream.v1.StreamRecord],
+    ) -> None: ...
+
+    @abstractmethod
+    def workflow_close_stream_records(self, stream_id: str) -> None: ...
+
+    @abstractmethod
+    async def workflow_read_stream_records(
+        self, stream_id: str, max_records: int
+    ) -> list[_DeliveredStreamRecord]: ...
+
+    @abstractmethod
     def workflow_get_current_history_length(self) -> int: ...
 
     @abstractmethod
@@ -352,6 +374,16 @@ class _Runtime(ABC):
 
     @abstractmethod
     def workflow_is_continue_as_new_suggested(self) -> bool: ...
+
+    @abstractmethod
+    def workflow_is_evicting(self) -> bool:
+        """Whether this instance is being dropped from the cache rather than ending.
+
+        Eviction cancels the primary task the way a workflow cancellation
+        does, so anything that runs on the way out has to be able to tell the
+        two apart. Instance state must not be touched while this is true.
+        """
+        ...
 
     @abstractmethod
     def workflow_is_target_worker_deployment_version_changed(self) -> bool: ...
@@ -498,6 +530,9 @@ class _Runtime(ABC):
         summary: str | None,
         event_groups: Sequence[EventGroup] | None = None,
     ) -> NexusOperationHandle[OutputT]: ...
+
+    @abstractmethod
+    def workflow_streams(self) -> _WorkflowStreams: ...
 
     @abstractmethod
     def workflow_time_ns(self) -> int: ...
@@ -1011,6 +1046,105 @@ async def sleep(
         summary=summary,
         event_groups=event_groups,
     )
+
+
+def _subscribe_stream(  # type: ignore[reportUnusedFunction]
+    stream_name_or_id: str, *, start_offset: int = 0
+) -> None:
+    """Subscribe this workflow to a server-side stream.
+
+    From here on its Workflow Tasks carry the ranges it has not consumed yet,
+    and :func:`_read_stream_records` returns them. Safe to call again: a second
+    subscription to a stream this run already consumes does not move its
+    cursor, though it does write one event. Calling it on every replay is
+    harmless because replay matches the command to the event already recorded.
+
+    Only the name or id and the start offset go to the server. The rest of the
+    stream's addressing is resolved there, because a workflow cannot look it up
+    without doing I/O and a value it carried would be a reading rather than a
+    fact. A name this workflow has not written yet names a stream it owns, and
+    subscribing creates it.
+
+    Args:
+        stream_name_or_id: Stream to consume: the name of one this workflow
+            owns, or the id of a standalone stream. The server tries them in
+            that order.
+        start_offset: Where to start. Negative means from wherever the stream is
+            when the subscription is registered; the server resolves that once
+            and records it, so replay does not resolve it again.
+    """
+    _Runtime.current().workflow_subscribe_stream(stream_name_or_id, start_offset)
+
+
+def _append_stream_records(  # type: ignore[reportUnusedFunction]
+    records: Sequence[temporalio.api.stream.v1.StreamRecord],
+    *,
+    stream_name: str = "",
+) -> None:
+    """Publish records to a server-side stream this workflow owns.
+
+    Returns at once. The records become one command when this Workflow Task
+    completes, so they are visible when the task is accepted and never if it
+    fails. Their bodies go to the stream's own log rather than into History,
+    which gets one fixed-size event naming the offset range, so a task that
+    publishes a thousand records costs History the same as one that publishes
+    one. Readers do not have to exist yet, and adding one costs the writer
+    nothing.
+
+    Args:
+        records: Records to append, in order. The server stores each with an
+            empty ``producer_id``, because the workflow is the producer.
+        stream_name: Name of a stream this workflow owns, created on first
+            use. Empty means the workflow's default output stream. A workflow
+            cannot append to a stream another execution owns.
+
+    Raises:
+        ValueError: ``records`` is empty or one of them is over the server's
+            per-record size limit.
+    """
+    _Runtime.current().workflow_append_stream_records(stream_name, records)
+
+
+@dataclass(frozen=True)
+class _DeliveredStreamRecord:
+    """One record a consuming workflow was given, with where it sat."""
+
+    record: temporalio.api.stream.v1.StreamRecord
+    offset: int
+    """Its position in the whole stream, which is what a reader resumes from."""
+
+
+def _close_stream_records(stream_id: str) -> None:  # type: ignore[reportUnusedFunction]
+    """Say this workflow wants no more of ``stream_id``.
+
+    There is no unsubscribe command, so the server keeps delivering for the
+    life of the run; this drops what arrives instead of holding it for a
+    reader that has gone. Deterministic on replay, because the same workflow
+    code closes at the same point and the same ranges are dropped.
+
+    Args:
+        stream_id: Stream to stop keeping records for.
+    """
+    _Runtime.current().workflow_close_stream_records(stream_id)
+
+
+async def _read_stream_records(  # type: ignore[reportUnusedFunction]
+    stream_id: str, *, max_records: int = 0
+) -> list[_DeliveredStreamRecord]:
+    """Read the next records of a server-side stream this workflow consumes.
+
+    Waits until at least one record is available. Ranges arrive on Workflow
+    Tasks, and only the offsets they covered are written to History, so this is
+    deterministic on replay: the server re-supplies the same ranges by reading
+    the stream again. Subscribe first with :func:`_subscribe_stream`; this only
+    reads what has already been delivered to this workflow.
+
+    Args:
+        stream_id: Stream to read from.
+        max_records: Most records to return at once, or 0 for everything
+            available.
+    """
+    return await _Runtime.current().workflow_read_stream_records(stream_id, max_records)
 
 
 async def wait_condition(

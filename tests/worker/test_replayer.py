@@ -8,8 +8,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import google.protobuf.json_format
 import pytest
 
+import temporalio.api.common.v1
+import temporalio.api.history.v1
+import temporalio.api.stream.v1
 import temporalio.worker._workflow_instance
 from temporalio import activity, workflow
 from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
@@ -119,6 +123,48 @@ async def test_replayer_workflow_complete(client: Client) -> None:
     await Replayer(workflows=[SayHelloWorkflow]).replay_workflow(
         await handle.fetch_history()
     )
+
+
+def test_workflow_history_json_carries_stream_slices_only_when_present() -> None:
+    """The JSON shape is unchanged without slices, and round-trips them when present."""
+    with Path(__file__).with_name("test_replayer_complete_history.json").open("r") as f:
+        history = WorkflowHistory.from_json("fake", f.read())
+    assert list(history.stream_slices) == []
+    # Byte for byte what the history proto's JSON was before slices existed.
+    assert history.to_json() == google.protobuf.json_format.MessageToJson(
+        temporalio.api.history.v1.History(events=history.events)
+    )
+    assert "streamSlices" not in history.to_json_dict()
+
+    record = temporalio.api.stream.v1.StreamRecord(
+        body=temporalio.api.common.v1.Payload(
+            data=b'{"n": 1}', metadata={"encoding": b"json/plain"}
+        ),
+        topic="inputs",
+        kind=temporalio.api.stream.v1.StreamRecordKind.STREAM_RECORD_KIND_DATA,
+        producer_id="model",
+        attempt=1,
+        sequence=0,
+    )
+    stream_slice = temporalio.api.stream.v1.StreamSlice(
+        stream_id="inputs",
+        run_id="run-1",
+        from_offset=0,
+        to_offset=1,
+        records=[record],
+        workflow_task_completed_event_id=4,
+    )
+    bundle = WorkflowHistory("fake", history.events, [stream_slice])
+
+    text = bundle.to_json()
+    assert "streamSlices" in text
+    restored = WorkflowHistory.from_json("fake", text)
+    assert list(restored.stream_slices) == [stream_slice]
+    assert list(restored.events) == list(history.events)
+    # The dict form reads back the same, and a plain export stays plain.
+    from_dict = WorkflowHistory.from_json("fake", bundle.to_json_dict())
+    assert list(from_dict.stream_slices) == [stream_slice]
+    assert WorkflowHistory("fake", restored.events).to_json() == history.to_json()
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="Skipping for < 3.12")
