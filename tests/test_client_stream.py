@@ -6,7 +6,9 @@ service does not exist on a released server. Point them at one:
     TEMPORAL_STREAM_TARGET=127.0.0.1:7333 uv run pytest tests/test_client_stream.py
 
 Skipped otherwise, rather than silently passing against a server that has no
-idea what a stream is.
+idea what a stream is. ``TEMPORAL_STREAM_SERVER_PREDATES_KIND_DEFAULT=1`` skips
+the one case that needs the server to store an unset kind as ``DATA``, for a
+branch build older than that rule.
 """
 
 from __future__ import annotations
@@ -119,6 +121,7 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     sent.producer_id = "model"
     sent.attempt = 2
     sent.sequence = 7
+    sent.kind = StreamRecordKind.STREAM_RECORD_KIND_DATA
     sent.metadata["trace"].CopyFrom(Payload(data=b"abc"))
     finish = StreamRecord(
         topic="t", kind=StreamRecordKind.STREAM_RECORD_KIND_FINISH, producer_id="model"
@@ -137,6 +140,16 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     assert got.metadata["trace"].data == b"abc"
     assert entries[1].record.kind == StreamRecordKind.STREAM_RECORD_KIND_FINISH
     assert not entries[1].record.HasField("body")
+
+
+@pytest.mark.skipif(
+    bool(os.environ.get("TEMPORAL_STREAM_SERVER_PREDATES_KIND_DEFAULT")),
+    reason="the target server stores an unset kind as sent",
+)
+async def test_an_unset_kind_reads_back_as_data(stream: StreamHandle) -> None:
+    await stream.append(rec(b"x"))
+    entries, _ = await stream.read()
+    assert entries[0].record.kind == StreamRecordKind.STREAM_RECORD_KIND_DATA
 
 
 # A closed stream stays readable, which is what removes the shutdown handshake

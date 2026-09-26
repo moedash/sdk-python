@@ -31,9 +31,11 @@ from temporalio.client import Client
 from temporalio.streams import RecordKind, StreamHandle
 from temporalio.worker import Worker
 
+# Run as a script rather than imported as a module, so the two siblings are
+# reached by name off this directory rather than through a package path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import provider_setup  # noqa: E402
-from agent_loop import (  # noqa: E402
+import provider_setup  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]
+from agent_loop import (  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]
     DECISIONS,
     INPUTS,
     RECEIPTS,

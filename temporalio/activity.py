@@ -211,6 +211,9 @@ class _Context:
     client: Client | None
     cancellation_details: _ActivityCancellationDetailsHolder
     stream_provider: temporalio.streams.StreamProvider | None = None
+    # A ``def`` activity is handed no client and no stream provider, so what
+    # it is missing cannot be read off the fields that are absent.
+    sync: bool = False
     _logger_details: Mapping[str, Any] | None = None
     _payload_converter: temporalio.converter.PayloadConverter | None = None
     _metric_meter: temporalio.common.MetricMeter | None = None
@@ -243,13 +246,9 @@ class _Context:
                 self.payload_converter_class_or_instance,
                 temporalio.converter.PayloadConverter,
             ):
-                self._payload_converter = _TemporalTransferTypePayloadConverter.wrap(
-                    self.payload_converter_class_or_instance
-                )
+                self._payload_converter = self.payload_converter_class_or_instance
             else:
-                self._payload_converter = _TemporalTransferTypePayloadConverter.wrap(
-                    self.payload_converter_class_or_instance()
-                )
+                self._payload_converter = self.payload_converter_class_or_instance()
         return self._payload_converter
 
     @property
@@ -319,14 +318,24 @@ def stream_handle(
         activity.
 
     Raises:
+        RuntimeError: When the client is not available, which is what a
+            ``def`` activity gets, or when the activity has no workflow and
+            no ``workflow_id`` was given.
         temporalio.streams.StreamUnsupportedError: The worker has no stream
             provider. Register one with ``Client.connect(plugins=[provider])``
             or ``Worker(plugins=[provider])``.
-        RuntimeError: When the client is not available, or when the activity
-            has no workflow and no ``workflow_id`` was given.
         ValueError: ``run_id`` was given without ``workflow_id``.
     """
     context = _Context.current()
+    if context.sync:
+        # A sync activity is handed neither a client nor a provider. Saying
+        # the worker has none would send the reader to fix a registration
+        # that is not the problem.
+        raise RuntimeError(
+            "No stream handle available. Stream handles are only available in "
+            "`async def` activities; not in `def` activities, which are handed no "
+            "client to reach the store with."
+        )
     provider = context.stream_provider
     if provider is None:
         raise temporalio.streams.StreamUnsupportedError(

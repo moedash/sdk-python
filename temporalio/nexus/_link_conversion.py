@@ -120,6 +120,9 @@ def temporal_link_to_nexus_link(
         case "batch_job":
             raise NotImplementedError("batch_job links are not supported")
 
+        case "callback":
+            raise NotImplementedError("callback links are not supported")
+
         case None:
             logger.warning("Invalid Temporal link: missing variant")
             return None

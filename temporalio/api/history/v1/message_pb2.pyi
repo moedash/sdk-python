@@ -1081,7 +1081,6 @@ class WorkflowTaskCompletedEventAttributes(google.protobuf.message.Message):
         Recorded on every task where a subscription is active, including when it
         observed nothing: an empty range is a fact replay must reproduce, and
         omitting it would let replay deliver records the Workflow did not have.
-        Numbered 20 to leave 14 through 19 free for fields added on the main line.
         """
     def __init__(
         self,
@@ -1575,6 +1574,7 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
     IDENTITY_FIELD_NUMBER: builtins.int
     RETRY_STATE_FIELD_NUMBER: builtins.int
     WORKER_VERSION_FIELD_NUMBER: builtins.int
+    CAUSE_FIELD_NUMBER: builtins.int
     @property
     def failure(self) -> temporalio.api.failure.v1.message_pb2.Failure:
         """Failure details"""
@@ -1590,6 +1590,8 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
         """Version info of the worker who processed this workflow task.
         Deprecated. This field should be cleaned up when versioning-2 API is removed. [cleanup-experimental-wv]
         """
+    cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType
+    """Why did the task fail? When unset, the failure is treated as an unspecified activity failure."""
     def __init__(
         self,
         *,
@@ -1600,6 +1602,7 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
         retry_state: temporalio.api.enums.v1.workflow_pb2.RetryState.ValueType = ...,
         worker_version: temporalio.api.common.v1.message_pb2.WorkerVersionStamp
         | None = ...,
+        cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -1610,6 +1613,8 @@ class ActivityTaskFailedEventAttributes(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "cause",
+            b"cause",
             "failure",
             b"failure",
             "identity",
@@ -3634,7 +3639,10 @@ class WorkflowStreamSubscribedEventAttributes(google.protobuf.message.Message):
     subscription.
     """
     stream_id: builtins.str
-    """Stream the Workflow subscribed to."""
+    """The stream the Workflow subscribed to, as the command addressed it:
+    either the name of a stream this Workflow owns or the id of one in
+    another execution.
+    """
     start_offset: builtins.int
     """The offset the subscription actually starts from. Resolved by the server
     when the subscription is registered and recorded here, so replay reads
@@ -3669,38 +3677,45 @@ class WorkflowStreamRecordsAppendedEventAttributes(google.protobuf.message.Messa
 
     WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
     STREAM_ID_FIELD_NUMBER: builtins.int
-    FIRST_OFFSET_FIELD_NUMBER: builtins.int
-    RECORD_COUNT_FIELD_NUMBER: builtins.int
+    FROM_OFFSET_FIELD_NUMBER: builtins.int
+    TO_OFFSET_FIELD_NUMBER: builtins.int
     workflow_task_completed_event_id: builtins.int
     """The WorkflowTaskCompleted event of the task whose command appended this
     batch.
     """
     stream_id: builtins.str
-    """Stream the Workflow appended to."""
-    first_offset: builtins.int
-    """Offset the first record of the batch landed at."""
-    record_count: builtins.int
-    """How many records the batch held. With first_offset this names the range
-    without carrying any of it, which is what keeps this event a fixed size
-    no matter how large the batch or its payloads are.
+    """Name of the stream the Workflow appended to."""
+    from_offset: builtins.int
+    """Inclusive. Same range vocabulary as StreamRange and StreamSlice, so a
+    reader does not have to remember which of the three counts and which
+    bounds.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
+    to_offset: builtins.int
+    """Exclusive. With from_offset this names the range without carrying any of
+    it, which is what keeps this event a fixed size no matter how large the
+    batch or its payloads are.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
     """
     def __init__(
         self,
         *,
         workflow_task_completed_event_id: builtins.int = ...,
         stream_id: builtins.str = ...,
-        first_offset: builtins.int = ...,
-        record_count: builtins.int = ...,
+        from_offset: builtins.int = ...,
+        to_offset: builtins.int = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "first_offset",
-            b"first_offset",
-            "record_count",
-            b"record_count",
+            "from_offset",
+            b"from_offset",
             "stream_id",
             b"stream_id",
+            "to_offset",
+            b"to_offset",
             "workflow_task_completed_event_id",
             b"workflow_task_completed_event_id",
         ],
