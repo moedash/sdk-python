@@ -6,9 +6,7 @@ service does not exist on a released server. Point them at one:
     TEMPORAL_STREAM_TARGET=127.0.0.1:7333 uv run pytest tests/test_client_stream.py
 
 Skipped otherwise, rather than silently passing against a server that has no
-idea what a stream is. ``TEMPORAL_STREAM_SERVER_PREDATES_KIND_DEFAULT=1`` skips
-the one case that needs the server to store an unset kind as ``DATA``, for a
-branch build older than that rule.
+idea what a stream is.
 """
 
 from __future__ import annotations
@@ -142,10 +140,6 @@ async def test_the_record_roundtrips_field_for_field(stream: StreamHandle) -> No
     assert not entries[1].record.HasField("body")
 
 
-@pytest.mark.skipif(
-    bool(os.environ.get("TEMPORAL_STREAM_SERVER_PREDATES_KIND_DEFAULT")),
-    reason="the target server stores an unset kind as sent",
-)
 async def test_an_unset_kind_reads_back_as_data(stream: StreamHandle) -> None:
     await stream.append(rec(b"x"))
     entries, _ = await stream.read()
