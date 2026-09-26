@@ -639,12 +639,22 @@ def shared_client(target_host: str, namespace: str) -> StreamClient:
     return existing
 
 
-async def close_shared_clients() -> None:
-    """Close every shared client this loop opened.
+async def close_shared_clients(*keys: tuple[str, str]) -> None:
+    """Close the shared clients this loop opened for ``keys``, or all of them.
 
-    For a process that is done with streams, and for tests, which open a
-    loop per case and would otherwise leave a channel behind on each.
+    A provider closes the ones it opened, named by ``(target host,
+    namespace)``: another provider on the same loop may still be reading
+    through a channel of its own, and taking that out from under it is not
+    this one's to do. With no keys it closes every one, which is what a
+    process finished with streams wants, and what a test that opened a loop
+    of its own wants.
     """
-    per_loop = _shared.pop(asyncio.get_running_loop(), {})
-    for client in per_loop.values():
+    loop = asyncio.get_running_loop()
+    if not keys:
+        per_loop = _shared.pop(loop, {})
+        closing = list(per_loop.values())
+    else:
+        per_loop = _shared.get(loop, {})
+        closing = [per_loop.pop(key) for key in keys if key in per_loop]
+    for client in closing:
         await client.close()
