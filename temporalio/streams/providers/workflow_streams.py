@@ -15,8 +15,20 @@ The mapping, in one place:
   code stores and returns that ``Payload`` untouched, so the body's own
   encoding never meets the transport.
 - Producer identity dedupes through the shipped publisher state: the
-  publisher id is ``producer#attempt`` and every publish Signal carries a
-  monotonic sequence, so a retried batch drops and a new attempt passes.
+  publisher id is ``producer#attempt`` and every publish Signal carries the
+  sequence its records end at, so a retried batch drops and a new attempt
+  passes.
+
+  What this transport cannot keep is the rest of that rule. A publish is a
+  Signal, which has no response, so the dedupe decision is taken in the
+  workflow and there is nowhere to report it. A repeat that carries
+  *different* content at a sequence the log already holds is therefore
+  dropped rather than refused with
+  :class:`temporalio.streams.StreamProducerError`, the way the memory and
+  native providers refuse it. Raising in the Signal handler is not an
+  alternative: it would fail the Workflow Task on every replay and the
+  caller would still learn nothing. A caller that needs a divergent retry to
+  be caught wants a provider whose append is a request and a response.
 - ``append()`` returns ``None``. The Signal transport learns positions at
   read time, so a caller that wants to follow from now asks ``latest()``.
 - A log belongs to one run and is not carried across continue-as-new, so a
@@ -63,11 +75,14 @@ from temporalio.contrib.workflow_streams import (
     PublishEntry,
     PublishInput,
     WorkflowStream,
-    WorkflowStreamClient,
 )
 from temporalio.converter import PayloadConverter
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
+from temporalio.streams._errors import (
+    StreamCursorError,
+    StreamError,
+    StreamNotFoundError,
+)
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 from temporalio.streams._topic import StreamTopic, resolve_topic
@@ -80,6 +95,7 @@ from temporalio.streams._wire import (
     to_wire,
 )
 from temporalio.streams.providers import ProviderPlugin
+from temporalio.worker._workflow_instance import QUERY_HANDLER_NOT_FOUND
 
 __all__ = [
     "WorkflowStreamsHandle",
@@ -91,7 +107,11 @@ T = TypeVar("T")
 
 _PROVIDER = "workflow_streams"
 _TAIL_QUERY = "__temporal_streams_tail"
+_LATEST_QUERY = "__temporal_streams_latest"
 _ENCODING = b"binary/plain"
+# The same cap the shipped poll path answers under, because both are one
+# response through the same server.
+_MAX_TAIL_RESPONSE_BYTES = 1_000_000
 # The server's failure type for an accepted Update whose run closed before
 # answering it: the poll's way of saying the run is over.
 _UPDATE_OUTLIVED_RUN = "AcceptedUpdateCompletedWorkflow"
@@ -159,16 +179,46 @@ class _InstanceStream:
             # final task published. The log is workflow state, so a Query
             # still serves it after completion.
             workflow.set_query_handler(_TAIL_QUERY, self._tail)
+        if workflow.get_query_handler(_LATEST_QUERY) is None:
+            workflow.set_query_handler(_LATEST_QUERY, self._latest)
 
-    def _tail(self, from_offset: int) -> list[dict[str, Any]]:
-        return [
-            {
-                "offset": offset,
-                "topic": topic,
-                "data": base64.b64encode(payload.SerializeToString()).decode("ascii"),
-            }
-            for offset, topic, payload in self.stream.items_from(from_offset)
-        ]
+    def _tail(self, from_offset: int, topic: str) -> dict[str, Any]:
+        """One page of ``topic``'s items at or past ``from_offset``.
+
+        Filtered and capped here rather than at the caller, because a Query
+        response has to fit the server's blob limit and a log the reader only
+        wants one topic of can be much larger than that.
+        """
+        items: list[dict[str, Any]] = []
+        size = 0
+        next_offset = self.stream.next_offset
+        more_ready = False
+        for offset, item_topic, payload in self.stream.items_from(from_offset):
+            if item_topic != topic:
+                continue
+            data = base64.b64encode(payload.SerializeToString()).decode("ascii")
+            if items and size + len(data) > _MAX_TAIL_RESPONSE_BYTES:
+                next_offset, more_ready = offset, True
+                break
+            size += len(data)
+            items.append({"offset": offset, "topic": item_topic, "data": data})
+        return {
+            "items": items,
+            "next_offset": next_offset,
+            "more_ready": more_ready,
+        }
+
+    def _latest(self, topic: str) -> int:
+        """The newest offset holding a record on ``topic``, or -1 when it has none.
+
+        The log orders every topic together, so the head of the log is not an
+        answer about one topic. Scanning here costs one Query rather than
+        shipping the log to the caller to find the same thing.
+        """
+        for offset, item_topic, _ in reversed(self.stream.items_from(0)):
+            if item_topic == topic:
+                return offset
+        return -1
 
 
 def _registered_stream() -> WorkflowStream | None:
@@ -320,8 +370,9 @@ class WorkflowStreamsProducer(Generic[T]):
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
-        self._sequence = 0
-        self._signal_sequence = 0
+        # One-based, because zero on the wire says the producer does not
+        # number its records and this one does.
+        self._sequence = 1
         self._pending: tuple[list[PublishEntry], int] | None = None
 
     @property
@@ -391,7 +442,11 @@ class WorkflowStreamsProducer(Generic[T]):
         await self._signal(entries, next_sequence)
 
     async def _signal(self, entries: list[PublishEntry], next_sequence: int) -> None:
-        signal_sequence = self._signal_sequence + 1
+        # The dedupe sequence is where this producer's records end, not how
+        # many signals it has sent. The two differ once a retry batches its
+        # records differently from the send it is repeating, and a counter of
+        # signals then either drops a batch of new records or lets records
+        # that are already there through a second time.
         self._pending = (entries, next_sequence)
         try:
             await self._handle.signal(
@@ -399,7 +454,7 @@ class WorkflowStreamsProducer(Generic[T]):
                 PublishInput(
                     items=entries,
                     publisher_id=self._publisher_id,
-                    sequence=signal_sequence,
+                    sequence=next_sequence,
                 ),
             )
         except RPCError as error:
@@ -409,7 +464,6 @@ class WorkflowStreamsProducer(Generic[T]):
                     "cannot be appended to"
                 ) from error
             raise
-        self._signal_sequence = signal_sequence
         self._sequence = next_sequence
         self._pending = None
 
@@ -486,13 +540,14 @@ class WorkflowStreamsHandle:
                 continue
             # What landed after the last poll is still in workflow state, so
             # the tail comes back by Query rather than being lost with the run.
-            for offset_, shipped_topic, payload in await self._tail(
-                handle, next_offset
-            ):
-                if shipped_topic != topic:
-                    continue
-                for record in self._records(decoder, run_id, offset_, payload):
-                    yield record
+            tail_offset = next_offset
+            while True:
+                page, tail_offset, more = await self._tail(handle, topic, tail_offset)
+                for offset_, payload in page:
+                    for record in self._records(decoder, run_id, offset_, payload):
+                        yield record
+                if not more:
+                    break
             if (
                 self._run_id is not None
                 or status != WorkflowExecutionStatus.CONTINUED_AS_NEW
@@ -536,10 +591,13 @@ class WorkflowStreamsHandle:
             except WorkflowUpdateFailedError as error:
                 cause = getattr(error.cause, "type", None)
                 if cause == TRUNCATED_OFFSET_ERROR_TYPE:
-                    # The log was truncated past this position; zero means
-                    # from whatever the run still retains.
-                    offset = 0
-                    continue
+                    # Restarting from the beginning would hand the caller
+                    # records it already handled, and only the caller can
+                    # decide to do that.
+                    raise StreamCursorError(
+                        f"offset {offset} of workflow {self._workflow_id!r} run "
+                        f"{handle.run_id!r} is no longer retained"
+                    ) from error
                 if cause == STREAM_DRAINING_ERROR_TYPE:
                     # Pollers are detached because the run is closing; the
                     # next attempt learns how it closed.
@@ -547,7 +605,9 @@ class WorkflowStreamsHandle:
                     continue
                 if cause == _UPDATE_OUTLIVED_RUN:
                     return
-                raise
+                raise StreamError(
+                    f"the poll update on workflow {self._workflow_id!r} failed: {error}"
+                ) from error
             except RPCError as error:
                 # The run closed and its poll Update went with it, or the
                 # workflow does not exist; the caller describes to tell which.
@@ -573,15 +633,20 @@ class WorkflowStreamsHandle:
     def _handle(self, run_id: str | None) -> WorkflowHandle[Any, Any]:
         return self._client.get_workflow_handle(self._workflow_id, run_id=run_id)
 
-    async def _status(
-        self, handle: WorkflowHandle[Any, Any]
-    ) -> WorkflowExecutionStatus | None:
+    async def _describe(self, handle: WorkflowHandle[Any, Any]) -> Any | None:
+        """The description of ``handle``'s run, or ``None`` when it is gone."""
         try:
-            return (await handle.describe()).status
+            return await handle.describe()
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
                 return None
             raise
+
+    async def _status(
+        self, handle: WorkflowHandle[Any, Any]
+    ) -> WorkflowExecutionStatus | None:
+        description = await self._describe(handle)
+        return None if description is None else description.status
 
     async def _first_run(self) -> str:
         """The oldest retained run of the chain, walking back from the latest."""
@@ -615,48 +680,76 @@ class WorkflowStreamsHandle:
         events = handle.fetch_history_events(
             event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT
         )
-        async for event in events:
-            if event.HasField("workflow_execution_continued_as_new_event_attributes"):
-                attributes = event.workflow_execution_continued_as_new_event_attributes
-                return attributes.new_execution_run_id or None
+        try:
+            async for event in events:
+                if event.HasField(
+                    "workflow_execution_continued_as_new_event_attributes"
+                ):
+                    attributes = (
+                        event.workflow_execution_continued_as_new_event_attributes
+                    )
+                    return attributes.new_execution_run_id or None
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+            raise StreamNotFoundError(
+                f"workflow {self._workflow_id!r} run {handle.run_id!r} was not found, "
+                "so its successor cannot be followed"
+            ) from error
         return None
 
     async def _tail(
-        self, handle: WorkflowHandle[Any, Any], from_offset: int
-    ) -> list[tuple[int, str, Payload]]:
+        self, handle: WorkflowHandle[Any, Any], topic: str, from_offset: int
+    ) -> tuple[list[tuple[int, Payload]], int, bool]:
+        """One page of ``topic``'s tail as ``(items, next offset, more to come)``."""
         try:
-            wire = await handle.query(_TAIL_QUERY, from_offset, result_type=list)
+            wire = await handle.query(
+                _TAIL_QUERY, args=[from_offset, topic], result_type=dict
+            )
         except WorkflowQueryFailedError as error:
-            if "expected but not found" not in str(error):
-                raise
+            if QUERY_HANDLER_NOT_FOUND not in str(error):
+                raise StreamError(
+                    f"the tail query on workflow {self._workflow_id!r} failed: {error}"
+                ) from error
             # The workflow never opened a stream through this provider, so
             # there is no tail to serve.
-            return []
+            return [], from_offset, False
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
             # The History is gone; nothing is left to serve.
-            return []
-        return [
-            (
-                item["offset"],
-                item["topic"],
-                Payload.FromString(base64.b64decode(item["data"])),
-            )
-            for item in wire
+            return [], from_offset, False
+        items = [
+            (item["offset"], Payload.FromString(base64.b64decode(item["data"])))
+            for item in wire["items"]
         ]
+        return items, wire["next_offset"], bool(wire["more_ready"])
 
     async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
-        """The newest position in the log, which orders every topic of this workflow.
+        """The newest position holding a record on ``topic``.
 
         The log is one per run, so the cursor names the run it was read from:
-        the pinned run, or the latest run of the chain.
+        the pinned run, or the latest run of the chain. One log orders every
+        topic, so the answer comes from a Query that scans it for this topic
+        rather than from the head of the log, which usually names some other
+        topic's record.
         """
         topic, _ = resolve_topic(topic)
         handle = self._handle(self._run_id)
+        description = await self._describe(handle)
+        if description is None:
+            raise StreamNotFoundError(f"workflow {self._workflow_id!r} was not found")
         try:
-            description = await handle.describe()
-            head = await WorkflowStreamClient(handle).get_offset()
+            head = await handle.query(_LATEST_QUERY, topic, result_type=int)
+        except WorkflowQueryFailedError as error:
+            if QUERY_HANDLER_NOT_FOUND not in str(error):
+                raise StreamError(
+                    f"the latest query on workflow {self._workflow_id!r} failed: "
+                    f"{error}"
+                ) from error
+            # The workflow never opened a stream through this provider, so
+            # the topic holds nothing.
+            head = -1
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
                 raise StreamNotFoundError(
@@ -665,9 +758,9 @@ class WorkflowStreamsHandle:
             raise
         run_id = description.run_id
         assert run_id is not None
-        if head > 0:
-            return _cursor(run_id, head - 1)
-        # An empty log on the chain's first run is the beginning of the
+        if head >= 0:
+            return _cursor(run_id, head)
+        # An empty topic on the chain's first run is the beginning of the
         # stream; on a successor it is a position of its own, because
         # BEGINNING would send a chain-following read back to the first run.
         if await self._predecessor(run_id) is None:

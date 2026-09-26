@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import uuid
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
@@ -20,15 +21,30 @@ import pytest
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
-from temporalio.contrib.workflow_streams import PublishInput
+from temporalio.client import (
+    Client,
+    WorkflowExecutionStatus,
+    WorkflowQueryFailedError,
+)
+from temporalio.contrib.workflow_streams import PublishInput, WorkflowStream
 from temporalio.converter import DataConverter
-from temporalio.streams import RecordKind, Supersession
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams import (
+    BEGINNING,
+    RecordKind,
+    StreamCursorError,
+    StreamError,
+    StreamNotFoundError,
+    Supersession,
+)
 from temporalio.streams._wire import WireRecord
 from temporalio.streams.providers.workflow_streams import (
+    WorkflowStreamsHandle,
     WorkflowStreamsProducer,
     WorkflowStreamsProvider,
+    _InstanceStream,
 )
+from temporalio.worker._workflow_instance import QUERY_HANDLER_NOT_FOUND
 from tests.helpers import new_worker
 
 INPUTS = "inputs"
@@ -243,6 +259,106 @@ async def test_a_bounded_read_is_cancelled_within_its_timeout(
 
 
 @workflow.defn
+class Truncating:
+    """Publishes on two topics and truncates its log when told to."""
+
+    def __init__(self) -> None:
+        # Constructed here so the shipped signal handler is registered before
+        # the provider looks for it, the way a migrating application holds it.
+        self._stream = WorkflowStream()
+        self._released = False
+
+    @workflow.signal
+    def truncate_to(self, offset: int) -> None:
+        self._stream.truncate(offset)
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self) -> None:
+        decisions = workflow.stream_writer(DECISIONS)
+        other = workflow.stream_writer(INPUTS)
+        decisions.publish({"n": 0})
+        other.publish({"side": "inputs"})
+        decisions.publish({"n": 1})
+        await workflow.wait_condition(lambda: self._released)
+
+
+async def test_a_truncated_position_is_refused_rather_than_restarted(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, Truncating, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            Truncating.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, workflow_id)
+        first = await take(stream.read(topic=DECISIONS, result_type=dict), 1)
+        assert first[0].value == {"n": 0}
+
+        # Everything the reader's cursor names is dropped from the log.
+        await handle.signal(Truncating.truncate_to, 3)
+        resumed = stream.read(topic=DECISIONS, result_type=dict, after=first[0].cursor)
+        # Starting over would hand back records the caller already handled,
+        # and only the caller can decide to do that.
+        with pytest.raises(StreamCursorError):
+            await take(resumed, 1, timeout=30)
+
+        await handle.signal(Truncating.release)
+        await handle.result()
+
+
+async def test_latest_names_the_newest_record_on_the_topic_asked_for(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, Truncating, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            Truncating.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, workflow_id)
+        decisions = await take(stream.read(topic=DECISIONS, result_type=dict), 2)
+
+        # One log orders both topics and the newest item on it belongs to
+        # `inputs`, so a log-global answer would be the wrong cursor here.
+        assert await stream.latest(topic=DECISIONS) == decisions[-1].cursor
+        inputs = await take(stream.read(topic=INPUTS, result_type=dict), 1)
+        assert await stream.latest(topic=INPUTS) == inputs[0].cursor
+        assert await stream.latest(topic="never-written") == BEGINNING
+
+        await handle.signal(Truncating.release)
+        await handle.result()
+
+
+async def test_the_tail_query_pages_instead_of_answering_in_one_blob():
+    # The workflow-side half of the tail, driven directly: a Query response
+    # has to fit the server's blob limit, so a log larger than the cap comes
+    # back a page at a time with a position to resume from.
+    big = Payload(metadata={"encoding": b"binary/plain"}, data=b"x" * 400_000)
+    items = [(offset, DECISIONS, big) for offset in range(6)]
+
+    class _Log:
+        next_offset = len(items)
+
+        def items_from(self, offset: int) -> list[Any]:
+            return [item for item in items if item[0] >= offset]
+
+    instance = _InstanceStream.__new__(_InstanceStream)
+    instance.stream = _Log()  # type: ignore[assignment]
+
+    seen: list[int] = []
+    offset, more = 0, True
+    while more:
+        page = instance._tail(offset, DECISIONS)
+        assert page["items"], "a page that fits nothing would never finish"
+        seen.extend(item["offset"] for item in page["items"])
+        offset, more = page["next_offset"], page["more_ready"]
+    assert seen == list(range(6))
+
+
+@workflow.defn
 class Relay:
     """Publishes one record per run and continues as new once."""
 
@@ -355,7 +471,7 @@ async def test_a_retried_append_after_an_ambiguous_failure_writes_once():
     # The retry carries the same signal sequence and the same record
     # sequence as the failed send, so the shipped dedupe drops the copy; the
     # batch after it continues the numbering.
-    assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (2, [1])]
+    assert _sequences(handle.sent) == [(2, [1]), (2, [1]), (3, [2])]
     assert all(publish.publisher_id == "model#1" for publish in handle.sent)
 
 
@@ -366,5 +482,144 @@ async def test_a_batch_whose_signal_failed_goes_out_before_the_next_one():
         await producer.append({"n": 1})
     await producer.append({"n": 2}, {"n": 3})
     await producer.finish()
-    assert _sequences(handle.sent) == [(1, [0]), (1, [0]), (2, [1, 2]), (3, [3])]
+    assert _sequences(handle.sent) == [(2, [1]), (2, [1]), (4, [2, 3]), (5, [4])]
     assert _wires(handle.sent[-1])[0].kind == int(RecordKind.FINISH)
+
+
+class _Description:
+    run_id = "the-only-run"
+    status = WorkflowExecutionStatus.COMPLETED
+
+
+class _StubHandle:
+    """A workflow handle that answers describe and fails whatever the test names."""
+
+    id = "stub"
+    run_id = "the-only-run"
+
+    def __init__(
+        self,
+        *,
+        query_error: BaseException | None = None,
+        events_error: BaseException | None = None,
+    ) -> None:
+        self._query_error = query_error
+        self._events_error = events_error
+
+    async def describe(self) -> Any:
+        return _Description()
+
+    async def start_update(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        # The run is closed, so its poll Update is gone with it and the read
+        # goes on to the tail Query, which is what these cases are about.
+        raise RPCError("no poll update", RPCStatusCode.NOT_FOUND, b"")
+
+    async def query(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        assert self._query_error is not None
+        raise self._query_error
+
+    def fetch_history_events(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        error = self._events_error
+
+        async def _events() -> AsyncIterator[Any]:
+            events: tuple[Any, ...] = ()
+            for event in events:
+                yield event
+            if error is not None:
+                raise error
+
+        return _events()
+
+
+class _OneHandleClient:
+    """A client that answers every handle request with the same handle."""
+
+    data_converter = DataConverter.default
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+
+    def get_workflow_handle(
+        self, workflow_id: str, *, run_id: str | None = None
+    ) -> Any:
+        del workflow_id, run_id
+        return self._handle
+
+
+def _handle_over(stub: _StubHandle) -> WorkflowStreamsHandle:
+    return WorkflowStreamsHandle(
+        _OneHandleClient(stub),  # type: ignore[arg-type]
+        "wf",
+        "the-only-run",
+        timedelta(0),
+    )
+
+
+async def test_a_failing_tail_query_comes_back_as_a_stream_error():
+    # The handler being absent is the one benign case; anything else is a
+    # real failure, and the interface says a caller catches stream conditions
+    # by meaning rather than by the client's own exception types.
+    stub = _StubHandle(query_error=WorkflowQueryFailedError("the workflow rejected it"))
+    with pytest.raises(StreamError):
+        await take(_handle_over(stub).read(topic=DECISIONS, result_type=dict), 1)
+
+
+async def test_a_missing_tail_handler_ends_the_read_instead_of_failing_it():
+    stub = _StubHandle(
+        query_error=WorkflowQueryFailedError(
+            f"Query handler for 'x' {QUERY_HANDLER_NOT_FOUND}, known queries: []"
+        )
+    )
+    # The workflow never opened a stream through this provider, so the run
+    # holds no tail and the read is simply over.
+    assert [r async for r in _handle_over(stub).read(topic=DECISIONS)] == []
+
+
+async def test_a_failing_latest_query_comes_back_as_a_stream_error():
+    stub = _StubHandle(query_error=WorkflowQueryFailedError("the workflow rejected it"))
+    with pytest.raises(StreamError):
+        await _handle_over(stub).latest(topic=DECISIONS)
+
+
+async def test_a_missing_run_leaves_the_successor_lookup_as_a_stream_error():
+    stub = _StubHandle(events_error=RPCError("gone", RPCStatusCode.NOT_FOUND, b""))
+    with pytest.raises(StreamNotFoundError):
+        await _handle_over(stub)._successor(stub)  # type: ignore[arg-type]
+
+
+class _PlainHandle:
+    """A workflow handle that accepts every Signal and remembers it."""
+
+    id = "plain"
+
+    def __init__(self) -> None:
+        self.sent: list[PublishInput] = []
+
+    async def signal(self, name: str, arg: PublishInput) -> None:
+        del name
+        self.sent.append(arg)
+
+
+async def test_the_dedupe_sequence_names_where_the_records_end():
+    # The shipped handler drops a batch whose sequence it has already passed,
+    # so the sequence has to say how far this producer's records reach. A
+    # count of signals does not: a retry that batches its records differently
+    # from the send it repeats then carries a sequence the workflow has not
+    # seen, and the records it already holds go in a second time.
+    first = _PlainHandle()
+    original = _producer(first)  # type: ignore[arg-type]
+    await original.append({"n": 1}, {"n": 2})
+
+    second = _PlainHandle()
+    retry = _producer(second)  # type: ignore[arg-type]
+    await retry.append({"n": 1})
+    await retry.append({"n": 2})
+    await retry.append({"n": 3})
+
+    # The original ended at record 2, so its sequence is 3. Neither half of
+    # the retry's re-split reaches past it, and only the new record does.
+    assert _sequences(first.sent) == [(3, [1, 2])]
+    assert _sequences(second.sent) == [(2, [1]), (3, [2]), (4, [3])]

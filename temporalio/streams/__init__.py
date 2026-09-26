@@ -21,7 +21,10 @@ The contract, in five statements:
    outside process writes through a :class:`StreamProducer` with a producer
    id, an attempt and a sequence, and its records are visible as soon as the
    store accepts them. Those three let a reader tell a retry from a new
-   generation.
+   generation. A retry that carries the same content is written once; one that
+   carries different content at the same sequence is refused with
+   :class:`StreamProducerError`, so a divergent retry is never dropped in
+   silence.
 4. **A cursor is opaque and belongs to its provider.** Hand it back to resume
    strictly after the record it names; :meth:`StreamHandle.latest` positions a
    follower. Do not compare two cursors or do arithmetic on one.
