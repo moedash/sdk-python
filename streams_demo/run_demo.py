@@ -1,0 +1,174 @@
+"""Run the shared agent loop against whichever provider is configured.
+
+Three cases, the same on every provider:
+
+- read, decide, publish and an ordinary Activity in the same workflow task,
+  with the smallest workflow cache the provider supports, so that as much of
+  the run as it allows is rebuilt rather than remembered;
+- a producer whose second attempt supersedes its first, which the reader has
+  to report and the workflow has to act on;
+- an outside reader following what the workflow published, and the receipts
+  the Activity appended on the workflow's stream from inside its own context.
+
+The provider is registered once, on the client; the worker inherits it and
+every context asks for its stream without naming it. Byte-identical in every
+tree. ``provider_setup`` is what differs, and it is the only import here that
+names a provider.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import Client
+from temporalio.streams import RecordKind, StreamHandle
+from temporalio.worker import Worker
+
+# Run as a script rather than imported as a module, so the two siblings are
+# reached by name off this directory rather than through a package path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import provider_setup  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]
+from agent_loop import (  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]
+    DECISIONS,
+    INPUTS,
+    RECEIPTS,
+    AgentLoop,
+    record_decision,
+)
+
+DECISION_LIMIT = 8
+EXPECTED_OUTPUT = 6
+
+
+async def collect_output(stream: StreamHandle, want: int) -> list[dict]:
+    """Read ``want`` decisions off the workflow's stream from outside it."""
+    seen: list[dict] = []
+    async for record in stream.read(topic=DECISIONS):
+        seen.append({"kind": record.kind.name, "value": record.value})
+        if len(seen) >= want:
+            break
+    return seen
+
+
+async def main() -> int:
+    """Run the demo once and write what happened next to this file."""
+    out = Path(__file__).resolve().parent / f"results-{provider_setup.NAME}"
+    out.mkdir(exist_ok=True)
+    target, provider = await provider_setup.open()
+    client = await Client.connect(target, namespace="default", plugins=[provider])
+
+    uid = f"ai198-contract-{provider_setup.NAME}-" + uuid.uuid4().hex
+    record: dict[str, Any] = {
+        "provider": provider_setup.NAME,
+        "workflow_id": uid,
+        "target": target,
+        "max_cached_workflows": provider_setup.WORKFLOW_CACHE,
+    }
+
+    async with Worker(
+        client,
+        task_queue=uid,
+        workflows=[AgentLoop],
+        activities=[record_decision],
+        max_cached_workflows=provider_setup.WORKFLOW_CACHE,
+    ):
+        handle = await client.start_workflow(
+            AgentLoop.run, DECISION_LIMIT, id=uid, task_queue=uid
+        )
+        stream = client.get_stream_handle(uid)
+        output = asyncio.create_task(collect_output(stream, EXPECTED_OUTPUT))
+
+        # The first attempt writes two records and then stops, as a failed
+        # activity would. The second writes different inputs under the same
+        # logical producer, which is what the reader has to report.
+        first = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await first.append({"id": "r1", "value": 1}, {"id": "r2", "value": 2})
+        await asyncio.sleep(0.5)
+        second = stream.producer(topic=INPUTS, producer_id="model", attempt=2)
+        await second.append({"id": "r3", "value": 3}, {"id": "r4", "value": 4})
+        await second.finish()
+
+        # A failed Workflow Task is not an outcome. The server rejects a
+        # completion that raced newly buffered events, and the retry usually
+        # gets through, so reading the first failure as the result reports a
+        # working run as a broken one. Wait for a terminal event, then report
+        # the retries separately so they are neither the headline nor hidden.
+        deadline = time.monotonic() + 120
+        # Taken from the enum rather than written out, because guessing these
+        # numbers is how a run that completed gets reported as terminated.
+        terminal = {
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED: "completed",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED: "workflow_failed",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT: "execution_timed_out",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED: "canceled",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED: "terminated",
+            EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW: "continued_as_new",
+        }
+        while time.monotonic() < deadline:
+            history = await handle.fetch_history()
+            reached = [
+                terminal[e.event_type]
+                for e in history.events
+                if e.event_type in terminal
+            ]
+            if reached:
+                record["outcome"] = reached[-1]
+                if record["outcome"] == "completed":
+                    record["trace"] = await handle.result()
+                break
+            await asyncio.sleep(0.1)
+        else:
+            record["outcome"] = "timed_out_waiting"
+            history = await handle.fetch_history()
+
+        retried = [
+            e
+            for e in history.events
+            if e.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+        ]
+        record["task_failures"] = [
+            {
+                "event_id": e.event_id,
+                "cause": int(e.workflow_task_failed_event_attributes.cause),
+                "message": e.workflow_task_failed_event_attributes.failure.message,
+            }
+            for e in retried
+        ]
+
+        try:
+            record["observed_output"] = await asyncio.wait_for(output, timeout=20)
+        except asyncio.TimeoutError:
+            output.cancel()
+            record["observed_output"] = "timed_out"
+
+        async def receipts() -> list[Any]:
+            # Ends by itself once the workflow is closed and the tail served.
+            return [
+                r.value
+                async for r in stream.read(topic=RECEIPTS)
+                if r.kind is RecordKind.DATA
+            ]
+
+        try:
+            record["receipts"] = await asyncio.wait_for(receipts(), timeout=20)
+        except asyncio.TimeoutError:
+            record["receipts"] = "timed_out"
+
+    history = await handle.fetch_history()
+    record["history_events"] = len(history.events)
+    (out / "history.json").write_text(history.to_json())
+    await provider_setup.close(provider)
+    (out / "results.json").write_text(json.dumps(record, indent=2) + "\n")
+    print(json.dumps(record, indent=2))
+    return 0 if record["outcome"] == "completed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

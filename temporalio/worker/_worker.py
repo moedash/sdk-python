@@ -510,6 +510,7 @@ class Worker:
                 interceptors=interceptors,
                 metric_meter=self._runtime.metric_meter,
                 client=client,
+                stream_provider=stream_provider,
                 encode_headers=(
                     client_config["header_codec_behavior"] == HeaderCodecBehavior.CODEC
                 ),

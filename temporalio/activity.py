@@ -29,6 +29,7 @@ import temporalio.bridge.proto
 import temporalio.bridge.proto.activity_task
 import temporalio.common
 import temporalio.converter
+import temporalio.streams
 from temporalio.converter._payload_converter import (
     _TemporalTransferTypePayloadConverter,
 )
@@ -209,6 +210,10 @@ class _Context:
     runtime_metric_meter: temporalio.common.MetricMeter | None
     client: Client | None
     cancellation_details: _ActivityCancellationDetailsHolder
+    stream_provider: temporalio.streams.StreamProvider | None = None
+    # A ``def`` activity is handed no client and no stream provider, so what
+    # it is missing cannot be read off the fields that are absent.
+    sync: bool = False
     _logger_details: Mapping[str, Any] | None = None
     _payload_converter: temporalio.converter.PayloadConverter | None = None
     _metric_meter: temporalio.common.MetricMeter | None = None
@@ -292,6 +297,62 @@ def client() -> Client:
             "client when creating ActivityEnvironment."
         )
     return client
+
+
+def stream_handle(
+    workflow_id: str | None = None, *, run_id: str | None = None
+) -> temporalio.streams.StreamHandle:
+    """Return a stream handle from the provider the worker was given.
+
+    With no arguments the handle is on this activity's own workflow, pinned to
+    the run the activity belongs to, so a producer opened from it writes onto
+    that run's stream and a read follows that run. Name a ``workflow_id`` to
+    address another workflow; ``run_id`` then pins the handle to one run and
+    its absence follows the execution chain. See :py:mod:`temporalio.streams`.
+
+    Like :py:func:`client`, this is only available in ``async def``
+    activities.
+
+    Returns:
+        :py:class:`temporalio.streams.StreamHandle` for use in the current
+        activity.
+
+    Raises:
+        RuntimeError: When the client is not available, which is what a
+            ``def`` activity gets, or when the activity has no workflow and
+            no ``workflow_id`` was given.
+        temporalio.streams.StreamUnsupportedError: The worker has no stream
+            provider. Register one with ``Client.connect(plugins=[provider])``
+            or ``Worker(plugins=[provider])``.
+        ValueError: ``run_id`` was given without ``workflow_id``.
+    """
+    context = _Context.current()
+    if context.sync:
+        # A sync activity is handed neither a client nor a provider. Saying
+        # the worker has none would send the reader to fix a registration
+        # that is not the problem.
+        raise RuntimeError(
+            "No stream handle available. Stream handles are only available in "
+            "`async def` activities; not in `def` activities, which are handed no "
+            "client to reach the store with."
+        )
+    provider = context.stream_provider
+    if provider is None:
+        raise temporalio.streams.StreamUnsupportedError(
+            "no stream provider is configured on this worker; register one with "
+            "Client.connect(plugins=[provider]) or Worker(plugins=[provider])"
+        )
+    if workflow_id is None:
+        if run_id is not None:
+            raise ValueError("run_id needs a workflow_id")
+        info = context.info()
+        if info.workflow_id is None:
+            raise RuntimeError(
+                "this activity belongs to no workflow, so name the workflow_id to "
+                "address"
+            )
+        workflow_id, run_id = info.workflow_id, info.workflow_run_id
+    return provider.get_stream_handle(client(), workflow_id, run_id=run_id)
 
 
 def in_activity() -> bool:
