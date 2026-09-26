@@ -35,6 +35,8 @@ from temporalio.contrib.external_workflow_streams._errors import (
     classify_read_failure,
 )
 from temporalio.contrib.external_workflow_streams._record import (
+    Cursor,
+    Offset,
     StreamRecord,
 )
 from temporalio.types import AnyType
@@ -94,6 +96,7 @@ class ExternalStreamRuntime(Protocol):
         wait_id: int,
         stream_key: StreamKey,
         idle_timeout: timedelta,
+        start_cursor: Cursor | None = None,
     ) -> None:
         """Registers a wait with the Worker's subscription manager.
 
@@ -266,7 +269,9 @@ class ExternalStreamTopic(Generic[AnyType]):
     value_type: type[AnyType] | None
     options: ExternalStreamOptions
 
-    def subscribe(self) -> ExternalStreamSubscription[AnyType]:
+    def subscribe(
+        self, *, start_cursor: Cursor | None = None
+    ) -> ExternalStreamSubscription[AnyType]:
         """Starts a new subscription and returns its async iterator.
 
         Each call is an **independent** subscription with its own ``wait_id``,
@@ -277,6 +282,13 @@ class ExternalStreamTopic(Generic[AnyType]):
         the same hazard class as timers and activities: inserting, removing, or
         reordering a ``subscribe()`` call renumbers every later wait in the Run
         and must be gated behind ``workflow.patched()``.
+
+        Args:
+            start_cursor: The boundary the subscription begins after. ``None``
+                resumes where the predecessor Run committed this wait, or at
+                ``BEGINNING`` on a first execution. A boundary the Workflow
+                names is recorded in the marker's header like the restored one,
+                so it must be derived deterministically: replay names it again.
         """
         state = _run_state()
         if state.runtime is None:
@@ -288,6 +300,11 @@ class ExternalStreamTopic(Generic[AnyType]):
         state.next_wait_id += 1
 
         stream_key = state.runtime.stream_key(self.name)
+        # Only a named boundary travels; the runtime derives the default itself
+        # from the predecessor Run's continuation.
+        start: dict[str, Any] = (
+            {} if start_cursor is None else {"start_cursor": start_cursor}
+        )
         state.runtime.register(
             wait_id=wait_id,
             stream_key=stream_key,
@@ -298,6 +315,7 @@ class ExternalStreamTopic(Generic[AnyType]):
             # `with_options` was given, so no configured value can ever reach
             # the reduction and every set parks after one second.
             idle_timeout=self.options.idle_timeout,
+            **start,
         )
         # Registering a wait is not blocking on one. The quiescent snapshot is a
         # request to Core to retain the Workflow Task and, once the idle timer
@@ -594,6 +612,16 @@ class ExternalStreamSubscription(Generic[AnyType]):
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[AnyType]:
+        async for _offset, value in self.records():
+            yield value
+
+    async def records(self) -> AsyncIterator[tuple[Offset, AnyType]]:
+        """Each value with the provider offset it was read from.
+
+        Same delivery, same consumption, same commit order as iterating values.
+        A reader that has to name where it got to, or hand a position to
+        something outside the Workflow, cannot do it from the values alone.
+        """
         while not self._finished:
             # Re-filled before *every* record rather than once per batch. A
             # record buffered while Workflow code was doing something else -- a
@@ -623,8 +651,10 @@ class ExternalStreamSubscription(Generic[AnyType]):
                 # becomes a value or raises, and neither outcome can leave the
                 # ready list half-consumed.
                 value = self._decode(record)
+                offset = record.offset
                 self._commit(record)
-                yield value
+                assert offset is not None
+                yield offset, value
                 continue
             await self._await_readiness()
 

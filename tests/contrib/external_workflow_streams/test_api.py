@@ -30,6 +30,8 @@ from temporalio.contrib.external_workflow_streams._errors import (
 )
 from temporalio.contrib.external_workflow_streams._manager import PreparedRecord
 from temporalio.contrib.external_workflow_streams._record import (
+    AFTER,
+    Cursor,
     Offset,
     RecordKind,
     StreamRecord,
@@ -48,6 +50,7 @@ class FakeRuntime:
         #: `wait_id -> configured idle timeout`, so a test can see that the
         #: value `with_options` was given actually reached the Worker.
         self.idle_timeouts: dict[int, timedelta] = {}
+        self.start_cursors: dict[int, Cursor | None] = {}
         self.buffers: dict[int, list[StreamRecord]] = {}
         self.deliveries: list[tuple[int, StreamRecord]] = []
         self.consumed: list[tuple[int, StreamRecord]] = []
@@ -72,9 +75,11 @@ class FakeRuntime:
         wait_id: int,
         stream_key: StreamKey,
         idle_timeout: timedelta,
+        start_cursor: Cursor | None = None,
     ) -> None:
         self.registrations.append((wait_id, stream_key))
         self.idle_timeouts[wait_id] = idle_timeout
+        self.start_cursors[wait_id] = start_cursor
 
     def drain(self, wait_id: int, max_records: int | None = None) -> list[StreamRecord]:
         buffered = self.buffers.get(wait_id, [])
@@ -190,6 +195,19 @@ def test_topics_inherit_their_options(
     subscription = configured.topic("tokens").subscribe()
 
     assert subscription.idle_timeout == timedelta(seconds=3)
+
+
+def test_a_subscription_may_name_the_boundary_it_starts_after(
+    runtime: FakeRuntime,
+) -> None:
+    """A named boundary reaches the runtime; an unnamed one leaves the default to it."""
+    boundary = AFTER(Offset("1700000000000-3"))
+
+    seeded = external_stream.topic("tokens").subscribe(start_cursor=boundary)
+    default = external_stream.topic("tokens").subscribe()
+
+    assert runtime.start_cursors[seeded.wait_id] == boundary
+    assert runtime.start_cursors[default.wait_id] is None
 
 
 # --- topics -------------------------------------------------------------------
