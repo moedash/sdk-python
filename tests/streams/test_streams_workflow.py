@@ -358,6 +358,68 @@ async def test_a_second_reader_on_a_topic_shares_the_subscription(
 
 
 @workflow.defn
+class FinishThenPublish:
+    """Finishes a topic on one writer and publishes on a second one."""
+
+    @workflow.run
+    async def run(self) -> str:
+        workflow.stream_writer(DECISIONS).finish()
+        # A fresh writer object, the same topic. The marker is already there,
+        # so this publish would land after the end of the topic.
+        try:
+            workflow.stream_writer(DECISIONS).publish({"after": "finish"})
+        except ValueError as error:
+            return str(error)
+        return "published"
+
+
+async def test_a_finished_topic_stays_finished_across_writers(
+    client: Client, provider: MemoryStreams
+):
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(client, FinishThenPublish, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            FinishThenPublish.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        assert "already finished" in await handle.result()
+        stream = provider.get_stream_handle(client, workflow_id)
+
+        async def read_everything() -> list[Any]:
+            return [(r.kind, r.value) async for r in stream.read(topic=DECISIONS)]
+
+        records = await asyncio.wait_for(read_everything(), 30)
+    # The marker is all that landed: the publish behind it never reached the
+    # topic, which is the point of the guard reading like a topic-wide rule.
+    assert records == [(RecordKind.FINISH, None)]
+
+
+@workflow.defn
+class NoStreams:
+    """Touches no stream at all, on a worker that has a provider."""
+
+    @workflow.run
+    async def run(self) -> str:
+        await asyncio.sleep(0)
+        return "done"
+
+
+@pytest.mark.usefixtures("provider")
+async def test_a_workflow_that_touches_no_stream_runs_unchanged(client: Client):
+    hooked = HookedMemory()
+    async with new_worker(client, NoStreams, plugins=[hooked]) as worker:
+        result = await client.execute_workflow(
+            NoStreams.run,
+            id=f"streams-wf-{uuid.uuid4().hex}",
+            task_queue=worker.task_queue,
+        )
+    assert result == "done"
+    # The interceptor is installed per worker, not per workflow, so the hooks
+    # still bracket a run that never opened a reader or a writer. A provider's
+    # hooks therefore have to be cheap and safe on a workflow that uses none.
+    assert [kind for kind, _ in hooked.calls] == ["start", "finish"]
+
+
+@workflow.defn
 class ForeignCursor:
     """Resumes from a cursor another provider minted."""
 
