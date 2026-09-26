@@ -96,6 +96,13 @@ from ._interceptor import (
 
 logger = logging.getLogger(__name__)
 
+QUERY_HANDLER_NOT_FOUND = "expected but not found"
+"""The phrase a query for an unregistered handler comes back with.
+
+A caller that has to recognise the condition has only the failure message to
+go on, so it matches this constant rather than a copy of the sentence.
+"""
+
 # Set to true to log all cases where we're ignoring things during delete
 LOG_IGNORE_DURING_DELETE = False
 
@@ -824,7 +831,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     if not defn:
                         known_queries = sorted([k for k in self._queries.keys() if k])
                         raise RuntimeError(
-                            f"Query handler for '{job.query_type}' expected but not found, "
+                            f"Query handler for '{job.query_type}' "
+                            f"{QUERY_HANDLER_NOT_FOUND}, "
                             f"known queries: [{' '.join(known_queries)}]"
                         )
 

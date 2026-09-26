@@ -50,8 +50,22 @@ from ._types import (
     _WorkflowStreamWireItem,
 )
 
-_PUBLISH_SIGNAL = "__temporal_workflow_stream_publish"
-_POLL_UPDATE = "__temporal_workflow_stream_poll"
+PUBLISH_SIGNAL_NAME = "__temporal_workflow_stream_publish"
+"""The signal :class:`WorkflowStream` registers for external publishes.
+
+Public so code that sends the signal itself, with its own publisher identity,
+does not have to copy the name.
+"""
+
+POLL_UPDATE_NAME = "__temporal_workflow_stream_poll"
+"""The update :class:`WorkflowStream` registers for long polls.
+
+Public so code that drives the poll itself, with its own retry and
+cancellation rules, does not have to copy the name.
+"""
+
+_PUBLISH_SIGNAL = PUBLISH_SIGNAL_NAME
+_POLL_UPDATE = POLL_UPDATE_NAME
 _OFFSET_QUERY = "__temporal_workflow_stream_offset"
 
 _MAX_POLL_RESPONSE_BYTES = 1_000_000
@@ -233,6 +247,25 @@ class WorkflowStream:
             )
         self._topic_types[name] = bound
         return WorkflowTopicHandle(self, name, bound)
+
+    @property
+    def next_offset(self) -> int:
+        """The global offset the next published item will receive."""
+        return self._base_offset + len(self._log)
+
+    def items_from(self, offset: int) -> list[tuple[int, str, Payload]]:
+        """Return ``(offset, topic, payload)`` for every item at or past ``offset``.
+
+        Reads the log in place, so it is safe to call from a
+        :func:`temporalio.workflow.wait_condition` predicate. An ``offset``
+        below the truncation base starts at the base instead; the offsets in
+        the result say where the items actually sit.
+        """
+        start = max(offset, self._base_offset) - self._base_offset
+        return [
+            (self._base_offset + index, item.topic, item.data)
+            for index, item in enumerate(self._log[start:], start)
+        ]
 
     def get_state(
         self, *, publisher_ttl: timedelta = timedelta(seconds=900)

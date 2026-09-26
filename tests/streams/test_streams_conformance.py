@@ -26,12 +26,14 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
+from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHandle
 from temporalio.common import RawValue
 from temporalio.streams import (
     BEGINNING,
@@ -45,6 +47,8 @@ from temporalio.streams import (
     topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
+from tests.helpers import new_worker
 
 # Defined once and shared by every case, the way an application shares them
 # between its workflow, its activities and its backend.
@@ -92,8 +96,58 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     provider.reset()
 
 
+@workflow.defn
+class StreamHost:
+    """Owns a stream and lingers, so outside code has a running workflow to address."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._released)
+
+
+async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
+    # No STREAMS_LIVE gate: the store is the workflow's own History, which the
+    # test environment's server provides.
+    provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
+    hosts: dict[str, WorkflowHandle[Any, Any]] = {}
+    async with new_worker(client, StreamHost) as worker:
+
+        async def host(workflow_id: str) -> None:
+            if workflow_id not in hosts:
+                hosts[workflow_id] = await client.start_workflow(
+                    StreamHost.run, id=workflow_id, task_queue=worker.task_queue
+                )
+
+        yield ProviderCase(
+            "workflow_streams",
+            provider,
+            client,
+            reports_positions=False,
+            # A publish is a Signal, so the dedupe decision is taken in the
+            # workflow with nowhere to report it. See the module docstring of
+            # the provider.
+            detects_divergent_retries=False,
+            host=host,
+        )
+        for handle in hosts.values():
+            await handle.terminate()
+
+
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
-    "memory": _memory_case
+    "memory": _memory_case,
+    "workflow_streams": _workflow_streams_case,
 }
 
 _CAPABILITIES = {

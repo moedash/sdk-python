@@ -49,6 +49,12 @@ to include examples, links to docs, or any other relevant information.
   is `temporal.api.stream.v1.StreamRecord` on every provider.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against.
+- **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
+  serves the stream interface over the shipped Workflow Streams transport as a
+  worker plugin, so a workflow reads and publishes through
+  `temporalio.contrib.workflow_streams` without naming it. Records are the
+  `StreamRecord` proto inside the shipped item payload, and a handle without a
+  run id follows continue-as-new run by run.
 
 ### Changed
 
