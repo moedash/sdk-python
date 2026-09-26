@@ -276,7 +276,7 @@ class WorkflowStreamRuntime:
         #: the Worker that built this runtime, so `codec_for` hands Workflow
         #: code a converter carrying the same context every other payload in the
         #: activation was converted with. Bound out there rather than in here
-        #: because `with_context` runs user code, and this object lives on the
+        #: because ``with_context`` runs user code, and this object lives on the
         #: far side of the sandbox boundary.
         self._data_converter = data_converter
         self._default_idle_timeout = default_idle_timeout
@@ -327,10 +327,12 @@ class WorkflowStreamRuntime:
         #: refused for: a fresh annotation is the most room there will ever be, so
         #: refusing there rolls over to an annotation that refuses identically.
         self._segments_in_annotation = 0
-        #: Set when a subscription is registered or a record delivered, so an
-        #: activation that changed nothing at all emits nothing.
+        #: A late first subscription must preserve the earlier empty drains in
+        #: the same task, without making unrelated workflows write markers.
+        self._unobserved_segments = 0
+        self._segment_pending = True
         self._observed_this_activation = False
-        #: `wait_id -> Future`, awaited by Workflow code and resolved by the
+        #: ``wait_id -> Future``, awaited by Workflow code and resolved by the
         #: readiness activation. It lives here rather than on either side alone
         #: because the two halves are in different modules and a second map
         #: would mean the side that resolves is never the side that registered.
@@ -341,7 +343,7 @@ class WorkflowStreamRuntime:
         #: only for the length of one replay job, which is what makes a
         #: registration made during it checkable against what was recorded.
         self._replay_bindings: dict[int, StreamBinding] | None = None
-        #: `wait_id -> the converter a *recorded* wait's records convert with`.
+        #: ``wait_id -> the converter a *recorded* wait's records convert with``.
         #: Installed by the Worker before a replay job reaches this thread; see
         #: :meth:`install_replay_converters` for why it exists and why it is not
         #: torn down when the replay ends.
@@ -409,7 +411,7 @@ class WorkflowStreamRuntime:
         drain a full batch, consume one record and block elsewhere on every
         activation in turn, so n subscriptions arrive at an activation holding
         roughly n times the cap between them and hand all of it over in one
-        `activate()` call. Starting the count at the carry-over makes what an
+        ``activate()`` call. Starting the count at the carry-over makes what an
         activation may hand over -- carried-over plus newly delivered -- exactly
         the cap, whatever the schedule.
         """
@@ -428,12 +430,14 @@ class WorkflowStreamRuntime:
                 )
             if self._output_history_floor_event_id != history_floor_event_id:
                 self._output_segments = []
+                self._unobserved_segments = 0
                 self._output_history_floor_event_id = history_floor_event_id
                 for waiter in self._output_capacity_waiters:
                     if not waiter.done():
                         waiter.set_result(None)
                 self._output_capacity_waiters = []
         self._output_segments.append({})
+        self._segment_pending = True
 
     def delivery_budget_remaining(self) -> int:
         """How many more records this activation may hand to Workflow code.
@@ -1308,7 +1312,7 @@ class WorkflowStreamRuntime:
         Only the **stream name** is compared, not the whole key. The other three
         components -- namespace, Workflow id, first execution Run id -- are the
         Run's identity rather than anything the code chose, and a replay harness
-        legitimately supplies its own: `Replayer` runs under `ReplayNamespace`,
+        legitimately supplies its own: `Replayer` runs under ``ReplayNamespace``,
         so comparing the full key would report every replayed history as
         nondeterministic. The key is still *recorded* whole, because replay has
         to read the ranges it names.
@@ -1638,11 +1642,21 @@ class WorkflowStreamRuntime:
         nothing still ran one event-loop drain, and replay must reproduce that
         drain or ``wait_condition`` predicates fire a different number of times.
         """
-        if not self._observed_this_activation:
+        if not self._observed_this_activation and not self._segment_pending:
+            return
+        self._segment_pending = False
+        if not self._observed_this_activation and not self._subscriptions:
+            self._unobserved_segments += 1
             return
         if reason is None:
             reason = self._segment_end_reason()
         accumulator = self._ensure_accumulator()
+        for _ in range(self._unobserved_segments):
+            self._pending_deltas.append(
+                accumulator.add_segment(Segment((), SegmentEndReason.NO_DATA_AVAILABLE))
+            )
+            self._segments_in_annotation += 1
+        self._unobserved_segments = 0
         self._pending_deltas.append(
             accumulator.add_segment(Segment(tuple(self._runs), reason))
         )
@@ -1686,10 +1700,9 @@ class WorkflowStreamRuntime:
     def take_observation_delta(self) -> bytes | None:
         """The bytes to put on this completion's `WorkflowStreamProgress`.
 
-        ``None`` means nothing replay-visible changed, which is the only case
-        where a completion legitimately carries no progress command -- and a
-        replay delivery is exactly that case, since everything it delivered is
-        already recorded in the marker being replayed.
+        Once an input subscription exists, even an empty activation belongs to
+        the shared input/output replay schedule. Workflows that never subscribe
+        still emit nothing, and replay does not rewrite its existing marker.
         """
         if self._replay_ready is not None:
             return None
@@ -1786,6 +1799,7 @@ class WorkflowStreamRuntime:
         self._run_sizes = []
         self._max_run_bytes = 0
         self._segments_in_annotation = 0
+        self._unobserved_segments = 0
         self._observed_this_activation = False
         self._annotation_start = {
             wait_id: state.delivery_cursor

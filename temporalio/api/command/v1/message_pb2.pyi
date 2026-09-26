@@ -18,6 +18,7 @@ import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
 import temporalio.api.sdk.v1.event_group_marker_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 import temporalio.api.workflow.v1.message_pb2
 
@@ -1119,6 +1120,8 @@ class Command(google.protobuf.message.Message):
     MODIFY_WORKFLOW_PROPERTIES_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     SCHEDULE_NEXUS_OPERATION_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     REQUEST_CANCEL_NEXUS_OPERATION_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    APPEND_STREAM_RECORDS_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    SUBSCRIBE_STREAM_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     command_type: temporalio.api.enums.v1.command_type_pb2.CommandType.ValueType
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
@@ -1209,6 +1212,14 @@ class Command(google.protobuf.message.Message):
     def request_cancel_nexus_operation_command_attributes(
         self,
     ) -> global___RequestCancelNexusOperationCommandAttributes: ...
+    @property
+    def append_stream_records_command_attributes(
+        self,
+    ) -> global___AppendStreamRecordsCommandAttributes: ...
+    @property
+    def subscribe_stream_command_attributes(
+        self,
+    ) -> global___SubscribeStreamCommandAttributes: ...
     def __init__(
         self,
         *,
@@ -1253,10 +1264,16 @@ class Command(google.protobuf.message.Message):
         | None = ...,
         request_cancel_nexus_operation_command_attributes: global___RequestCancelNexusOperationCommandAttributes
         | None = ...,
+        append_stream_records_command_attributes: global___AppendStreamRecordsCommandAttributes
+        | None = ...,
+        subscribe_stream_command_attributes: global___SubscribeStreamCommandAttributes
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
+            "append_stream_records_command_attributes",
+            b"append_stream_records_command_attributes",
             "attributes",
             b"attributes",
             "cancel_timer_command_attributes",
@@ -1291,6 +1308,8 @@ class Command(google.protobuf.message.Message):
             b"start_child_workflow_execution_command_attributes",
             "start_timer_command_attributes",
             b"start_timer_command_attributes",
+            "subscribe_stream_command_attributes",
+            b"subscribe_stream_command_attributes",
             "upsert_workflow_search_attributes_command_attributes",
             b"upsert_workflow_search_attributes_command_attributes",
             "user_metadata",
@@ -1300,6 +1319,8 @@ class Command(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "append_stream_records_command_attributes",
+            b"append_stream_records_command_attributes",
             "attributes",
             b"attributes",
             "cancel_timer_command_attributes",
@@ -1338,6 +1359,8 @@ class Command(google.protobuf.message.Message):
             b"start_child_workflow_execution_command_attributes",
             "start_timer_command_attributes",
             b"start_timer_command_attributes",
+            "subscribe_stream_command_attributes",
+            b"subscribe_stream_command_attributes",
             "upsert_workflow_search_attributes_command_attributes",
             b"upsert_workflow_search_attributes_command_attributes",
             "user_metadata",
@@ -1365,8 +1388,90 @@ class Command(google.protobuf.message.Message):
             "modify_workflow_properties_command_attributes",
             "schedule_nexus_operation_command_attributes",
             "request_cancel_nexus_operation_command_attributes",
+            "append_stream_records_command_attributes",
+            "subscribe_stream_command_attributes",
         ]
         | None
     ): ...
 
 global___Command = Command
+
+class AppendStreamRecordsCommandAttributes(google.protobuf.message.Message):
+    """Appends records to a stream the Workflow owns. Applied inside the Workflow
+    Task's own commit. Produces one `WorkflowStreamRecordsAppended` event
+    carrying the offset range and none of the payload; it schedules no further
+    work.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """Empty means the Workflow's default output stream."""
+    @property
+    def records(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamRecord
+    ]:
+        """Stored in order. The server sets `producer_id` to empty on each record,
+        because the owning Workflow is the producer here.
+        """
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        records: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamRecord
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "records", b"records", "stream_id", b"stream_id"
+        ],
+    ) -> None: ...
+
+global___AppendStreamRecordsCommandAttributes = AppendStreamRecordsCommandAttributes
+
+class SubscribeStreamCommandAttributes(google.protobuf.message.Message):
+    """Subscribe this Workflow to a stream, so later Workflow Tasks carry the ranges
+    it has not consumed yet.
+
+    The stream's addressing is resolved by the server rather than supplied here.
+    A Workflow cannot look it up without doing I/O, and a value it carried would
+    be a reading rather than a fact, so it could differ on replay.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    START_OFFSET_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """Stream to consume. A stream in another execution is addressed by its id;
+    one this Workflow owns is addressed by the name it was published under.
+    The server resolves an owned name first and falls back to a standalone
+    id, so a Workflow that owns a stream under this name cannot reach a
+    standalone stream with the same id.
+    """
+    start_offset: builtins.int
+    """Where to start. Negative means from wherever the stream is when the
+    subscription is registered, which the server resolves and records so
+    replay does not resolve it again.
+    """
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        start_offset: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "start_offset", b"start_offset", "stream_id", b"stream_id"
+        ],
+    ) -> None: ...
+
+global___SubscribeStreamCommandAttributes = SubscribeStreamCommandAttributes

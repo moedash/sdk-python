@@ -16,6 +16,7 @@ import temporalio.bridge.proto.workflow_activation
 import temporalio.bridge.proto.workflow_completion
 import temporalio.converter
 import temporalio.workflow
+from temporalio.contrib.external_workflow_streams._annotation import decode_annotation
 from temporalio.contrib.external_workflow_streams._backend import StreamKey
 from temporalio.contrib.external_workflow_streams._errors import (
     ExternalStreamCapacityError,
@@ -167,7 +168,9 @@ def backend() -> _OutputMemoryBackend:
 
 
 @pytest.fixture
-def runtime(backend: _OutputMemoryBackend) -> WorkflowStreamRuntime:
+async def runtime(backend: _OutputMemoryBackend) -> WorkflowStreamRuntime:
+    # The manager captures the loop it is built on, which in the Worker is the
+    # Worker's own. A sync fixture has none to capture.
     manager = StreamSubscriptionManager(
         backend=backend,
         notify_ready=_notify,
@@ -1064,3 +1067,134 @@ def test_input_and_output_share_one_replay_segment_drain_schedule() -> None:
         "abandon-output",
         "end-input",
     ]
+
+
+def test_ambiguous_legacy_combined_schedule_is_rejected_before_drain() -> None:
+    runtime = _CombinedReplayRuntime()
+    driver = _CombinedReplayDriver(runtime)
+    output = SimpleNamespace(segments=(object(), object(), object(), object()))
+    job = SimpleNamespace(output=output, HasField=lambda field: field == "output")
+
+    apply_replay = cast(Any, _WorkflowInstanceImpl._apply_replay_external_streams)
+    with pytest.raises(
+        temporalio.workflow.NondeterminismError, match="incompatible input and output"
+    ):
+        apply_replay(driver, job)
+
+    assert runtime.events == ["begin-output"]
+
+
+@pytest.mark.parametrize("subscription_exists", [False, True])
+async def test_combined_marker_preserves_empty_input_activations(
+    runtime: WorkflowStreamRuntime, subscription_exists: bool
+) -> None:
+    key = runtime.stream_key("inputs")
+    if subscription_exists:
+        runtime.begin_activation(1)
+        runtime.register(wait_id=1, stream_key=key)
+        runtime.take_observation_delta()
+        runtime.add_terminal()
+
+    deltas = []
+    try:
+        for index in range(4):
+            runtime.begin_activation(7)
+            if index == 1 and not subscription_exists:
+                runtime.register(wait_id=1, stream_key=key)
+            if index in (1, 3):
+                record = StreamRecord(
+                    RecordKind.DATA, b"input", "producer", index
+                ).placed_at(Offset(f"{index}-0"))
+                runtime.record_delivery(1, record)
+                await runtime.publish_output(
+                    topic="events",
+                    value=str(index),
+                    value_type=str,
+                    kind=RecordKind.DATA,
+                    max_publish_latency=timedelta(seconds=1),
+                    max_records=10,
+                    max_logical_bytes=10_000,
+                )
+            delta = runtime.take_observation_delta()
+            if delta is not None:
+                deltas.append(delta)
+        deltas.append(runtime.add_terminal())
+        staged = await runtime.stage_output(7)
+        annotation = decode_annotation(b"".join(deltas))
+
+        assert [bool(segment.runs) for segment in annotation.segments] == [
+            False,
+            True,
+            False,
+            True,
+        ]
+        assert staged.segment_record_counts == ((0,), (1,), (0,), (1,))
+    finally:
+        await runtime._manager.shutdown()
+
+
+class _SchedulingStub:
+    """The two calls the activation's job dispatch makes on the instance."""
+
+    def __init__(self, *, single_batch: bool) -> None:
+        self._single_batch_activation = single_batch
+        self.events: list[str] = []
+
+    def _apply(self, job: Any) -> None:
+        self.events.append(f"apply-{job.name}")
+
+    def _run_once(self, *, check_conditions: bool) -> None:
+        self.events.append(f"drain({check_conditions})")
+
+
+def _job(name: str) -> Any:
+    return SimpleNamespace(name=name)
+
+
+def _dispatch(stub: _SchedulingStub, job_sets: list[list[Any]], replay: list[Any]):
+    cast(Any, _WorkflowInstanceImpl._apply_activation_jobs)(stub, job_sets, replay)
+
+
+@pytest.mark.parametrize("single_batch", [False, True])
+def test_a_replay_marker_rides_the_patch_set_drain(single_batch: bool) -> None:
+    """A marker beside patch jobs alone must not earn a second drain.
+
+    A patch job set drains once, and that drain is the first one that can
+    publish, so the install belongs in front of it. Behind it the activation
+    runs two drains where the recorded task ran one, and every
+    ``wait_condition`` predicate fires an extra time.
+    """
+    stub = _SchedulingStub(single_batch=single_batch)
+    _dispatch(stub, [[_job("patch")], [], [], []], [_job("marker")])
+
+    assert stub.events == ["apply-patch", "apply-marker", "drain(False)"]
+
+
+def test_a_marker_still_waits_for_the_signal_set_it_precedes() -> None:
+    stub = _SchedulingStub(single_batch=False)
+    _dispatch(stub, [[_job("patch")], [_job("signal")], [], []], [_job("marker")])
+
+    assert stub.events == [
+        "apply-patch",
+        "drain(False)",
+        "apply-signal",
+        "apply-marker",
+        "drain(True)",
+    ]
+
+
+def test_a_query_only_activation_answers_after_the_marker() -> None:
+    stub = _SchedulingStub(single_batch=False)
+    _dispatch(stub, [[], [], [], [_job("query")]], [_job("marker")])
+
+    assert stub.events == ["apply-query", "apply-marker", "drain(False)"]
+
+
+@pytest.mark.parametrize("single_batch", [False, True])
+def test_a_marker_alone_drains_once_without_checking_conditions(
+    single_batch: bool,
+) -> None:
+    stub = _SchedulingStub(single_batch=single_batch)
+    _dispatch(stub, [[], [], [], []], [_job("marker")])
+
+    assert stub.events == ["apply-marker", "drain(False)"]

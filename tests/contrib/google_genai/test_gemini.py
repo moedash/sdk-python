@@ -292,8 +292,8 @@ class GeminiApiCallTracker:
         self, req: _GeminiUploadToFileSearchStoreRequest
     ) -> types.UploadToFileSearchStoreOperation:
         self.file_search_store_upload_requests.append(req)
-        return types.UploadToFileSearchStoreOperation.model_construct(
-            name="operations/test-op",
+        return types.UploadToFileSearchStoreOperation.model_validate(
+            {"name": "operations/test-op"}
         )
 
     @activity.defn
@@ -740,6 +740,16 @@ class FileDownloadWorkflow:
     async def run(self, file_name: str) -> bytes:
         client = TemporalAsyncClient()
         return await client.files.download(file=file_name)
+
+
+@workflow.defn
+class FileDownloadToPathWorkflow:
+    """Workflow that downloads a file to a path on the activity worker."""
+
+    @workflow.run
+    async def run(self, file_name: str, destination: str) -> None:
+        client = TemporalAsyncClient()
+        await client.files.download(file=file_name, destination=destination)
 
 
 @workflow.defn
@@ -1251,6 +1261,24 @@ async def test_file_download(client: Client):
     assert result == b"fake file content"
 
 
+async def test_file_download_to_path(client: Client):
+    """Download destinations are passed to the activity worker."""
+    new_client, api_tracker = apply_plugin(client, [])
+
+    async with new_worker(new_client, FileDownloadToPathWorkflow) as worker:
+        await new_client.execute_workflow(
+            FileDownloadToPathWorkflow.run,
+            args=["files/some-file", "/tmp/downloaded-file"],
+            id=f"gemini-file-download-to-path-{uuid.uuid4()}",
+            task_queue=worker.task_queue,
+        )
+
+    assert len(api_tracker.file_download_requests) == 1
+    request = api_tracker.file_download_requests[0]
+    assert request.file == "files/some-file"
+    assert request.destination == "/tmp/downloaded-file"
+
+
 # ===========================================================================
 # File search store upload tests
 # ===========================================================================
@@ -1387,8 +1415,8 @@ def _apply_plugin_with_mock_client(client: Client, mock_responses: list[str]) ->
     )
     gemini.aio.files.download = AsyncMock(return_value=b"mock download content")  # type: ignore[method-assign]
     gemini.aio.file_search_stores.upload_to_file_search_store = AsyncMock(  # type: ignore[method-assign]
-        return_value=types.UploadToFileSearchStoreOperation.model_construct(
-            name="operations/mock-op"
+        return_value=types.UploadToFileSearchStoreOperation.model_validate(
+            {"name": "operations/mock-op"}
         )
     )
 
