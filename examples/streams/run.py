@@ -58,6 +58,10 @@ async def main() -> None:
         help="task queue the nexus endpoint routes to",
     )
     args = parser.parse_args()
+    # Checked before any provider exists, so a missing flag is a usage error
+    # rather than a traceback with a provider left open.
+    if args.provider == "nexus" and not args.endpoint:
+        parser.error("nexus needs --endpoint <endpoint-id>")
 
     store = args.behind if args.provider == "nexus" else args.provider
     provider = _setup.make_provider(store, args)
