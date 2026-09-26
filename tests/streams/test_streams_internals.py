@@ -84,6 +84,27 @@ def test_supersession_is_synthesized_from_observations():
     assert attempts.note("model", 2, topic="t", previous=Cursor("memory:1")) is None
 
 
+def test_an_attempt_that_goes_backwards_is_said_rather_than_passed_off():
+    # Attempts only rise on one producer, so a lower one means the store handed
+    # two generations back out of order. Yielded as data with no signal, a
+    # consumer renders the stale generation as the current answer.
+    said: list[str] = []
+    attempts = AttemptTracker(said.append)
+    assert attempts.note("model", 2, topic="t", previous=BEGINNING) is None
+    assert attempts.note("model", 1, topic="t", previous=Cursor("memory:3")) is None
+    assert len(said) == 1
+    assert "attempt 1" in said[0] and "behind attempt 2" in said[0]
+    assert "model" in said[0]
+
+
+def test_a_repeat_of_the_current_attempt_is_not_worth_saying():
+    said: list[str] = []
+    attempts = AttemptTracker(said.append)
+    attempts.note("model", 1, topic="t", previous=BEGINNING)
+    assert attempts.note("model", 1, topic="t", previous=Cursor("memory:1")) is None
+    assert said == []
+
+
 def test_topic_keys_cannot_collide():
     # A colon in a workflow id must not make two addresses one key.
     assert _ids.topic_key("a:b", "c") != _ids.topic_key("a", "b:c")

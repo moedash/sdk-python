@@ -25,6 +25,7 @@ import pytest
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.streams import (
+    BEGINNING,
     Cursor,
     ReadSource,
     RecordKind,
@@ -503,3 +504,38 @@ async def test_an_outside_producer_and_the_workflow_share_a_topic(
         ("", RecordKind.DATA, {"from": "workflow"}),
         ("", RecordKind.FINISH, None),
     ]
+
+
+@workflow.defn
+class PublishFromQuery:
+    """Publishes from a query handler, which commits nothing."""
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+    @workflow.query
+    def peek(self) -> str:
+        workflow.stream_writer(DECISIONS).publish({"from": "query"})
+        return "unreachable"
+
+
+async def test_a_publish_from_a_query_handler_is_refused_at_the_call(
+    client: Client, provider: MemoryStreams
+):
+    # A query is answered on a task that carries the answer alone, so the record
+    # could only ever be dropped on the way out. The call says so instead.
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(client, PublishFromQuery, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            PublishFromQuery.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        try:
+            with pytest.raises(Exception) as caught:
+                await handle.query(PublishFromQuery.peek)
+            assert "publish to a stream" in str(caught.value)
+
+            stream = provider.get_stream_handle(client, workflow_id)
+            assert await stream.latest(topic=DECISIONS) == BEGINNING
+        finally:
+            await handle.terminate()

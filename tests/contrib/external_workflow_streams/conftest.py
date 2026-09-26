@@ -16,23 +16,27 @@ from dataclasses import dataclass
 import pytest
 import pytest_asyncio
 
-from temporalio.testing import WorkflowEnvironment
+#: Asking for either of these is what gives a case a running server. A case
+#: that asks for neither never observes a clock, so no environment can fail it.
+_SERVER_FIXTURES = frozenset({"client", "env"})
 
 
 @pytest.fixture(autouse=True)
-def skip_under_time_skipping(env: WorkflowEnvironment) -> None:
-    """Hold this suite to a server whose clock the tests can reason about.
+def skip_under_time_skipping(request: pytest.FixtureRequest) -> None:
+    """Hold the server-backed cases to a clock the tests can reason about.
 
-    These cases measure real-server timing: how long a Workflow Task was held
+    Those cases measure real-server timing: how long a Workflow Task was held
     open, the interval a wake sweep runs on, the deadline a shutdown waits out.
     The time-skipping server advances the clock whenever workers go idle, which
     removes exactly the quantities being measured, so the failures it produces
-    say nothing about the feature. Which cases fail drifts run to run, between
-    fourteen and seventeen of them, which is why the whole suite is held rather
-    than a list of names. The ordinary dev-server step still runs all of it.
+    say nothing about the feature. Which of them fail drifts run to run, so the
+    server-backed cases are held as a group rather than by name. Everything
+    else here is offline and keeps running on both environments.
     """
-    if env.supports_time_skipping:
-        pytest.skip("this suite measures real-server timing; see conftest")
+    if _SERVER_FIXTURES.isdisjoint(request.fixturenames):
+        return
+    if request.getfixturevalue("env").supports_time_skipping:
+        pytest.skip("this case measures real-server timing; see conftest")
 
 
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379"
