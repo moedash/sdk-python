@@ -14,12 +14,12 @@ DECISIONS = streams.topic("decisions", Decision)
 
 | Path | Who | Call | Example file |
 |---|---|---|---|
-| A: the workflow publishes | workflow code | `workflow.stream_writer(DECISIONS).publish(Decision(...))`, then `.finish()` | `path_a_publish.py` |
-| A: a backend follows | any process with a client | `stream = client.get_stream_handle(workflow_id)`, then `stream.read(topic=DECISIONS, after=await stream.latest(topic=DECISIONS))` | `path_a_publish.py` |
-| B: an Activity produces | activity code | `activity.stream_handle().producer(topic=INPUTS).append(Token(...))` | `path_b_produce.py` |
-| B: a backend produces | any process with a client | `client.get_stream_handle(workflow_id).producer(topic=INPUTS, producer_id=..., attempt=...)` | `path_b_produce.py` |
+| A: the workflow publishes | workflow code | `workflow.stream_writer(PROGRESS).publish(Progress(...))`, then `.finish()` | `path_a_publish.py` |
+| A: a backend follows | any process with a client | `stream = client.get_stream_handle(workflow_id)`, then `stream.read(topic=PROGRESS, after=await stream.latest(topic=PROGRESS))` | `path_a_publish.py` |
+| B: an Activity produces | activity code | `await activity.stream_handle().producer(topic=INPUTS).append(Token(...))` | `path_b_produce.py` |
+| B: a backend produces | any process with a client | `client.get_stream_handle(workflow_id).producer(topic=NOTES, producer_id=..., attempt=...)` | `path_b_produce.py` |
 | B: a backend consumes | any process with a client | `client.get_stream_handle(workflow_id).read(topic=INPUTS)` | `path_b_produce.py` |
-| C: the workflow consumes | workflow code | `async for record in workflow.stream_reader(INPUTS)` | `path_c_consume.py` |
+| C: the workflow consumes | workflow code | `async for record in workflow.stream_reader(COMMANDS)` | `path_c_consume.py` |
 
 A plain string names a topic decided at runtime, with `result_type=` on the
 call; the examples never need one.
