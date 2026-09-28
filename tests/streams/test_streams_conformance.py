@@ -37,6 +37,7 @@ from temporalio.client import Client, WorkflowHandle
 from temporalio.common import RawValue
 from temporalio.streams import (
     BEGINNING,
+    DEFAULT_TOPIC,
     Cursor,
     RecordKind,
     StreamCursorError,
@@ -345,6 +346,23 @@ async def test_topics_are_addressed_by_name(case: ProviderCase):
     assert [(r.topic, r.value) for r in only_a] == [("a", {"n": 1})]
     only_b = await take(stream.read(topic=B), 1)
     assert [(r.topic, r.value) for r in only_b] == [("b", {"n": 2})]
+
+
+async def test_naming_no_topic_addresses_the_default_topic(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    assert await stream.latest() == BEGINNING
+    producer = stream.producer(producer_id="model", attempt=1)
+    await producer.append({"n": 1})
+    await stream.producer(topic=OUT, producer_id="model", attempt=1).append({"n": 2})
+
+    records = await take(stream.read(), 1)
+    assert [(r.topic, r.value) for r in records] == [(DEFAULT_TOPIC, {"n": 1})]
+    assert await stream.latest() == records[0].cursor
+    # The default is an ordinary name, so naming it is the same topic.
+    named = await take(stream.read(topic=DEFAULT_TOPIC, result_type=dict), 1)
+    assert [r.value for r in named] == [{"n": 1}]
+    assert await stream.latest(topic=DEFAULT_TOPIC) == records[0].cursor
 
 
 async def test_cursor_resumes_where_it_points(case: ProviderCase):

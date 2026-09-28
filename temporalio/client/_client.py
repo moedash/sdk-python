@@ -905,7 +905,10 @@ class Client:
         follows the workflow's execution chain across continue-as-new, with
         one it is pinned to that run. The provider is the one registered with
         ``plugins=[provider]`` at :py:meth:`connect`, or passed as
-        ``stream_provider``. See :py:mod:`temporalio.streams`.
+        ``stream_provider``. The handle's ``read``, ``latest`` and
+        ``producer`` take a topic, and without one address the workflow's
+        default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`. See
+        :py:mod:`temporalio.streams`.
 
         Args:
             workflow_id: Workflow ID whose stream to get a handle to.
