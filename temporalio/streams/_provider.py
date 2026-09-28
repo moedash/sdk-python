@@ -91,10 +91,11 @@ class StreamProducer(Protocol[T_contra]):
 
 
 class StreamHandle(Protocol):
-    """One workflow's stream, addressed by topic, from outside workflow code.
+    """One owner's stream, addressed by topic, from outside workflow code.
 
-    A handle follows the workflow's execution chain unless it was opened with
-    a ``run_id``, in which case it is pinned to that run. A topic is a
+    The owner is a workflow or an activity. A handle on a workflow follows
+    its execution chain unless it was opened with a ``run_id``, in which case
+    it is pinned to that run. A topic is a
     :class:`temporalio.streams.StreamTopic` definition, which carries the
     record type, or a plain string with ``result_type=`` for a name decided
     at runtime. A transport failure surfaces as
@@ -289,6 +290,31 @@ class StreamProvider(Protocol):
 
         Without ``run_id`` it follows the execution chain, so a consumer keeps
         reading across continue-as-new; with one it is pinned to that run.
+        """
+        ...
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> StreamHandle:
+        """A handle on the streams an activity owns.
+
+        Without ``workflow_id`` the activity is a standalone one, an execution
+        of its own, and ``run_id`` pins one run of it. With ``workflow_id`` it
+        is an activity that workflow scheduled, and ``run_id`` pins the
+        workflow's run. Either way these streams are apart from any
+        workflow's: a topic here and the same topic on the workflow's handle
+        are two streams. A retry of the activity writes to the same streams,
+        and a read ends when the activity reaches a terminal status, not when
+        an attempt fails.
+
+        Raises:
+            StreamUnsupportedError: The provider's store cannot hold a stream
+                an activity owns.
         """
         ...
 
