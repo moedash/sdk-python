@@ -206,18 +206,18 @@ def stream_reader(topic: StreamTopic[T], *, after: Cursor = ...) -> StreamReader
 
 @overload
 def stream_reader(
-    topic: str, *, result_type: type[T], after: Cursor = ...
+    topic: str | None = None, *, result_type: type[T], after: Cursor = ...
 ) -> StreamReader[T]: ...
 
 
 @overload
 def stream_reader(
-    topic: str, *, result_type: None = None, after: Cursor = ...
+    topic: str | None = None, *, result_type: None = None, after: Cursor = ...
 ) -> StreamReader[Any]: ...
 
 
 def stream_reader(
-    topic: str | StreamTopic[Any],
+    topic: str | StreamTopic[Any] | None = None,
     *,
     result_type: type | None = None,
     after: Cursor = BEGINNING,
@@ -226,7 +226,9 @@ def stream_reader(
 
     ``topic`` is a :func:`temporalio.streams.topic` definition, which carries
     the record type, or a plain string with ``result_type=`` for a name
-    decided at runtime. One subscription per topic per run. A second call
+    decided at runtime, and without one the reader is on
+    :data:`temporalio.streams.DEFAULT_TOPIC`, decoded as a string-named topic
+    is. One subscription per topic per run. A second call
     for the same topic returns the reader already open on it, so records go
     to whichever loop pulls first; such a call may pass neither ``after`` nor
     a different type. Adding a reader on a new topic is a new command, so
@@ -235,8 +237,9 @@ def stream_reader(
     continue-as-new implicitly.
 
     Args:
-        topic: The topic, relative to this workflow's stream.
-        result_type: The value type for a string-named topic, used as the
+        topic: The topic, relative to this workflow's stream. Omit it for
+            the default topic.
+        result_type: The value type for a string-named or default topic, used as the
             decode hint. :class:`temporalio.common.RawValue` returns the
             payload untouched.
         after: Resume strictly after this record. Honoured on the first
@@ -277,11 +280,11 @@ def stream_writer(topic: StreamTopic[T]) -> StreamWriter[T]: ...
 
 
 @overload
-def stream_writer(topic: str) -> StreamWriter[Any]: ...
+def stream_writer(topic: str | None = None) -> StreamWriter[Any]: ...
 
 
-def stream_writer(topic: str | StreamTopic[Any]) -> StreamWriter[Any]:
-    """Publish to ``topic`` of this workflow's stream.
+def stream_writer(topic: str | StreamTopic[Any] | None = None) -> StreamWriter[Any]:
+    """Publish to ``topic`` of this workflow's stream, or to its default topic.
 
     Every call returns a new writer, and they all share the run's record of
     which topics were finished, so ``finish()`` on one is seen by the next.
@@ -289,7 +292,9 @@ def stream_writer(topic: str | StreamTopic[Any]) -> StreamWriter[Any]:
     Args:
         topic: A :func:`temporalio.streams.topic` definition, whose value type
             the writer's ``publish`` takes, or a plain string for a name
-            decided at runtime. Encoding follows each published value.
+            decided at runtime. Omitted, the writer is on
+            :data:`temporalio.streams.DEFAULT_TOPIC`. Encoding follows each
+            published value.
 
     Raises:
         ValueError: ``topic`` is empty.

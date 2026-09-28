@@ -109,23 +109,28 @@ class StreamHandle(Protocol):
 
     @overload
     def read(
-        self, *, topic: str, after: Cursor = ..., result_type: type[T]
+        self, *, topic: str | None = None, after: Cursor = ..., result_type: type[T]
     ) -> AsyncGenerator[StreamRecord[T], None]: ...
 
     @overload
     def read(
-        self, *, topic: str, after: Cursor = ..., result_type: None = None
+        self,
+        *,
+        topic: str | None = None,
+        after: Cursor = ...,
+        result_type: None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]: ...
 
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield the records on ``topic`` after ``after`` as they arrive.
 
+        Without ``topic`` it reads :data:`temporalio.streams.DEFAULT_TOPIC`.
         ``BEGINNING`` yields everything the topic retains. Any other cursor
         came from a record a reader saw, and reading resumes just past it, so
         a reader that stores the last cursor it handled and hands it back
@@ -150,8 +155,10 @@ class StreamHandle(Protocol):
         """
         ...
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, or ``BEGINNING`` when empty.
+
+        Without ``topic`` it answers for :data:`temporalio.streams.DEFAULT_TOPIC`.
 
         For a reader that wants to follow from now: ``read(after=latest())``
         yields only what is published after this call returned, which is how
@@ -167,17 +174,17 @@ class StreamHandle(Protocol):
 
     @overload
     def producer(
-        self, *, topic: str, producer_id: str = ..., attempt: int = ...
+        self, *, topic: str | None = None, producer_id: str = ..., attempt: int = ...
     ) -> StreamProducer[Any]: ...
 
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> StreamProducer[Any]:
-        """A producer on ``topic``.
+        """A producer on ``topic``, or on the default topic without one.
 
         Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
         activity's own id and attempt are the right answer, and they are what
