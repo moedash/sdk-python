@@ -330,8 +330,10 @@ def stream_handle(
     ``read``, ``latest`` or ``producer`` that names no topic addresses the
     owner's default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`, the
     one :py:func:`temporalio.workflow.stream_reader` and
-    :py:func:`temporalio.workflow.stream_writer` use without a topic. See
-    :py:mod:`temporalio.streams`.
+    :py:func:`temporalio.workflow.stream_writer` use without a topic. A
+    ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+    :py:data:`temporalio.streams.END` or at the last ``N`` records with
+    ``last=N``. See :py:mod:`temporalio.streams`.
 
     Like :py:func:`client`, this is only available in ``async def``
     activities.
