@@ -337,7 +337,7 @@ class MemoryStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -406,7 +406,7 @@ class MemoryStreamHandle:
             self._run_id is None and status == WorkflowExecutionStatus.CONTINUED_AS_NEW
         )
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, for following from now."""
         name, _ = resolve_topic(topic)
         count = len(self._streams._topic(self._workflow_id, name).records)
@@ -415,7 +415,7 @@ class MemoryStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> MemoryProducer[Any]:
