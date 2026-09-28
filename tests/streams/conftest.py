@@ -6,3 +6,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "reports_positions: the case needs append() to return where records landed",
     )
+    config.addinivalue_line(
+        "markers",
+        "truncates: the case needs a way to drop a topic's oldest records",
+    )
