@@ -290,3 +290,72 @@ class StreamRange(google.protobuf.message.Message):
     ) -> None: ...
 
 global___StreamRange = StreamRange
+
+class StreamStartPosition(google.protobuf.message.Message):
+    """Where a new subscription or read begins. The server resolves it against the
+    stream as it stands in the same transaction that registers the reader, so
+    the result does not race with appends or truncation, and records the
+    resolved absolute offset.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    OFFSET_FIELD_NUMBER: builtins.int
+    LAST_N_FIELD_NUMBER: builtins.int
+    EARLIEST_FIELD_NUMBER: builtins.int
+    TAIL_FIELD_NUMBER: builtins.int
+    offset: builtins.int
+    """Absolute and inclusive. Refused when below the stream's floor."""
+    last_n: builtins.int
+    """The last N records the stream holds, or all of them when it holds
+    fewer. Counts records of every kind. Must be positive.
+    """
+    earliest: builtins.bool
+    """The oldest record the stream still holds. Must be true."""
+    tail: builtins.bool
+    """Only records appended after registration: the stream's head offset.
+    Must be true.
+    """
+    def __init__(
+        self,
+        *,
+        offset: builtins.int = ...,
+        last_n: builtins.int = ...,
+        earliest: builtins.bool = ...,
+        tail: builtins.bool = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "earliest",
+            b"earliest",
+            "last_n",
+            b"last_n",
+            "offset",
+            b"offset",
+            "position",
+            b"position",
+            "tail",
+            b"tail",
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "earliest",
+            b"earliest",
+            "last_n",
+            b"last_n",
+            "offset",
+            b"offset",
+            "position",
+            b"position",
+            "tail",
+            b"tail",
+        ],
+    ) -> None: ...
+    def WhichOneof(
+        self, oneof_group: typing_extensions.Literal["position", b"position"]
+    ) -> typing_extensions.Literal["offset", "last_n", "earliest", "tail"] | None: ...
+
+global___StreamStartPosition = StreamStartPosition
