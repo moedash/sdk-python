@@ -12,6 +12,12 @@ stream: the server resolves an unnamed stream to that same name, so the
 provider sends the name explicitly and a record's topic and its stream's name
 never differ.
 
+An activity owns topics of its own, apart from its workflow's: a standalone
+activity is its own owner on the server, and an activity a workflow scheduled
+is addressed through that workflow. They are one stream per activity
+execution, so a retry writes to the same stream, and the server ends them when
+the activity reaches a terminal status.
+
 A cursor names the run as well as the offset, because an owned stream belongs
 to one run and a successor's starts over at zero. A handle without a run id
 reads run after run, learning from the poll that a run's stream is closed and
@@ -56,7 +62,12 @@ from temporalio.streams._wire import (
 )
 from temporalio.streams.providers import ProviderPlugin
 
-__all__ = ["NativeProducer", "NativeStreamHandle", "NativeStreams"]
+__all__ = [
+    "NativeActivityStreamHandle",
+    "NativeProducer",
+    "NativeStreamHandle",
+    "NativeStreams",
+]
 
 T = TypeVar("T")
 
@@ -536,6 +547,60 @@ class NativeStreamHandle:
             return 0
 
 
+class NativeActivityStreamHandle(NativeStreamHandle):
+    """The topics one activity owns, from outside, over the stream service.
+
+    An activity's streams belong to one activity execution, not to a chain of
+    runs: a retry writes to the same stream and a read ends when the activity
+    reaches a terminal status. So the handle pins the execution on first use
+    and never follows a successor. A standalone activity is its own owner; an
+    activity a workflow scheduled is reached through that workflow's run.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        activity_id: str,
+        workflow_id: str | None,
+        run_id: str | None,
+        *,
+        opened: set[tuple[str, str]] | None = None,
+    ) -> None:
+        """Address ``activity_id``'s topics, pinned to ``run_id`` when one is given."""
+        super().__init__(client, workflow_id or "", run_id, opened=opened)
+        self._activity_id = activity_id
+
+    def _stream(self, topic: str, run_id: str) -> WorkflowStreamHandle:
+        return self._service().activity_stream(
+            self._activity_id, topic, workflow_id=self._workflow_id, run_id=run_id
+        )
+
+    async def _current_run(self) -> str:
+        if self._workflow_id:
+            return await super()._current_run()
+        try:
+            description = await self._client.get_activity_handle(
+                self._activity_id
+            ).describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                raise StreamNotFoundError(
+                    f"activity {self._activity_id!r} was not found"
+                ) from error
+            raise
+        assert description.activity_run_id is not None
+        return description.activity_run_id
+
+    async def _first_run(self) -> str:
+        return await self._current_run()
+
+    async def _predecessor(self, run_id: str) -> str | None:
+        return None
+
+    async def _successor(self, topic: str, run_id: str) -> tuple[str, int] | None:
+        return None
+
+
 class NativeStreams(ProviderPlugin):
     """The server-side provider.
 
@@ -560,6 +625,24 @@ class NativeStreams(ProviderPlugin):
     ) -> NativeStreamHandle:
         """A handle on ``workflow_id``'s topics; without ``run_id`` it follows the chain."""
         return NativeStreamHandle(client, workflow_id, run_id, opened=self._opened)
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NativeActivityStreamHandle:
+        """A handle on the topics ``activity_id`` owns, apart from any workflow's.
+
+        Without ``workflow_id`` the activity is a standalone one and ``run_id``
+        pins its run; with one it is that workflow's activity and ``run_id``
+        pins the workflow's run.
+        """
+        return NativeActivityStreamHandle(
+            client, activity_id, workflow_id, run_id, opened=self._opened
+        )
 
     async def close(self) -> None:
         """Close the channels this provider opened to the stream service.

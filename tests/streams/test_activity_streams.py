@@ -16,6 +16,7 @@ registered, which the workers and the reads in these cases share.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from temporalio.streams import (
     topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.native import NativeStreams
 from temporalio.testing import WorkflowEnvironment
 from tests.helpers import new_worker
 
@@ -57,9 +59,26 @@ async def _memory_setup(client: Client) -> AsyncIterator[ActivitySetup]:
     provider.reset()
 
 
+async def _native_setup(client: Client) -> AsyncIterator[ActivitySetup]:
+    # The store is a server built from the stream-carrying branch, which the
+    # test environment's own server is not; TEMPORAL_ADDRESS names it.
+    address = os.environ.get("TEMPORAL_ADDRESS")
+    if address:
+        client = await Client.connect(
+            address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+        )
+    provider = NativeStreams()
+    config = client.config()
+    config["plugins"] = [provider]
+    yield ActivitySetup("native", provider, Client(**config))
+    await provider.close()
+
+
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ActivitySetup]]] = {
     "memory": _memory_setup
 }
+if os.environ.get("STREAMS_LIVE") == "native":
+    SETUPS["native"] = _native_setup
 
 
 @pytest.fixture(params=sorted(SETUPS))
