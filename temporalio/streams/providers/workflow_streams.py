@@ -488,7 +488,7 @@ class WorkflowStreamsHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -725,7 +725,7 @@ class WorkflowStreamsHandle:
         ]
         return items, wire["next_offset"], bool(wire["more_ready"])
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The newest position holding a record on ``topic``.
 
         The log is one per run, so the cursor names the run it was read from:
@@ -770,7 +770,7 @@ class WorkflowStreamsHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> WorkflowStreamsProducer[Any]:

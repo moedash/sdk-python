@@ -822,7 +822,7 @@ class NexusStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -881,7 +881,7 @@ class NexusStreamHandle:
             if answer.done:
                 return
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The newest position on ``topic`` behind the endpoint, for following from now."""
         topic, _ = resolve_topic(topic)
         answer = await self._front.invoke(
@@ -901,7 +901,7 @@ class NexusStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> NexusProducer[Any]:

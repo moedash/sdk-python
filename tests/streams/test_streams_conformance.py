@@ -81,6 +81,8 @@ class ProviderCase:
     """``append()`` compares a repeat's content with what it already holds."""
     host: Callable[[str], Awaitable[None]] | None = None
     """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
+    task_queue: str | None = None
+    """Where the setup's worker runs the workflows below, when it has one."""
 
     async def open(
         self, workflow_id: str, *, run_id: str | None = None
@@ -121,6 +123,18 @@ class StreamHost:
         await workflow.wait_condition(lambda: self._released)
 
 
+@workflow.defn
+class DefaultTopicAnswer:
+    """Reads one value on its default topic and answers on the same topic."""
+
+    @workflow.run
+    async def run(self) -> None:
+        reader = workflow.stream_reader(result_type=dict)
+        async for value in reader.values():
+            workflow.stream_writer().publish({"answer": value["n"] * 2})
+            reader.close()
+
+
 async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
     # No STREAMS_LIVE gate: the store is the workflow's own History, which the
     # test environment's server provides.
@@ -131,7 +145,7 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
     config["plugins"] = [provider]
     client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost) as worker:
+    async with new_worker(client, StreamHost, DefaultTopicAnswer) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
@@ -149,6 +163,7 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             # the provider.
             detects_divergent_retries=False,
             host=host,
+            task_queue=worker.task_queue,
         )
         for handle in hosts.values():
             await handle.terminate()
@@ -175,7 +190,7 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
     config["plugins"] = [provider]
     client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost) as worker:
+    async with new_worker(client, StreamHost, DefaultTopicAnswer) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
@@ -183,7 +198,9 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
                     StreamHost.run, id=workflow_id, task_queue=worker.task_queue
                 )
 
-        yield ProviderCase("native", provider, client, host=host)
+        yield ProviderCase(
+            "native", provider, client, host=host, task_queue=worker.task_queue
+        )
         for handle in hosts.values():
             await handle.terminate()
     await provider.close()
@@ -209,7 +226,7 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
     config["plugins"] = [provider]
     client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost) as worker:
+    async with new_worker(client, StreamHost, DefaultTopicAnswer) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
@@ -217,7 +234,9 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
                     StreamHost.run, id=workflow_id, task_queue=worker.task_queue
                 )
 
-        yield ProviderCase("redis", provider, client, host=host)
+        yield ProviderCase(
+            "redis", provider, client, host=host, task_queue=worker.task_queue
+        )
         for handle in hosts.values():
             await handle.terminate()
     await provider.close()
@@ -456,6 +475,29 @@ async def test_naming_no_topic_addresses_the_default_topic(case: ProviderCase):
     named = await take(stream.read(topic=DEFAULT_TOPIC, result_type=dict), 1)
     assert [r.value for r in named] == [{"n": 1}]
     assert await stream.latest(topic=DEFAULT_TOPIC) == records[0].cursor
+
+
+async def test_a_workflow_answers_on_its_default_topic(case: ProviderCase):
+    if case.client is None or case.task_queue is None:
+        pytest.skip(
+            f"the {case.name} setup runs no worker; test_streams_workflow covers "
+            "its workflow half"
+        )
+    workflow_id = new_workflow_id()
+    handle = await case.client.start_workflow(
+        DefaultTopicAnswer.run, id=workflow_id, task_queue=case.task_queue
+    )
+    stream = case.client.get_stream_handle(workflow_id)
+    await stream.producer(producer_id="client", attempt=1).append({"n": 21})
+    await handle.result()
+
+    # The outside producer and the workflow, each naming no topic, meet on
+    # one topic that a reader naming none sees in order.
+    records = await take(stream.read(), 2, timeout=30.0)
+    assert [(r.topic, r.producer_id, r.value) for r in records] == [
+        (DEFAULT_TOPIC, "client", {"n": 21}),
+        (DEFAULT_TOPIC, "", {"answer": 42}),
+    ]
 
 
 async def test_cursor_resumes_where_it_points(case: ProviderCase):

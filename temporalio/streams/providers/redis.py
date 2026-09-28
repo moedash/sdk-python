@@ -760,7 +760,7 @@ class RedisStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -893,7 +893,7 @@ class RedisStreamHandle:
         # is not the end unless the handle was pinned to it.
         return not (self._run_id is None and status in _STILL_CONSUMING)
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest committed record on ``topic``, for following from now.
 
         ``BEGINNING`` when the topic holds no committed record, which a topic whose
@@ -918,7 +918,7 @@ class RedisStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> RedisProducer[Any]:
