@@ -327,8 +327,10 @@ def stream_handle(
     status.
 
     Name a ``workflow_id`` to address another workflow; ``run_id`` then pins
-    the handle to one run and its absence follows the execution chain. See
-    :py:mod:`temporalio.streams`.
+    the handle to one run and its absence follows the execution chain. A
+    ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+    :py:data:`temporalio.streams.END` or at the last ``N`` records with
+    ``last=N``. See :py:mod:`temporalio.streams`.
 
     Like :py:func:`client`, this is only available in ``async def``
     activities.

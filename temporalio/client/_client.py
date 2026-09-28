@@ -923,7 +923,11 @@ class Client:
         ``workflow_id`` is left out, and ``run_id`` then pins the activity's
         run, or an activity that ``workflow_id`` scheduled. The provider is
         the one registered with ``plugins=[provider]`` at :py:meth:`connect`,
-        or passed as ``stream_provider``. See :py:mod:`temporalio.streams`.
+        or passed as ``stream_provider``. A ``read`` starts at
+        :py:data:`temporalio.streams.BEGINNING`, at
+        :py:data:`temporalio.streams.END` or at the last ``N`` records with
+        ``last=N``, and resumes only after a cursor it was handed. See
+        :py:mod:`temporalio.streams`.
 
         Args:
             workflow_id: Workflow ID whose stream to get a handle to, or the
