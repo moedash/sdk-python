@@ -15,6 +15,8 @@ so nobody mistakes it for evidence:
   handle only decides which run's close ends a read.
 - It learns that a workflow closed by describing it, so a handle opened
   without a client reads until the caller closes it.
+- It keeps every record until :meth:`MemoryStreams.truncate` drops the
+  oldest ones, which stands in for a store's retention in tests.
 
 The outside surface (producer identity, retry deduplication, positions,
 supersession, cursors) is faithful, which is what the conformance tests lean
@@ -40,7 +42,14 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamProducerError
 from temporalio.streams._ids import topic_key
 from temporalio.streams._provider import ReadSource, WriteSink
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -79,6 +88,10 @@ class _Topic:
     """One topic's records, and the waiters parked on its tail."""
 
     def __init__(self) -> None:
+        # The retained records, the first of which sits at offset ``base``.
+        # Offsets are never reused, so a cursor keeps naming the same record
+        # after truncation drops the ones before it.
+        self.base = 0
         self.records: list[bytes] = []
         # Dedupe identity is (producer#attempt, first sequence of the append),
         # the same pair the storage providers use, mapped to where the batch
@@ -122,7 +135,7 @@ class _Topic:
                         f"content by {writer!r}"
                     )
                 return first, count
-        first = len(self.records)
+        first = self.head
         self.records.extend(bodies)
         if writer is not None:
             self.seen[key] = (first, len(wires), content)
@@ -131,9 +144,24 @@ class _Topic:
             loop.call_soon_threadsafe(_wake, future)
         return first, len(wires)
 
+    @property
+    def head(self) -> int:
+        """The offset the next record lands at."""
+        return self.base + len(self.records)
+
+    def at(self, offset: int) -> bytes:
+        """The retained record at ``offset``."""
+        return self.records[offset - self.base]
+
+    def truncate(self, keep: int) -> None:
+        """Drop all but the newest ``keep`` records."""
+        drop = max(0, len(self.records) - keep)
+        self.base += drop
+        del self.records[:drop]
+
     async def wait_past(self, offset: int, timeout: float | None) -> None:
         """Wait until a record exists at ``offset``, or ``timeout`` passes."""
-        if len(self.records) > offset:
+        if self.head > offset:
             return
         loop = asyncio.get_running_loop()
         future: asyncio.Future[None] = loop.create_future()
@@ -173,15 +201,17 @@ class _MemReadSource:
 
     async def next_batch(self) -> list[tuple[Cursor, WireRecord]]:
         while not self._closed:
-            records = self._store.records
-            if len(records) > self._offset:
+            head = self._store.head
+            if head > self._offset:
                 batch: list[tuple[Cursor, WireRecord]] = []
-                for offset in range(self._offset, len(records)):
+                for offset in range(max(self._offset, self._store.base), head):
                     cursor = mint_cursor(_PROVIDER, str(offset))
-                    wire = _parse(cursor, records[offset], workflow.logger.warning)
+                    wire = _parse(
+                        cursor, self._store.at(offset), workflow.logger.warning
+                    )
                     if wire is not None:
                         batch.append((cursor, wire))
-                self._offset = len(records)
+                self._offset = head
                 if batch:
                     return batch
                 continue
@@ -208,9 +238,12 @@ class _MemoryWorkflowProvider:
     def __init__(self, streams: MemoryStreams) -> None:
         self._streams = streams
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
-        start = self._streams._offset_after(after)
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
+        check_read_start(after, last)
         store = self._streams._topic(workflow.info().workflow_id, topic)
+        start = self._streams._start(store, after, last)
         return _MemReadSource(store, start, self._streams._poll)
 
     def open_writer(self, topic: str) -> WriteSink:
@@ -339,15 +372,24 @@ class MemoryStreamHandle:
         *,
         topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the workflow closes."""
+        """Yield records on ``topic`` from where the read starts until the workflow closes.
+
+        ``END`` and ``last=`` are resolved by this call, against what the
+        topic holds when it is made.
+        """
+        check_read_start(after, last)
         name, result_type = resolve_topic(topic, result_type)
         store = self._streams._topic(self._workflow_id, name)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
-        start = self._streams._offset_after(after)
-        return self._read(store, start, after, result_type)
+        start = self._streams._start(store, after, last)
+        # The decoder positions a synthesized record at the one before it, so
+        # it is told the position before the first record this read yields.
+        previous = mint_cursor(_PROVIDER, str(start - 1)) if start else BEGINNING
+        return self._read(store, start, previous, result_type)
 
     async def _read(
         self,
@@ -361,10 +403,14 @@ class MemoryStreamHandle:
         )
         closed = False
         while True:
-            records = store.records
-            while offset < len(records):
+            while offset < store.head:
+                if offset < store.base:
+                    raise StreamCursorError(
+                        f"offset {offset} was truncated while this read was behind; "
+                        f"the topic now starts at {store.base}"
+                    )
                 cursor = mint_cursor(_PROVIDER, str(offset))
-                wire = _parse(cursor, records[offset], logger.warning)
+                wire = _parse(cursor, store.at(offset), logger.warning)
                 offset += 1
                 if wire is None:
                     continue
@@ -409,8 +455,8 @@ class MemoryStreamHandle:
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, for following from now."""
         name, _ = resolve_topic(topic)
-        count = len(self._streams._topic(self._workflow_id, name).records)
-        return mint_cursor(_PROVIDER, str(count - 1)) if count else BEGINNING
+        head = self._streams._topic(self._workflow_id, name).head
+        return mint_cursor(_PROVIDER, str(head - 1)) if head else BEGINNING
 
     def producer(
         self,
@@ -450,6 +496,15 @@ class MemoryStreams(ProviderPlugin):
         """Drop every topic. For tests."""
         self._topics.clear()
 
+    def truncate(self, workflow_id: str, topic: str, *, keep: int) -> None:
+        """Drop all but the newest ``keep`` records of a topic. For tests.
+
+        Stands in for a store's retention: offsets are kept, so a cursor from
+        before still names its record, and a read from ``BEGINNING`` starts
+        at the oldest one left.
+        """
+        self._topic(workflow_id, topic).truncate(keep)
+
     def workflow_provider(self) -> _MemoryWorkflowProvider:
         """The workflow half, over this provider's topics."""
         return _MemoryWorkflowProvider(self)
@@ -477,13 +532,24 @@ class MemoryStreams(ProviderPlugin):
             found = self._topics[key] = _Topic()
         return found
 
-    def _offset_after(self, after: Cursor) -> int:
+    def _start(self, store: _Topic, after: Cursor, last: int | None) -> int:
+        """The offset a read starts at, resolved against what ``store`` holds now."""
+        if last is not None:
+            return max(store.base, store.head - last)
+        if after == END:
+            return store.head
         position = cursor_position(after, provider=_PROVIDER)
         if position is None:
-            return 0
+            return store.base
         try:
-            return int(position) + 1
+            start = int(position) + 1
         except ValueError:
             raise StreamCursorError(
                 f"cursor {after.token!r} does not name a position on the memory provider"
             ) from None
+        if start < store.base:
+            raise StreamCursorError(
+                f"cursor {after.token!r} names a record no longer retained; the "
+                f"topic starts at offset {store.base}"
+            )
+        return start
