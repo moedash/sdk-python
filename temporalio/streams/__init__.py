@@ -24,7 +24,9 @@ The contract, in five statements:
    generation.
 4. **A cursor is opaque and belongs to its provider.** Hand it back to resume
    strictly after the record it names; :meth:`StreamHandle.latest` positions a
-   follower. Do not compare two cursors or do arithmetic on one.
+   follower. Do not compare two cursors or do arithmetic on one. A read with
+   no cursor yet starts at :data:`BEGINNING`, at :data:`END`, or at the last
+   ``N`` records with ``last=N``.
 5. **A workflow addresses its streams relative to itself, by topic.** A topic
    can be written by the workflow and by outside producers, and read by the
    workflow and by outside consumers; which of those happen is the
@@ -81,6 +83,7 @@ from temporalio.streams._provider import (
 )
 from temporalio.streams._record import (
     BEGINNING,
+    END,
     Cursor,
     RecordKind,
     StreamRecord,
@@ -90,6 +93,7 @@ from temporalio.streams._topic import StreamTopic, resolve_topic, topic
 
 __all__ = [
     "BEGINNING",
+    "END",
     "Cursor",
     "ReadSource",
     "RecordKind",
