@@ -308,7 +308,12 @@ def stream_handle(
     the run the activity belongs to, so a producer opened from it writes onto
     that run's stream and a read follows that run. Name a ``workflow_id`` to
     address another workflow; ``run_id`` then pins the handle to one run and
-    its absence follows the execution chain. See :py:mod:`temporalio.streams`.
+    its absence follows the execution chain. A ``read``, ``latest`` or
+    ``producer`` that names no topic addresses the workflow's default topic,
+    :py:data:`temporalio.streams.DEFAULT_TOPIC`, the one
+    :py:func:`temporalio.workflow.stream_reader` and
+    :py:func:`temporalio.workflow.stream_writer` use without a topic. See
+    :py:mod:`temporalio.streams`.
 
     Like :py:func:`client`, this is only available in ``async def``
     activities.

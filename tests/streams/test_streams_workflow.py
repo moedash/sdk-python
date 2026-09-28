@@ -25,6 +25,7 @@ import pytest
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.streams import (
+    DEFAULT_TOPIC,
     Cursor,
     ReadSource,
     RecordKind,
@@ -502,4 +503,41 @@ async def test_an_outside_producer_and_the_workflow_share_a_topic(
         ("tool", RecordKind.DATA, {"from": "producer"}),
         ("", RecordKind.DATA, {"from": "workflow"}),
         ("", RecordKind.FINISH, None),
+    ]
+
+
+@workflow.defn
+class DefaultTopicEcho:
+    """Reads one value on its default topic and answers on the same topic."""
+
+    @workflow.run
+    async def run(self) -> None:
+        reader = workflow.stream_reader(result_type=dict)
+        writer = workflow.stream_writer()
+        async for value in reader.values():
+            writer.publish({"echo": value["n"] * 2})
+            reader.close()
+        writer.finish()
+
+
+async def test_a_workflow_reads_and_writes_its_default_topic(
+    client: Client, provider: MemoryStreams
+):
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(client, DefaultTopicEcho, plugins=[provider]) as worker:
+        stream = provider.get_stream_handle(client, workflow_id)
+        await stream.producer(producer_id="client", attempt=1).append({"n": 21})
+        handle = await client.start_workflow(
+            DefaultTopicEcho.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        await handle.result()
+
+        async def read_everything() -> list[Any]:
+            return [r async for r in stream.read(topic=DEFAULT_TOPIC)]
+
+        records = await asyncio.wait_for(read_everything(), 30)
+    assert [(r.topic, r.kind, r.value) for r in records] == [
+        (DEFAULT_TOPIC, RecordKind.DATA, {"n": 21}),
+        (DEFAULT_TOPIC, RecordKind.DATA, {"echo": 42}),
+        (DEFAULT_TOPIC, RecordKind.FINISH, None),
     ]
