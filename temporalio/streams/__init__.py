@@ -34,7 +34,8 @@ The contract, in five statements:
    application's business. A topic is defined once with :func:`topic`, with
    the type its records decode to, and that definition is shared by the
    workflow, its activities and the backend; a plain string names a topic
-   decided at runtime.
+   decided at runtime. A call that names no topic addresses the workflow's
+   default topic, :data:`DEFAULT_TOPIC`.
 
 A provider is an object, registered once as a plugin:
 ``Client.connect(plugins=[provider])``; workers built from that client inherit
@@ -86,10 +87,16 @@ from temporalio.streams._record import (
     StreamRecord,
     Supersession,
 )
-from temporalio.streams._topic import StreamTopic, resolve_topic, topic
+from temporalio.streams._topic import (
+    DEFAULT_TOPIC,
+    StreamTopic,
+    resolve_topic,
+    topic,
+)
 
 __all__ = [
     "BEGINNING",
+    "DEFAULT_TOPIC",
     "Cursor",
     "ReadSource",
     "RecordKind",
