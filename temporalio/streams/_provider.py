@@ -104,12 +104,11 @@ class StreamHandle(Protocol):
 
     @overload
     def read(
-        self, *, topic: StreamTopic[T], after: Cursor = ...
-    ) -> AsyncGenerator[StreamRecord[T], None]: ...
-
-    @overload
-    def read(
-        self, *, topic: str | None = None, after: Cursor = ..., result_type: type[T]
+        self,
+        *,
+        topic: StreamTopic[T],
+        after: Cursor = ...,
+        last: int | None = None,
     ) -> AsyncGenerator[StreamRecord[T], None]: ...
 
     @overload
@@ -118,6 +117,17 @@ class StreamHandle(Protocol):
         *,
         topic: str | None = None,
         after: Cursor = ...,
+        last: int | None = None,
+        result_type: type[T],
+    ) -> AsyncGenerator[StreamRecord[T], None]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        topic: str | None = None,
+        after: Cursor = ...,
+        last: int | None = None,
         result_type: None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]: ...
 
@@ -126,15 +136,21 @@ class StreamHandle(Protocol):
         *,
         topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield the records on ``topic`` after ``after`` as they arrive.
 
         Without ``topic`` it reads :data:`temporalio.streams.DEFAULT_TOPIC`.
-        ``BEGINNING`` yields everything the topic retains. Any other cursor
-        came from a record a reader saw, and reading resumes just past it, so
-        a reader that stores the last cursor it handled and hands it back
-        sees every record exactly once. The read ends when the owning
+        ``BEGINNING`` yields everything the topic retains, starting at the
+        oldest record it still holds. ``END`` yields only what is appended
+        after the read starts. ``last=N`` starts at the newest ``N`` records,
+        or at all of them when there are fewer; it counts records of every
+        kind, so a ``FINISH`` among them leaves fewer than ``N`` values, and
+        it is exclusive with a cursor. Any other cursor came from a record a
+        reader saw, and reading resumes just past it, so a reader that stores
+        the last cursor it handled and hands it back sees every record
+        exactly once; that is the only way to resume. The read ends when the owning
         execution, or its chain, is closed and every retained record after
         ``after`` has been delivered; until then it waits. The result is a
         generator, so a caller that stops early should ``aclose()`` it. How
@@ -146,10 +162,14 @@ class StreamHandle(Protocol):
 
         Raises:
             ValueError: ``result_type`` was passed with a topic definition,
-                or the topic is empty.
+                the topic is empty, ``last`` is not positive, or ``last`` was
+                passed with a cursor.
             StreamCursorError: ``after`` came from another provider or names
                 a record no longer retained. Raised by this call, not by the
                 first iteration.
+            StreamUnsupportedError: The provider cannot start a read where
+                ``END`` or ``last=`` asks. A provider that raises it says so
+                in its own documentation.
             StreamNotFoundError: The workflow or topic does not exist or is
                 past retention.
         """
@@ -239,11 +259,21 @@ class WorkflowStreamProvider(Protocol):
     the definitions are resolved before it is called.
     """
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
         """Subscribe the running workflow to ``topic`` of its own stream.
+
+        ``after`` and ``last`` mean what they mean on
+        :meth:`StreamHandle.read`, and arrive already checked. Where a start
+        is resolved has to be something replay reproduces, so a provider
+        resolves it in the store and records the result, never by reading
+        the store from the workflow thread.
 
         Raises:
             StreamCursorError: ``after`` was minted by another provider.
+            StreamUnsupportedError: The provider cannot start where ``END``
+                or ``last`` asks.
         """
         ...
 
