@@ -1453,6 +1453,7 @@ class SubscribeStreamCommandAttributes(google.protobuf.message.Message):
 
     STREAM_NAME_OR_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     stream_name_or_id: builtins.str
     """Stream to consume, named either way round: a stream this Workflow owns
     by the name it appends under, a stream in another execution by its id.
@@ -1462,25 +1463,39 @@ class SubscribeStreamCommandAttributes(google.protobuf.message.Message):
     is how a reader subscribes before the first record is written.
     """
     start_offset: builtins.int
-    """Where to start, as an absolute offset. Any negative value means the head
-    of the stream as of registration, and they all mean the same thing. The
-    server resolves it and records the result, so replay does not resolve it
-    again.
-
-    There is no way to ask for the earliest readable offset of a stream that
-    has been truncated. Reading it from DescribeStream and passing it here
-    races with further truncation.
+    """Where to start, as an absolute offset. Read only when `start_position`
+    is unset. A negative value is refused: the head of the stream is asked
+    for with `start_position.tail`.
     """
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Where to start. The server resolves it once, when it registers the
+        subscription, and records the resolved absolute offset on the subscribed
+        event, so replay does not resolve it again. Setting it together with a
+        non-zero `start_offset` fails the command.
+        """
     def __init__(
         self,
         *,
         stream_name_or_id: builtins.str = ...,
         start_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "start_offset", b"start_offset", "stream_name_or_id", b"stream_name_or_id"
+            "start_offset",
+            b"start_offset",
+            "start_position",
+            b"start_position",
+            "stream_name_or_id",
+            b"stream_name_or_id",
         ],
     ) -> None: ...
 
