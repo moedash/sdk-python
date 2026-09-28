@@ -8,6 +8,7 @@ from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import message as _message
 from google.protobuf import reflection as _reflection
 from google.protobuf import symbol_database as _symbol_database
+from google.protobuf.internal import enum_type_wrapper
 
 # @@protoc_insertion_point(imports)
 
@@ -25,8 +26,15 @@ from temporalio.api.streamservice.v1 import (
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n/temporalio/api/stream/v1/request_response.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a&temporalio/api/stream/v1/message.proto\x1a+temporalio/api/stream/v1/stream_state.proto\x1a$temporal/api/common/v1/message.proto"\x88\x01\n\x11\x43reateStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12M\n\tlifecycle\x18\x03 \x01(\x0b\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamLifecycle"$\n\x12\x43reateStreamOutput\x12\x0e\n\x06run_id\x18\x01 \x01(\t"\xf5\x01\n\x10\x41\x64\x64MessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\t \x01(\t\x12H\n\x07records\x18\x03 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12\x13\n\x0bproducer_id\x18\x04 \x01(\t\x12\x10\n\x08sequence\x18\x05 \x01(\x03\x12\x17\n\x0f\x65xpected_offset\x18\x06 \x01(\x03\x12\x1b\n\x13use_expected_offset\x18\x08 \x01(\x08J\x04\x08\x07\x10\x08"c\n\x11\x41\x64\x64MessagesOutput\x12\x14\n\x0c\x66irst_offset\x18\x01 \x01(\x03\x12\x13\n\x0bnext_offset\x18\x02 \x01(\x03\x12\r\n\x05\x63ount\x18\x03 \x01(\x03\x12\x14\n\x0c\x64\x65\x64uplicated\x18\x04 \x01(\x08"O\n\x12\x46inishWritingInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x13\n\x0bproducer_id\x18\x03 \x01(\t"\x15\n\x13\x46inishWritingOutput"\x94\x01\n\x16SubscribeWorkflowInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x06 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t\x12\x11\n\tstream_id\x18\x05 \x01(\t\x12\x14\n\x0cstart_offset\x18\x04 \x01(\x03"/\n\x17SubscribeWorkflowOutput\x12\x14\n\x0cstart_offset\x18\x01 \x01(\x03"\x9f\x01\n\x11PollMessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x07 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x03 \x01(\x03\x12\x14\n\x0cmax_messages\x18\x04 \x01(\x05\x12\x0e\n\x06topics\x18\x05 \x03(\t\x12\x19\n\x11wait_new_messages\x18\x06 \x01(\x08"\xdf\x01\n\x12PollMessagesOutput\x12H\n\x07records\x18\x01 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12\x13\n\x0bnext_offset\x18\x02 \x01(\x03\x12\x13\n\x0bhead_offset\x18\x03 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x35\n\x0c\x63lose_reason\x18\x05 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x0e\n\x06run_id\x18\x06 \x01(\t";\n\x13\x44\x65scribeStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t"\xc4\x01\n\x19PollWorkflowMessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x08 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x04 \x01(\x03\x12\x14\n\x0cmax_messages\x18\x05 \x01(\x05\x12\x0e\n\x06topics\x18\x06 \x03(\t\x12\x19\n\x11wait_new_messages\x18\x07 \x01(\x08"p\n\x1b\x44\x65scribeWorkflowStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x04 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t"\xde\x01\n\x18\x41\x64\x64WorkflowMessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x07 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t\x12H\n\x07records\x18\x04 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12\x13\n\x0bproducer_id\x18\x05 \x01(\t\x12\x10\n\x08sequence\x18\x06 \x01(\x03"]\n\x14\x44\x65scribeStreamOutput\x12\x45\n\x05state\x18\x01 \x01(\x0b\x32\x36.temporal.server.chasm.lib.stream.proto.v1.StreamState"i\n\x10\x43loseStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12/\n\x06reason\x18\x03 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload"\x13\n\x11\x43loseStreamOutput"T\n\x13TruncateStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x17\n\x0fnew_base_offset\x18\x03 \x01(\x03"\x16\n\x14TruncateStreamOutput"H\n\x11\x44\x65leteStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\r\n\x05\x66orce\x18\x03 \x01(\x08"\x14\n\x12\x44\x65leteStreamOutput"\x83\x01\n\x13\x43reateStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12V\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.CreateStreamInput"p\n\x14\x43reateStreamResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.CreateStreamOutput"\x81\x01\n\x12\x41\x64\x64MessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12U\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32;.temporal.server.chasm.lib.stream.proto.v1.AddMessagesInput"n\n\x13\x41\x64\x64MessagesResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.AddMessagesOutput"\x85\x01\n\x14\x46inishWritingRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12W\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.FinishWritingInput"r\n\x15\x46inishWritingResponse\x12Y\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32>.temporal.server.chasm.lib.stream.proto.v1.FinishWritingOutput"\x8d\x01\n\x18SubscribeWorkflowRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12[\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x41.temporal.server.chasm.lib.stream.proto.v1.SubscribeWorkflowInput"z\n\x19SubscribeWorkflowResponse\x12]\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32\x42.temporal.server.chasm.lib.stream.proto.v1.SubscribeWorkflowOutput"\x83\x01\n\x13PollMessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12V\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.PollMessagesInput"p\n\x14PollMessagesResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.PollMessagesOutput"\x87\x01\n\x15\x44\x65scribeStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12X\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32>.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamInput"t\n\x16\x44\x65scribeStreamResponse\x12Z\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32?.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamOutput"\x93\x01\n\x1bPollWorkflowMessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12^\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x44.temporal.server.chasm.lib.stream.proto.v1.PollWorkflowMessagesInput"x\n\x1cPollWorkflowMessagesResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.PollMessagesOutput"\x97\x01\n\x1d\x44\x65scribeWorkflowStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12`\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x46.temporal.server.chasm.lib.stream.proto.v1.DescribeWorkflowStreamInput"|\n\x1e\x44\x65scribeWorkflowStreamResponse\x12Z\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32?.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamOutput"\x90\x01\n\x1bRegisterStreamConsumerInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x1c\n\x14\x63onsumer_workflow_id\x18\x03 \x01(\t\x12\x17\n\x0f\x63onsumer_run_id\x18\x05 \x01(\t\x12\x14\n\x0cstart_offset\x18\x04 \x01(\x03"T\n\x1cRegisterStreamConsumerOutput\x12\x14\n\x0cstart_offset\x18\x01 \x01(\x03\x12\x12\n\nknown_head\x18\x04 \x01(\x03J\x04\x08\x02\x10\x03J\x04\x08\x03\x10\x04"\x80\x01\n\x18\x41\x64vanceConsumerHeadInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x05 \x01(\t\x12\x11\n\tstream_id\x18\x03 \x01(\t\x12\x13\n\x0bhead_offset\x18\x04 \x01(\x03"n\n\x19\x41\x64vanceConsumerHeadOutput\x12\x17\n\x0f\x63onsumer_closed\x18\x01 \x01(\x08\x12\x18\n\x10successor_run_id\x18\x02 \x01(\t\x12\x1e\n\x16successor_start_offset\x18\x03 \x01(\x03"\x91\x01\n\x1a\x41\x64\x64WorkflowMessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12]\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x43.temporal.server.chasm.lib.stream.proto.v1.AddWorkflowMessagesInput"v\n\x1b\x41\x64\x64WorkflowMessagesResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.AddMessagesOutput"\x97\x01\n\x1dRegisterStreamConsumerRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12`\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x46.temporal.server.chasm.lib.stream.proto.v1.RegisterStreamConsumerInput"\x84\x01\n\x1eRegisterStreamConsumerResponse\x12\x62\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32G.temporal.server.chasm.lib.stream.proto.v1.RegisterStreamConsumerOutput"\x91\x01\n\x1a\x41\x64vanceConsumerHeadRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12]\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x43.temporal.server.chasm.lib.stream.proto.v1.AdvanceConsumerHeadInput"~\n\x1b\x41\x64vanceConsumerHeadResponse\x12_\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32\x44.temporal.server.chasm.lib.stream.proto.v1.AdvanceConsumerHeadOutput"\x81\x01\n\x12\x43loseStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12U\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32;.temporal.server.chasm.lib.stream.proto.v1.CloseStreamInput"n\n\x13\x43loseStreamResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.CloseStreamOutput"\x87\x01\n\x15TruncateStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12X\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32>.temporal.server.chasm.lib.stream.proto.v1.TruncateStreamInput"t\n\x16TruncateStreamResponse\x12Z\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32?.temporal.server.chasm.lib.stream.proto.v1.TruncateStreamOutput"`\n\x10ListStreamsInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tpage_size\x18\x02 \x01(\x05\x12\x17\n\x0fnext_page_token\x18\x03 \x01(\x0c\x12\r\n\x05query\x18\x04 \x01(\t"4\n\x0fStreamListEntry\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t"y\n\x11ListStreamsOutput\x12K\n\x07streams\x18\x01 \x03(\x0b\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamListEntry\x12\x17\n\x0fnext_page_token\x18\x02 \x01(\x0c"\x81\x01\n\x12ListStreamsRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12U\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32;.temporal.server.chasm.lib.stream.proto.v1.ListStreamsInput"n\n\x13ListStreamsResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.ListStreamsOutput"\x83\x01\n\x13\x44\x65leteStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12V\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.DeleteStreamInput"p\n\x14\x44\x65leteStreamResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.DeleteStreamOutputB>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
+    b'\n/temporalio/api/stream/v1/request_response.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a&temporalio/api/stream/v1/message.proto\x1a+temporalio/api/stream/v1/stream_state.proto\x1a$temporal/api/common/v1/message.proto"\x88\x01\n\x11\x43reateStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12M\n\tlifecycle\x18\x03 \x01(\x0b\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamLifecycle"$\n\x12\x43reateStreamOutput\x12\x0e\n\x06run_id\x18\x01 \x01(\t"\xf5\x01\n\x10\x41\x64\x64MessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\t \x01(\t\x12H\n\x07records\x18\x03 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12\x13\n\x0bproducer_id\x18\x04 \x01(\t\x12\x10\n\x08sequence\x18\x05 \x01(\x03\x12\x17\n\x0f\x65xpected_offset\x18\x06 \x01(\x03\x12\x1b\n\x13use_expected_offset\x18\x08 \x01(\x08J\x04\x08\x07\x10\x08"c\n\x11\x41\x64\x64MessagesOutput\x12\x14\n\x0c\x66irst_offset\x18\x01 \x01(\x03\x12\x13\n\x0bnext_offset\x18\x02 \x01(\x03\x12\r\n\x05\x63ount\x18\x03 \x01(\x03\x12\x14\n\x0c\x64\x65\x64uplicated\x18\x04 \x01(\x08"O\n\x12\x46inishWritingInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x13\n\x0bproducer_id\x18\x03 \x01(\t"\x15\n\x13\x46inishWritingOutput"\x94\x01\n\x16SubscribeWorkflowInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x06 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t\x12\x11\n\tstream_id\x18\x05 \x01(\t\x12\x14\n\x0cstart_offset\x18\x04 \x01(\x03"/\n\x17SubscribeWorkflowOutput\x12\x14\n\x0cstart_offset\x18\x01 \x01(\x03"\x9f\x01\n\x11PollMessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x07 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x03 \x01(\x03\x12\x14\n\x0cmax_messages\x18\x04 \x01(\x05\x12\x0e\n\x06topics\x18\x05 \x03(\t\x12\x19\n\x11wait_new_messages\x18\x06 \x01(\x08"\xdf\x01\n\x12PollMessagesOutput\x12H\n\x07records\x18\x01 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12\x13\n\x0bnext_offset\x18\x02 \x01(\x03\x12\x13\n\x0bhead_offset\x18\x03 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x35\n\x0c\x63lose_reason\x18\x05 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x0e\n\x06run_id\x18\x06 \x01(\t";\n\x13\x44\x65scribeStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t"\x88\x01\n\x0bStreamOwner\x12H\n\x04kind\x18\x01 \x01(\x0e\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamOwnerKind\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x03 \x01(\t\x12\x13\n\x0b\x61\x63tivity_id\x18\x04 \x01(\t"\x8b\x02\n\x19PollWorkflowMessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x45\n\x05owner\x18\t \x01(\x0b\x32\x36.temporal.server.chasm.lib.stream.proto.v1.StreamOwner\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x08 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t\x12\x13\n\x0b\x66rom_offset\x18\x04 \x01(\x03\x12\x14\n\x0cmax_messages\x18\x05 \x01(\x05\x12\x0e\n\x06topics\x18\x06 \x03(\t\x12\x19\n\x11wait_new_messages\x18\x07 \x01(\x08"\xb7\x01\n\x1b\x44\x65scribeWorkflowStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x45\n\x05owner\x18\x05 \x01(\x0b\x32\x36.temporal.server.chasm.lib.stream.proto.v1.StreamOwner\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x04 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t"\xa5\x02\n\x18\x41\x64\x64WorkflowMessagesInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x45\n\x05owner\x18\x08 \x01(\x0b\x32\x36.temporal.server.chasm.lib.stream.proto.v1.StreamOwner\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x07 \x01(\t\x12\x13\n\x0bstream_name\x18\x03 \x01(\t\x12H\n\x07records\x18\x04 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12\x13\n\x0bproducer_id\x18\x05 \x01(\t\x12\x10\n\x08sequence\x18\x06 \x01(\x03"]\n\x14\x44\x65scribeStreamOutput\x12\x45\n\x05state\x18\x01 \x01(\x0b\x32\x36.temporal.server.chasm.lib.stream.proto.v1.StreamState"i\n\x10\x43loseStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12/\n\x06reason\x18\x03 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload"\x13\n\x11\x43loseStreamOutput"T\n\x13TruncateStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x17\n\x0fnew_base_offset\x18\x03 \x01(\x03"\x16\n\x14TruncateStreamOutput"H\n\x11\x44\x65leteStreamInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\r\n\x05\x66orce\x18\x03 \x01(\x08"\x14\n\x12\x44\x65leteStreamOutput"\x83\x01\n\x13\x43reateStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12V\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.CreateStreamInput"p\n\x14\x43reateStreamResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.CreateStreamOutput"\x81\x01\n\x12\x41\x64\x64MessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12U\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32;.temporal.server.chasm.lib.stream.proto.v1.AddMessagesInput"n\n\x13\x41\x64\x64MessagesResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.AddMessagesOutput"\x85\x01\n\x14\x46inishWritingRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12W\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.FinishWritingInput"r\n\x15\x46inishWritingResponse\x12Y\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32>.temporal.server.chasm.lib.stream.proto.v1.FinishWritingOutput"\x8d\x01\n\x18SubscribeWorkflowRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12[\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x41.temporal.server.chasm.lib.stream.proto.v1.SubscribeWorkflowInput"z\n\x19SubscribeWorkflowResponse\x12]\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32\x42.temporal.server.chasm.lib.stream.proto.v1.SubscribeWorkflowOutput"\x83\x01\n\x13PollMessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12V\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.PollMessagesInput"p\n\x14PollMessagesResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.PollMessagesOutput"\x87\x01\n\x15\x44\x65scribeStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12X\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32>.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamInput"t\n\x16\x44\x65scribeStreamResponse\x12Z\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32?.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamOutput"\x93\x01\n\x1bPollWorkflowMessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12^\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x44.temporal.server.chasm.lib.stream.proto.v1.PollWorkflowMessagesInput"x\n\x1cPollWorkflowMessagesResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.PollMessagesOutput"\x97\x01\n\x1d\x44\x65scribeWorkflowStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12`\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x46.temporal.server.chasm.lib.stream.proto.v1.DescribeWorkflowStreamInput"|\n\x1e\x44\x65scribeWorkflowStreamResponse\x12Z\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32?.temporal.server.chasm.lib.stream.proto.v1.DescribeStreamOutput"\x90\x01\n\x1bRegisterStreamConsumerInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x1c\n\x14\x63onsumer_workflow_id\x18\x03 \x01(\t\x12\x17\n\x0f\x63onsumer_run_id\x18\x05 \x01(\t\x12\x14\n\x0cstart_offset\x18\x04 \x01(\x03"k\n\x1cRegisterStreamConsumerOutput\x12\x14\n\x0cstart_offset\x18\x01 \x01(\x03\x12\x12\n\nknown_head\x18\x04 \x01(\x03\x12\x15\n\rstream_absent\x18\x05 \x01(\x08J\x04\x08\x02\x10\x03J\x04\x08\x03\x10\x04"\x80\x01\n\x18\x41\x64vanceConsumerHeadInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x13\n\x0bworkflow_id\x18\x02 \x01(\t\x12\x14\n\x0cowner_run_id\x18\x05 \x01(\t\x12\x11\n\tstream_id\x18\x03 \x01(\t\x12\x13\n\x0bhead_offset\x18\x04 \x01(\x03"n\n\x19\x41\x64vanceConsumerHeadOutput\x12\x17\n\x0f\x63onsumer_closed\x18\x01 \x01(\x08\x12\x18\n\x10successor_run_id\x18\x02 \x01(\t\x12\x1e\n\x16successor_start_offset\x18\x03 \x01(\x03"\x91\x01\n\x1a\x41\x64\x64WorkflowMessagesRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12]\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x43.temporal.server.chasm.lib.stream.proto.v1.AddWorkflowMessagesInput"v\n\x1b\x41\x64\x64WorkflowMessagesResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.AddMessagesOutput"\x97\x01\n\x1dRegisterStreamConsumerRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12`\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x46.temporal.server.chasm.lib.stream.proto.v1.RegisterStreamConsumerInput"\x84\x01\n\x1eRegisterStreamConsumerResponse\x12\x62\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32G.temporal.server.chasm.lib.stream.proto.v1.RegisterStreamConsumerOutput"\x91\x01\n\x1a\x41\x64vanceConsumerHeadRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12]\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32\x43.temporal.server.chasm.lib.stream.proto.v1.AdvanceConsumerHeadInput"~\n\x1b\x41\x64vanceConsumerHeadResponse\x12_\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32\x44.temporal.server.chasm.lib.stream.proto.v1.AdvanceConsumerHeadOutput"\x81\x01\n\x12\x43loseStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12U\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32;.temporal.server.chasm.lib.stream.proto.v1.CloseStreamInput"n\n\x13\x43loseStreamResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.CloseStreamOutput"\x87\x01\n\x15TruncateStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12X\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32>.temporal.server.chasm.lib.stream.proto.v1.TruncateStreamInput"t\n\x16TruncateStreamResponse\x12Z\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32?.temporal.server.chasm.lib.stream.proto.v1.TruncateStreamOutput"`\n\x10ListStreamsInput\x12\x11\n\tnamespace\x18\x01 \x01(\t\x12\x11\n\tpage_size\x18\x02 \x01(\x05\x12\x17\n\x0fnext_page_token\x18\x03 \x01(\x0c\x12\r\n\x05query\x18\x04 \x01(\t"4\n\x0fStreamListEntry\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t"y\n\x11ListStreamsOutput\x12K\n\x07streams\x18\x01 \x03(\x0b\x32:.temporal.server.chasm.lib.stream.proto.v1.StreamListEntry\x12\x17\n\x0fnext_page_token\x18\x02 \x01(\x0c"\x81\x01\n\x12ListStreamsRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12U\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32;.temporal.server.chasm.lib.stream.proto.v1.ListStreamsInput"n\n\x13ListStreamsResponse\x12W\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.ListStreamsOutput"\x83\x01\n\x13\x44\x65leteStreamRequest\x12\x14\n\x0cnamespace_id\x18\x01 \x01(\t\x12V\n\x10\x66rontend_request\x18\x02 \x01(\x0b\x32<.temporal.server.chasm.lib.stream.proto.v1.DeleteStreamInput"p\n\x14\x44\x65leteStreamResponse\x12X\n\x11\x66rontend_response\x18\x01 \x01(\x0b\x32=.temporal.server.chasm.lib.stream.proto.v1.DeleteStreamOutput*\x9d\x01\n\x0fStreamOwnerKind\x12!\n\x1dSTREAM_OWNER_KIND_UNSPECIFIED\x10\x00\x12\x1e\n\x1aSTREAM_OWNER_KIND_WORKFLOW\x10\x01\x12\x1e\n\x1aSTREAM_OWNER_KIND_ACTIVITY\x10\x02\x12\'\n#STREAM_OWNER_KIND_WORKFLOW_ACTIVITY\x10\x03\x42>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
 )
+
+_STREAMOWNERKIND = DESCRIPTOR.enum_types_by_name["StreamOwnerKind"]
+StreamOwnerKind = enum_type_wrapper.EnumTypeWrapper(_STREAMOWNERKIND)
+STREAM_OWNER_KIND_UNSPECIFIED = 0
+STREAM_OWNER_KIND_WORKFLOW = 1
+STREAM_OWNER_KIND_ACTIVITY = 2
+STREAM_OWNER_KIND_WORKFLOW_ACTIVITY = 3
 
 
 _CREATESTREAMINPUT = DESCRIPTOR.message_types_by_name["CreateStreamInput"]
@@ -40,6 +48,7 @@ _SUBSCRIBEWORKFLOWOUTPUT = DESCRIPTOR.message_types_by_name["SubscribeWorkflowOu
 _POLLMESSAGESINPUT = DESCRIPTOR.message_types_by_name["PollMessagesInput"]
 _POLLMESSAGESOUTPUT = DESCRIPTOR.message_types_by_name["PollMessagesOutput"]
 _DESCRIBESTREAMINPUT = DESCRIPTOR.message_types_by_name["DescribeStreamInput"]
+_STREAMOWNER = DESCRIPTOR.message_types_by_name["StreamOwner"]
 _POLLWORKFLOWMESSAGESINPUT = DESCRIPTOR.message_types_by_name[
     "PollWorkflowMessagesInput"
 ]
@@ -239,6 +248,17 @@ DescribeStreamInput = _reflection.GeneratedProtocolMessageType(
     },
 )
 _sym_db.RegisterMessage(DescribeStreamInput)
+
+StreamOwner = _reflection.GeneratedProtocolMessageType(
+    "StreamOwner",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _STREAMOWNER,
+        "__module__": "temporalio.api.streamservice.v1.request_response_pb2",
+        # @@protoc_insertion_point(class_scope:temporal.server.chasm.lib.stream.proto.v1.StreamOwner)
+    },
+)
+_sym_db.RegisterMessage(StreamOwner)
 
 PollWorkflowMessagesInput = _reflection.GeneratedProtocolMessageType(
     "PollWorkflowMessagesInput",
@@ -762,6 +782,8 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._serialized_options = (
         b"Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampb"
     )
+    _STREAMOWNERKIND._serialized_start = 7484
+    _STREAMOWNERKIND._serialized_end = 7641
     _CREATESTREAMINPUT._serialized_start = 218
     _CREATESTREAMINPUT._serialized_end = 354
     _CREATESTREAMOUTPUT._serialized_start = 356
@@ -784,98 +806,100 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     _POLLMESSAGESOUTPUT._serialized_end = 1433
     _DESCRIBESTREAMINPUT._serialized_start = 1435
     _DESCRIBESTREAMINPUT._serialized_end = 1494
-    _POLLWORKFLOWMESSAGESINPUT._serialized_start = 1497
-    _POLLWORKFLOWMESSAGESINPUT._serialized_end = 1693
-    _DESCRIBEWORKFLOWSTREAMINPUT._serialized_start = 1695
-    _DESCRIBEWORKFLOWSTREAMINPUT._serialized_end = 1807
-    _ADDWORKFLOWMESSAGESINPUT._serialized_start = 1810
-    _ADDWORKFLOWMESSAGESINPUT._serialized_end = 2032
-    _DESCRIBESTREAMOUTPUT._serialized_start = 2034
-    _DESCRIBESTREAMOUTPUT._serialized_end = 2127
-    _CLOSESTREAMINPUT._serialized_start = 2129
-    _CLOSESTREAMINPUT._serialized_end = 2234
-    _CLOSESTREAMOUTPUT._serialized_start = 2236
-    _CLOSESTREAMOUTPUT._serialized_end = 2255
-    _TRUNCATESTREAMINPUT._serialized_start = 2257
-    _TRUNCATESTREAMINPUT._serialized_end = 2341
-    _TRUNCATESTREAMOUTPUT._serialized_start = 2343
-    _TRUNCATESTREAMOUTPUT._serialized_end = 2365
-    _DELETESTREAMINPUT._serialized_start = 2367
-    _DELETESTREAMINPUT._serialized_end = 2439
-    _DELETESTREAMOUTPUT._serialized_start = 2441
-    _DELETESTREAMOUTPUT._serialized_end = 2461
-    _CREATESTREAMREQUEST._serialized_start = 2464
-    _CREATESTREAMREQUEST._serialized_end = 2595
-    _CREATESTREAMRESPONSE._serialized_start = 2597
-    _CREATESTREAMRESPONSE._serialized_end = 2709
-    _ADDMESSAGESREQUEST._serialized_start = 2712
-    _ADDMESSAGESREQUEST._serialized_end = 2841
-    _ADDMESSAGESRESPONSE._serialized_start = 2843
-    _ADDMESSAGESRESPONSE._serialized_end = 2953
-    _FINISHWRITINGREQUEST._serialized_start = 2956
-    _FINISHWRITINGREQUEST._serialized_end = 3089
-    _FINISHWRITINGRESPONSE._serialized_start = 3091
-    _FINISHWRITINGRESPONSE._serialized_end = 3205
-    _SUBSCRIBEWORKFLOWREQUEST._serialized_start = 3208
-    _SUBSCRIBEWORKFLOWREQUEST._serialized_end = 3349
-    _SUBSCRIBEWORKFLOWRESPONSE._serialized_start = 3351
-    _SUBSCRIBEWORKFLOWRESPONSE._serialized_end = 3473
-    _POLLMESSAGESREQUEST._serialized_start = 3476
-    _POLLMESSAGESREQUEST._serialized_end = 3607
-    _POLLMESSAGESRESPONSE._serialized_start = 3609
-    _POLLMESSAGESRESPONSE._serialized_end = 3721
-    _DESCRIBESTREAMREQUEST._serialized_start = 3724
-    _DESCRIBESTREAMREQUEST._serialized_end = 3859
-    _DESCRIBESTREAMRESPONSE._serialized_start = 3861
-    _DESCRIBESTREAMRESPONSE._serialized_end = 3977
-    _POLLWORKFLOWMESSAGESREQUEST._serialized_start = 3980
-    _POLLWORKFLOWMESSAGESREQUEST._serialized_end = 4127
-    _POLLWORKFLOWMESSAGESRESPONSE._serialized_start = 4129
-    _POLLWORKFLOWMESSAGESRESPONSE._serialized_end = 4249
-    _DESCRIBEWORKFLOWSTREAMREQUEST._serialized_start = 4252
-    _DESCRIBEWORKFLOWSTREAMREQUEST._serialized_end = 4403
-    _DESCRIBEWORKFLOWSTREAMRESPONSE._serialized_start = 4405
-    _DESCRIBEWORKFLOWSTREAMRESPONSE._serialized_end = 4529
-    _REGISTERSTREAMCONSUMERINPUT._serialized_start = 4532
-    _REGISTERSTREAMCONSUMERINPUT._serialized_end = 4676
-    _REGISTERSTREAMCONSUMEROUTPUT._serialized_start = 4678
-    _REGISTERSTREAMCONSUMEROUTPUT._serialized_end = 4762
-    _ADVANCECONSUMERHEADINPUT._serialized_start = 4765
-    _ADVANCECONSUMERHEADINPUT._serialized_end = 4893
-    _ADVANCECONSUMERHEADOUTPUT._serialized_start = 4895
-    _ADVANCECONSUMERHEADOUTPUT._serialized_end = 5005
-    _ADDWORKFLOWMESSAGESREQUEST._serialized_start = 5008
-    _ADDWORKFLOWMESSAGESREQUEST._serialized_end = 5153
-    _ADDWORKFLOWMESSAGESRESPONSE._serialized_start = 5155
-    _ADDWORKFLOWMESSAGESRESPONSE._serialized_end = 5273
-    _REGISTERSTREAMCONSUMERREQUEST._serialized_start = 5276
-    _REGISTERSTREAMCONSUMERREQUEST._serialized_end = 5427
-    _REGISTERSTREAMCONSUMERRESPONSE._serialized_start = 5430
-    _REGISTERSTREAMCONSUMERRESPONSE._serialized_end = 5562
-    _ADVANCECONSUMERHEADREQUEST._serialized_start = 5565
-    _ADVANCECONSUMERHEADREQUEST._serialized_end = 5710
-    _ADVANCECONSUMERHEADRESPONSE._serialized_start = 5712
-    _ADVANCECONSUMERHEADRESPONSE._serialized_end = 5838
-    _CLOSESTREAMREQUEST._serialized_start = 5841
-    _CLOSESTREAMREQUEST._serialized_end = 5970
-    _CLOSESTREAMRESPONSE._serialized_start = 5972
-    _CLOSESTREAMRESPONSE._serialized_end = 6082
-    _TRUNCATESTREAMREQUEST._serialized_start = 6085
-    _TRUNCATESTREAMREQUEST._serialized_end = 6220
-    _TRUNCATESTREAMRESPONSE._serialized_start = 6222
-    _TRUNCATESTREAMRESPONSE._serialized_end = 6338
-    _LISTSTREAMSINPUT._serialized_start = 6340
-    _LISTSTREAMSINPUT._serialized_end = 6436
-    _STREAMLISTENTRY._serialized_start = 6438
-    _STREAMLISTENTRY._serialized_end = 6490
-    _LISTSTREAMSOUTPUT._serialized_start = 6492
-    _LISTSTREAMSOUTPUT._serialized_end = 6613
-    _LISTSTREAMSREQUEST._serialized_start = 6616
-    _LISTSTREAMSREQUEST._serialized_end = 6745
-    _LISTSTREAMSRESPONSE._serialized_start = 6747
-    _LISTSTREAMSRESPONSE._serialized_end = 6857
-    _DELETESTREAMREQUEST._serialized_start = 6860
-    _DELETESTREAMREQUEST._serialized_end = 6991
-    _DELETESTREAMRESPONSE._serialized_start = 6993
-    _DELETESTREAMRESPONSE._serialized_end = 7105
+    _STREAMOWNER._serialized_start = 1497
+    _STREAMOWNER._serialized_end = 1633
+    _POLLWORKFLOWMESSAGESINPUT._serialized_start = 1636
+    _POLLWORKFLOWMESSAGESINPUT._serialized_end = 1903
+    _DESCRIBEWORKFLOWSTREAMINPUT._serialized_start = 1906
+    _DESCRIBEWORKFLOWSTREAMINPUT._serialized_end = 2089
+    _ADDWORKFLOWMESSAGESINPUT._serialized_start = 2092
+    _ADDWORKFLOWMESSAGESINPUT._serialized_end = 2385
+    _DESCRIBESTREAMOUTPUT._serialized_start = 2387
+    _DESCRIBESTREAMOUTPUT._serialized_end = 2480
+    _CLOSESTREAMINPUT._serialized_start = 2482
+    _CLOSESTREAMINPUT._serialized_end = 2587
+    _CLOSESTREAMOUTPUT._serialized_start = 2589
+    _CLOSESTREAMOUTPUT._serialized_end = 2608
+    _TRUNCATESTREAMINPUT._serialized_start = 2610
+    _TRUNCATESTREAMINPUT._serialized_end = 2694
+    _TRUNCATESTREAMOUTPUT._serialized_start = 2696
+    _TRUNCATESTREAMOUTPUT._serialized_end = 2718
+    _DELETESTREAMINPUT._serialized_start = 2720
+    _DELETESTREAMINPUT._serialized_end = 2792
+    _DELETESTREAMOUTPUT._serialized_start = 2794
+    _DELETESTREAMOUTPUT._serialized_end = 2814
+    _CREATESTREAMREQUEST._serialized_start = 2817
+    _CREATESTREAMREQUEST._serialized_end = 2948
+    _CREATESTREAMRESPONSE._serialized_start = 2950
+    _CREATESTREAMRESPONSE._serialized_end = 3062
+    _ADDMESSAGESREQUEST._serialized_start = 3065
+    _ADDMESSAGESREQUEST._serialized_end = 3194
+    _ADDMESSAGESRESPONSE._serialized_start = 3196
+    _ADDMESSAGESRESPONSE._serialized_end = 3306
+    _FINISHWRITINGREQUEST._serialized_start = 3309
+    _FINISHWRITINGREQUEST._serialized_end = 3442
+    _FINISHWRITINGRESPONSE._serialized_start = 3444
+    _FINISHWRITINGRESPONSE._serialized_end = 3558
+    _SUBSCRIBEWORKFLOWREQUEST._serialized_start = 3561
+    _SUBSCRIBEWORKFLOWREQUEST._serialized_end = 3702
+    _SUBSCRIBEWORKFLOWRESPONSE._serialized_start = 3704
+    _SUBSCRIBEWORKFLOWRESPONSE._serialized_end = 3826
+    _POLLMESSAGESREQUEST._serialized_start = 3829
+    _POLLMESSAGESREQUEST._serialized_end = 3960
+    _POLLMESSAGESRESPONSE._serialized_start = 3962
+    _POLLMESSAGESRESPONSE._serialized_end = 4074
+    _DESCRIBESTREAMREQUEST._serialized_start = 4077
+    _DESCRIBESTREAMREQUEST._serialized_end = 4212
+    _DESCRIBESTREAMRESPONSE._serialized_start = 4214
+    _DESCRIBESTREAMRESPONSE._serialized_end = 4330
+    _POLLWORKFLOWMESSAGESREQUEST._serialized_start = 4333
+    _POLLWORKFLOWMESSAGESREQUEST._serialized_end = 4480
+    _POLLWORKFLOWMESSAGESRESPONSE._serialized_start = 4482
+    _POLLWORKFLOWMESSAGESRESPONSE._serialized_end = 4602
+    _DESCRIBEWORKFLOWSTREAMREQUEST._serialized_start = 4605
+    _DESCRIBEWORKFLOWSTREAMREQUEST._serialized_end = 4756
+    _DESCRIBEWORKFLOWSTREAMRESPONSE._serialized_start = 4758
+    _DESCRIBEWORKFLOWSTREAMRESPONSE._serialized_end = 4882
+    _REGISTERSTREAMCONSUMERINPUT._serialized_start = 4885
+    _REGISTERSTREAMCONSUMERINPUT._serialized_end = 5029
+    _REGISTERSTREAMCONSUMEROUTPUT._serialized_start = 5031
+    _REGISTERSTREAMCONSUMEROUTPUT._serialized_end = 5138
+    _ADVANCECONSUMERHEADINPUT._serialized_start = 5141
+    _ADVANCECONSUMERHEADINPUT._serialized_end = 5269
+    _ADVANCECONSUMERHEADOUTPUT._serialized_start = 5271
+    _ADVANCECONSUMERHEADOUTPUT._serialized_end = 5381
+    _ADDWORKFLOWMESSAGESREQUEST._serialized_start = 5384
+    _ADDWORKFLOWMESSAGESREQUEST._serialized_end = 5529
+    _ADDWORKFLOWMESSAGESRESPONSE._serialized_start = 5531
+    _ADDWORKFLOWMESSAGESRESPONSE._serialized_end = 5649
+    _REGISTERSTREAMCONSUMERREQUEST._serialized_start = 5652
+    _REGISTERSTREAMCONSUMERREQUEST._serialized_end = 5803
+    _REGISTERSTREAMCONSUMERRESPONSE._serialized_start = 5806
+    _REGISTERSTREAMCONSUMERRESPONSE._serialized_end = 5938
+    _ADVANCECONSUMERHEADREQUEST._serialized_start = 5941
+    _ADVANCECONSUMERHEADREQUEST._serialized_end = 6086
+    _ADVANCECONSUMERHEADRESPONSE._serialized_start = 6088
+    _ADVANCECONSUMERHEADRESPONSE._serialized_end = 6214
+    _CLOSESTREAMREQUEST._serialized_start = 6217
+    _CLOSESTREAMREQUEST._serialized_end = 6346
+    _CLOSESTREAMRESPONSE._serialized_start = 6348
+    _CLOSESTREAMRESPONSE._serialized_end = 6458
+    _TRUNCATESTREAMREQUEST._serialized_start = 6461
+    _TRUNCATESTREAMREQUEST._serialized_end = 6596
+    _TRUNCATESTREAMRESPONSE._serialized_start = 6598
+    _TRUNCATESTREAMRESPONSE._serialized_end = 6714
+    _LISTSTREAMSINPUT._serialized_start = 6716
+    _LISTSTREAMSINPUT._serialized_end = 6812
+    _STREAMLISTENTRY._serialized_start = 6814
+    _STREAMLISTENTRY._serialized_end = 6866
+    _LISTSTREAMSOUTPUT._serialized_start = 6868
+    _LISTSTREAMSOUTPUT._serialized_end = 6989
+    _LISTSTREAMSREQUEST._serialized_start = 6992
+    _LISTSTREAMSREQUEST._serialized_end = 7121
+    _LISTSTREAMSRESPONSE._serialized_start = 7123
+    _LISTSTREAMSRESPONSE._serialized_end = 7233
+    _DELETESTREAMREQUEST._serialized_start = 7236
+    _DELETESTREAMREQUEST._serialized_end = 7367
+    _DELETESTREAMRESPONSE._serialized_start = 7369
+    _DELETESTREAMRESPONSE._serialized_end = 7481
 # @@protoc_insertion_point(module_scope)

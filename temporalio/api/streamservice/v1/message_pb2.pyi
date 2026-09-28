@@ -70,8 +70,8 @@ class StreamRecord(google.protobuf.message.Message):
         """Producer-supplied provenance, stored as sent."""
     topic: builtins.str
     sequence: builtins.int
-    """The producer's position within its attempt, or -1 when unnumbered. Stored
-    as sent; the global offset is what orders the stream.
+    """The producer's position within its attempt, zero when it does not number
+    its records. Stored as sent; the global offset is what orders the stream.
     """
     kind: temporalio.api.stream.v1.message_pb2.StreamRecordKind.ValueType
     """Settled to DATA on append when left unspecified, so a retry hashes the
