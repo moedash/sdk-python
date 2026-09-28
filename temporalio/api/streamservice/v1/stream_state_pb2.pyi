@@ -122,7 +122,10 @@ class StreamState(google.protobuf.message.Message):
         """
     appended_bytes: builtins.int
     """Bytes appended over the stream's life, kept for the budget check. A stream
-    with a budget never reclaims, so this is also what it holds.
+    with a budget carries no lifecycle cap and is never truncated, so nothing
+    reclaims behind it and this is also what it holds. The item side of the
+    budget measures head minus base for the same reason: offsets are global
+    and a stream can begin above zero.
     """
     notify_pending: builtins.bool
     """A notify task is scheduled and has not run yet. Appends while it is set
@@ -414,6 +417,12 @@ class StreamLifecycle(google.protobuf.message.Message):
     max_items: builtins.int
     """Cap on readable messages. Whole batches are reclaimed once the floor
     passes them, so a capped stream has bounded storage.
+
+    While a workflow consumer is registered the cap stops being a rolling
+    window: the consumer's floor sits at the offset it subscribed from,
+    because replay re-reads every range its History recorded, so the cap
+    behaves as a lifetime quota measured from that subscription and appends
+    past it are refused rather than reclaiming behind the consumer.
     """
     def __init__(
         self,

@@ -134,7 +134,9 @@ class StreamServiceServicer(object):
         raise NotImplementedError("Method not implemented!")
 
     def PollWorkflowMessages(self, request, context):
-        """Routed on the owner, because the stream it reads has no id of its own."""
+        """The owned-stream calls are routed on the owner, because the stream has no
+        id of its own. A workflow's activity is routed on the workflow.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
