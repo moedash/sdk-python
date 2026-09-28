@@ -6,7 +6,11 @@ first: the workflow publishes to it with a command the server applies in the
 transaction that accepts the Workflow Task, subscribes to it by name and reads
 the ranges the server delivers on its Workflow Tasks; outside code appends and
 reads through the stream service, and the workflow's records and an outside
-producer's land in one log in the order the server accepted them.
+producer's land in one log in the order the server accepted them. The default
+topic, :data:`temporalio.streams.DEFAULT_TOPIC`, is the server's default
+stream: the server resolves an unnamed stream to that same name, so the
+provider sends the name explicitly and a record's topic and its stream's name
+never differ.
 
 A cursor names the run as well as the offset, because an owned stream belongs
 to one run and a successor's starts over at zero. A handle without a run id
@@ -325,7 +329,7 @@ class NativeStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
@@ -374,7 +378,7 @@ class NativeStreamHandle:
                 return
             run_id, offset = successor, 0
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, naming the run it was read from.
 
         An empty topic on the chain's first run is the beginning of the
@@ -398,7 +402,7 @@ class NativeStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> NativeProducer[Any]:
