@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +34,7 @@ from temporalio.common import RawValue
 from temporalio.streams import (
     BEGINNING,
     DEFAULT_TOPIC,
+    END,
     Cursor,
     RecordKind,
     StreamCursorError,
@@ -64,6 +65,9 @@ class ProviderCase:
     """``append()`` returns where the records landed."""
     detects_divergent_retries: bool = True
     """``append()`` compares a repeat's content with what it already holds."""
+    truncate: Callable[[str, str, int], Awaitable[None]] | None = None
+    """Drops all but the newest records of a workflow's topic, standing in
+    for retention, or ``None`` when the provider offers no way to."""
 
     async def open(
         self, workflow_id: str, *, run_id: str | None = None
@@ -78,7 +82,11 @@ class ProviderCase:
 
 async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     provider = MemoryStreams()
-    yield ProviderCase("memory", provider)
+
+    async def truncate(workflow_id: str, topic: str, keep: int) -> None:
+        provider.truncate(workflow_id, topic, keep=keep)
+
+    yield ProviderCase("memory", provider, truncate=truncate)
     provider.reset()
 
 
@@ -89,6 +97,7 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
     "detects_divergent_retries": lambda case: case.detects_divergent_retries,
+    "truncates": lambda case: case.truncate is not None,
 }
 
 
@@ -394,3 +403,89 @@ async def test_a_definition_carries_its_type_once(case: ProviderCase):
         topic("", dict)
     # A string names a topic decided at runtime, and the hint rides the call.
     assert await stream.latest(topic=OUT.name) == BEGINNING
+
+
+async def test_last_n_starts_at_the_newest_records(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+
+    newest = await take(stream.read(topic=OUT, last=2), 2)
+    assert [r.value for r in newest] == [{"n": 3}, {"n": 4}]
+    # Fewer records than asked for is all of them, not an error.
+    everything = await take(stream.read(topic=OUT, last=100), 4)
+    assert [r.value for r in everything] == [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}]
+    # The cursors it yields are ordinary cursors, so a resume after one works.
+    again = await take(stream.read(topic=OUT, after=newest[0].cursor), 1)
+    assert [r.value for r in again] == [{"n": 4}]
+
+
+async def test_last_n_counts_finish_records(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await producer.append({"n": 1}, {"n": 2})
+    await producer.finish()
+
+    records = await take(stream.read(topic=OUT, last=2), 2)
+    assert [(r.kind, r.value) for r in records] == [
+        (RecordKind.DATA, {"n": 2}),
+        (RecordKind.FINISH, None),
+    ]
+
+
+async def test_end_reads_only_what_arrives_after_the_read_starts(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await producer.append({"n": "old"}, {"n": "old"})
+
+    records = stream.read(topic=OUT, after=END)
+    first = asyncio.ensure_future(records.__anext__())
+    # END resolves when the read starts, and nothing says when that was, so
+    # appends keep coming until the reader takes one.
+    try:
+        for _ in range(100):
+            await producer.append({"n": "new"})
+            done, _ = await asyncio.wait({first}, timeout=0.1)
+            if done:
+                break
+        record = await asyncio.wait_for(first, 5)
+    finally:
+        await records.aclose()
+    assert record.value == {"n": "new"}
+
+
+@pytest.mark.truncates
+async def test_beginning_starts_at_the_oldest_record_still_held(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+    before = await take(stream.read(topic=OUT), 1)
+    assert case.truncate is not None
+    await case.truncate(workflow_id, OUT.name, 2)
+
+    # BEGINNING is the oldest record retained, not offset zero, which a
+    # truncated stream no longer holds.
+    records = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in records] == [{"n": 3}, {"n": 4}]
+    newest = await take(stream.read(topic=OUT, last=3), 2)
+    assert [r.value for r in newest] == [{"n": 3}, {"n": 4}]
+    with pytest.raises(StreamCursorError):
+        stream.read(topic=OUT, after=before[0].cursor)
+
+
+async def test_a_read_start_names_one_place(case: ProviderCase):
+    stream = await case.open(new_workflow_id())
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    appended = await producer.append({"n": 1})
+    for last in (0, -1, True):
+        with pytest.raises(ValueError, match="positive"):
+            stream.read(topic=OUT, last=last)
+    if appended is not None:
+        with pytest.raises(ValueError, match="either after= or last="):
+            stream.read(topic=OUT, after=appended, last=1)
+    with pytest.raises(ValueError, match="either after= or last="):
+        stream.read(topic=OUT, after=END, last=1)
