@@ -19,7 +19,13 @@ import pytest
 
 from temporalio import activity, workflow
 from temporalio.client import Client
-from temporalio.streams import RecordKind, StreamUnsupportedError, topic
+from temporalio.streams import (
+    BEGINNING,
+    DEFAULT_TOPIC,
+    RecordKind,
+    StreamUnsupportedError,
+    topic,
+)
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from tests.helpers import new_worker
@@ -107,6 +113,49 @@ async def test_one_registration_on_the_client_serves_every_context(
             (RecordKind.DATA, {"echo": 0}),
             (RecordKind.DATA, {"echo": 1}),
             (RecordKind.FINISH, None),
+        ]
+
+
+@activity.defn
+async def emit_on_the_default_topic() -> None:
+    await activity.stream_handle().producer().append({"from": "activity"})
+
+
+@workflow.defn
+class Answers:
+    """Waits for the activity's record on the default topic and answers there."""
+
+    @workflow.run
+    async def run(self) -> None:
+        reader = workflow.stream_reader(result_type=dict)
+        await workflow.execute_activity(
+            emit_on_the_default_topic, start_to_close_timeout=timedelta(seconds=30)
+        )
+        async for value in reader.values():
+            workflow.stream_writer().publish({"answer": value["from"]})
+            reader.close()
+
+
+async def test_every_accessor_defaults_to_the_same_topic(
+    client: Client, provider: MemoryStreams
+):
+    registered = _with_provider(client, provider)
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(
+        registered, Answers, activities=[emit_on_the_default_topic]
+    ) as worker:
+        stream = registered.get_stream_handle(workflow_id)
+        assert await stream.latest() == BEGINNING
+        await registered.execute_workflow(
+            Answers.run, id=workflow_id, task_queue=worker.task_queue
+        )
+
+        async def read_everything() -> list[Any]:
+            return [(r.topic, r.value) async for r in stream.read()]
+
+        assert await asyncio.wait_for(read_everything(), 30) == [
+            (DEFAULT_TOPIC, {"from": "activity"}),
+            (DEFAULT_TOPIC, {"answer": "activity"}),
         ]
 
 
