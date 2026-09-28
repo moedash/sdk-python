@@ -597,7 +597,7 @@ class NativeActivityStreamHandle(NativeStreamHandle):
     async def _predecessor(self, run_id: str) -> str | None:
         return None
 
-    async def _successor(self, run_id: str) -> str | None:
+    async def _successor(self, topic: str, run_id: str) -> tuple[str, int] | None:
         return None
 
 
