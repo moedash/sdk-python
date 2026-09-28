@@ -49,7 +49,7 @@ import base64
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, NoReturn, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -82,6 +82,7 @@ from temporalio.streams._errors import (
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
+    StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
@@ -805,6 +806,29 @@ class WorkflowStreamsProvider(ProviderPlugin):
     ) -> WorkflowStreamsHandle:
         """A handle on ``workflow_id``'s log; without ``run_id`` it follows the chain."""
         return WorkflowStreamsHandle(client, workflow_id, run_id, self._poll_cooldown)
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NoReturn:
+        """Refused: this provider cannot hold a stream an activity owns.
+
+        The log lives inside a running workflow and is served by its handlers,
+        and a standalone activity has no workflow to host one. An activity
+        writes to its workflow's topics instead, through
+        ``activity.stream_handle()`` without a scope.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the workflow streams provider cannot hold a stream an activity owns: its "
+            "log lives inside a running workflow"
+        )
 
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection of its own."""

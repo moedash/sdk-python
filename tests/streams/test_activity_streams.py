@@ -32,10 +32,14 @@ from temporalio.streams import (
     BEGINNING,
     RecordKind,
     StreamProvider,
+    StreamUnsupportedError,
     topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.native import NativeStreams
+from temporalio.streams.providers.nexus import NexusStreams
+from temporalio.streams.providers.redis import RedisStreams
+from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.testing import WorkflowEnvironment
 from tests.helpers import new_worker
 
@@ -278,3 +282,25 @@ async def test_a_standalone_activity_has_no_workflow_to_address(setup: ActivityS
 async def test_get_stream_handle_needs_an_owner(setup: ActivitySetup):
     with pytest.raises(ValueError, match="workflow_id or the activity_id"):
         setup.client.get_stream_handle()
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: RedisStreams(),
+        lambda: WorkflowStreamsProvider(),
+        lambda: NexusStreams(endpoint="unused"),
+    ],
+    ids=["redis", "workflow_streams", "nexus"],
+)
+async def test_a_provider_without_activity_owners_says_so(
+    client: Client, make: Callable[[], StreamProvider]
+):
+    # Whether a store can hold an activity's stream is the provider's
+    # capability, so the refusal is the documented error, never an
+    # AttributeError or a stream silently put somewhere else.
+    provider = make()
+    with pytest.raises(StreamUnsupportedError, match="activity"):
+        provider.get_activity_stream_handle(client, "act")
+    with pytest.raises(StreamUnsupportedError, match="activity"):
+        provider.get_activity_stream_handle(client, "act", workflow_id="wf")

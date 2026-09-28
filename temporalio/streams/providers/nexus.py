@@ -995,6 +995,24 @@ class NexusStreams(StreamProvider, temporalio.client.Plugin):
         """
         return NexusStreamHandle(_Front(self, client), workflow_id, run_id)
 
+    def get_activity_stream_handle(
+        self,
+        client: Client | None,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NoReturn:
+        """Refused: the endpoint's operations address a stream by workflow only.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the nexus provider cannot reach a stream an activity owns: the endpoint's "
+            "operations address a stream by workflow only"
+        )
+
     async def close(self) -> None:
         """Nothing to release: each call opens and closes its own connection."""
 

@@ -52,7 +52,7 @@ import re
 import time
 from collections.abc import AsyncGenerator, Coroutine, Sequence
 from datetime import timedelta
-from typing import Any, Final, Generic, TypeVar
+from typing import Any, Final, Generic, NoReturn, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -114,6 +114,7 @@ from temporalio.streams._errors import (
     StreamError,
     StreamNotFoundError,
     StreamProducerError,
+    StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
@@ -1037,6 +1038,28 @@ class RedisStreams(ProviderPlugin):
     ) -> RedisStreamHandle:
         """A handle on ``workflow_id``'s topics; it follows the chain by construction."""
         return RedisStreamHandle(self, client, workflow_id, run_id)
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NoReturn:
+        """Refused: this provider cannot hold a stream an activity owns.
+
+        The transport keys every stream by a workflow chain, and a standalone
+        activity has none. An activity writes to its workflow's topics
+        instead, through ``activity.stream_handle()`` without a scope.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the redis provider cannot hold a stream an activity owns: its transport "
+            "keys every stream by a workflow chain"
+        )
 
     async def close(self) -> None:
         """Release the Redis connections this provider opened."""
