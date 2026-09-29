@@ -1510,7 +1510,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         return self._info
 
     def workflow_subscribe_stream(
-        self, stream_name_or_id: str, start_offset: int
+        self,
+        stream_name_or_id: str,
+        start: temporalio.api.stream.v1.StreamStartPosition,
     ) -> None:
         # Reissued on every replay, so the buffer has to exist before the first
         # range arrives and the command has to be harmless the second time. A
@@ -1520,7 +1522,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         )
         command = self._add_command()
         command.subscribe_stream.stream_name_or_id = stream_name_or_id
-        command.subscribe_stream.start_offset = start_offset
+        command.subscribe_stream.start_position.CopyFrom(start)
 
     def workflow_append_stream_records(
         self,
