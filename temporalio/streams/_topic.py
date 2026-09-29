@@ -10,6 +10,10 @@ runtime; then the decode hint travels as ``result_type=`` on each call.
 
 The wire does not change: a topic is a string on the proto and in every
 store, and :attr:`temporalio.streams.StreamRecord.topic` is that string.
+
+Every workflow also has a default topic, :data:`DEFAULT_TOPIC`, which a call
+addresses by naming no topic at all. It is an ordinary name, so naming it
+explicitly is the same topic, not an error.
 """
 
 from __future__ import annotations
@@ -17,9 +21,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, overload
 
-__all__ = ["StreamTopic", "resolve_topic", "topic"]
+__all__ = ["DEFAULT_TOPIC", "StreamTopic", "resolve_topic", "topic"]
 
 T = TypeVar("T")
+
+DEFAULT_TOPIC = "output"
+"""The topic a call addresses when it names none.
+
+The server resolves an unnamed stream of a workflow to this same name, so on
+the native provider the default topic is the server's default stream, and a
+store with no default of its own holds it under this name. It stays an
+ordinary name rather than a reserved one for the same reason the server does
+not reserve it: refusing it would make one stream reachable under two rules.
+"""
 
 
 @dataclass(frozen=True)
@@ -67,12 +81,13 @@ def topic(name: str, result_type: type | None = None) -> StreamTopic[Any]:
 
 
 def resolve_topic(
-    topic: str | StreamTopic[Any], result_type: type | None = None
+    topic: str | StreamTopic[Any] | None = None, result_type: type | None = None
 ) -> tuple[str, type | None]:
     """The name and decode hint a call means, from either form of topic.
 
     Providers call this once at the top of ``read``, ``latest`` and
     ``producer``, so a definition and a string are the same to the store.
+    ``None`` is a call that named no topic, and means :data:`DEFAULT_TOPIC`.
 
     Raises:
         ValueError: A definition was given together with ``result_type``,
@@ -85,6 +100,8 @@ def resolve_topic(
                 "result_type= with a definition"
             )
         name, result_type = topic.name, topic.result_type
+    elif topic is None:
+        name = DEFAULT_TOPIC
     else:
         name = topic
     if not name:
