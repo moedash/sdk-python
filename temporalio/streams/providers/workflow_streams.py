@@ -115,6 +115,9 @@ _MAX_TAIL_RESPONSE_BYTES = 1_000_000
 # The server's failure type for an accepted Update whose run closed before
 # answering it: the poll's way of saying the run is over.
 _UPDATE_OUTLIVED_RUN = "AcceptedUpdateCompletedWorkflow"
+# The SDK's rejection of an Update no handler is registered for. It shares
+# its wording with the Query one.
+_HANDLER_NOT_FOUND = QUERY_HANDLER_NOT_FOUND
 
 logger = logging.getLogger(__name__)
 
@@ -326,9 +329,10 @@ class _WSWorkflowProvider:
         return _WSWriteSink(self._own_stream(), topic)
 
     def on_workflow_start(self) -> None:
-        # Registered before the first task completes, because an outside
-        # reader can poll before workflow code has opened anything, and an
-        # Update with no handler yet is rejected rather than held.
+        # Registered on the first task, because an outside reader can poll
+        # before workflow code has opened anything, and an Update with no
+        # handler yet is rejected rather than held. A poll that arrives in
+        # that first task still runs ahead of this hook; the reader retries it.
         self._own_stream()
 
     async def on_workflow_finish(self) -> None:
@@ -572,6 +576,7 @@ class WorkflowStreamsHandle:
         runs, which is the outer loop's job.
         """
         cooldown = self._poll_cooldown.total_seconds()
+        unhandled = False
         while True:
             try:
                 update = await handle.start_update(
@@ -605,6 +610,26 @@ class WorkflowStreamsHandle:
                     continue
                 if cause == _UPDATE_OUTLIVED_RUN:
                     return
+                if _HANDLER_NOT_FOUND in str(error.cause):
+                    if await self._status(handle) != WorkflowExecutionStatus.RUNNING:
+                        # The run closed with the rejecting task, as a run
+                        # that continues as new on its first task does; the
+                        # caller describes it and follows the chain.
+                        return
+                    if unhandled:
+                        raise StreamError(
+                            f"workflow {self._workflow_id!r} run {handle.run_id!r} "
+                            "does not serve the poll update: the workflow_streams "
+                            "provider is not installed on its worker, and no "
+                            "WorkflowStream was constructed"
+                        ) from error
+                    # A rejection comes back with the completion of the task
+                    # that made it, so a retry reaches a later task, and the
+                    # start hook registers the handler on the first one. Only
+                    # a second rejection means there is no handler to wait for.
+                    unhandled = True
+                    await asyncio.sleep(cooldown)
+                    continue
                 raise StreamError(
                     f"the poll update on workflow {self._workflow_id!r} failed: {error}"
                 ) from error
