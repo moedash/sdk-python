@@ -15,6 +15,12 @@ so nobody mistakes it for evidence:
   handle only decides which run's close ends a read.
 - It learns that a workflow closed by describing it, so a handle opened
   without a client reads until the caller closes it.
+- An activity's own streams are keyed by the activity, not by its run. A
+  standalone activity's read ends when describing it shows a terminal
+  status. A workflow's activity is described through its workflow: the read
+  ends once the activity has been seen pending and is no longer, or the
+  workflow closed, so a read opened after the activity already finished
+  waits for the workflow.
 
 The outside surface (producer identity, retry deduplication, positions,
 supersession, cursors) is faithful, which is what the conformance tests lean
@@ -34,7 +40,7 @@ from google.protobuf.message import DecodeError
 
 import temporalio.converter
 from temporalio import workflow
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import ActivityExecutionStatus, Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError
 from temporalio.streams._ids import topic_key
@@ -278,20 +284,28 @@ class MemoryProducer(Generic[T]):
 
 
 class MemoryStreamHandle:
-    """One workflow's stream from outside, with the shared reader rules."""
+    """One owner's stream from outside, with the shared reader rules.
+
+    The owner is ``workflow_id``'s workflow, or with ``activity_id`` an
+    activity: a standalone one without ``workflow_id``, or one that workflow
+    scheduled.
+    """
 
     def __init__(
         self,
         streams: MemoryStreams,
         client: Client | None,
-        workflow_id: str,
+        workflow_id: str | None,
         run_id: str | None,
+        activity_id: str | None = None,
     ) -> None:
-        """Address ``workflow_id``'s topics in ``streams``."""
+        """Address the owner's topics in ``streams``."""
         self._streams = streams
         self._client = client
         self._workflow_id = workflow_id
         self._run_id = run_id
+        self._activity_id = activity_id
+        self._seen_pending = False
         self._converter = (
             client.data_converter.payload_converter
             if client is not None
@@ -307,7 +321,7 @@ class MemoryStreamHandle:
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield records on ``topic`` after ``after`` until the workflow closes."""
         name, result_type = resolve_topic(topic, result_type)
-        store = self._streams._topic(self._workflow_id, name)
+        store = self._store(name)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         start = self._streams._offset_after(after)
@@ -347,21 +361,46 @@ class MemoryStreamHandle:
                     else self._streams._poll.total_seconds(),
                 )
 
+    def _store(self, topic: str) -> _Topic:
+        if self._activity_id is not None:
+            return self._streams._activity_topic(
+                self._workflow_id, self._activity_id, topic
+            )
+        assert self._workflow_id is not None
+        return self._streams._topic(self._workflow_id, topic)
+
     async def _closed(self) -> bool:
         if self._client is None:
             return False
-        handle = self._client.get_workflow_handle(
-            self._workflow_id, run_id=self._run_id
-        )
         try:
-            description = await handle.describe()
+            if self._activity_id is not None and self._workflow_id is None:
+                activity = await self._client.get_activity_handle(
+                    self._activity_id, run_id=self._run_id
+                ).describe()
+                return activity.status != ActivityExecutionStatus.RUNNING
+            assert self._workflow_id is not None
+            description = await self._client.get_workflow_handle(
+                self._workflow_id, run_id=self._run_id
+            ).describe()
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
-                # A producer may write before the workflow exists; there is
+                # A producer may write before the owner exists; there is
                 # nothing to follow yet, so keep waiting.
                 return False
             raise
         status = description.status
+        if self._activity_id is not None:
+            pending = any(
+                info.activity_id == self._activity_id
+                for info in description.raw_description.pending_activities
+            )
+            if pending:
+                self._seen_pending = True
+            elif self._seen_pending:
+                return True
+            # The activity's streams are not the workflow's chain: a run that
+            # continued as new took its activities with it.
+            return status is not None and status != WorkflowExecutionStatus.RUNNING
         if status is None or status == WorkflowExecutionStatus.RUNNING:
             return False
         # Following the chain, a run that continued as new is not the end:
@@ -373,7 +412,7 @@ class MemoryStreamHandle:
     async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
         """The cursor of the newest record on ``topic``, for following from now."""
         name, _ = resolve_topic(topic)
-        count = len(self._streams._topic(self._workflow_id, name).records)
+        count = len(self._store(name).records)
         return mint_cursor(_PROVIDER, str(count - 1)) if count else BEGINNING
 
     def producer(
@@ -385,7 +424,7 @@ class MemoryStreamHandle:
     ) -> MemoryProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
         name, _ = resolve_topic(topic)
-        store = self._streams._topic(self._workflow_id, name)
+        store = self._store(name)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return MemoryProducer(store, self._converter, name, producer_id, attempt)
 
@@ -409,10 +448,12 @@ class MemoryStreams(ProviderPlugin):
         """
         self._poll = poll_interval
         self._topics: dict[str, _Topic] = {}
+        self._activity_topics: dict[tuple[str | None, str, str], _Topic] = {}
 
     def reset(self) -> None:
         """Drop every topic. For tests."""
         self._topics.clear()
+        self._activity_topics.clear()
 
     def workflow_provider(self) -> _MemoryWorkflowProvider:
         """The workflow half, over this provider's topics."""
@@ -429,6 +470,21 @@ class MemoryStreams(ProviderPlugin):
         """
         return MemoryStreamHandle(self, client, workflow_id, run_id)
 
+    def get_activity_stream_handle(
+        self,
+        client: Client | None,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> MemoryStreamHandle:
+        """A handle on the topics ``activity_id`` owns, apart from any workflow's.
+
+        As on :meth:`get_stream_handle`, ``client`` may be ``None``, and then
+        a read waits until the caller closes it.
+        """
+        return MemoryStreamHandle(self, client, workflow_id, run_id, activity_id)
+
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection."""
 
@@ -439,6 +495,19 @@ class MemoryStreams(ProviderPlugin):
         found = self._topics.get(key)
         if found is None:
             found = self._topics[key] = _Topic()
+        return found
+
+    def _activity_topic(
+        self, workflow_id: str | None, activity_id: str, topic: str
+    ) -> _Topic:
+        # Kept apart from the workflow topics, so no workflow id can name an
+        # activity's stream.
+        if not topic:
+            raise ValueError("topic must not be empty")
+        key = (workflow_id, activity_id, topic)
+        found = self._activity_topics.get(key)
+        if found is None:
+            found = self._activity_topics[key] = _Topic()
         return found
 
     def _offset_after(self, after: Cursor) -> int:
