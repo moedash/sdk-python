@@ -84,7 +84,14 @@ from temporalio.streams._errors import (
     StreamUnsupportedError,
 )
 from temporalio.streams._provider import StreamHandle, StreamProducer, StreamProvider
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -210,6 +217,8 @@ class _Subscription:
     records: asyncio.Queue[StreamRecord[Any]]
     position: str
     last_used: float
+    last_n: int | None = None
+    """The newest-N start this subscription was opened with, when it had no token."""
     pump: asyncio.Task[None] | None = None
     failure: BaseException | None = None
     done: bool = False
@@ -431,15 +440,26 @@ class TemporalStreamsHandler:
             left = deadline - datetime.now(timezone.utc) - _DEADLINE_MARGIN
             wait = max(0.0, min(wait, left.total_seconds()))
         after = input.after_token or ""
+        if after and input.last_n is not None:
+            raise ValueError(
+                "pass either after_token or last_n, not both: a token resumes a "
+                "read and last_n starts one"
+            )
         key = (input.workflow_id, input.run_id or "", input.topic)
         await self._expire_subscriptions()
         lock = self._read_locks.setdefault(key, asyncio.Lock())
         async with lock:
             subscription = self._subscriptions.get(key)
-            if subscription is None or subscription.position != after:
+            if (
+                subscription is None
+                or subscription.position != after
+                or (not after and subscription.last_n != input.last_n)
+            ):
                 if subscription is not None:
                     await self._drop(key)
-                subscription = self._subscribe(key, stream, input.topic, after)
+                subscription = self._subscribe(
+                    key, stream, input.topic, after, input.last_n
+                )
             try:
                 records, next_token = await self._drain(subscription, max_records, wait)
             except Exception:
@@ -462,20 +482,30 @@ class TemporalStreamsHandler:
         return ReadOutput(records=records, next_token=next_token, done=done)
 
     def _subscribe(
-        self, key: tuple[str, str, str], stream: StreamHandle, topic: str, after: str
+        self,
+        key: tuple[str, str, str],
+        stream: StreamHandle,
+        topic: str,
+        after: str,
+        last_n: int | None,
     ) -> _Subscription:
         # Raw payloads: the handler forwards what the store holds without
         # decoding it, so an encoding only the caller's codec understands
         # passes through untouched. A foreign token is refused right here.
-        source = stream.read(
-            topic=topic,
-            after=Cursor(after) if after else BEGINNING,
-            result_type=RawValue,
+        source = (
+            stream.read(topic=topic, last=last_n, result_type=RawValue)
+            if last_n is not None
+            else stream.read(
+                topic=topic,
+                after=Cursor(after) if after else BEGINNING,
+                result_type=RawValue,
+            )
         )
         subscription = _Subscription(
             records=asyncio.Queue(maxsize=_QUEUE_DEPTH),
             position=after,
             last_used=time.monotonic(),
+            last_n=last_n,
         )
 
         async def pump() -> None:
@@ -822,11 +852,17 @@ class NexusStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after``, one endpoint batch at a time.
+        """Yield records on ``topic`` from where the read starts, one endpoint batch at a time.
+
+        ``BEGINNING`` and ``last=`` are resolved by the store behind the
+        endpoint on the first call. ``END`` is the endpoint's newest position,
+        asked for with a ``latest_only`` call when the read starts, and the
+        read resumes after it, so it yields only what is appended from then on.
 
         The token is opaque here, so a cursor from another store is refused by
         the store behind the endpoint and raises
@@ -839,16 +875,23 @@ class NexusStreamHandle:
         the store stay, and a caller that stops and starts many reads on one
         topic should expect that lag rather than an immediate release.
         """
+        check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
-        return self._read(topic, after, result_type)
+        return self._read(topic, after, last, result_type)
 
     async def _read(
-        self, topic: str, after: Cursor, result_type: type | None
+        self, topic: str, after: Cursor, last: int | None, result_type: type | None
     ) -> AsyncGenerator[StreamRecord[Any], None]:
+        if after == END:
+            after = await self.latest(topic=topic)
+        # Where last= lands is the store's to say, so BEGINNING stands in for
+        # the position before it: a resume from it may repeat a record, where
+        # anything later could skip one.
         decoder = RecordDecoder(
             self._front.converter, result_type, after=after, warn=logger.warning
         )
         token = after.token
+        last_n = last
         while True:
             answer = await self._front.invoke(
                 _READ_OPERATION,
@@ -857,6 +900,7 @@ class NexusStreamHandle:
                     run_id=self._run_id,
                     topic=topic,
                     after_token=token,
+                    last_n=last_n,
                     max_records=self._front.max_records,
                     wait_ms=int(self._front.read_wait.total_seconds() * 1000),
                 ),
@@ -878,10 +922,12 @@ class NexusStreamHandle:
                 for out in decoder.decode(cursor, record):
                     yield out
             token = answer.next_token or token
+            if token:
+                last_n = None
             if answer.done:
                 return
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The newest position on ``topic`` behind the endpoint, for following from now."""
         topic, _ = resolve_topic(topic)
         answer = await self._front.invoke(
@@ -901,7 +947,7 @@ class NexusStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> NexusProducer[Any]:
@@ -994,6 +1040,24 @@ class NexusStreams(StreamProvider, temporalio.client.Plugin):
         and supplies the data converter when none was configured.
         """
         return NexusStreamHandle(_Front(self, client), workflow_id, run_id)
+
+    def get_activity_stream_handle(
+        self,
+        client: Client | None,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NoReturn:
+        """Refused: the endpoint's operations address a stream by workflow only.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the nexus provider cannot reach a stream an activity owns: the endpoint's "
+            "operations address a stream by workflow only"
+        )
 
     async def close(self) -> None:
         """Nothing to release: each call opens and closes its own connection."""

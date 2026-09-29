@@ -11,6 +11,11 @@ which capabilities it lacks, so the cases marked ``reports_positions`` are
 skipped with a reason on a provider whose ``append()`` learns positions at
 read time.
 
+``NexusStreams`` is deliberately absent from ``SETUPS``. It is a front with no
+workflow half (its ``workflow_provider()`` raises), so there is no store for a
+host workflow to own; ``test_nexus_provider`` covers it through an endpoint
+that fronts a storage provider.
+
 What this file pins down is what a provider owes: producer identity, retry
 deduplication, positions, supersession, topic addressing, cursor resumption,
 cursor ownership, and releasing a read the caller stopped early. Every case
