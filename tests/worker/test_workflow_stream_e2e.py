@@ -890,6 +890,13 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
             latest = await client.get_stream_handle(workflow_id).latest(topic=INPUTS)
             assert latest.token == f"native:{reset_run}:3"
 
+            # Pinned to the reset run, BEGINNING is the floor its inherited
+            # stream starts at. Offset zero, which it never held, is refused.
+            from_floor = await asyncio.wait_for(
+                _collect(client, workflow_id, INPUTS, reset_run), 30
+            )
+            assert from_floor == [({"n": 4}, reset_run, 2), (None, reset_run, 3)]
+
         # The reset run's history: the base run's events, the reset marker
         # naming both runs, then its own. The replayer fetches the first era
         # from the base run's stream and the rest from the reset run's.
