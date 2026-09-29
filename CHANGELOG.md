@@ -52,6 +52,10 @@ to include examples, links to docs, or any other relevant information.
 
 ### Fixed
 
+- `WorkflowEnvironment.start_time_skipping()`: concurrent `WorkflowHandle.result()` waiters now
+  share one time-skipping unlock. The test server holds one lock per in-flight task, so a second
+  unlock let the clock jump while another workflow still had a task in flight, and that task then
+  timed out.
 - `GoogleAdkPlugin` now passes the optional `anthropic`, `litellm`, and `openai` SDKs through
   the workflow sandbox.
 - `contrib.deepagents`: prevent duplicate input messages after continue-as-new.
