@@ -20,12 +20,6 @@ tool, publish. Continue-as-new is taken when the server suggests it, and
 also every two turns here so a short demo crosses runs. Each run's topic
 belongs to that run, and the client's read walks from one run to the next
 without being told.
-
-On ``workflow_streams`` a live read across continue-as-new currently fails
-inside the provider: its poll Update reaches the successor run before that
-run has registered the handler for it. So there the client waits for the
-chain to finish and then reads it whole. That still walks every run, and the
-output says which mode ran.
 """
 
 from __future__ import annotations
@@ -140,10 +134,6 @@ async def run(args: argparse.Namespace) -> None:
                 id=workflow_id,
                 task_queue=task_queue,
             )
-            if args.provider == "workflow_streams":
-                print("    live follow across runs is blocked here; reading the")
-                print("    finished chain instead")
-                await handle.result()
             # No run id on the handle, so the read follows the chain and ends
             # when its last run is closed and the tail has been delivered.
             async for record in client.get_stream_handle(workflow_id).read(

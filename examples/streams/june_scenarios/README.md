@@ -11,7 +11,7 @@ reaches into private SDK code or adds a feature.
 |---|---|---|---|
 | Client starts and consume stream: primary and named | `s1_client_consumes.py` | implemented | Default topic with no name, a typed topic, `last=N`, `after=END`, `BEGINNING` on a moved floor (memory only) |
 | Client starts and consume stream: standalone alt 1, 2, 3 | `s2_standalone_streams.py` | alt 2 implemented; alts 1 and 3 open | Native only. Shows `StreamNotFoundError` for alt 1; wait-for-creation reads and start-committed stream arguments are open questions on the blueprint |
-| Workflow as Producer: as named handle | `s3_workflow_producer.py` | implemented | His turn loop with continue-as-new; the client follows the chain. On `workflow_streams` the live follow across runs hits a provider bug, so it reads the finished chain there |
+| Workflow as Producer: as named handle | `s3_workflow_producer.py` | implemented | His turn loop with continue-as-new; the client follows the chain live |
 | Workflow as Producer: as return type | `s4_workflow_as_generator.py` | emulated | Default-topic publishes plus `FINISH`, result from the workflow; the generator signature is sugar not built |
 | Activity as Producer: as named handle | `s5_activity_producers.py` | implemented | Workflow topic (Path B), `scope="activity"`, standalone activity; the last two on native and memory only |
 | Activity as Producer: as return type | `s6_activity_as_generator.py` | emulated | Appends plus a heartbeat checkpoint; the retry resumes and readers see `SUPERSEDED` |
@@ -41,13 +41,6 @@ Nexus endpoint. `memory` is offered here, not in the parent examples,
 because it is not replay-safe; these scenarios keep a warm cache. `redis`
 is accepted too, with `--redis`, but was not part of the runs behind this
 directory.
-
-On `workflow_streams`, an outside read that polls before the run's first
-Workflow Task can be refused inside the provider, because its poll handler
-is registered when the workflow function starts, after the Update in that
-first task has already been turned away. It is a provider bug, not a demo
-one, and a rerun passes; s3 steps around it on that provider because a
-successor run hits it every time.
 
 A scenario a provider cannot serve says so in its output and moves on:
 `s2` on anything but `native`, `s5` (b) and (c) on `workflow_streams` and
