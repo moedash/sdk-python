@@ -418,6 +418,169 @@ async def test_a_handle_without_a_run_id_reads_across_continue_as_new(
         assert resumed == [{"run": 1}, None]
 
 
+@workflow.defn
+class Rolling:
+    """Publishes what it is sent, continues as new onto ``successor_queue`` once."""
+
+    def __init__(self) -> None:
+        self._sent: list[int] = []
+        self._roll_to = ""
+        self._released = False
+
+    @workflow.signal
+    def emit(self, n: int) -> None:
+        self._sent.append(n)
+
+    @workflow.signal
+    def roll(self, successor_queue: str) -> None:
+        self._roll_to = successor_queue
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self, run: int) -> None:
+        decisions = workflow.stream_writer(DECISIONS)
+        while True:
+            await workflow.wait_condition(
+                lambda: bool(self._sent or self._roll_to or self._released)
+            )
+            while self._sent:
+                decisions.publish({"run": run, "n": self._sent.pop(0)})
+            if self._roll_to:
+                workflow.continue_as_new(run + 1, task_queue=self._roll_to)
+            if self._released:
+                decisions.finish()
+                return
+
+
+@workflow.defn
+class Idle:
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._released)
+
+
+async def _collect_all(records: Any, into: list[Any]) -> None:
+    async for record in records:
+        into.append((record.kind, record.value))
+
+
+async def test_a_live_read_without_a_run_id_follows_continue_as_new(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    successor_queue = f"streams-ws-successor-{uuid.uuid4().hex}"
+    async with new_worker(client, Rolling, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            Rolling.run, 0, id=workflow_id, task_queue=worker.task_queue
+        )
+        seen: list[Any] = []
+        reader = asyncio.create_task(
+            _collect_all(
+                provider.get_stream_handle(client, workflow_id).read(
+                    topic=DECISIONS, result_type=dict
+                ),
+                seen,
+            )
+        )
+        await handle.signal(Rolling.emit, 1)
+        await handle.signal(Rolling.emit, 2)
+        await assert_eventually_len(seen, 2, reader)
+
+        # The successor runs on a queue nobody polls yet, so the reader's
+        # first poll on it waits for the successor's first task and lands in
+        # it, ahead of the hook that registers the handler.
+        await handle.signal(Rolling.roll, successor_queue)
+        successor = client.get_workflow_handle(workflow_id)
+        while (await successor.describe()).run_id == handle.result_run_id:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(1)
+        assert not reader.done()
+        async with new_worker(
+            client, Rolling, plugins=[provider], task_queue=successor_queue
+        ):
+            await successor.signal(Rolling.emit, 3)
+            await successor.signal(Rolling.emit, 4)
+            await assert_eventually_len(seen, 4, reader)
+            await successor.signal(Rolling.release)
+            await asyncio.wait_for(reader, 30)
+            await successor.result()
+
+    assert seen == [
+        (RecordKind.DATA, {"run": 0, "n": 1}),
+        (RecordKind.DATA, {"run": 0, "n": 2}),
+        (RecordKind.DATA, {"run": 1, "n": 3}),
+        (RecordKind.DATA, {"run": 1, "n": 4}),
+        (RecordKind.FINISH, None),
+    ]
+
+
+async def test_a_poll_that_arrives_before_the_first_task_is_retried(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    task_queue = f"streams-ws-{uuid.uuid4().hex}"
+    handle = await client.start_workflow(
+        Rolling.run, 0, id=workflow_id, task_queue=task_queue
+    )
+    seen: list[Any] = []
+    reader = asyncio.create_task(
+        _collect_all(
+            provider.get_stream_handle(client, workflow_id).read(
+                topic=DECISIONS, result_type=dict
+            ),
+            seen,
+        )
+    )
+    # No worker yet, so the poll is delivered in the run's first task.
+    await asyncio.sleep(1)
+    async with new_worker(client, Rolling, plugins=[provider], task_queue=task_queue):
+        await handle.signal(Rolling.emit, 1)
+        await assert_eventually_len(seen, 1, reader)
+        await handle.signal(Rolling.release)
+        await asyncio.wait_for(reader, 30)
+        await handle.result()
+    assert seen == [(RecordKind.DATA, {"run": 0, "n": 1}), (RecordKind.FINISH, None)]
+
+
+async def test_a_running_workflow_without_the_provider_fails_the_read_clearly(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, Idle) as worker:
+        handle = await client.start_workflow(
+            Idle.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, workflow_id)
+        with pytest.raises(StreamError, match="provider is not installed"):
+            await take(stream.read(topic=DECISIONS), 1)
+        await handle.signal(Idle.release)
+        await handle.result()
+
+
+async def assert_eventually_len(
+    items: list[Any], count: int, reader: asyncio.Task[None]
+) -> None:
+    async def _wait() -> None:
+        while len(items) < count:
+            if reader.done():
+                # A read that failed surfaces its error instead of a timeout.
+                reader.result()
+                raise AssertionError(f"the read ended early with {items}")
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_wait(), 30)
+
+
 async def _values(records: Any) -> list[Any]:
     return [r.value async for r in records]
 
