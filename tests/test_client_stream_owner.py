@@ -39,6 +39,7 @@ def _client(recorder: _Recorder) -> StreamClient:
     client = StreamClient.__new__(StreamClient)
     client._stub = recorder
     client._namespace = "ns"
+    client._retry_config = None
     return client
 
 
