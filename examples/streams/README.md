@@ -26,6 +26,8 @@ call; the examples never need one.
 
 `agent.py` and `run.py` compose all three paths in one agent, on every provider
 and behind the Nexus front. `_setup.py` is the one place a store is named.
+`june_scenarios/` maps every scenario in Roey's June design notes onto this
+surface, one file per scenario family, with a status on each.
 
 ## Running
 
