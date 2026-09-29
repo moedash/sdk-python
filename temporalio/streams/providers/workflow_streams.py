@@ -85,7 +85,14 @@ from temporalio.streams._errors import (
     StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -109,6 +116,7 @@ T = TypeVar("T")
 _PROVIDER = "workflow_streams"
 _TAIL_QUERY = "__temporal_streams_tail"
 _LATEST_QUERY = "__temporal_streams_latest"
+_START_QUERY = "__temporal_streams_start"
 _ENCODING = b"binary/plain"
 # The same cap the shipped poll path answers under, because both are one
 # response through the same server.
@@ -182,6 +190,8 @@ class _InstanceStream:
             workflow.set_query_handler(_TAIL_QUERY, self._tail)
         if workflow.get_query_handler(_LATEST_QUERY) is None:
             workflow.set_query_handler(_LATEST_QUERY, self._latest)
+        if workflow.get_query_handler(_START_QUERY) is None:
+            workflow.set_query_handler(_START_QUERY, self._start)
 
     def _tail(self, from_offset: int, topic: str) -> dict[str, Any]:
         """One page of ``topic``'s items at or past ``from_offset``.
@@ -220,6 +230,33 @@ class _InstanceStream:
             if item_topic == topic:
                 return offset
         return -1
+
+    def _start(self, topic: str, last_n: int) -> int:
+        """Where a read starts: the log's head, or ``topic``'s newest ``last_n`` records.
+
+        Zero ``last_n`` asks for the head, which is where ``END`` starts.
+        """
+        return start_offset(self.stream, topic, last_n)
+
+
+def start_offset(stream: WorkflowStream, topic: str, last_n: int) -> int:
+    """The log offset a read of ``topic`` starts at.
+
+    ``last_n`` of zero is the head of the log, so only what is published next
+    is read. Otherwise it is the offset of ``topic``'s ``last_n``-th newest
+    item, or the oldest one the log holds when there are fewer. The log is
+    workflow state, so the workflow half answers the same on every replay.
+    """
+    if last_n <= 0:
+        return stream.next_offset
+    items = stream.items_from(0)
+    seen = 0
+    for offset, item_topic, _ in reversed(items):
+        if item_topic == topic:
+            seen += 1
+            if seen == last_n:
+                return offset
+    return items[0][0] if items else stream.next_offset
 
 
 def _registered_stream() -> WorkflowStream | None:
@@ -309,10 +346,25 @@ class _WSWorkflowProvider:
             self._stream = _instance().stream
         return self._stream
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
+        check_read_start(after, last)
         _require_topic(topic)
         run_id = workflow.info().run_id
         start = 0
+        # The log is workflow state, so END and last= resolve against it here
+        # and land on the same offset on every replay.
+        if last is not None:
+            return _WSReadSource(
+                self._own_stream(),
+                topic,
+                start_offset(self._own_stream(), topic, last),
+                run_id,
+            )
+        if after == END:
+            stream = self._own_stream()
+            return _WSReadSource(stream, topic, stream.next_offset, run_id)
         named = _position(after)
         if named is not None:
             if named[0] != run_id:
@@ -491,33 +543,46 @@ class WorkflowStreamsHandle:
         *,
         topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
+        """Yield records on ``topic`` from where the read starts until the chain, or the pinned run, closes.
+
+        ``BEGINNING`` is the oldest item the first retained run's log still
+        holds: the poll Update reads offset zero as the log's base. ``END``
+        and ``last=`` start on the current run, or the pinned one, at an
+        offset its workflow answers by Query when the read starts.
+        """
+        check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
-        named = _position(after)
+        named = None if after == END else _position(after)
         if named is not None and self._run_id is not None and named[0] != self._run_id:
             raise StreamCursorError(
                 f"cursor {after.token!r} names another run than this handle is pinned to"
             )
-        return self._read(topic, named, after, result_type)
+        return self._read(topic, named, after, last, result_type)
 
     async def _read(
         self,
         topic: str,
         named: tuple[str, int] | None,
         after: Cursor,
+        last: int | None,
         result_type: type | None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
+        if named is not None:
+            run_id, offset = named[0], named[1] + 1
+        elif last is not None or after == END:
+            run_id, offset = await self._start_on_current_run(topic, last or 0)
+            # A synthesized record is positioned before the first one read.
+            after = _cursor(run_id, offset - 1)
+        else:
+            run_id, offset = self._run_id or await self._first_run(), 0
         decoder = RecordDecoder(
             self._converter, result_type, after=after, warn=logger.warning
         )
-        if named is not None:
-            run_id, offset = named[0], named[1] + 1
-        else:
-            run_id, offset = self._run_id or await self._first_run(), 0
         while True:
             handle = self._handle(run_id)
             next_offset = offset
@@ -725,6 +790,40 @@ class WorkflowStreamsHandle:
             for item in wire["items"]
         ]
         return items, wire["next_offset"], bool(wire["more_ready"])
+
+    async def _start_on_current_run(self, topic: str, last_n: int) -> tuple[str, int]:
+        """The run a read at ``END`` or of the newest records starts on, and the offset.
+
+        Raises:
+            StreamUnsupportedError: The workflow's worker runs a provider that
+                predates these reads and cannot answer where they start.
+        """
+        handle = self._handle(self._run_id)
+        description = await self._describe(handle)
+        if description is None:
+            raise StreamNotFoundError(f"workflow {self._workflow_id!r} was not found")
+        run_id = description.run_id
+        assert run_id is not None
+        try:
+            offset = await self._handle(run_id).query(
+                _START_QUERY, args=[topic, last_n], result_type=int
+            )
+        except WorkflowQueryFailedError as error:
+            if QUERY_HANDLER_NOT_FOUND not in str(error):
+                raise StreamError(
+                    f"the start query on workflow {self._workflow_id!r} failed: {error}"
+                ) from error
+            raise StreamUnsupportedError(
+                f"workflow {self._workflow_id!r} does not answer where a read at END "
+                "or of the last records starts; its worker's provider predates them"
+            ) from error
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                raise StreamNotFoundError(
+                    f"workflow {self._workflow_id!r} was not found"
+                ) from error
+            raise
+        return run_id, offset
 
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The newest position holding a record on ``topic``.

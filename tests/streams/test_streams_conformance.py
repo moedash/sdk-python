@@ -54,6 +54,7 @@ from temporalio.streams import (
     Supersession,
     topic,
 )
+from temporalio.streams.providers import workflow_streams
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.native import NativeStreams
 from temporalio.streams.providers.redis import RedisStreams
@@ -132,6 +133,27 @@ class StreamHost:
 
 
 @workflow.defn
+class TruncatingStreamHost:
+    """A stream host whose log an update can truncate, the way a workflow's retention would."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.update
+    def truncate(self, topic: str, keep: int) -> None:
+        stream = workflow_streams._instance().stream  # pyright: ignore[reportPrivateUsage]
+        stream.truncate(workflow_streams.start_offset(stream, topic, keep))
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._released)
+
+
+@workflow.defn
 class DefaultTopicAnswer:
     """Reads one value on its default topic and answers on the same topic."""
 
@@ -153,13 +175,20 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
     config["plugins"] = [provider]
     client = Client(**config)
     hosts: dict[str, WorkflowHandle[Any, Any]] = {}
-    async with new_worker(client, StreamHost, DefaultTopicAnswer) as worker:
+    async with new_worker(client, TruncatingStreamHost, DefaultTopicAnswer) as worker:
 
         async def host(workflow_id: str) -> None:
             if workflow_id not in hosts:
                 hosts[workflow_id] = await client.start_workflow(
-                    StreamHost.run, id=workflow_id, task_queue=worker.task_queue
+                    TruncatingStreamHost.run,
+                    id=workflow_id,
+                    task_queue=worker.task_queue,
                 )
+
+        async def truncate(workflow_id: str, topic: str, keep: int) -> None:
+            await hosts[workflow_id].execute_update(
+                TruncatingStreamHost.truncate, args=[topic, keep]
+            )
 
         yield ProviderCase(
             "workflow_streams",
@@ -172,6 +201,7 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             detects_divergent_retries=False,
             host=host,
             task_queue=worker.task_queue,
+            truncate=truncate,
         )
         for handle in hosts.values():
             await handle.terminate()
@@ -673,8 +703,10 @@ async def test_beginning_starts_at_the_oldest_record_still_held(case: ProviderCa
     assert [r.value for r in records] == [{"n": 3}, {"n": 4}]
     newest = await take(stream.read(topic=OUT, last=3), 2)
     assert [r.value for r in newest] == [{"n": 3}, {"n": 4}]
+    # A cursor below the floor is refused. A provider that needs a round trip
+    # to know says so on the first step rather than on the call.
     with pytest.raises(StreamCursorError):
-        stream.read(topic=OUT, after=before[0].cursor)
+        await take(stream.read(topic=OUT, after=before[0].cursor), 1)
 
 
 async def test_a_read_start_names_one_place(case: ProviderCase):
