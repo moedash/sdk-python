@@ -18,10 +18,12 @@ from temporalio.streams.providers import ProviderPlugin
 PROVIDERS = ("workflow_streams", "native", "redis")
 
 
-def parser(description: str) -> argparse.ArgumentParser:
+def parser(
+    description: str, providers: tuple[str, ...] = PROVIDERS
+) -> argparse.ArgumentParser:
     """The flags every example shares."""
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("provider", choices=PROVIDERS)
+    parser.add_argument("provider", choices=providers)
     parser.add_argument("--address", default="localhost:7233")
     parser.add_argument("--redis", default="redis://127.0.0.1:6379")
     return parser
@@ -43,6 +45,12 @@ def make_provider(name: str, args: argparse.Namespace) -> ProviderPlugin:
         from temporalio.streams.providers.native import NativeStreams
 
         return NativeStreams()
+    if name == "memory":
+        # Only for examples that keep a warm cache: this provider is not
+        # replay-safe, which is why PROVIDERS leaves it out.
+        from temporalio.streams.providers.memory import MemoryStreams
+
+        return MemoryStreams()
     raise SystemExit(f"unknown provider {name}")
 
 
