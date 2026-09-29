@@ -31,10 +31,12 @@ from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
     BEGINNING,
+    END,
     RecordKind,
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
+    StreamUnsupportedError,
     Supersession,
 )
 from temporalio.streams._wire import WireRecord
@@ -786,3 +788,72 @@ async def test_the_dedupe_sequence_names_where_the_records_end():
     # the retry's re-split reaches past it, and only the new record does.
     assert _sequences(first.sent) == [(3, [1, 2])]
     assert _sequences(second.sent) == [(2, [1]), (3, [2]), (4, [3])]
+
+
+@workflow.defn
+class StartsWhenTold:
+    """Opens a reader on ``inputs`` at the start a signal names and returns what it read."""
+
+    def __init__(self) -> None:
+        self._start: str | None = None
+
+    @workflow.signal
+    def begin(self, start: str) -> None:
+        self._start = start
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        await workflow.wait_condition(lambda: self._start is not None)
+        if self._start == "end":
+            reader = workflow.stream_reader(INPUTS, result_type=dict, after=END)
+            want = 1
+        else:
+            reader = workflow.stream_reader(INPUTS, result_type=dict, last=2)
+            want = 2
+        values: list[Any] = []
+        async for value in reader.values():
+            values.append(value["n"])
+            if len(values) == want:
+                break
+        return values
+
+
+async def test_a_workflow_reader_starts_at_end_or_the_newest_records(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    # The log is workflow state, so both starts resolve against it on the
+    # workflow thread; a cold cache replays every task and has to land the
+    # reader on the same offset each time.
+    async with new_worker(
+        client, StartsWhenTold, plugins=[provider], max_cached_workflows=0
+    ) as worker:
+        for start, expected in (("last", [3, 4]), ("end", ["new"])):
+            handle = await client.start_workflow(
+                StartsWhenTold.run,
+                id=f"ws-start-{uuid.uuid4().hex}",
+                task_queue=worker.task_queue,
+            )
+            stream = provider.get_stream_handle(client, handle.id)
+            producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+            await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+            await handle.signal(StartsWhenTold.begin, start)
+            result = asyncio.ensure_future(handle.result())
+            if start == "end":
+                for _ in range(150):
+                    await producer.append({"n": "new"})
+                    done, _ = await asyncio.wait({result}, timeout=0.2)
+                    if done:
+                        break
+            assert await asyncio.wait_for(result, 30) == expected
+
+
+async def test_a_stream_an_activity_owns_is_refused(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    # The log lives inside a running workflow, so an activity has no place to
+    # put a stream of its own here. The refusal is the documented error, not
+    # an AttributeError or a stream silently put somewhere else.
+    with pytest.raises(StreamUnsupportedError, match="activity"):
+        provider.get_activity_stream_handle(client, "act")
+    with pytest.raises(StreamUnsupportedError, match="activity"):
+        provider.get_activity_stream_handle(client, "act", workflow_id="wf")
