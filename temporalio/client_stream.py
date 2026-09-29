@@ -26,11 +26,24 @@ server answers ``NOT_FOUND``,
 :class:`temporalio.streams.StreamProducerError` when it refuses a producer
 sequence it already holds, and :class:`temporalio.service.RPCError`
 otherwise, never the transport's own exception type.
+
+A failure sdk-core would retry is retried here, on the same codes and with the
+same default :class:`temporalio.service.RetryConfig`, because this channel is
+not Core's and gets none of its retrying. ``RESOURCE_EXHAUSTED`` backs off
+longer than the rest, as in Core, so a caller the server is throttling does not
+add to the load. A call the server cannot tell from its own repeat, an append
+without a producer id or a create, is retried only on ``RESOURCE_EXHAUSTED``,
+which the server sends before it does anything. The budget is bounded; a caller
+that wants a shorter one cancels, as with ``asyncio.timeout``, and the
+cancellation lands whether an attempt or a wait between attempts is in progress.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import random
+import time
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -42,9 +55,12 @@ import grpc.aio
 from google.protobuf.message import Message
 
 import temporalio.api.streamservice.v1 as stream
+from temporalio.api.common.v1 import GrpcStatus
+from temporalio.api.enums.v1 import ResourceExhaustedCause
+from temporalio.api.errordetails.v1 import ResourceExhaustedFailure
 from temporalio.api.stream.v1 import StreamRecord, StreamStartPosition
 from temporalio.api.streamservice.v1 import service_pb2_grpc
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RetryConfig, RPCError, RPCStatusCode
 from temporalio.streams import StreamNotFoundError, StreamProducerError
 
 __all__ = [
@@ -60,11 +76,132 @@ __all__ = [
 
 _T = TypeVar("_T")
 
+logger = logging.getLogger(__name__)
+
 # The server refuses a producer sequence it already holds with a message and
 # no typed detail, so the phrase is the only thing to match on. Both refusals
 # it sends carry it: a repeat with different content, and one behind the
 # sequence it accepted last.
 _PRODUCER_CONFLICT = "producer sequence"
+
+# The codes sdk-core retries.
+_RETRYABLE = frozenset(
+    {
+        grpc.StatusCode.DATA_LOSS,
+        grpc.StatusCode.INTERNAL,
+        grpc.StatusCode.UNKNOWN,
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+        grpc.StatusCode.ABORTED,
+        grpc.StatusCode.OUT_OF_RANGE,
+        grpc.StatusCode.UNAVAILABLE,
+    }
+)
+# What the server sends before it does anything, so a call that cannot be told
+# from its own repeat is still safe to make again on it.
+_REFUSED = frozenset({grpc.StatusCode.RESOURCE_EXHAUSTED})
+# A message over the channel's limit comes back as RESOURCE_EXHAUSTED and is
+# the same size every time.
+_TOO_LARGE = (
+    "grpc: received message larger than max",
+    "grpc: message after decompression larger than max",
+    "grpc: received message after decompression larger than max",
+)
+# The floor under a throttled call's wait, sdk-core's own.
+_THROTTLE = RetryConfig(
+    initial_interval_millis=1000,
+    multiplier=2.0,
+    max_interval_millis=10000,
+    max_elapsed_time_millis=None,
+    max_retries=0,
+)
+
+
+class _Backoff:
+    """Exponential backoff over a :class:`RetryConfig`, with sdk-core's arithmetic."""
+
+    def __init__(self, config: RetryConfig) -> None:
+        self._config = config
+        self._started = time.monotonic()
+        self._interval = config.initial_interval_millis / 1000
+        self._failures = 0
+
+    def next(self) -> float | None:
+        """Seconds to wait before the next attempt, or ``None`` once the budget is spent."""
+        config = self._config
+        self._failures += 1
+        if config.max_retries and self._failures >= config.max_retries:
+            return None
+        base = self._interval
+        self._interval = min(
+            base * config.multiplier, config.max_interval_millis / 1000
+        )
+        spread = base * config.randomization_factor
+        delay = max(base + random.uniform(-spread, spread), 0.0)
+        if config.max_elapsed_time_millis is not None and (
+            time.monotonic() - self._started + delay
+            > config.max_elapsed_time_millis / 1000
+        ):
+            return None
+        return delay
+
+
+def _raw_status(error: grpc.aio.AioRpcError) -> bytes:
+    # The aio metadata iterates as (key, value) pairs at runtime, whatever
+    # shape the stubs give its items.
+    trailing: Any = error.trailing_metadata()
+    for item in trailing or ():
+        key, value = item[0], item[1]
+        if key == "grpc-status-details-bin" and isinstance(value, bytes):
+            return value
+    return b""
+
+
+def _exhausted_cause(error: grpc.aio.AioRpcError) -> int | None:
+    """The cause the server attached to a ``RESOURCE_EXHAUSTED``, when it attached one."""
+    raw = _raw_status(error)
+    if not raw:
+        return None
+    status = GrpcStatus()
+    status.ParseFromString(raw)
+    for detail in status.details:
+        if detail.Is(ResourceExhaustedFailure.DESCRIPTOR):
+            failure = ResourceExhaustedFailure()
+            detail.Unpack(failure)
+            return failure.cause
+    return None
+
+
+def _worth_waiting_out(error: grpc.aio.AioRpcError) -> bool:
+    """Whether a ``RESOURCE_EXHAUSTED`` is load the server will shed, rather than a limit."""
+    if (error.details() or "").startswith(_TOO_LARGE):
+        return False
+    # A stream's budget refuses an append for as long as the stream is that
+    # full, which no wait changes.
+    return _exhausted_cause(error) != (
+        ResourceExhaustedCause.RESOURCE_EXHAUSTED_CAUSE_PERSISTENCE_STORAGE_LIMIT
+    )
+
+
+def _retry_after(
+    error: grpc.aio.AioRpcError,
+    backoff: _Backoff,
+    throttle: _Backoff,
+    *,
+    idempotent: bool,
+) -> float | None:
+    """Seconds to wait before making the call again, or ``None`` to raise it."""
+    code = error.code()
+    if code not in _RETRYABLE or (not idempotent and code not in _REFUSED):
+        return None
+    throttled = code is grpc.StatusCode.RESOURCE_EXHAUSTED
+    if throttled and not _worth_waiting_out(error):
+        return None
+    delay = backoff.next()
+    if delay is None:
+        return None
+    if throttled:
+        delay = max(delay, throttle.next() or 0.0)
+    return delay
 
 
 @dataclass(frozen=True)
@@ -176,44 +313,93 @@ def _translate(error: grpc.aio.AioRpcError) -> Exception:
         # content or behind the one it accepted last. The caller asked to be
         # deduplicated and could not be, which is a condition of its own.
         return StreamProducerError(details)
-    raw = b""
-    # The aio metadata iterates as (key, value) pairs at runtime, whatever
-    # shape the stubs give its items.
-    trailing: Any = error.trailing_metadata()
-    for item in trailing or ():
-        key, value = item[0], item[1]
-        if key == "grpc-status-details-bin" and isinstance(value, bytes):
-            raw = value
-    return RPCError(details, RPCStatusCode(code.value[0]), raw)
+    return RPCError(details, RPCStatusCode(code.value[0]), _raw_status(error))
 
 
-async def _call(method: Callable[[Any], Awaitable[_T]], request: Any) -> _T:
-    """Make one stub call, translating the transport's failure to the SDK's."""
-    try:
-        return await method(request)
-    except grpc.aio.AioRpcError as error:
-        raise _translate(error) from error
+async def _call(
+    method: Callable[[Any], Awaitable[_T]],
+    request: Any,
+    *,
+    retry_config: RetryConfig | None = None,
+    idempotent: bool = True,
+) -> _T:
+    """Make one stub call, retried as sdk-core would, translating the failure to the SDK's.
+
+    ``idempotent`` is false for a call the server cannot tell from its own
+    repeat, which is then retried only on a refusal the server sent before it
+    did anything. The request is the same object on every attempt, so a
+    numbered append is deduplicated by the server whichever attempt landed.
+    """
+    config = retry_config or RetryConfig()
+    backoff = _Backoff(config)
+    throttle = _Backoff(_THROTTLE)
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return await method(request)
+        except grpc.aio.AioRpcError as error:
+            delay = _retry_after(error, backoff, throttle, idempotent=idempotent)
+            if delay is None:
+                raise _translate(error) from error
+            _log_retry(error, attempts, config)
+        await asyncio.sleep(delay)
+
+
+def _log_retry(error: grpc.aio.AioRpcError, attempts: int, config: RetryConfig) -> None:
+    # Quiet at first and louder once half the budget is gone, as sdk-core does,
+    # so a single throttled call is not a warning but a struggling one is.
+    level = logging.DEBUG
+    if config.max_retries and attempts * 2 >= config.max_retries:
+        level = logging.WARNING
+    logger.log(
+        level,
+        "stream call failed with %s on attempt %d, retrying: %s",
+        error.code().name,
+        attempts,
+        error.details(),
+    )
 
 
 class StreamClient:
     """Creates and opens streams on a namespace."""
 
-    def __init__(self, channel: Any, namespace: str) -> None:
-        """Wrap an existing ``grpc.aio`` channel. Prefer :meth:`connect`."""
+    def __init__(
+        self,
+        channel: Any,
+        namespace: str,
+        *,
+        retry_config: RetryConfig | None = None,
+    ) -> None:
+        """Wrap an existing ``grpc.aio`` channel. Prefer :meth:`connect`.
+
+        ``retry_config`` is the policy every call made through this client
+        retries under; ``None`` is the SDK's default.
+        """
         self._channel = channel
         self._namespace = namespace
+        self._retry_config = retry_config
         # The generated stub is typed for a synchronous channel. This client
         # drives it over ``grpc.aio``, where every call is awaited.
         self._stub: Any = service_pb2_grpc.StreamServiceStub(channel)
 
     @staticmethod
-    def connect(target_host: str, namespace: str = "default") -> StreamClient:
+    def connect(
+        target_host: str,
+        namespace: str = "default",
+        *,
+        retry_config: RetryConfig | None = None,
+    ) -> StreamClient:
         """Open a channel to a frontend.
 
         Separate from ``Client.connect`` because this does not share the
         connection the rest of the SDK uses.
         """
-        return StreamClient(grpc.aio.insecure_channel(target_host), namespace)
+        return StreamClient(
+            grpc.aio.insecure_channel(target_host),
+            namespace,
+            retry_config=retry_config,
+        )
 
     async def close(self) -> None:
         """Close the underlying channel."""
@@ -240,6 +426,8 @@ class StreamClient:
         if max_items is not None:
             lifecycle.max_items = max_items
 
+        # A create that landed but was not answered would be refused as a
+        # repeat, so it goes again only on a refusal.
         response = await _call(
             self._stub.CreateStream,
             stream.CreateStreamRequest(
@@ -249,17 +437,22 @@ class StreamClient:
                     lifecycle=lifecycle,
                 )
             ),
+            retry_config=self._retry_config,
+            idempotent=False,
         )
         return StreamHandle(
             self._stub,
             self._namespace,
             stream_id,
             run_id=response.frontend_response.run_id,
+            retry_config=self._retry_config,
         )
 
     def get(self, stream_id: str) -> StreamHandle:
         """Open an existing stream without a round trip."""
-        return StreamHandle(self._stub, self._namespace, stream_id)
+        return StreamHandle(
+            self._stub, self._namespace, stream_id, retry_config=self._retry_config
+        )
 
     def workflow_stream(
         self, workflow_id: str, name: str = "", *, owner_run_id: str = ""
@@ -281,7 +474,12 @@ class StreamClient:
         :meth:`WorkflowStreamHandle.pin` for why a follower wants that.
         """
         return WorkflowStreamHandle(
-            self._stub, self._namespace, workflow_id, name, owner_run_id
+            self._stub,
+            self._namespace,
+            workflow_id,
+            name,
+            owner_run_id,
+            retry_config=self._retry_config,
         )
 
     def activity_stream(
@@ -309,6 +507,7 @@ class StreamClient:
             name,
             run_id,
             activity_id=activity_id,
+            retry_config=self._retry_config,
         )
 
 
@@ -316,7 +515,13 @@ class StreamHandle:
     """A handle to one standalone stream."""
 
     def __init__(
-        self, stub: Any, namespace: str, stream_id: str, run_id: str = ""
+        self,
+        stub: Any,
+        namespace: str,
+        stream_id: str,
+        run_id: str = "",
+        *,
+        retry_config: RetryConfig | None = None,
     ) -> None:
         """Prefer :meth:`StreamClient.get` or :meth:`StreamClient.create`."""
         self._stub = stub
@@ -325,6 +530,7 @@ class StreamHandle:
         # Passing this back saves the server resolving the current run on every
         # call, which is otherwise a persistence lookup per request.
         self._run_id = run_id
+        self._retry_config = retry_config
 
     @property
     def id(self) -> str:
@@ -341,9 +547,11 @@ class StreamHandle:
 
         Supplying ``producer_id`` and ``sequence`` makes the append idempotent:
         a retry with the same pair returns the original offsets rather than
-        appending twice, and says so. Without them the append is
-        at-least-once, which is only the right trade when duplicates are
-        harmless.
+        appending twice, and says so. That is also what lets a failed append
+        be made again here on every code sdk-core retries. Without them the
+        append is at-least-once, which is only the right trade when duplicates
+        are harmless, and it is made again only on a refusal the server sent
+        before it did anything.
         """
         response = await _call(
             self._stub.AddMessages,
@@ -357,6 +565,8 @@ class StreamHandle:
                     sequence=sequence,
                 )
             ),
+            retry_config=self._retry_config,
+            idempotent=bool(producer_id),
         )
         return _appended(response.frontend_response)
 
@@ -440,6 +650,7 @@ class StreamHandle:
                     wait_new_messages=wait,
                 )
             ),
+            retry_config=self._retry_config,
         )
         return _page(response.frontend_response)
 
@@ -459,6 +670,7 @@ class StreamHandle:
                     new_base_offset=new_base_offset,
                 )
             ),
+            retry_config=self._retry_config,
         )
 
     async def finish_writing(self, producer_id: str) -> None:
@@ -472,6 +684,7 @@ class StreamHandle:
                     producer_id=producer_id,
                 )
             ),
+            retry_config=self._retry_config,
         )
 
     async def close(self) -> None:
@@ -483,6 +696,7 @@ class StreamHandle:
                     namespace=self._namespace, stream_id=self._id
                 )
             ),
+            retry_config=self._retry_config,
         )
 
     async def describe(self) -> stream.StreamState:
@@ -494,6 +708,7 @@ class StreamHandle:
                     namespace=self._namespace, stream_id=self._id
                 )
             ),
+            retry_config=self._retry_config,
         )
         return response.frontend_response.state
 
@@ -517,6 +732,7 @@ class WorkflowStreamHandle:
         owner_run_id: str = "",
         *,
         activity_id: str = "",
+        retry_config: RetryConfig | None = None,
     ) -> None:
         """Prefer :meth:`StreamClient.workflow_stream` or :meth:`StreamClient.activity_stream`."""
         self._stub = stub
@@ -525,6 +741,7 @@ class WorkflowStreamHandle:
         self._name = name
         self._owner_run_id = owner_run_id
         self._activity_id = activity_id
+        self._retry_config = retry_config
 
     @property
     def workflow_id(self) -> str:
@@ -608,6 +825,8 @@ class WorkflowStreamHandle:
                     sequence=sequence,
                 )
             ),
+            retry_config=self._retry_config,
+            idempotent=bool(producer_id),
         )
         return _appended(response.frontend_response)
 
@@ -679,6 +898,7 @@ class WorkflowStreamHandle:
                     wait_new_messages=wait,
                 )
             ),
+            retry_config=self._retry_config,
         )
         return _page(response.frontend_response)
 
@@ -697,6 +917,7 @@ class WorkflowStreamHandle:
                     stream_name=self._name,
                 )
             ),
+            retry_config=self._retry_config,
         )
         return response.frontend_response.state
 
