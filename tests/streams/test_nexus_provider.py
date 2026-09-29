@@ -40,6 +40,7 @@ from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
     BEGINNING,
+    END,
     Cursor,
     RecordKind,
     StreamCursorError,
@@ -784,3 +785,47 @@ def test_a_socket_failure_never_reaches_the_caller_as_a_timeout():
     # A url urllib cannot even build a request from does not escape either.
     with pytest.raises(nexus._EndpointFailure):  # pyright: ignore[reportPrivateUsage]
         nexus._post("not a url", b"{}", {}, timedelta(seconds=1))  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_front_carries_every_read_start(monkeypatch: pytest.MonkeyPatch):
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
+    stream = _front(None).get_stream_handle(None, "wf-starts")
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+
+    # last= rides the contract to the store behind the endpoint.
+    newest = await take(
+        stream.read(topic=INPUTS, result_type=dict, last=2), 2, timeout=30
+    )
+    assert [record.value for record in newest] == [{"n": 2}, {"n": 3}]
+
+    # END is the endpoint's newest position when the read starts.
+    at_end = stream.read(topic=INPUTS, result_type=dict, after=END)
+    first = asyncio.ensure_future(at_end.__anext__())
+    try:
+        for _ in range(100):
+            await producer.append({"n": "new"})
+            done, _ = await asyncio.wait({first}, timeout=0.1)
+            if done:
+                break
+        record = await asyncio.wait_for(first, 30)
+    finally:
+        await at_end.aclose()
+    assert record.value == {"n": "new"}
+
+    # A token resumes a read and last_n starts one, so the two are refused.
+    with pytest.raises(nexusrpc.HandlerError) as both:
+        await _dispatch(
+            handler,
+            READ_OPERATION,
+            ReadInput(
+                workflow_id="wf-starts",
+                topic=INPUTS,
+                after_token=newest[0].cursor.token,
+                last_n=1,
+            ),
+        )
+    assert both.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
+    await handler.close()

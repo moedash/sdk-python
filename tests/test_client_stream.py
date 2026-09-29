@@ -19,7 +19,11 @@ from collections.abc import AsyncIterator
 import pytest
 
 from temporalio.api.common.v1 import Payload
-from temporalio.api.stream.v1 import StreamRecord, StreamRecordKind
+from temporalio.api.stream.v1 import (
+    StreamRecord,
+    StreamRecordKind,
+    StreamStartPosition,
+)
 from temporalio.client_stream import StreamClient, StreamHandle
 from temporalio.service import RPCError
 from temporalio.streams import StreamNotFoundError, StreamProducerError
@@ -216,3 +220,47 @@ async def test_a_producer_conflict_is_a_stream_producer_error(
 
     entries, _ = await stream.read()
     assert data(entries) == [b"one", b"two"]
+
+
+async def test_earliest_reads_from_the_floor_of_a_truncated_stream(
+    stream: StreamHandle,
+) -> None:
+    await stream.append(rec(b"a"), rec(b"b"), rec(b"c"), rec(b"d"))
+    await stream.truncate(2)
+
+    # Offset zero is what a reader with no position used to send, and a
+    # truncated stream no longer holds it.
+    with pytest.raises(RPCError, match="truncated"):
+        await stream.read(from_offset=0)
+    entries, next_offset = await stream.read(start=StreamStartPosition(earliest=True))
+    assert data(entries) == [b"c", b"d"]
+    assert [entry.offset for entry in entries] == [2, 3]
+    assert next_offset == 4
+
+
+async def test_last_n_and_tail_resolve_on_the_first_read(stream: StreamHandle) -> None:
+    await stream.append(rec(b"a"), rec(b"b"), rec(b"c"))
+
+    entries, _ = await stream.read(start=StreamStartPosition(last_n=2))
+    assert data(entries) == [b"b", b"c"]
+    entries, next_offset = await stream.read(start=StreamStartPosition(tail=True))
+    assert entries == []
+    assert next_offset == 3
+    with pytest.raises(RPCError):
+        await stream.read(from_offset=1, start=StreamStartPosition(earliest=True))
+
+
+async def test_follow_from_the_tail_skips_what_was_there(stream: StreamHandle) -> None:
+    await stream.append(rec(b"old"))
+    following = stream.follow(start=StreamStartPosition(tail=True))
+    first = asyncio.ensure_future(following.__anext__())
+    try:
+        for _ in range(100):
+            await stream.append(rec(b"new"))
+            done, _ = await asyncio.wait({first}, timeout=0.1)
+            if done:
+                break
+        entry = await asyncio.wait_for(first, 10)
+    finally:
+        first.cancel()
+    assert entry.record.body.data == b"new"

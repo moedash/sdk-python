@@ -6,7 +6,17 @@ first: the workflow publishes to it with a command the server applies in the
 transaction that accepts the Workflow Task, subscribes to it by name and reads
 the ranges the server delivers on its Workflow Tasks; outside code appends and
 reads through the stream service, and the workflow's records and an outside
-producer's land in one log in the order the server accepted them.
+producer's land in one log in the order the server accepted them. The default
+topic, :data:`temporalio.streams.DEFAULT_TOPIC`, is the server's default
+stream: the server resolves an unnamed stream to that same name, so the
+provider sends the name explicitly and a record's topic and its stream's name
+never differ.
+
+An activity owns topics of its own, apart from its workflow's: a standalone
+activity is its own owner on the server, and an activity a workflow scheduled
+is addressed through that workflow. They are one stream per activity
+execution, so a retry writes to the same stream, and the server ends them when
+the activity reaches a terminal status.
 
 A cursor names the run as well as the offset, because an owned stream belongs
 to one run and a successor's starts over at zero. A handle without a run id
@@ -29,8 +39,10 @@ from collections.abc import AsyncGenerator
 from typing import Any, Generic, TypeVar
 
 from temporalio import workflow
+from temporalio.api.stream.v1 import StreamStartPosition
 from temporalio.client import Client, WorkflowHistoryEventFilterType
 from temporalio.client_stream import (
+    Page,
     StreamClient,
     WorkflowStreamHandle,
     close_shared_clients,
@@ -40,7 +52,14 @@ from temporalio.converter import PayloadCodec, PayloadConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, WriteSink
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -52,7 +71,12 @@ from temporalio.streams._wire import (
 )
 from temporalio.streams.providers import ProviderPlugin
 
-__all__ = ["NativeProducer", "NativeStreamHandle", "NativeStreams"]
+__all__ = [
+    "NativeActivityStreamHandle",
+    "NativeProducer",
+    "NativeStreamHandle",
+    "NativeStreams",
+]
 
 T = TypeVar("T")
 
@@ -153,18 +177,30 @@ class _NativeWriteSink:
 class _NativeWorkflowProvider:
     """The workflow half: the server's commands and delivered ranges."""
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
+        check_read_start(after, last)
         _require_topic(topic)
         run_id = workflow.info().run_id
-        start = 0
-        named = _position(after)
-        if named is not None:
+        # The server resolves the position when it registers the subscription
+        # and records the offset on the subscribed event, so replay never
+        # resolves it again.
+        if last is not None:
+            start = StreamStartPosition(last_n=last)
+        elif after == END:
+            start = StreamStartPosition(tail=True)
+        elif after == BEGINNING:
+            start = StreamStartPosition(earliest=True)
+        else:
+            named = _position(after)
+            assert named is not None
             if named[0] != run_id:
                 raise StreamCursorError(
                     f"cursor {after.token!r} names another run; a run's stream is its own"
                 )
-            start = named[1] + 1
-        workflow._subscribe_stream(topic, start_offset=start)
+            start = StreamStartPosition(offset=named[1] + 1)
+        workflow._subscribe_stream(topic, start=start)
         return _NativeReadSource(topic, run_id)
 
     def open_writer(self, topic: str) -> WriteSink:
@@ -329,44 +365,69 @@ class NativeStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes.
+        """Yield records on ``topic`` from where the read starts until the chain, or the pinned run, closes.
+
+        ``BEGINNING`` is the oldest record the chain's first retained run
+        still holds. ``END`` and ``last=`` start on the current run, or the
+        pinned one: an earlier run of a chain has ended and holds neither the
+        tail nor the newest records. The server resolves each on the first
+        poll, in the read that serves it.
 
         The chain is followed across continue-as-new and across a reset: a
         run reset from a closed one is read next, from the floor its stream
         reports. A handle pinned to a run that was reset ends with that run.
         """
+        check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
-        named = _position(after)
+        named = None if after == END else _position(after)
         if named is not None and self._run_id is not None and named[0] != self._run_id:
             raise StreamCursorError(
                 f"cursor {after.token!r} names another run than this handle is pinned to"
             )
-        return self._read(topic, named, after, result_type)
+        start: StreamStartPosition | None = None
+        if last is not None:
+            start = StreamStartPosition(last_n=last)
+        elif after == END:
+            start = StreamStartPosition(tail=True)
+        elif named is None:
+            start = StreamStartPosition(earliest=True)
+        return self._read(topic, named, start, after, result_type)
 
     async def _read(
         self,
         topic: str,
         named: tuple[str, int] | None,
+        start: StreamStartPosition | None,
         after: Cursor,
         result_type: type | None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        decoder = RecordDecoder(
-            self._converter, result_type, after=after, warn=logger.warning
-        )
+        decoder: RecordDecoder | None = None
+        offset = 0
         if named is not None:
             run_id, offset = named[0], named[1] + 1
+        elif start is not None and start.WhichOneof("position") != "earliest":
+            run_id = self._run_id or await self._current_run()
         else:
-            run_id, offset = self._run_id or await self._first_run(), 0
+            run_id = self._run_id or await self._first_run()
         while True:
             stream = self._stream(topic, run_id)
             while True:
-                page = await stream.poll(from_offset=offset)
+                page = await stream.poll(from_offset=offset, start=start)
+                if decoder is None:
+                    decoder = RecordDecoder(
+                        self._converter,
+                        result_type,
+                        after=self._previous(run_id, page, start, after),
+                        warn=logger.warning,
+                    )
+                start = None
                 for entry in page.entries:
                     record = await _decode_body(self._codec, entry.record)
                     for out in decoder.decode(_cursor(run_id, entry.offset), record):
@@ -383,7 +444,22 @@ class NativeStreamHandle:
                 return
             run_id, offset = following
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    @staticmethod
+    def _previous(
+        run_id: str, page: Page, start: StreamStartPosition | None, after: Cursor
+    ) -> Cursor:
+        """The position before the first record a read yields.
+
+        A synthesized record is positioned there. After ``END`` or ``last=``
+        it is only known once the server resolved the start, from the first
+        page. It names a run so a chain-following resume stays on this one.
+        """
+        if start is None or start.WhichOneof("position") == "earliest":
+            return after
+        first = page.entries[0].offset if page.entries else page.next_offset
+        return _cursor(run_id, first - 1)
+
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, naming the run it was read from.
 
         An empty topic on the chain's first run is the beginning of the
@@ -407,7 +483,7 @@ class NativeStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> NativeProducer[Any]:
@@ -532,6 +608,60 @@ class NativeStreamHandle:
             return 0
 
 
+class NativeActivityStreamHandle(NativeStreamHandle):
+    """The topics one activity owns, from outside, over the stream service.
+
+    An activity's streams belong to one activity execution, not to a chain of
+    runs: a retry writes to the same stream and a read ends when the activity
+    reaches a terminal status. So the handle pins the execution on first use
+    and never follows a successor. A standalone activity is its own owner; an
+    activity a workflow scheduled is reached through that workflow's run.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        activity_id: str,
+        workflow_id: str | None,
+        run_id: str | None,
+        *,
+        opened: set[tuple[str, str]] | None = None,
+    ) -> None:
+        """Address ``activity_id``'s topics, pinned to ``run_id`` when one is given."""
+        super().__init__(client, workflow_id or "", run_id, opened=opened)
+        self._activity_id = activity_id
+
+    def _stream(self, topic: str, run_id: str) -> WorkflowStreamHandle:
+        return self._service().activity_stream(
+            self._activity_id, topic, workflow_id=self._workflow_id, run_id=run_id
+        )
+
+    async def _current_run(self) -> str:
+        if self._workflow_id:
+            return await super()._current_run()
+        try:
+            description = await self._client.get_activity_handle(
+                self._activity_id
+            ).describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                raise StreamNotFoundError(
+                    f"activity {self._activity_id!r} was not found"
+                ) from error
+            raise
+        assert description.activity_run_id is not None
+        return description.activity_run_id
+
+    async def _first_run(self) -> str:
+        return await self._current_run()
+
+    async def _predecessor(self, run_id: str) -> str | None:
+        return None
+
+    async def _successor(self, topic: str, run_id: str) -> tuple[str, int] | None:
+        return None
+
+
 class NativeStreams(ProviderPlugin):
     """The server-side provider.
 
@@ -556,6 +686,24 @@ class NativeStreams(ProviderPlugin):
     ) -> NativeStreamHandle:
         """A handle on ``workflow_id``'s topics; without ``run_id`` it follows the chain."""
         return NativeStreamHandle(client, workflow_id, run_id, opened=self._opened)
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NativeActivityStreamHandle:
+        """A handle on the topics ``activity_id`` owns, apart from any workflow's.
+
+        Without ``workflow_id`` the activity is a standalone one and ``run_id``
+        pins its run; with one it is that workflow's activity and ``run_id``
+        pins the workflow's run.
+        """
+        return NativeActivityStreamHandle(
+            client, activity_id, workflow_id, run_id, opened=self._opened
+        )
 
     async def close(self) -> None:
         """Close the channels this provider opened to the stream service.

@@ -525,6 +525,27 @@ class _ReadInputTransferTypeConverter(
                 else:
                     latest_only_value = latest_only_value_raw
 
+        last_n_value: int | None = None
+        if "last_n" in raw:
+            last_n_value_raw = raw["last_n"]
+            if last_n_value_raw is None:
+                violations.append(
+                    Violation(path="last_n", reason="explicit null not allowed")
+                )
+            else:
+                last_n_value_parsed = _parse_spec_integer(
+                    last_n_value_raw, "last_n", violations
+                )
+                if last_n_value_parsed is not None:
+                    last_n_value = last_n_value_parsed
+                    if last_n_value < 1:
+                        violations.append(
+                            Violation(
+                                path="last_n",
+                                reason=f"must be >= 1, got {last_n_value}",
+                            )
+                        )
+
         for key in raw:
             if (
                 key != "workflow_id"
@@ -534,6 +555,7 @@ class _ReadInputTransferTypeConverter(
                 and key != "max_records"
                 and key != "wait_ms"
                 and key != "latest_only"
+                and key != "last_n"
             ):
                 violations.append(Violation(path=key, reason="unknown field"))
         if violations:
@@ -546,6 +568,7 @@ class _ReadInputTransferTypeConverter(
             max_records=max_records_value,
             wait_ms=wait_ms_value,
             latest_only=latest_only_value,
+            last_n=last_n_value,
         )
 
     @typing_extensions.override
@@ -600,6 +623,16 @@ class _ReadInputTransferTypeConverter(
             out["wait_ms"] = value.wait_ms
         if value.latest_only is not None:
             out["latest_only"] = value.latest_only
+        if value.last_n is not None:
+            if abs(value.last_n) > 9007199254740991:
+                violations.append(
+                    Violation(path="last_n", reason="exceeds ±(2^53-1) integer cap")
+                )
+            if value.last_n < 1:
+                violations.append(
+                    Violation(path="last_n", reason=f"must be >= 1, got {value.last_n}")
+                )
+            out["last_n"] = value.last_n
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return out
@@ -640,6 +673,12 @@ class ReadInput:
     latest_only: bool | None = None
     """Answer with the newest position and no records, for a reader that wants to follow
     from now.
+    """
+
+    last_n: int | None = None
+    """With no after_token, start at the newest this many records, or at all of them when
+    the stream holds fewer. Records of every kind count. Refused alongside an
+    after_token, which is how a read resumes.
     """
 
 

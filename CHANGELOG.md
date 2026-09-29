@@ -47,6 +47,10 @@ to include examples, links to docs, or any other relevant information.
   `streams.topic("inputs", Token)`, shared by workflow, activity and client
   code; a plain string names a topic decided at runtime. The record on the wire
   is `temporal.api.stream.v1.StreamRecord` on every provider, and
+  code; a plain string names a topic decided at runtime, and a call that names
+  no topic addresses the default topic, `streams.DEFAULT_TOPIC` (`"output"`,
+  the server's default stream name). The record on the wire
+  is `temporal.api.stream.v1.StreamRecord` on every provider.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against.
 - **Experimental**: `temporalio.streams.providers.redis.RedisStreams` serves the

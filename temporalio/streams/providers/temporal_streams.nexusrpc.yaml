@@ -157,6 +157,14 @@ $defs:
         description: >-
           Answer with the newest position and no records, for a reader that
           wants to follow from now.
+      last_n:
+        type: integer
+        minimum: 1
+        description: >-
+          With no after_token, start at the newest this many records, or at
+          all of them when the stream holds fewer. Records of every kind
+          count. Refused alongside an after_token, which is how a read
+          resumes.
     required:
       - workflow_id
       - topic

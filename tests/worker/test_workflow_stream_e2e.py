@@ -32,7 +32,7 @@ from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHistory
 from temporalio.client_stream import StreamClient
 from temporalio.converter import DataConverter, PayloadCodec
-from temporalio.streams import RecordKind, StreamNotFoundError
+from temporalio.streams import END, RecordKind, StreamNotFoundError
 from temporalio.streams.providers.native import NativeStreams
 from temporalio.worker import Replayer, Worker
 from temporalio.workflow import NondeterminismError
@@ -291,7 +291,7 @@ class PublishAndRead:
         workflow._append_stream_records([_record(b"gamma")], stream_name="output")
         # A name this workflow has not written yet still names a stream it
         # owns, so subscribing creates the one the later publish lands in.
-        workflow._subscribe_stream("output", start_offset=0)
+        workflow._subscribe_stream("output")
 
         received: list[str] = []
         while len(received) < 3:
@@ -345,7 +345,7 @@ class ConsumeAcrossTasks:
 
     @workflow.run
     async def run(self, stream_id: str, expected: int) -> list[str]:
-        workflow._subscribe_stream(stream_id, start_offset=0)
+        workflow._subscribe_stream(stream_id)
         seen: list[str] = []
         while len(seen) < expected:
             for item in await workflow._read_stream_records(stream_id):
@@ -890,6 +890,13 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
             latest = await client.get_stream_handle(workflow_id).latest(topic=INPUTS)
             assert latest.token == f"native:{reset_run}:3"
 
+            # Pinned to the reset run, BEGINNING is the floor its inherited
+            # stream starts at. Offset zero, which it never held, is refused.
+            from_floor = await asyncio.wait_for(
+                _collect(client, workflow_id, INPUTS, reset_run), 30
+            )
+            assert from_floor == [({"n": 4}, reset_run, 2), (None, reset_run, 3)]
+
         # The reset run's history: the base run's events, the reset marker
         # naming both runs, then its own. The replayer fetches the first era
         # from the base run's stream and the rest from the reset run's.
@@ -1063,5 +1070,104 @@ async def test_a_chain_of_two_resets_is_followed_to_its_end() -> None:
                     seen.append(run)
             assert seen == sorted(set(seen), key=walked.index)
             assert seen[0] == base_run and seen[-1] == second
+    finally:
+        await provider.close()
+
+
+@workflow.defn
+class StartsWhenTold:
+    """Subscribes to ``inputs`` at a start given by a signal and returns what it read."""
+
+    def __init__(self) -> None:
+        self._start: str | None = None
+
+    @workflow.signal
+    def begin(self, start: str) -> None:
+        self._start = start
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        await workflow.wait_condition(lambda: self._start is not None)
+        if self._start == "end":
+            reader = workflow.stream_reader(INPUTS, result_type=dict, after=END)
+            want = 1
+        else:
+            reader = workflow.stream_reader(INPUTS, result_type=dict, last=2)
+            want = 2
+        values: list[Any] = []
+        async for value in reader.values():
+            values.append(value["n"])
+            if len(values) == want:
+                break
+        return values
+
+
+async def _subscribed_offsets(client: Client, workflow_id: str) -> list[int]:
+    return [
+        event.workflow_stream_subscribed_event_attributes.start_offset
+        async for event in client.get_workflow_handle(
+            workflow_id
+        ).fetch_history_events()
+        if event.event_type == EVENT_STREAM_SUBSCRIBED
+    ]
+
+
+async def test_a_workflow_reader_starts_at_the_last_n_records_on_the_server() -> None:
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "last-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "last-wf-" + uuid.uuid4().hex[:8]
+    try:
+        # Cold, so every task replays and the recorded start is what places
+        # the reader, not a second resolution.
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[StartsWhenTold],
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                StartsWhenTold.run, id=workflow_id, task_queue=task_queue
+            )
+            stream = client.get_stream_handle(workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+            await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+            await handle.signal(StartsWhenTold.begin, "last")
+            assert await asyncio.wait_for(handle.result(), 60) == [3, 4]
+        assert await _subscribed_offsets(client, workflow_id) == [2]
+    finally:
+        await provider.close()
+
+
+async def test_a_workflow_reader_at_end_skips_what_was_there_on_the_server() -> None:
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "end-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "end-wf-" + uuid.uuid4().hex[:8]
+    try:
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[StartsWhenTold],
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                StartsWhenTold.run, id=workflow_id, task_queue=task_queue
+            )
+            stream = client.get_stream_handle(workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+            await producer.append({"n": "old"}, {"n": "old"})
+            await handle.signal(StartsWhenTold.begin, "end")
+            result = asyncio.ensure_future(handle.result())
+            # The subscription registers when the signalled task completes,
+            # which the test does not observe, so appends keep coming.
+            for _ in range(150):
+                await producer.append({"n": "new"})
+                done, _ = await asyncio.wait({result}, timeout=0.2)
+                if done:
+                    break
+            assert await asyncio.wait_for(result, 60) == ["new"]
+        offsets = await _subscribed_offsets(client, workflow_id)
+        assert len(offsets) == 1 and offsets[0] >= 2
     finally:
         await provider.close()

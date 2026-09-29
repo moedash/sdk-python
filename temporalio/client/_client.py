@@ -897,26 +897,43 @@ class Client:
         )
 
     def get_stream_handle(
-        self, workflow_id: str, *, run_id: str | None = None
+        self,
+        workflow_id: str | None = None,
+        *,
+        run_id: str | None = None,
+        activity_id: str | None = None,
     ) -> temporalio.streams.StreamHandle:
-        """Get a handle on a workflow's stream from the provider registered on this client.
+        """Get a handle on a workflow's or an activity's stream from the provider registered on this client.
 
         Mirrors :py:meth:`get_workflow_handle`: without ``run_id`` the handle
         follows the workflow's execution chain across continue-as-new, with
-        one it is pinned to that run. The provider is the one registered with
-        ``plugins=[provider]`` at :py:meth:`connect`, or passed as
-        ``stream_provider``. See :py:mod:`temporalio.streams`.
+        one it is pinned to that run. With ``activity_id`` the handle is on
+        the streams that activity owns: a standalone activity's when
+        ``workflow_id`` is left out, and ``run_id`` then pins the activity's
+        run, or an activity that ``workflow_id`` scheduled. The provider is
+        the one registered with ``plugins=[provider]`` at :py:meth:`connect`,
+        or passed as ``stream_provider``. The handle's ``read``, ``latest``
+        and ``producer`` take a topic, and without one address the owner's
+        default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`. A
+        ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+        :py:data:`temporalio.streams.END` or at the last ``N`` records with
+        ``last=N``, and resumes only after a cursor it was handed. See
+        :py:mod:`temporalio.streams`.
 
         Args:
-            workflow_id: Workflow ID whose stream to get a handle to.
+            workflow_id: Workflow ID whose stream to get a handle to, or the
+                workflow that scheduled ``activity_id``.
             run_id: Run ID to pin the handle to.
+            activity_id: Activity ID whose own streams to get a handle to.
 
         Returns:
             The stream handle.
 
         Raises:
+            ValueError: Neither ``workflow_id`` nor ``activity_id`` was given.
             temporalio.streams.StreamUnsupportedError: No stream provider is
-                registered on this client.
+                registered on this client, or it cannot hold a stream an
+                activity owns.
         """
         provider = self._config.get("stream_provider")
         if provider is None:
@@ -924,6 +941,12 @@ class Client:
                 "no stream provider is registered on this client; connect with "
                 "plugins=[provider]"
             )
+        if activity_id is not None:
+            return provider.get_activity_stream_handle(
+                self, activity_id, workflow_id=workflow_id, run_id=run_id
+            )
+        if workflow_id is None:
+            raise ValueError("name the workflow_id or the activity_id to address")
         return provider.get_stream_handle(self, workflow_id, run_id=run_id)
 
     def get_workflow_handle_for(

@@ -37,6 +37,14 @@ The mapping, in one place:
   batch limits are lifted for this provider, because a synchronous publish
   cannot wait for the worker to stage a full batch; a batch it cannot stage
   fails the task.
+- A read starts at ``BEGINNING``, which is the oldest entry the trim left, at
+  ``END``, the committed tail when the read starts, or at the last ``N``
+  committed records, found by scanning the committed prefix. A workflow
+  reader takes ``BEGINNING`` or a cursor only: the transport records where a
+  subscription starts, and resolving the tail or the newest records needs a
+  store read the workflow thread cannot make and nothing would record, so
+  ``END`` and ``last=`` there raise
+  :class:`temporalio.streams.StreamUnsupportedError`.
 - Retention is trimming, with no consumer floor. When ``retention`` or
   ``max_len`` is set, every append the provider makes trims the key it wrote,
   whatever any reader has reached. A replay that reaches a recorded range the
@@ -50,9 +58,10 @@ import asyncio
 import logging
 import re
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Coroutine, Sequence
 from datetime import timedelta
-from typing import Any, Final, Generic, TypeVar
+from typing import Any, Final, Generic, NoReturn, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -75,6 +84,9 @@ from temporalio.contrib.external_workflow_streams import (
 )
 from temporalio.contrib.external_workflow_streams import (
     BEGINNING as TRANSPORT_BEGINNING,
+)
+from temporalio.contrib.external_workflow_streams import (
+    Cursor as TransportCursor,
 )
 from temporalio.contrib.external_workflow_streams import (
     RecordKind as TransportRecordKind,
@@ -114,9 +126,17 @@ from temporalio.streams._errors import (
     StreamError,
     StreamNotFoundError,
     StreamProducerError,
+    StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -469,8 +489,18 @@ class _RedisWorkflowProvider:
     def __init__(self, idle_timeout: timedelta) -> None:
         self._input = external_stream.with_options(idle_timeout=idle_timeout)
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
+        check_read_start(after, last)
         _require_topic(topic)
+        if last is not None or after == END:
+            raise StreamUnsupportedError(
+                "the redis provider cannot start a workflow reader at END or at the "
+                "last records: the transport starts a subscription at a cursor the "
+                "workflow names or where its predecessor committed, and finding the "
+                "tail is a store read the workflow thread cannot make"
+            )
         position = _workflow_position(after)
         # Without a position the transport resumes where the chain's
         # predecessor run committed; with one, that is where the wait starts
@@ -489,6 +519,33 @@ class _RedisWorkflowProvider:
 
     async def on_workflow_finish(self) -> None:
         pass
+
+
+async def _start_cursor(
+    backend: RedisStreamBackend, key: StreamKey, last: int | None
+) -> TransportCursor:
+    """Where an outside read at ``END``, or of the newest ``last`` records, starts.
+
+    Both come from the committed prefix, so a staged batch whose task has not
+    settled is not counted, and neither is a fence or an aborted stage.
+    """
+    if last is None:
+        return await backend.output_tail(key)
+    newest: deque[Offset] = deque(maxlen=last + 1)
+    cursor = TRANSPORT_BEGINNING
+    while True:
+        result = await backend.read_output_after(
+            key, cursor, max_records=256, block=timedelta(0)
+        )
+        for placed in result.records:
+            cursor = AFTER(placed.offset)
+            if placed.kind is TransportRecordKind.DATA:
+                newest.append(placed.offset)
+        if result.pending is not None or not result.records:
+            break
+    if len(newest) <= last:
+        return TRANSPORT_BEGINNING
+    return AFTER(newest[0])
 
 
 async def _chain(client: Client, workflow_id: str) -> WorkflowChainKey:
@@ -760,11 +817,15 @@ class RedisStreamHandle:
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes.
+        """Yield records on ``topic`` from where the read starts until the chain, or the pinned run, closes.
+
+        ``END`` and ``last=`` are resolved on the first step, against the
+        committed records: ``last=`` scans the committed prefix to find them.
 
         Two refusals and they do not land together. A cursor another provider minted,
         or one naming the workflow's own input log, is refused by this call: reading
@@ -777,25 +838,39 @@ class RedisStreamHandle:
             StreamCursorError: The cursor is another provider's, or names the
                 workflow's input log.
         """
+        check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
-        position = _outside_position(after)
-        return self._read(topic, position, after, result_type)
+        position = None if after == END else _outside_position(after)
+        return self._read(topic, position, after, last, result_type)
 
     async def _read(
         self,
         topic: str,
         position: Offset | None,
         after: Cursor,
+        last: int | None,
         result_type: type | None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        decoder = RecordDecoder(
-            self._converter, result_type, after=after, warn=logger.warning
-        )
         backend = self._streams._require_backend()
         chain = await _chain(self._client, self._workflow_id)
         key = chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+        start: TransportCursor | None = None
+        if last is not None or after == END:
+            try:
+                start = await _start_cursor(backend, key, last)
+            except TransportStreamError as error:
+                raise _storage_error(error, "the store could not be read") from error
+            # A synthesized record is positioned before the first one read.
+            after = (
+                BEGINNING
+                if start.is_beginning
+                else mint_cursor(_PROVIDER, start.offset.token)  # type: ignore[union-attr]
+            )
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
         if (
             position is not None
             and isinstance(backend, _RetainingBackend)
@@ -807,7 +882,10 @@ class RedisStreamHandle:
                 f"cursor {after.token!r} names a record on {topic!r} that the "
                 f"provider's retention has trimmed ({backend.describe_window()})"
             )
-        cursor = TRANSPORT_BEGINNING if position is None else AFTER(position)
+        if start is not None:
+            cursor = start
+        else:
+            cursor = TRANSPORT_BEGINNING if position is None else AFTER(position)
         closed = False
         while True:
             try:
@@ -893,7 +971,7 @@ class RedisStreamHandle:
         # is not the end unless the handle was pinned to it.
         return not (self._run_id is None and status in _STILL_CONSUMING)
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest committed record on ``topic``, for following from now.
 
         ``BEGINNING`` when the topic holds no committed record, which a topic whose
@@ -918,7 +996,7 @@ class RedisStreamHandle:
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> RedisProducer[Any]:
@@ -1037,6 +1115,28 @@ class RedisStreams(ProviderPlugin):
     ) -> RedisStreamHandle:
         """A handle on ``workflow_id``'s topics; it follows the chain by construction."""
         return RedisStreamHandle(self, client, workflow_id, run_id)
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> NoReturn:
+        """Refused: this provider cannot hold a stream an activity owns.
+
+        The transport keys every stream by a workflow chain, and a standalone
+        activity has none. An activity writes to its workflow's topics
+        instead, through ``activity.stream_handle()`` without a scope.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the redis provider cannot hold a stream an activity owns: its transport "
+            "keys every stream by a workflow chain"
+        )
 
     async def close(self) -> None:
         """Release the Redis connections this provider opened."""

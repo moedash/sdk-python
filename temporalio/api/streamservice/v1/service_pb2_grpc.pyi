@@ -39,7 +39,9 @@ class StreamServiceStub:
         temporalio.api.streamservice.v1.request_response_pb2.PollWorkflowMessagesRequest,
         temporalio.api.streamservice.v1.request_response_pb2.PollWorkflowMessagesResponse,
     ]
-    """Routed on the owner, because the stream it reads has no id of its own."""
+    """The owned-stream calls are routed on the owner, because the stream has no
+    id of its own. A workflow's activity is routed on the workflow.
+    """
     DescribeWorkflowStream: grpc.UnaryUnaryMultiCallable[
         temporalio.api.streamservice.v1.request_response_pb2.DescribeWorkflowStreamRequest,
         temporalio.api.streamservice.v1.request_response_pb2.DescribeWorkflowStreamResponse,
@@ -127,7 +129,9 @@ class StreamServiceServicer(metaclass=abc.ABCMeta):
         request: temporalio.api.streamservice.v1.request_response_pb2.PollWorkflowMessagesRequest,
         context: grpc.ServicerContext,
     ) -> temporalio.api.streamservice.v1.request_response_pb2.PollWorkflowMessagesResponse:
-        """Routed on the owner, because the stream it reads has no id of its own."""
+        """The owned-stream calls are routed on the owner, because the stream has no
+        id of its own. A workflow's activity is routed on the workflow.
+        """
     @abc.abstractmethod
     def DescribeWorkflowStream(
         self,

@@ -42,7 +42,7 @@ import grpc.aio
 from google.protobuf.message import Message
 
 import temporalio.api.streamservice.v1 as stream
-from temporalio.api.stream.v1 import StreamRecord
+from temporalio.api.stream.v1 import StreamRecord, StreamStartPosition
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import StreamNotFoundError, StreamProducerError
@@ -284,6 +284,33 @@ class StreamClient:
             self._stub, self._namespace, workflow_id, name, owner_run_id
         )
 
+    def activity_stream(
+        self,
+        activity_id: str,
+        name: str = "",
+        *,
+        workflow_id: str = "",
+        run_id: str = "",
+    ) -> WorkflowStreamHandle:
+        """Open a stream an activity owns.
+
+        Without ``workflow_id`` the activity is a standalone one, an execution
+        of its own, and ``run_id`` pins one run of it. With ``workflow_id`` it
+        is an activity that workflow scheduled, reached through the workflow,
+        and ``run_id`` pins the workflow's run. Either way the stream is apart
+        from the workflow's streams, one per activity execution rather than
+        per attempt, and it reads as closed once the activity reaches a
+        terminal status. An empty name is the activity's default stream.
+        """
+        return WorkflowStreamHandle(
+            self._stub,
+            self._namespace,
+            workflow_id,
+            name,
+            run_id,
+            activity_id=activity_id,
+        )
+
 
 class StreamHandle:
     """A handle to one standalone stream."""
@@ -337,6 +364,7 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         max_records: int = 0,
         topics: Sequence[str] = (),
         wait: bool = False,
@@ -344,12 +372,21 @@ class StreamHandle:
         """Read once from ``from_offset``, returning the entries and the
         offset to read from next.
 
+        A reader with no offset yet passes ``start`` instead: the oldest
+        record held, the tail, or the last N records. The server resolves it
+        in the same read, so it cannot race with truncation, and the offset
+        returned is where to continue. Passing both is refused.
+
         With ``wait`` set, blocks until something arrives, the stream closes,
         or the server's long-poll window elapses. A window that elapses returns
         an empty list rather than raising, so the caller just reads again.
         """
         page = await self.poll(
-            from_offset=from_offset, max_records=max_records, topics=topics, wait=wait
+            from_offset=from_offset,
+            start=start,
+            max_records=max_records,
+            topics=topics,
+            wait=wait,
         )
         return page.entries, page.next_offset
 
@@ -357,9 +394,10 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
     ) -> AsyncIterator[StreamEntry]:
-        """Yield entries as they arrive, starting at ``from_offset``.
+        """Yield entries as they arrive, starting at ``from_offset`` or ``start``.
 
         Ends once the stream is closed and this reader has drained it. A closed
         stream stays readable until its retention expires, so a reader that
@@ -368,7 +406,10 @@ class StreamHandle:
         """
         offset = from_offset
         while True:
-            page = await self.poll(from_offset=offset, topics=topics)
+            page = await self.poll(from_offset=offset, start=start, topics=topics)
+            # The first page carries where the start resolved to, and every
+            # later poll continues from the offset it handed back.
+            start = None
             for entry in page.entries:
                 yield entry
             offset = page.next_offset
@@ -379,6 +420,7 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
         max_records: int = 0,
         wait: bool = True,
@@ -392,6 +434,7 @@ class StreamHandle:
                     stream_id=self._id,
                     run_id=self._run_id,
                     from_offset=from_offset,
+                    start_position=start,
                     max_messages=max_records,
                     topics=list(topics),
                     wait_new_messages=wait,
@@ -399,6 +442,24 @@ class StreamHandle:
             ),
         )
         return _page(response.frontend_response)
+
+    async def truncate(self, new_base_offset: int) -> None:
+        """Drop every record below ``new_base_offset``.
+
+        A reader that asks for an offset below it is refused. One that has no
+        offset yet and wants the oldest record left asks for
+        ``StreamStartPosition(earliest=True)`` rather than offset zero.
+        """
+        await _call(
+            self._stub.TruncateStream,
+            stream.TruncateStreamRequest(
+                frontend_request=stream.TruncateStreamInput(
+                    namespace=self._namespace,
+                    stream_id=self._id,
+                    new_base_offset=new_base_offset,
+                )
+            ),
+        )
 
     async def finish_writing(self, producer_id: str) -> None:
         """Declare one producer done without ending the stream for others."""
@@ -438,12 +499,13 @@ class StreamHandle:
 
 
 class WorkflowStreamHandle:
-    """A handle to a stream a workflow owns.
+    """A handle to a stream a workflow or an activity owns.
 
-    The workflow writes to it from inside its Workflow Task, which costs it no
-    transition of its own. Anything else writes through :meth:`append`, which
-    costs one transition on the owning execution per batch. Both land in the
-    same log in the order the server accepted them.
+    A workflow writes to its own from inside its Workflow Task, which costs it
+    no transition of its own. Anything else writes through :meth:`append`,
+    which costs one transition on the owning execution per batch. Both land in
+    the same log in the order the server accepted them. An activity has only
+    the second path.
     """
 
     def __init__(
@@ -453,18 +515,50 @@ class WorkflowStreamHandle:
         workflow_id: str,
         name: str = "",
         owner_run_id: str = "",
+        *,
+        activity_id: str = "",
     ) -> None:
-        """Prefer :meth:`StreamClient.workflow_stream`."""
+        """Prefer :meth:`StreamClient.workflow_stream` or :meth:`StreamClient.activity_stream`."""
         self._stub = stub
         self._namespace = namespace
         self._workflow_id = workflow_id
         self._name = name
         self._owner_run_id = owner_run_id
+        self._activity_id = activity_id
 
     @property
     def workflow_id(self) -> str:
-        """Id of the workflow that owns this stream."""
+        """Id of the workflow that owns this stream, or that scheduled the activity that does."""
         return self._workflow_id
+
+    @property
+    def activity_id(self) -> str:
+        """Id of the activity that owns this stream, empty when a workflow does."""
+        return self._activity_id
+
+    def _owner(self) -> dict[str, Any]:
+        # A workflow owner goes out in the workflow fields, which a server
+        # without owner support still routes on; only an activity needs the
+        # owner reference.
+        if not self._activity_id:
+            return {
+                "workflow_id": self._workflow_id,
+                "owner_run_id": self._owner_run_id,
+            }
+        if self._workflow_id:
+            owner = stream.StreamOwner(
+                kind=stream.STREAM_OWNER_KIND_WORKFLOW_ACTIVITY,
+                id=self._workflow_id,
+                run_id=self._owner_run_id,
+                activity_id=self._activity_id,
+            )
+        else:
+            owner = stream.StreamOwner(
+                kind=stream.STREAM_OWNER_KIND_ACTIVITY,
+                id=self._activity_id,
+                run_id=self._owner_run_id,
+            )
+        return {"owner": owner}
 
     @property
     def name(self) -> str:
@@ -507,8 +601,7 @@ class WorkflowStreamHandle:
             stream.AddWorkflowMessagesRequest(
                 frontend_request=stream.AddWorkflowMessagesInput(
                     namespace=self._namespace,
-                    workflow_id=self._workflow_id,
-                    owner_run_id=self._owner_run_id,
+                    **self._owner(),
                     stream_name=self._name,
                     records=[_to_service(record) for record in records],
                     producer_id=producer_id,
@@ -522,13 +615,18 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         max_records: int = 0,
         topics: Sequence[str] = (),
         wait: bool = False,
     ) -> tuple[list[StreamEntry], int]:
         """Read once from ``from_offset``, as :meth:`StreamHandle.read`."""
         page = await self.poll(
-            from_offset=from_offset, max_records=max_records, topics=topics, wait=wait
+            from_offset=from_offset,
+            start=start,
+            max_records=max_records,
+            topics=topics,
+            wait=wait,
         )
         return page.entries, page.next_offset
 
@@ -536,12 +634,16 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
     ) -> AsyncIterator[StreamEntry]:
         """Yield entries as they arrive, as :meth:`StreamHandle.follow`."""
         offset = from_offset
         while True:
-            page = await self.poll(from_offset=offset, topics=topics)
+            page = await self.poll(from_offset=offset, start=start, topics=topics)
+            # The first page carries where the start resolved to, and every
+            # later poll continues from the offset it handed back.
+            start = None
             for entry in page.entries:
                 yield entry
             offset = page.next_offset
@@ -552,6 +654,7 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
         max_records: int = 0,
         wait: bool = True,
@@ -567,10 +670,10 @@ class WorkflowStreamHandle:
             stream.PollWorkflowMessagesRequest(
                 frontend_request=stream.PollWorkflowMessagesInput(
                     namespace=self._namespace,
-                    workflow_id=self._workflow_id,
-                    owner_run_id=self._owner_run_id,
+                    **self._owner(),
                     stream_name=self._name,
                     from_offset=from_offset,
+                    start_position=start,
                     max_messages=max_records,
                     topics=list(topics),
                     wait_new_messages=wait,
@@ -590,8 +693,7 @@ class WorkflowStreamHandle:
             stream.DescribeWorkflowStreamRequest(
                 frontend_request=stream.DescribeWorkflowStreamInput(
                     namespace=self._namespace,
-                    workflow_id=self._workflow_id,
-                    owner_run_id=self._owner_run_id,
+                    **self._owner(),
                     stream_name=self._name,
                 )
             ),

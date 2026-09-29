@@ -6,21 +6,57 @@ isort:skip_file
 import builtins
 import collections.abc
 import sys
+import typing
 
 import google.protobuf.descriptor
 import google.protobuf.internal.containers
+import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 
 import temporalio.api.common.v1.message_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.streamservice.v1.message_pb2
 import temporalio.api.streamservice.v1.stream_state_pb2
 
-if sys.version_info >= (3, 8):
+if sys.version_info >= (3, 10):
     import typing as typing_extensions
 else:
     import typing_extensions
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
+
+class _StreamOwnerKind:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _StreamOwnerKindEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+        _StreamOwnerKind.ValueType
+    ],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    STREAM_OWNER_KIND_UNSPECIFIED: _StreamOwnerKind.ValueType  # 0
+    STREAM_OWNER_KIND_WORKFLOW: _StreamOwnerKind.ValueType  # 1
+    STREAM_OWNER_KIND_ACTIVITY: _StreamOwnerKind.ValueType  # 2
+    """A standalone activity, which is an execution of its own."""
+    STREAM_OWNER_KIND_WORKFLOW_ACTIVITY: _StreamOwnerKind.ValueType  # 3
+    """An activity a workflow scheduled. It is not an execution of its own, so
+    its streams are reached through the workflow and routed on it.
+    """
+
+class StreamOwnerKind(_StreamOwnerKind, metaclass=_StreamOwnerKindEnumTypeWrapper):
+    """The kind of execution an owned stream lives in."""
+
+STREAM_OWNER_KIND_UNSPECIFIED: StreamOwnerKind.ValueType  # 0
+STREAM_OWNER_KIND_WORKFLOW: StreamOwnerKind.ValueType  # 1
+STREAM_OWNER_KIND_ACTIVITY: StreamOwnerKind.ValueType  # 2
+"""A standalone activity, which is an execution of its own."""
+STREAM_OWNER_KIND_WORKFLOW_ACTIVITY: StreamOwnerKind.ValueType  # 3
+"""An activity a workflow scheduled. It is not an execution of its own, so
+its streams are reached through the workflow and routed on it.
+"""
+global___StreamOwnerKind = StreamOwnerKind
 
 class CreateStreamInput(google.protobuf.message.Message):
     """The frontend-facing shapes are defined here rather than in the public API
@@ -242,6 +278,7 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
     STREAM_NAME_FIELD_NUMBER: builtins.int
     STREAM_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     workflow_id: builtins.str
     owner_run_id: builtins.str
@@ -256,9 +293,17 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
     stream_name is set.
     """
     start_offset: builtins.int
-    """Where to start. Resolved here rather than at delivery, so the first
-    recorded range starts from a fact instead of a reading.
+    """Where to start, as an absolute offset. Read only when start_position is
+    unset. A negative value is refused.
     """
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Where to start. Resolved here rather than at delivery, so the first
+        recorded range starts from a fact instead of a reading. Refused alongside a
+        non-zero start_offset.
+        """
     def __init__(
         self,
         *,
@@ -268,7 +313,12 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
         stream_name: builtins.str = ...,
         stream_id: builtins.str = ...,
         start_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -278,6 +328,8 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
             b"owner_run_id",
             "start_offset",
             b"start_offset",
+            "start_position",
+            b"start_position",
             "stream_id",
             b"stream_id",
             "stream_name",
@@ -312,6 +364,7 @@ class PollMessagesInput(google.protobuf.message.Message):
     STREAM_ID_FIELD_NUMBER: builtins.int
     RUN_ID_FIELD_NUMBER: builtins.int
     FROM_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     MAX_MESSAGES_FIELD_NUMBER: builtins.int
     TOPICS_FIELD_NUMBER: builtins.int
     WAIT_NEW_MESSAGES_FIELD_NUMBER: builtins.int
@@ -320,6 +373,15 @@ class PollMessagesInput(google.protobuf.message.Message):
     run_id: builtins.str
     """Optional, as on AddMessagesInput."""
     from_offset: builtins.int
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Where a first poll starts, when the reader has no offset yet. Resolved in
+        the same read that serves the records, so it cannot race with truncation,
+        and next_offset carries the result for the polls after it. Refused
+        alongside a non-zero from_offset.
+        """
     max_messages: builtins.int
     @property
     def topics(
@@ -340,10 +402,15 @@ class PollMessagesInput(google.protobuf.message.Message):
         stream_id: builtins.str = ...,
         run_id: builtins.str = ...,
         from_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
         max_messages: builtins.int = ...,
         topics: collections.abc.Iterable[builtins.str] | None = ...,
         wait_new_messages: builtins.bool = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -355,6 +422,8 @@ class PollMessagesInput(google.protobuf.message.Message):
             b"namespace",
             "run_id",
             b"run_id",
+            "start_position",
+            b"start_position",
             "stream_id",
             b"stream_id",
             "topics",
@@ -448,32 +517,85 @@ class DescribeStreamInput(google.protobuf.message.Message):
 
 global___DescribeStreamInput = DescribeStreamInput
 
+class StreamOwner(google.protobuf.message.Message):
+    """The execution that owns a stream. An attached stream has no id of its own,
+    so it is named by this and a stream name, and routed on id.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    KIND_FIELD_NUMBER: builtins.int
+    ID_FIELD_NUMBER: builtins.int
+    RUN_ID_FIELD_NUMBER: builtins.int
+    ACTIVITY_ID_FIELD_NUMBER: builtins.int
+    kind: global___StreamOwnerKind.ValueType
+    id: builtins.str
+    """The workflow id for WORKFLOW and WORKFLOW_ACTIVITY, the activity id for
+    ACTIVITY.
+    """
+    run_id: builtins.str
+    """Optional. Pins to one run of the execution named by id, so a caller is not
+    silently redirected to a later run's stream, which starts empty and at
+    offset zero. Empty means whichever run is current.
+    """
+    activity_id: builtins.str
+    """The activity within the workflow, for WORKFLOW_ACTIVITY only."""
+    def __init__(
+        self,
+        *,
+        kind: global___StreamOwnerKind.ValueType = ...,
+        id: builtins.str = ...,
+        run_id: builtins.str = ...,
+        activity_id: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "activity_id",
+            b"activity_id",
+            "id",
+            b"id",
+            "kind",
+            b"kind",
+            "run_id",
+            b"run_id",
+        ],
+    ) -> None: ...
+
+global___StreamOwner = StreamOwner
+
 class PollWorkflowMessagesInput(google.protobuf.message.Message):
-    """A stream a workflow owns lives inside that workflow's execution, so it has
-    no standalone id to address it by. It is named by its owner and its name
-    instead, and routed on the owner.
+    """A stream an execution owns lives inside it, so it has no standalone id to
+    address it by. It is named by its owner and its name instead, and routed on
+    the owner.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     NAMESPACE_FIELD_NUMBER: builtins.int
+    OWNER_FIELD_NUMBER: builtins.int
     WORKFLOW_ID_FIELD_NUMBER: builtins.int
     OWNER_RUN_ID_FIELD_NUMBER: builtins.int
     STREAM_NAME_FIELD_NUMBER: builtins.int
     FROM_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     MAX_MESSAGES_FIELD_NUMBER: builtins.int
     TOPICS_FIELD_NUMBER: builtins.int
     WAIT_NEW_MESSAGES_FIELD_NUMBER: builtins.int
     namespace: builtins.str
+    @property
+    def owner(self) -> global___StreamOwner: ...
     workflow_id: builtins.str
+    """Shorthand for an owner of kind WORKFLOW, and refused alongside owner."""
     owner_run_id: builtins.str
-    """Optional. Pins to one run, so a caller that has continued as new is not
-    silently redirected to the successor's stream, which starts empty and at
-    offset zero. Empty means whichever run is current.
-    """
     stream_name: builtins.str
-    """Empty means the workflow's default output stream."""
+    """Empty means the owner's default output stream."""
     from_offset: builtins.int
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """As on PollMessagesInput."""
     max_messages: builtins.int
     @property
     def topics(
@@ -485,14 +607,23 @@ class PollWorkflowMessagesInput(google.protobuf.message.Message):
         self,
         *,
         namespace: builtins.str = ...,
+        owner: global___StreamOwner | None = ...,
         workflow_id: builtins.str = ...,
         owner_run_id: builtins.str = ...,
         stream_name: builtins.str = ...,
         from_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
         max_messages: builtins.int = ...,
         topics: collections.abc.Iterable[builtins.str] | None = ...,
         wait_new_messages: builtins.bool = ...,
     ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "owner", b"owner", "start_position", b"start_position"
+        ],
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -502,8 +633,12 @@ class PollWorkflowMessagesInput(google.protobuf.message.Message):
             b"max_messages",
             "namespace",
             b"namespace",
+            "owner",
+            b"owner",
             "owner_run_id",
             b"owner_run_id",
+            "start_position",
+            b"start_position",
             "stream_name",
             b"stream_name",
             "topics",
@@ -521,30 +656,36 @@ class DescribeWorkflowStreamInput(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     NAMESPACE_FIELD_NUMBER: builtins.int
+    OWNER_FIELD_NUMBER: builtins.int
     WORKFLOW_ID_FIELD_NUMBER: builtins.int
     OWNER_RUN_ID_FIELD_NUMBER: builtins.int
     STREAM_NAME_FIELD_NUMBER: builtins.int
     namespace: builtins.str
+    @property
+    def owner(self) -> global___StreamOwner: ...
     workflow_id: builtins.str
+    """Shorthand for an owner of kind WORKFLOW, and refused alongside owner."""
     owner_run_id: builtins.str
-    """Optional. Pins to one run, so a caller that has continued as new is not
-    silently redirected to the successor's stream, which starts empty and at
-    offset zero. Empty means whichever run is current.
-    """
     stream_name: builtins.str
     def __init__(
         self,
         *,
         namespace: builtins.str = ...,
+        owner: global___StreamOwner | None = ...,
         workflow_id: builtins.str = ...,
         owner_run_id: builtins.str = ...,
         stream_name: builtins.str = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["owner", b"owner"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
             "namespace",
             b"namespace",
+            "owner",
+            b"owner",
             "owner_run_id",
             b"owner_run_id",
             "stream_name",
@@ -557,13 +698,14 @@ class DescribeWorkflowStreamInput(google.protobuf.message.Message):
 global___DescribeWorkflowStreamInput = DescribeWorkflowStreamInput
 
 class AddWorkflowMessagesInput(google.protobuf.message.Message):
-    """Appending to a stream a workflow owns, from outside that workflow. The
-    workflow's own publishes ride its Workflow Task instead.
+    """Appending to an owned stream from outside its owner. A workflow's own
+    publishes ride its Workflow Task instead; an activity has no other path.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     NAMESPACE_FIELD_NUMBER: builtins.int
+    OWNER_FIELD_NUMBER: builtins.int
     WORKFLOW_ID_FIELD_NUMBER: builtins.int
     OWNER_RUN_ID_FIELD_NUMBER: builtins.int
     STREAM_NAME_FIELD_NUMBER: builtins.int
@@ -571,14 +713,13 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
     PRODUCER_ID_FIELD_NUMBER: builtins.int
     SEQUENCE_FIELD_NUMBER: builtins.int
     namespace: builtins.str
+    @property
+    def owner(self) -> global___StreamOwner: ...
     workflow_id: builtins.str
+    """Shorthand for an owner of kind WORKFLOW, and refused alongside owner."""
     owner_run_id: builtins.str
-    """Optional. Pins to one run, so a caller that has continued as new is not
-    silently redirected to the successor's stream, which starts empty and at
-    offset zero. Empty means whichever run is current.
-    """
     stream_name: builtins.str
-    """Empty means the workflow's default output stream."""
+    """Empty means the owner's default output stream."""
     @property
     def records(
         self,
@@ -592,6 +733,7 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
         self,
         *,
         namespace: builtins.str = ...,
+        owner: global___StreamOwner | None = ...,
         workflow_id: builtins.str = ...,
         owner_run_id: builtins.str = ...,
         stream_name: builtins.str = ...,
@@ -602,11 +744,16 @@ class AddWorkflowMessagesInput(google.protobuf.message.Message):
         producer_id: builtins.str = ...,
         sequence: builtins.int = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["owner", b"owner"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
             "namespace",
             b"namespace",
+            "owner",
+            b"owner",
             "owner_run_id",
             b"owner_run_id",
             "producer_id",
@@ -1198,6 +1345,7 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
     CONSUMER_WORKFLOW_ID_FIELD_NUMBER: builtins.int
     CONSUMER_RUN_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     stream_id: builtins.str
     consumer_workflow_id: builtins.str
@@ -1207,9 +1355,16 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
     """
     consumer_run_id: builtins.str
     start_offset: builtins.int
-    """Negative means from wherever the stream is when the pin is taken. Resolved
-    here, where the frontier is, and returned so the cursor records a fact.
+    """An absolute offset, read only when start_position is unset. A negative
+    value is refused.
     """
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Resolved here, where the frontier is, and returned as start_offset on the
+        output so the cursor records a fact.
+        """
     def __init__(
         self,
         *,
@@ -1218,7 +1373,12 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
         consumer_workflow_id: builtins.str = ...,
         consumer_run_id: builtins.str = ...,
         start_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -1230,6 +1390,8 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
             b"namespace",
             "start_offset",
             b"start_offset",
+            "start_position",
+            b"start_position",
             "stream_id",
             b"stream_id",
         ],
@@ -1242,21 +1404,36 @@ class RegisterStreamConsumerOutput(google.protobuf.message.Message):
 
     START_OFFSET_FIELD_NUMBER: builtins.int
     KNOWN_HEAD_FIELD_NUMBER: builtins.int
+    STREAM_ABSENT_FIELD_NUMBER: builtins.int
     start_offset: builtins.int
     known_head: builtins.int
     """The frontier at registration, so the cursor starts with a known head
     instead of waiting for the first push.
+    """
+    stream_absent: builtins.bool
+    """No execution in this namespace holds a stream with that id, so nothing
+    was registered. An answer rather than a NotFound because the caller acts
+    on it: a subscribe command falls back to a stream of the workflow's own by
+    that name. Every other NotFound, from a registry miss to a shard that has
+    moved, stays an error, since binding the workflow to different data on one
+    of those would be silent and permanent.
     """
     def __init__(
         self,
         *,
         start_offset: builtins.int = ...,
         known_head: builtins.int = ...,
+        stream_absent: builtins.bool = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "known_head", b"known_head", "start_offset", b"start_offset"
+            "known_head",
+            b"known_head",
+            "start_offset",
+            b"start_offset",
+            "stream_absent",
+            b"stream_absent",
         ],
     ) -> None: ...
 

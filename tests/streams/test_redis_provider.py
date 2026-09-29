@@ -7,11 +7,19 @@ from datetime import timedelta
 
 import pytest
 
-from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
+from temporalio.streams import (
+    BEGINNING,
+    END,
+    Cursor,
+    StreamCursorError,
+    StreamError,
+    StreamUnsupportedError,
+)
 from temporalio.streams.providers.redis import (
     RedisStreams,
     _drive,
     _outside_position,
+    _RedisWorkflowProvider,
     _workflow_position,
 )
 
@@ -74,3 +82,14 @@ def test_retention_options_are_checked_at_construction():
     with pytest.raises(ValueError, match="trimmed by its owner"):
         RedisStreams(backend=object(), max_len=10)
     RedisStreams(retention=timedelta(hours=1), max_len=10)
+
+
+def test_a_workflow_reader_cannot_start_at_end_or_the_last_records():
+    # The transport records where a subscription starts, and finding the tail
+    # is a store read the workflow thread cannot make, so both are refused
+    # before anything is subscribed.
+    workflow_half = _RedisWorkflowProvider(timedelta(seconds=1))
+    with pytest.raises(StreamUnsupportedError, match="END or at the last records"):
+        workflow_half.open_reader("inputs", after=END)
+    with pytest.raises(StreamUnsupportedError, match="END or at the last records"):
+        workflow_half.open_reader("inputs", after=BEGINNING, last=2)
