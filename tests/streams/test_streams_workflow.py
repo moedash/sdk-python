@@ -25,6 +25,8 @@ import pytest
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.streams import (
+    DEFAULT_TOPIC,
+    END,
     Cursor,
     ReadSource,
     RecordKind,
@@ -503,3 +505,114 @@ async def test_an_outside_producer_and_the_workflow_share_a_topic(
         ("", RecordKind.DATA, {"from": "workflow"}),
         ("", RecordKind.FINISH, None),
     ]
+
+
+@workflow.defn
+class DefaultTopicEcho:
+    """Reads one value on its default topic and answers on the same topic."""
+
+    @workflow.run
+    async def run(self) -> None:
+        reader = workflow.stream_reader(result_type=dict)
+        writer = workflow.stream_writer()
+        async for value in reader.values():
+            writer.publish({"echo": value["n"] * 2})
+            reader.close()
+        writer.finish()
+
+
+async def test_a_workflow_reads_and_writes_its_default_topic(
+    client: Client, provider: MemoryStreams
+):
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(client, DefaultTopicEcho, plugins=[provider]) as worker:
+        stream = provider.get_stream_handle(client, workflow_id)
+        await stream.producer(producer_id="client", attempt=1).append({"n": 21})
+        handle = await client.start_workflow(
+            DefaultTopicEcho.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        await handle.result()
+
+        async def read_everything() -> list[Any]:
+            return [r async for r in stream.read(topic=DEFAULT_TOPIC)]
+
+        records = await asyncio.wait_for(read_everything(), 30)
+    assert [(r.topic, r.kind, r.value) for r in records] == [
+        (DEFAULT_TOPIC, RecordKind.DATA, {"n": 21}),
+        (DEFAULT_TOPIC, RecordKind.DATA, {"echo": 42}),
+        (DEFAULT_TOPIC, RecordKind.FINISH, None),
+    ]
+
+
+@workflow.defn
+class NewestTwo:
+    """Starts at the newest two records on ``inputs`` and returns their values."""
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        reader = workflow.stream_reader(INPUTS, last=2)
+        values: list[Any] = []
+        async for value in reader.values():
+            values.append(value["n"])
+            if len(values) == 2:
+                reader.close()
+        return values
+
+
+async def test_a_workflow_reader_starts_at_the_last_n_records(
+    client: Client, provider: MemoryStreams
+):
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(client, NewestTwo, plugins=[provider]) as worker:
+        stream = provider.get_stream_handle(client, workflow_id)
+        await stream.producer(topic=INPUTS, producer_id="tool", attempt=1).append(
+            {"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}
+        )
+        handle = await client.start_workflow(
+            NewestTwo.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        assert await handle.result() == [3, 4]
+
+
+@workflow.defn
+class FromNow:
+    """Follows ``inputs`` from when it subscribes and returns the first value."""
+
+    @workflow.run
+    async def run(self) -> Any:
+        reader = workflow.stream_reader(INPUTS, after=END)
+        async for value in reader.values():
+            reader.close()
+            return value["n"]
+        return None
+
+
+async def test_a_workflow_reader_at_end_skips_what_was_there(
+    client: Client, provider: MemoryStreams
+):
+    workflow_id = f"streams-wf-{uuid.uuid4().hex}"
+    async with new_worker(client, FromNow, plugins=[provider]) as worker:
+        stream = provider.get_stream_handle(client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+        await producer.append({"n": "old"})
+        handle = await client.start_workflow(
+            FromNow.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        result = asyncio.ensure_future(handle.result())
+        # The subscription starts when the workflow runs, which the test does
+        # not observe, so appends keep coming until the workflow takes one.
+        for _ in range(150):
+            await producer.append({"n": "new"})
+            done, _ = await asyncio.wait({result}, timeout=0.2)
+            if done:
+                break
+        assert await asyncio.wait_for(result, 10) == "new"
+
+
+def test_a_workflow_reader_start_names_one_place():
+    # Checked before the reader needs a running workflow, so a mistake says
+    # what it is rather than that there is no workflow.
+    with pytest.raises(ValueError, match="either after= or last="):
+        workflow.stream_reader(INPUTS, after=END, last=1)
+    with pytest.raises(ValueError, match="positive"):
+        workflow.stream_reader(INPUTS, last=0)

@@ -91,10 +91,11 @@ class StreamProducer(Protocol[T_contra]):
 
 
 class StreamHandle(Protocol):
-    """One workflow's stream, addressed by topic, from outside workflow code.
+    """One owner's stream, addressed by topic, from outside workflow code.
 
-    A handle follows the workflow's execution chain unless it was opened with
-    a ``run_id``, in which case it is pinned to that run. A topic is a
+    The owner is a workflow or an activity. A handle on a workflow follows
+    its execution chain unless it was opened with a ``run_id``, in which case
+    it is pinned to that run. A topic is a
     :class:`temporalio.streams.StreamTopic` definition, which carries the
     record type, or a plain string with ``result_type=`` for a name decided
     at runtime. A transport failure surfaces as
@@ -104,32 +105,53 @@ class StreamHandle(Protocol):
 
     @overload
     def read(
-        self, *, topic: StreamTopic[T], after: Cursor = ...
+        self,
+        *,
+        topic: StreamTopic[T],
+        after: Cursor = ...,
+        last: int | None = None,
     ) -> AsyncGenerator[StreamRecord[T], None]: ...
 
     @overload
     def read(
-        self, *, topic: str, after: Cursor = ..., result_type: type[T]
+        self,
+        *,
+        topic: str | None = None,
+        after: Cursor = ...,
+        last: int | None = None,
+        result_type: type[T],
     ) -> AsyncGenerator[StreamRecord[T], None]: ...
 
     @overload
     def read(
-        self, *, topic: str, after: Cursor = ..., result_type: None = None
+        self,
+        *,
+        topic: str | None = None,
+        after: Cursor = ...,
+        last: int | None = None,
+        result_type: None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]: ...
 
     def read(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """Yield the records on ``topic`` after ``after`` as they arrive.
 
-        ``BEGINNING`` yields everything the topic retains. Any other cursor
-        came from a record a reader saw, and reading resumes just past it, so
-        a reader that stores the last cursor it handled and hands it back
-        sees every record exactly once. The read ends when the owning
+        Without ``topic`` it reads :data:`temporalio.streams.DEFAULT_TOPIC`.
+        ``BEGINNING`` yields everything the topic retains, starting at the
+        oldest record it still holds. ``END`` yields only what is appended
+        after the read starts. ``last=N`` starts at the newest ``N`` records,
+        or at all of them when there are fewer; it counts records of every
+        kind, so a ``FINISH`` among them leaves fewer than ``N`` values, and
+        it is exclusive with a cursor. Any other cursor came from a record a
+        reader saw, and reading resumes just past it, so a reader that stores
+        the last cursor it handled and hands it back sees every record
+        exactly once; that is the only way to resume. The read ends when the owning
         execution, or its chain, is closed and every retained record after
         ``after`` has been delivered; until then it waits. The result is a
         generator, so a caller that stops early should ``aclose()`` it. How
@@ -141,17 +163,23 @@ class StreamHandle(Protocol):
 
         Raises:
             ValueError: ``result_type`` was passed with a topic definition,
-                or the topic is empty.
+                the topic is empty, ``last`` is not positive, or ``last`` was
+                passed with a cursor.
             StreamCursorError: ``after`` came from another provider or names
                 a record no longer retained. Raised by this call, not by the
                 first iteration.
+            StreamUnsupportedError: The provider cannot start a read where
+                ``END`` or ``last=`` asks. A provider that raises it says so
+                in its own documentation.
             StreamNotFoundError: The workflow or topic does not exist or is
                 past retention.
         """
         ...
 
-    async def latest(self, *, topic: str | StreamTopic[Any]) -> Cursor:
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, or ``BEGINNING`` when empty.
+
+        Without ``topic`` it answers for :data:`temporalio.streams.DEFAULT_TOPIC`.
 
         For a reader that wants to follow from now: ``read(after=latest())``
         yields only what is published after this call returned, which is how
@@ -167,17 +195,17 @@ class StreamHandle(Protocol):
 
     @overload
     def producer(
-        self, *, topic: str, producer_id: str = ..., attempt: int = ...
+        self, *, topic: str | None = None, producer_id: str = ..., attempt: int = ...
     ) -> StreamProducer[Any]: ...
 
     def producer(
         self,
         *,
-        topic: str | StreamTopic[Any],
+        topic: str | StreamTopic[Any] | None = None,
         producer_id: str = "",
         attempt: int = 0,
     ) -> StreamProducer[Any]:
-        """A producer on ``topic``.
+        """A producer on ``topic``, or on the default topic without one.
 
         Inside an activity, leave ``producer_id`` and ``attempt`` unset: the
         activity's own id and attempt are the right answer, and they are what
@@ -232,11 +260,21 @@ class WorkflowStreamProvider(Protocol):
     the definitions are resolved before it is called.
     """
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
         """Subscribe the running workflow to ``topic`` of its own stream.
+
+        ``after`` and ``last`` mean what they mean on
+        :meth:`StreamHandle.read`, and arrive already checked. Where a start
+        is resolved has to be something replay reproduces, so a provider
+        resolves it in the store and records the result, never by reading
+        the store from the workflow thread.
 
         Raises:
             StreamCursorError: ``after`` was minted by another provider.
+            StreamUnsupportedError: The provider cannot start where ``END``
+                or ``last`` asks.
         """
         ...
 
@@ -282,6 +320,31 @@ class StreamProvider(Protocol):
 
         Without ``run_id`` it follows the execution chain, so a consumer keeps
         reading across continue-as-new; with one it is pinned to that run.
+        """
+        ...
+
+    def get_activity_stream_handle(
+        self,
+        client: Client,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> StreamHandle:
+        """A handle on the streams an activity owns.
+
+        Without ``workflow_id`` the activity is a standalone one, an execution
+        of its own, and ``run_id`` pins one run of it. With ``workflow_id`` it
+        is an activity that workflow scheduled, and ``run_id`` pins the
+        workflow's run. Either way these streams are apart from any
+        workflow's: a topic here and the same topic on the workflow's handle
+        are two streams. A retry of the activity writes to the same streams,
+        and a read ends when the activity reaches a terminal status, not when
+        an attempt fails.
+
+        Raises:
+            StreamUnsupportedError: The provider's store cannot hold a stream
+                an activity owns.
         """
         ...
 

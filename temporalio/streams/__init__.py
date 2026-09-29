@@ -27,14 +27,17 @@ The contract, in five statements:
    silence.
 4. **A cursor is opaque and belongs to its provider.** Hand it back to resume
    strictly after the record it names; :meth:`StreamHandle.latest` positions a
-   follower. Do not compare two cursors or do arithmetic on one.
+   follower. Do not compare two cursors or do arithmetic on one. A read with
+   no cursor yet starts at :data:`BEGINNING`, at :data:`END`, or at the last
+   ``N`` records with ``last=N``.
 5. **A workflow addresses its streams relative to itself, by topic.** A topic
    can be written by the workflow and by outside producers, and read by the
    workflow and by outside consumers; which of those happen is the
    application's business. A topic is defined once with :func:`topic`, with
    the type its records decode to, and that definition is shared by the
    workflow, its activities and the backend; a plain string names a topic
-   decided at runtime.
+   decided at runtime. A call that names no topic addresses the workflow's
+   default topic, :data:`DEFAULT_TOPIC`.
 
 A provider is an object, registered once as a plugin:
 ``Client.connect(plugins=[provider])``; workers built from that client inherit
@@ -42,10 +45,13 @@ it, and ``Worker(plugins=[provider])`` or ``Replayer(plugins=[provider])``
 registers it on a worker alone. Each context then asks for its stream the
 same way. Workflow code uses :func:`temporalio.workflow.stream_reader` and
 :func:`temporalio.workflow.stream_writer`. An activity uses
-:func:`temporalio.activity.stream_handle`, which is its own workflow pinned
-to its run unless told otherwise. Any process holding a client uses
+:func:`temporalio.activity.stream_handle`: an activity a workflow scheduled
+reaches that workflow's stream pinned to its run, a standalone activity
+reaches its own, and ``scope="activity"`` gives the first kind its own
+streams too. Any process holding a client uses
 :meth:`temporalio.client.Client.get_stream_handle`, which mirrors
-``get_workflow_handle``. The explicit form,
+``get_workflow_handle`` and takes an ``activity_id`` for an activity's
+streams. The explicit form,
 ``provider.get_stream_handle(client, workflow_id)``, stays for a process that
 talks to two stores. This module keeps the shared types, the errors and the
 protocols a provider implements; nothing here that workflow code imports does
@@ -81,15 +87,23 @@ from temporalio.streams._provider import (
 )
 from temporalio.streams._record import (
     BEGINNING,
+    END,
     Cursor,
     RecordKind,
     StreamRecord,
     Supersession,
 )
-from temporalio.streams._topic import StreamTopic, resolve_topic, topic
+from temporalio.streams._topic import (
+    DEFAULT_TOPIC,
+    StreamTopic,
+    resolve_topic,
+    topic,
+)
 
 __all__ = [
     "BEGINNING",
+    "DEFAULT_TOPIC",
+    "END",
     "Cursor",
     "ReadSource",
     "RecordKind",
