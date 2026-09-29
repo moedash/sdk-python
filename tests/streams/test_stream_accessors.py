@@ -22,6 +22,7 @@ from temporalio.client import Client
 from temporalio.streams import (
     BEGINNING,
     DEFAULT_TOPIC,
+    END,
     RecordKind,
     StreamUnsupportedError,
     topic,
@@ -213,3 +214,24 @@ async def test_a_sync_activity_is_told_it_cannot_have_a_handle(
             )
     assert "only available in `async def` activities" in result
     assert "plugins=" not in result
+
+
+async def test_an_activity_owned_stream_takes_every_read_start(
+    client: Client, provider: MemoryStreams
+):
+    registered = _with_provider(client, provider)
+    stream = registered.get_stream_handle(activity_id=f"act-{uuid.uuid4().hex}")
+    producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+    await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+
+    async def first(records: Any) -> Any:
+        async for record in records:
+            await records.aclose()
+            return record.value
+        return None
+
+    assert await first(stream.read(topic=INPUTS, after=BEGINNING)) == {"n": 1}
+    assert await first(stream.read(topic=INPUTS, last=1)) == {"n": 3}
+    at_end = stream.read(topic=INPUTS, after=END)
+    await producer.append({"n": 4})
+    assert await asyncio.wait_for(first(at_end), 10) == {"n": 4}

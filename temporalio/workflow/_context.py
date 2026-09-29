@@ -325,7 +325,9 @@ class _Runtime(ABC):
 
     @abstractmethod
     def workflow_subscribe_stream(
-        self, stream_name_or_id: str, start_offset: int
+        self,
+        stream_name_or_id: str,
+        start: temporalio.api.stream.v1.StreamStartPosition,
     ) -> None: ...
 
     @abstractmethod
@@ -1049,7 +1051,9 @@ async def sleep(
 
 
 def _subscribe_stream(  # type: ignore[reportUnusedFunction]
-    stream_name_or_id: str, *, start_offset: int = 0
+    stream_name_or_id: str,
+    *,
+    start: temporalio.api.stream.v1.StreamStartPosition | None = None,
 ) -> None:
     """Subscribe this workflow to a server-side stream.
 
@@ -1059,7 +1063,7 @@ def _subscribe_stream(  # type: ignore[reportUnusedFunction]
     cursor, though it does write one event. Calling it on every replay is
     harmless because replay matches the command to the event already recorded.
 
-    Only the name or id and the start offset go to the server. The rest of the
+    Only the name or id and the start position go to the server. The rest of the
     stream's addressing is resolved there, because a workflow cannot look it up
     without doing I/O and a value it carried would be a reading rather than a
     fact. A name this workflow has not written yet names a stream it owns, and
@@ -1069,11 +1073,14 @@ def _subscribe_stream(  # type: ignore[reportUnusedFunction]
         stream_name_or_id: Stream to consume: the name of one this workflow
             owns, or the id of a standalone stream. The server tries them in
             that order.
-        start_offset: Where to start. Negative means from wherever the stream is
-            when the subscription is registered; the server resolves that once
-            and records it, so replay does not resolve it again.
+        start: Where to start: an absolute offset, the oldest record the
+            stream holds, the tail as of registration, or the last N records.
+            Omitted, it is the oldest record held. The server resolves it
+            once and records the offset, so replay does not resolve it again.
     """
-    _Runtime.current().workflow_subscribe_stream(stream_name_or_id, start_offset)
+    if start is None:
+        start = temporalio.api.stream.v1.StreamStartPosition(earliest=True)
+    _Runtime.current().workflow_subscribe_stream(stream_name_or_id, start)
 
 
 def _append_stream_records(  # type: ignore[reportUnusedFunction]

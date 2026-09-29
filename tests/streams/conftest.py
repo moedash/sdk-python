@@ -11,3 +11,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "detects_divergent_retries: the case needs append() to compare a repeat's "
         "content with what the store holds",
     )
+    config.addinivalue_line(
+        "markers",
+        "truncates: the case needs a way to drop a topic's oldest records",
+    )
