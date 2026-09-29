@@ -914,7 +914,10 @@ class Client:
         the one registered with ``plugins=[provider]`` at :py:meth:`connect`,
         or passed as ``stream_provider``. The handle's ``read``, ``latest``
         and ``producer`` take a topic, and without one address the owner's
-        default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`. See
+        default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`. A
+        ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+        :py:data:`temporalio.streams.END` or at the last ``N`` records with
+        ``last=N``, and resumes only after a cursor it was handed. See
         :py:mod:`temporalio.streams`.
 
         Args:

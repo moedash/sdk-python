@@ -14,6 +14,7 @@ import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 
 import temporalio.api.common.v1.message_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.streamservice.v1.message_pb2
 import temporalio.api.streamservice.v1.stream_state_pb2
 
@@ -277,6 +278,7 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
     STREAM_NAME_FIELD_NUMBER: builtins.int
     STREAM_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     workflow_id: builtins.str
     owner_run_id: builtins.str
@@ -291,9 +293,17 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
     stream_name is set.
     """
     start_offset: builtins.int
-    """Where to start. Resolved here rather than at delivery, so the first
-    recorded range starts from a fact instead of a reading.
+    """Where to start, as an absolute offset. Read only when start_position is
+    unset. A negative value is refused.
     """
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Where to start. Resolved here rather than at delivery, so the first
+        recorded range starts from a fact instead of a reading. Refused alongside a
+        non-zero start_offset.
+        """
     def __init__(
         self,
         *,
@@ -303,7 +313,12 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
         stream_name: builtins.str = ...,
         stream_id: builtins.str = ...,
         start_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -313,6 +328,8 @@ class SubscribeWorkflowInput(google.protobuf.message.Message):
             b"owner_run_id",
             "start_offset",
             b"start_offset",
+            "start_position",
+            b"start_position",
             "stream_id",
             b"stream_id",
             "stream_name",
@@ -347,6 +364,7 @@ class PollMessagesInput(google.protobuf.message.Message):
     STREAM_ID_FIELD_NUMBER: builtins.int
     RUN_ID_FIELD_NUMBER: builtins.int
     FROM_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     MAX_MESSAGES_FIELD_NUMBER: builtins.int
     TOPICS_FIELD_NUMBER: builtins.int
     WAIT_NEW_MESSAGES_FIELD_NUMBER: builtins.int
@@ -355,6 +373,15 @@ class PollMessagesInput(google.protobuf.message.Message):
     run_id: builtins.str
     """Optional, as on AddMessagesInput."""
     from_offset: builtins.int
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Where a first poll starts, when the reader has no offset yet. Resolved in
+        the same read that serves the records, so it cannot race with truncation,
+        and next_offset carries the result for the polls after it. Refused
+        alongside a non-zero from_offset.
+        """
     max_messages: builtins.int
     @property
     def topics(
@@ -375,10 +402,15 @@ class PollMessagesInput(google.protobuf.message.Message):
         stream_id: builtins.str = ...,
         run_id: builtins.str = ...,
         from_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
         max_messages: builtins.int = ...,
         topics: collections.abc.Iterable[builtins.str] | None = ...,
         wait_new_messages: builtins.bool = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -390,6 +422,8 @@ class PollMessagesInput(google.protobuf.message.Message):
             b"namespace",
             "run_id",
             b"run_id",
+            "start_position",
+            b"start_position",
             "stream_id",
             b"stream_id",
             "topics",
@@ -544,6 +578,7 @@ class PollWorkflowMessagesInput(google.protobuf.message.Message):
     OWNER_RUN_ID_FIELD_NUMBER: builtins.int
     STREAM_NAME_FIELD_NUMBER: builtins.int
     FROM_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     MAX_MESSAGES_FIELD_NUMBER: builtins.int
     TOPICS_FIELD_NUMBER: builtins.int
     WAIT_NEW_MESSAGES_FIELD_NUMBER: builtins.int
@@ -556,6 +591,11 @@ class PollWorkflowMessagesInput(google.protobuf.message.Message):
     stream_name: builtins.str
     """Empty means the owner's default output stream."""
     from_offset: builtins.int
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """As on PollMessagesInput."""
     max_messages: builtins.int
     @property
     def topics(
@@ -572,12 +612,17 @@ class PollWorkflowMessagesInput(google.protobuf.message.Message):
         owner_run_id: builtins.str = ...,
         stream_name: builtins.str = ...,
         from_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
         max_messages: builtins.int = ...,
         topics: collections.abc.Iterable[builtins.str] | None = ...,
         wait_new_messages: builtins.bool = ...,
     ) -> None: ...
     def HasField(
-        self, field_name: typing_extensions.Literal["owner", b"owner"]
+        self,
+        field_name: typing_extensions.Literal[
+            "owner", b"owner", "start_position", b"start_position"
+        ],
     ) -> builtins.bool: ...
     def ClearField(
         self,
@@ -592,6 +637,8 @@ class PollWorkflowMessagesInput(google.protobuf.message.Message):
             b"owner",
             "owner_run_id",
             b"owner_run_id",
+            "start_position",
+            b"start_position",
             "stream_name",
             b"stream_name",
             "topics",
@@ -1298,6 +1345,7 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
     CONSUMER_WORKFLOW_ID_FIELD_NUMBER: builtins.int
     CONSUMER_RUN_ID_FIELD_NUMBER: builtins.int
     START_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     stream_id: builtins.str
     consumer_workflow_id: builtins.str
@@ -1307,9 +1355,16 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
     """
     consumer_run_id: builtins.str
     start_offset: builtins.int
-    """Negative means from wherever the stream is when the pin is taken. Resolved
-    here, where the frontier is, and returned so the cursor records a fact.
+    """An absolute offset, read only when start_position is unset. A negative
+    value is refused.
     """
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Resolved here, where the frontier is, and returned as start_offset on the
+        output so the cursor records a fact.
+        """
     def __init__(
         self,
         *,
@@ -1318,7 +1373,12 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
         consumer_workflow_id: builtins.str = ...,
         consumer_run_id: builtins.str = ...,
         start_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -1330,6 +1390,8 @@ class RegisterStreamConsumerInput(google.protobuf.message.Message):
             b"namespace",
             "start_offset",
             b"start_offset",
+            "start_position",
+            b"start_position",
             "stream_id",
             b"stream_id",
         ],

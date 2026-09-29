@@ -42,7 +42,7 @@ import grpc.aio
 from google.protobuf.message import Message
 
 import temporalio.api.streamservice.v1 as stream
-from temporalio.api.stream.v1 import StreamRecord
+from temporalio.api.stream.v1 import StreamRecord, StreamStartPosition
 from temporalio.api.streamservice.v1 import service_pb2_grpc
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import StreamNotFoundError, StreamProducerError
@@ -364,6 +364,7 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         max_records: int = 0,
         topics: Sequence[str] = (),
         wait: bool = False,
@@ -371,12 +372,21 @@ class StreamHandle:
         """Read once from ``from_offset``, returning the entries and the
         offset to read from next.
 
+        A reader with no offset yet passes ``start`` instead: the oldest
+        record held, the tail, or the last N records. The server resolves it
+        in the same read, so it cannot race with truncation, and the offset
+        returned is where to continue. Passing both is refused.
+
         With ``wait`` set, blocks until something arrives, the stream closes,
         or the server's long-poll window elapses. A window that elapses returns
         an empty list rather than raising, so the caller just reads again.
         """
         page = await self.poll(
-            from_offset=from_offset, max_records=max_records, topics=topics, wait=wait
+            from_offset=from_offset,
+            start=start,
+            max_records=max_records,
+            topics=topics,
+            wait=wait,
         )
         return page.entries, page.next_offset
 
@@ -384,9 +394,10 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
     ) -> AsyncIterator[StreamEntry]:
-        """Yield entries as they arrive, starting at ``from_offset``.
+        """Yield entries as they arrive, starting at ``from_offset`` or ``start``.
 
         Ends once the stream is closed and this reader has drained it. A closed
         stream stays readable until its retention expires, so a reader that
@@ -395,7 +406,10 @@ class StreamHandle:
         """
         offset = from_offset
         while True:
-            page = await self.poll(from_offset=offset, topics=topics)
+            page = await self.poll(from_offset=offset, start=start, topics=topics)
+            # The first page carries where the start resolved to, and every
+            # later poll continues from the offset it handed back.
+            start = None
             for entry in page.entries:
                 yield entry
             offset = page.next_offset
@@ -406,6 +420,7 @@ class StreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
         max_records: int = 0,
         wait: bool = True,
@@ -419,6 +434,7 @@ class StreamHandle:
                     stream_id=self._id,
                     run_id=self._run_id,
                     from_offset=from_offset,
+                    start_position=start,
                     max_messages=max_records,
                     topics=list(topics),
                     wait_new_messages=wait,
@@ -426,6 +442,24 @@ class StreamHandle:
             ),
         )
         return _page(response.frontend_response)
+
+    async def truncate(self, new_base_offset: int) -> None:
+        """Drop every record below ``new_base_offset``.
+
+        A reader that asks for an offset below it is refused. One that has no
+        offset yet and wants the oldest record left asks for
+        ``StreamStartPosition(earliest=True)`` rather than offset zero.
+        """
+        await _call(
+            self._stub.TruncateStream,
+            stream.TruncateStreamRequest(
+                frontend_request=stream.TruncateStreamInput(
+                    namespace=self._namespace,
+                    stream_id=self._id,
+                    new_base_offset=new_base_offset,
+                )
+            ),
+        )
 
     async def finish_writing(self, producer_id: str) -> None:
         """Declare one producer done without ending the stream for others."""
@@ -581,13 +615,18 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         max_records: int = 0,
         topics: Sequence[str] = (),
         wait: bool = False,
     ) -> tuple[list[StreamEntry], int]:
         """Read once from ``from_offset``, as :meth:`StreamHandle.read`."""
         page = await self.poll(
-            from_offset=from_offset, max_records=max_records, topics=topics, wait=wait
+            from_offset=from_offset,
+            start=start,
+            max_records=max_records,
+            topics=topics,
+            wait=wait,
         )
         return page.entries, page.next_offset
 
@@ -595,12 +634,16 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
     ) -> AsyncIterator[StreamEntry]:
         """Yield entries as they arrive, as :meth:`StreamHandle.follow`."""
         offset = from_offset
         while True:
-            page = await self.poll(from_offset=offset, topics=topics)
+            page = await self.poll(from_offset=offset, start=start, topics=topics)
+            # The first page carries where the start resolved to, and every
+            # later poll continues from the offset it handed back.
+            start = None
             for entry in page.entries:
                 yield entry
             offset = page.next_offset
@@ -611,6 +654,7 @@ class WorkflowStreamHandle:
         self,
         *,
         from_offset: int = 0,
+        start: StreamStartPosition | None = None,
         topics: Sequence[str] = (),
         max_records: int = 0,
         wait: bool = True,
@@ -629,6 +673,7 @@ class WorkflowStreamHandle:
                     **self._owner(),
                     stream_name=self._name,
                     from_offset=from_offset,
+                    start_position=start,
                     max_messages=max_records,
                     topics=list(topics),
                     wait_new_messages=wait,

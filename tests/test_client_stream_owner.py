@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import temporalio.api.streamservice.v1 as stream
-from temporalio.api.stream.v1 import StreamRecord
+from temporalio.api.stream.v1 import StreamRecord, StreamStartPosition
 from temporalio.client_stream import StreamClient
 
 
@@ -76,3 +76,14 @@ async def test_a_workflow_activity_is_reached_through_its_workflow():
             kind=stream.STREAM_OWNER_KIND_WORKFLOW_ACTIVITY, id="wf", activity_id="act"
         )
         assert request.stream_name == "reasoning"
+
+
+async def test_a_first_read_carries_its_start_position():
+    recorder = _Recorder()
+    handle = _client(recorder).workflow_stream("wf")
+    await handle.read(start=StreamStartPosition(last_n=3))
+    await handle.read(from_offset=4)
+    first, later = recorder.requests
+    assert first.start_position == StreamStartPosition(last_n=3)
+    assert first.from_offset == 0
+    assert not later.HasField("start_position")
