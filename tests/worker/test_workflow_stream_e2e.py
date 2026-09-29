@@ -27,7 +27,7 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.api.stream.v1 import StreamRecord
 from temporalio.client import Client
 from temporalio.client_stream import StreamClient
-from temporalio.streams import RecordKind
+from temporalio.streams import END, RecordKind
 from temporalio.streams.providers.native import NativeStreams
 from temporalio.worker import Worker
 from tests.streams.test_streams_conformance import take
@@ -277,7 +277,7 @@ class PublishAndRead:
         workflow._append_stream_records([_record(b"gamma")], stream_name="output")
         # A name this workflow has not written yet still names a stream it
         # owns, so subscribing creates the one the later publish lands in.
-        workflow._subscribe_stream("output", start_offset=0)
+        workflow._subscribe_stream("output")
 
         received: list[str] = []
         while len(received) < 3:
@@ -331,7 +331,7 @@ class ConsumeAcrossTasks:
 
     @workflow.run
     async def run(self, stream_id: str, expected: int) -> list[str]:
-        workflow._subscribe_stream(stream_id, start_offset=0)
+        workflow._subscribe_stream(stream_id)
         seen: list[str] = []
         while len(seen) < expected:
             for item in await workflow._read_stream_records(stream_id):
@@ -384,3 +384,102 @@ async def test_a_cached_workflow_consumes_across_sticky_tasks() -> None:
         )
     finally:
         await streams.close()
+
+
+@workflow.defn
+class StartsWhenTold:
+    """Subscribes to ``inputs`` at a start given by a signal and returns what it read."""
+
+    def __init__(self) -> None:
+        self._start: str | None = None
+
+    @workflow.signal
+    def begin(self, start: str) -> None:
+        self._start = start
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        await workflow.wait_condition(lambda: self._start is not None)
+        if self._start == "end":
+            reader = workflow.stream_reader(INPUTS, result_type=dict, after=END)
+            want = 1
+        else:
+            reader = workflow.stream_reader(INPUTS, result_type=dict, last=2)
+            want = 2
+        values: list[Any] = []
+        async for value in reader.values():
+            values.append(value["n"])
+            if len(values) == want:
+                break
+        return values
+
+
+async def _subscribed_offsets(client: Client, workflow_id: str) -> list[int]:
+    return [
+        event.workflow_stream_subscribed_event_attributes.start_offset
+        async for event in client.get_workflow_handle(
+            workflow_id
+        ).fetch_history_events()
+        if event.event_type == EVENT_STREAM_SUBSCRIBED
+    ]
+
+
+async def test_a_workflow_reader_starts_at_the_last_n_records_on_the_server() -> None:
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "last-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "last-wf-" + uuid.uuid4().hex[:8]
+    try:
+        # Cold, so every task replays and the recorded start is what places
+        # the reader, not a second resolution.
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[StartsWhenTold],
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                StartsWhenTold.run, id=workflow_id, task_queue=task_queue
+            )
+            stream = client.get_stream_handle(workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+            await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+            await handle.signal(StartsWhenTold.begin, "last")
+            assert await asyncio.wait_for(handle.result(), 60) == [3, 4]
+        assert await _subscribed_offsets(client, workflow_id) == [2]
+    finally:
+        await provider.close()
+
+
+async def test_a_workflow_reader_at_end_skips_what_was_there_on_the_server() -> None:
+    provider = NativeStreams()
+    client = await _connect(provider)
+    task_queue = "end-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "end-wf-" + uuid.uuid4().hex[:8]
+    try:
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[StartsWhenTold],
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                StartsWhenTold.run, id=workflow_id, task_queue=task_queue
+            )
+            stream = client.get_stream_handle(workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+            await producer.append({"n": "old"}, {"n": "old"})
+            await handle.signal(StartsWhenTold.begin, "end")
+            result = asyncio.ensure_future(handle.result())
+            # The subscription registers when the signalled task completes,
+            # which the test does not observe, so appends keep coming.
+            for _ in range(150):
+                await producer.append({"n": "new"})
+                done, _ = await asyncio.wait({result}, timeout=0.2)
+                if done:
+                    break
+            assert await asyncio.wait_for(result, 60) == ["new"]
+        offsets = await _subscribed_offsets(client, workflow_id)
+        assert len(offsets) == 1 and offsets[0] >= 2
+    finally:
+        await provider.close()

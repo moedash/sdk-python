@@ -35,8 +35,10 @@ from collections.abc import AsyncGenerator
 from typing import Any, Generic, TypeVar
 
 from temporalio import workflow
+from temporalio.api.stream.v1 import StreamStartPosition
 from temporalio.client import Client, WorkflowHistoryEventFilterType
 from temporalio.client_stream import (
+    Page,
     StreamClient,
     WorkflowStreamHandle,
     close_shared_clients,
@@ -46,7 +48,14 @@ from temporalio.converter import PayloadCodec, PayloadConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, WriteSink
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -164,18 +173,30 @@ class _NativeWriteSink:
 class _NativeWorkflowProvider:
     """The workflow half: the server's commands and delivered ranges."""
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
+        check_read_start(after, last)
         _require_topic(topic)
         run_id = workflow.info().run_id
-        start = 0
-        named = _position(after)
-        if named is not None:
+        # The server resolves the position when it registers the subscription
+        # and records the offset on the subscribed event, so replay never
+        # resolves it again.
+        if last is not None:
+            start = StreamStartPosition(last_n=last)
+        elif after == END:
+            start = StreamStartPosition(tail=True)
+        elif after == BEGINNING:
+            start = StreamStartPosition(earliest=True)
+        else:
+            named = _position(after)
+            assert named is not None
             if named[0] != run_id:
                 raise StreamCursorError(
                     f"cursor {after.token!r} names another run; a run's stream is its own"
                 )
-            start = named[1] + 1
-        workflow._subscribe_stream(topic, start_offset=start)
+            start = StreamStartPosition(offset=named[1] + 1)
+        workflow._subscribe_stream(topic, start=start)
         return _NativeReadSource(topic, run_id)
 
     def open_writer(self, topic: str) -> WriteSink:
@@ -342,37 +363,63 @@ class NativeStreamHandle:
         *,
         topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the chain, or the pinned run, closes."""
+        """Yield records on ``topic`` from where the read starts until the chain, or the pinned run, closes.
+
+        ``BEGINNING`` is the oldest record the chain's first retained run
+        still holds. ``END`` and ``last=`` start on the current run, or the
+        pinned one: an earlier run of a chain has ended and holds neither the
+        tail nor the newest records. The server resolves each on the first
+        poll, in the read that serves it.
+        """
+        check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
-        named = _position(after)
+        named = None if after == END else _position(after)
         if named is not None and self._run_id is not None and named[0] != self._run_id:
             raise StreamCursorError(
                 f"cursor {after.token!r} names another run than this handle is pinned to"
             )
-        return self._read(topic, named, after, result_type)
+        start: StreamStartPosition | None = None
+        if last is not None:
+            start = StreamStartPosition(last_n=last)
+        elif after == END:
+            start = StreamStartPosition(tail=True)
+        elif named is None:
+            start = StreamStartPosition(earliest=True)
+        return self._read(topic, named, start, after, result_type)
 
     async def _read(
         self,
         topic: str,
         named: tuple[str, int] | None,
+        start: StreamStartPosition | None,
         after: Cursor,
         result_type: type | None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        decoder = RecordDecoder(
-            self._converter, result_type, after=after, warn=logger.warning
-        )
+        decoder: RecordDecoder | None = None
+        offset = 0
         if named is not None:
             run_id, offset = named[0], named[1] + 1
+        elif start is not None and start.WhichOneof("position") != "earliest":
+            run_id = self._run_id or await self._current_run()
         else:
-            run_id, offset = self._run_id or await self._first_run(), 0
+            run_id = self._run_id or await self._first_run()
         while True:
             stream = self._stream(topic, run_id)
             while True:
-                page = await stream.poll(from_offset=offset)
+                page = await stream.poll(from_offset=offset, start=start)
+                if decoder is None:
+                    decoder = RecordDecoder(
+                        self._converter,
+                        result_type,
+                        after=self._previous(run_id, page, start, after),
+                        warn=logger.warning,
+                    )
+                start = None
                 for entry in page.entries:
                     record = await _decode_body(self._codec, entry.record)
                     for out in decoder.decode(_cursor(run_id, entry.offset), record):
@@ -388,6 +435,21 @@ class NativeStreamHandle:
             if successor is None:
                 return
             run_id, offset = successor, 0
+
+    @staticmethod
+    def _previous(
+        run_id: str, page: Page, start: StreamStartPosition | None, after: Cursor
+    ) -> Cursor:
+        """The position before the first record a read yields.
+
+        A synthesized record is positioned there. After ``END`` or ``last=``
+        it is only known once the server resolved the start, from the first
+        page. It names a run so a chain-following resume stays on this one.
+        """
+        if start is None or start.WhichOneof("position") == "earliest":
+            return after
+        first = page.entries[0].offset if page.entries else page.next_offset
+        return _cursor(run_id, first - 1)
 
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, naming the run it was read from.

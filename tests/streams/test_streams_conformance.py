@@ -144,6 +144,9 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
                     StreamHost.run, id=workflow_id, task_queue=worker.task_queue
                 )
 
+        # No truncate hook: a stream a workflow owns has no truncation call.
+        # BEGINNING on a truncated stream is covered on the stream client,
+        # whose standalone streams can be truncated.
         yield ProviderCase("native", provider, client, host=host)
         for handle in hosts.values():
             await handle.terminate()
