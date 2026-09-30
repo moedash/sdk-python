@@ -113,10 +113,11 @@ _REASONS: dict[str, type[Exception]] = {
     "STREAM_PRODUCER_CONFLICT": StreamProducerError,
     "STREAM_PRODUCER_STALE_SEQUENCE": StreamProducerError,
     "STREAM_CURSOR_BELOW_FLOOR": StreamCursorError,
+    "STREAM_CLOSED": StreamClosedError,
 }
 # The phrases a server built before the tokens existed sends for the same
-# refusals, so a reader of either server gets the typed error. An append on a
-# sealed stream has no token yet and is matched on its whole message.
+# refusals, so a reader of either server gets the typed error. The sealed
+# stream's message is matched whole.
 _PRODUCER_PHRASE = "producer sequence"
 _CURSOR_PHRASE = "below the stream's floor"
 _CLOSED_PHRASE = "stream is closed"
