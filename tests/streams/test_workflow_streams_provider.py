@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -30,11 +31,13 @@ from temporalio.client import (
     WorkflowUpdateFailedError,
 )
 from temporalio.contrib.workflow_streams import PublishInput, WorkflowStream
-from temporalio.converter import DataConverter
+from temporalio.converter import DataConverter, ExternalStorage
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
     BEGINNING,
+    CONTENT_HASH_KEY,
+    DEFAULT_TOPIC,
     END,
     Cursor,
     RecordKind,
@@ -42,10 +45,13 @@ from temporalio.streams import (
     StreamError,
     StreamNotFoundError,
     StreamProducerError,
+    StreamRef,
     StreamUnsupportedError,
     Supersession,
+    content_hash,
 )
 from temporalio.streams._wire import WireRecord
+from temporalio.streams.providers import workflow_streams
 from temporalio.streams.providers.workflow_streams import (
     WorkflowStreamsActivityHandle,
     WorkflowStreamsHandle,
@@ -1141,6 +1147,106 @@ async def test_a_standalone_activity_stream_is_refused(
         provider.get_activity_stream_handle(client, "act", workflow_id="wf"),
         WorkflowStreamsActivityHandle,
     )
+
+
+async def test_a_standalone_stream_is_refused(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    # Every log is a running workflow's state; a stream with no owner has no
+    # workflow to live in. Both the create and the lookup say so.
+    with pytest.raises(StreamUnsupportedError, match="standalone"):
+        await provider.create_standalone_stream(client, "shared")
+    with pytest.raises(StreamUnsupportedError, match="standalone"):
+        provider.get_standalone_stream_handle(client, "shared")
+
+
+async def test_a_handle_names_its_stream_as_a_ref(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_stream = provider.get_stream_handle(client, "wf", run_id="run-1")
+    assert workflow_stream.ref(topic=INPUTS) == StreamRef.for_workflow(
+        "wf", run_id="run-1", topic=INPUTS
+    )
+    own = provider.get_activity_stream_handle(client, "act", workflow_id="wf")
+    assert own.ref(topic=TOKENS) == StreamRef.for_activity(
+        "act", workflow_id="wf", topic=TOKENS
+    )
+    assert own.ref().topic == DEFAULT_TOPIC
+    # An owned stream ends with its owner; only a standalone one closes.
+    with pytest.raises(ValueError, match="standalone"):
+        await own.close()
+
+
+def test_a_record_carries_the_plaintext_hash_the_workflow_dedupes_by():
+    handle = _UpdateHandle()
+    producer = _producer(handle, "update")
+    entries, _ = producer._entries(
+        [(RecordKind.DATA, {"n": 1}), (RecordKind.FINISH, None)]
+    )  # pyright: ignore[reportPrivateUsage]
+    data, finish = _wires(PublishInput(items=entries))
+    # A DATA record is stamped with the hash of its converted body, where the
+    # workflow can read it without the body; FINISH has nothing to hash.
+    assert data.metadata[CONTENT_HASH_KEY].data.decode() == content_hash(data.body)
+    assert CONTENT_HASH_KEY not in finish.metadata
+
+    # The workflow's identity for a batch is those hashes, so a body whose
+    # bytes a codec changed is still the same batch, and a different value
+    # is not.
+    def batch(*values: dict) -> PublishInput:
+        made, _ = _producer(handle, "update")._entries(  # pyright: ignore[reportPrivateUsage]
+            [(RecordKind.DATA, value) for value in values]
+        )
+        return PublishInput(items=made, publisher_id="model#1", sequence=3)
+
+    same, recoded, other = batch({"n": 1}), batch({"n": 1}), batch({"n": 2})
+    record = _wires(recoded)[0]
+    record.body.data = b"\x00" + record.body.data
+    recoded.items[0].data = base64.b64encode(
+        Payload(
+            metadata={"encoding": b"binary/plain"}, data=record.SerializeToString()
+        ).SerializeToString()
+    ).decode("ascii")
+    assert workflow_streams._content(same) == workflow_streams._content(recoded)  # pyright: ignore[reportPrivateUsage]
+    assert workflow_streams._content(same) != workflow_streams._content(other)  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_external_storage_applies_at_the_envelope_the_workflow_reads_through(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    # Worker and clients share one converter, as a deployment's do. A batch
+    # above the threshold leaves as a claim on the Update argument, the
+    # worker redeems it, the workflow reads the value, and the outside
+    # reader gets the poll response the same way.
+    from tests.streams.test_streams_conformance import RecordingDriver
+
+    driver = RecordingDriver()
+    converter = dataclasses.replace(
+        DataConverter.default,
+        external_storage=ExternalStorage(drivers=[driver], payload_size_threshold=512),
+    )
+    config = client.config()
+    config["data_converter"] = converter
+    shared = Client(**config)
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(shared, EchoLoop, plugins=[provider]) as worker:
+        handle = await shared.start_workflow(
+            EchoLoop.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(shared, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await producer.append({"n": 1})
+        assert driver.stored == 0
+        await producer.append({"n": 2, "blob": "x" * 4096})
+        assert driver.stored == 1
+        await producer.finish()
+
+        records = await take(stream.read(topic=DECISIONS, result_type=dict), 3)
+        assert [r.value.get("echo") for r in records[:2]] == [1, 2]
+        assert records[2].kind is RecordKind.FINISH
+        assert driver.retrieved >= 1
+
+        await handle.signal(EchoLoop.release)
+        assert await handle.result() == 2
 
 
 TOKENS = "tokens"

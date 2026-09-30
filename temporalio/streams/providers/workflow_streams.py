@@ -58,7 +58,27 @@ The mapping, in one place:
   provider reserves ``activity/`` in the owner's map. The record itself
   carries the plain name. A standalone activity has no workflow to host a
   log, so its streams are refused, and a workflow's own topic may not start
-  with the reserved prefix.
+  with the reserved prefix. A standalone stream, one with no owner at all,
+  is refused too: there is no workflow whose state could hold it. A housing
+  workflow per stream id is the design option for that, not built here.
+- A record's body meets the client's data converter at the transport's
+  envelope rather than one record at a time. A batch travels as a Signal or
+  Update argument and comes back as an Update or Query result, and the SDK
+  runs the payload codec and external storage over those the way it does
+  over every payload it sends, off the workflow thread, so a batch above the
+  storage threshold is offloaded as a claim and a codec protects it in
+  History. The bodies inside are left as the payload converter produced
+  them, because the workflow thread reads them straight out of its state
+  and could not decode a codec's output or redeem a claim there. So the
+  worker's converter has to match the clients', as it does for every other
+  payload, and a client with a converter of its own cannot read another's
+  records. What each record does carry is the plaintext hash of its body
+  under ``temporal.io/content-hash``, stamped by the producer before the
+  envelope is encoded, and the workflow matches a repeated batch by those
+  hashes rather than by the bytes.
+- A handle names its stream as a :class:`temporalio.streams.StreamRef` with
+  ``ref()``, a workflow's or an activity's, and ``close()`` refuses, since
+  an owned stream ends with its owner.
 """
 
 from __future__ import annotations
@@ -100,6 +120,7 @@ from temporalio.contrib.workflow_streams import (
 from temporalio.converter import PayloadConverter
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams._body import CONTENT_HASH_KEY, content_hash
 from temporalio.streams._errors import (
     StreamCursorError,
     StreamError,
@@ -116,6 +137,7 @@ from temporalio.streams._record import (
     StreamRecord,
     check_read_start,
 )
+from temporalio.streams._ref import StreamRef
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -243,10 +265,23 @@ def _entry_data(payload: Payload) -> str:
 
 
 def _content(publish: PublishInput) -> str:
-    """A digest of one batch's content, length-delimited so a resplit cannot collide."""
+    """A digest of one batch's content, length-delimited so a resplit cannot collide.
+
+    Each record counts by the plaintext hash stamped on it under
+    ``CONTENT_HASH_KEY``, so a body's encoding never enters the identity a
+    repeat is matched by; a record without a body, such as ``FINISH``, counts
+    by its bytes.
+    """
     digest = hashlib.sha256()
     for entry in publish.items:
-        for part in (entry.topic.encode(), entry.data.encode("ascii")):
+        record = WireRecord.FromString(_decode_payload(entry.data).data)
+        stamped = record.metadata.get(CONTENT_HASH_KEY)
+        identity = (
+            stamped.data
+            if stamped is not None
+            else record.SerializeToString(deterministic=True)
+        )
+        for part in (entry.topic.encode(), identity):
             digest.update(len(part).to_bytes(8, "big"))
             digest.update(part)
     return digest.hexdigest()
@@ -687,6 +722,16 @@ class WorkflowStreamsProducer(Generic[T]):
                 sequence=sequence,
             )
             sequence += 1
+            if wire.HasField("body"):
+                # The plaintext hash the workflow matches a repeat by, taken
+                # as the converter produced the body, before the transport's
+                # codec meets the envelope.
+                wire.metadata[CONTENT_HASH_KEY].CopyFrom(
+                    Payload(
+                        metadata={"encoding": _ENCODING},
+                        data=content_hash(wire.body).encode(),
+                    )
+                )
             entries.append(
                 PublishEntry(topic=self._item_topic, data=_entry_data(_wrap(wire)))
             )
@@ -1250,6 +1295,19 @@ class WorkflowStreamsHandle:
             retry_cooldown=self._poll_cooldown,
         )
 
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A ref to ``topic`` of this workflow's stream, pinned as this handle is."""
+        return StreamRef.for_workflow(
+            self._workflow_id, run_id=self._run_id, topic=topic
+        )
+
+    async def close(self) -> None:
+        """Refuse: an owned stream ends with its owner, not by a caller."""
+        raise ValueError(
+            "only a standalone stream can be closed; this handle is on an owned "
+            "stream, which ends when its workflow or activity does"
+        )
+
 
 class WorkflowStreamsActivityHandle(WorkflowStreamsHandle):
     """The streams one activity of a workflow owns, kept in that workflow's log.
@@ -1284,6 +1342,15 @@ class WorkflowStreamsActivityHandle(WorkflowStreamsHandle):
 
     def _wire_topic(self, topic: str) -> str:
         return _activity_topic(self._activity_id, topic)
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A ref to ``topic`` of this activity's streams, through its workflow."""
+        return StreamRef.for_activity(
+            self._activity_id,
+            workflow_id=self._workflow_id,
+            run_id=self._run_id,
+            topic=topic,
+        )
 
     async def _read(
         self,
@@ -1415,6 +1482,49 @@ class WorkflowStreamsProvider(ProviderPlugin):
             activity_id,
             self._poll_cooldown,
             self._publish_transport,
+        )
+
+    async def create_standalone_stream(
+        self,
+        client: Client,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> WorkflowStreamsHandle:
+        """Refused: this provider has no store for a stream without an owner.
+
+        Every log here is a running workflow's state, served by that
+        workflow's handlers, and a standalone stream has no workflow. A
+        housing workflow started for the stream id, with the retention policy
+        as its state and ``close()`` as a Signal, would be one way to offer
+        it on this transport; it is a design option for a later round, not
+        built here.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the workflow_streams provider does not host standalone streams: every "
+            "log is a running workflow's state, and a stream without an owner has "
+            "no workflow"
+        )
+
+    def get_standalone_stream_handle(
+        self, client: Client, stream_id: str
+    ) -> WorkflowStreamsHandle:
+        """Refused: this provider has no store for a stream without an owner.
+
+        See :meth:`create_standalone_stream`.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the workflow_streams provider does not host standalone streams: every "
+            "log is a running workflow's state, and a stream without an owner has "
+            "no workflow"
         )
 
     async def close(self) -> None:
