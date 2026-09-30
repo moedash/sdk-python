@@ -31,6 +31,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -53,14 +54,17 @@ from temporalio.streams import (
     END,
     Cursor,
     RecordKind,
+    StreamClosedError,
     StreamCursorError,
     StreamHandle,
+    StreamNotFoundError,
     StreamProducerError,
     StreamProvider,
     StreamRef,
     Supersession,
     topic,
 )
+from temporalio.streams._ref import open_ref
 from temporalio.streams.providers.memory import MemoryStreams
 
 # Defined once and shared by every case, the way an application shares them
@@ -88,6 +92,11 @@ class ProviderCase:
     truncate: Callable[[str, str, int], Awaitable[None]] | None = None
     """Drops all but the newest records of a workflow's topic, standing in
     for retention, or ``None`` when the provider offers no way to."""
+    hosts_standalone_streams: bool = True
+    """The store holds a stream with an id of its own and no owner."""
+    waits_for_standalone_creation: bool = False
+    """A read on a standalone stream id that does not exist yet parks until
+    the first write instead of raising ``StreamNotFoundError``."""
 
     async def open(
         self,
@@ -111,6 +120,42 @@ class ProviderCase:
             None,  # type: ignore[arg-type]
             workflow_id,
             run_id=run_id,
+        )
+
+    async def open_ref(self, ref: StreamRef) -> StreamHandle:
+        if self.client is not None:
+            return self.client.get_stream_handle(ref)
+        return open_ref(self.provider, None, ref)  # type: ignore[arg-type]
+
+    async def create_stream(
+        self,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> StreamHandle:
+        if self.client is not None:
+            return await self.client.create_stream(
+                stream_id,
+                retention=retention,
+                max_records=max_records,
+                max_bytes=max_bytes,
+            )
+        return await self.provider.create_standalone_stream(
+            None,  # type: ignore[arg-type]
+            stream_id,
+            retention=retention,
+            max_records=max_records,
+            max_bytes=max_bytes,
+        )
+
+    async def open_standalone(self, stream_id: str) -> StreamHandle:
+        if self.client is not None:
+            return self.client.get_stream_handle(stream_id=stream_id)
+        return self.provider.get_standalone_stream_handle(
+            None,  # type: ignore[arg-type]
+            stream_id,
         )
 
 
@@ -191,6 +236,7 @@ _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
     "detects_divergent_retries": lambda case: case.detects_divergent_retries,
     "truncates": lambda case: case.truncate is not None,
+    "hosts_standalone_streams": lambda case: case.hosts_standalone_streams,
 }
 
 
@@ -222,6 +268,19 @@ async def take(records: Any, count: int, timeout: float = 5.0) -> list:
 
     await asyncio.wait_for(_collect(), timeout)
     return out
+
+
+async def drain(records: Any, timeout: float = 5.0) -> list:
+    """Every record until the read ends on its own."""
+
+    async def _collect() -> list:
+        return [record async for record in records]
+
+    return await asyncio.wait_for(_collect(), timeout)
+
+
+def new_stream_id() -> str:
+    return f"stream-{uuid.uuid4().hex}"
 
 
 async def test_append_read_roundtrip(case: ProviderCase):
@@ -668,3 +727,138 @@ async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     await first.append({"id": "r2"})
     records = await take(stream.read(topic=OUT), 2)
     assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]
+
+
+async def test_a_ref_opens_the_stream_it_names(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    await stream.producer(topic=A, producer_id="model", attempt=1).append({"n": 1})
+    ref = stream.ref(topic=A)
+
+    # The receiver names no topic: the ref carried it, so every call on the
+    # handle it opened addresses topic ``a`` of that workflow.
+    opened = await case.open_ref(ref)
+    records = await take(opened.read(result_type=dict), 1)
+    assert [(r.topic, r.value) for r in records] == [("a", {"n": 1})]
+    assert await opened.latest() == records[0].cursor
+    assert opened.ref() == ref
+    await opened.producer(producer_id="tool", attempt=1).append({"n": 2})
+    assert [r.value for r in await take(stream.read(topic=A), 2)] == [
+        {"n": 1},
+        {"n": 2},
+    ]
+    # Naming a topic on the opened handle addresses that topic instead.
+    assert await opened.latest(topic=B) == BEGINNING
+    assert opened.ref(topic=B) == stream.ref(topic=B)
+
+
+@pytest.mark.hosts_standalone_streams
+async def test_a_standalone_stream_is_read_from_another_handle(case: ProviderCase):
+    stream_id = new_stream_id()
+    created = await case.create_stream(stream_id)
+    producer = created.producer(topic=OUT, producer_id="writer", attempt=1)
+    await producer.append({"n": 1}, {"n": 2})
+
+    # Any process reaches the stream by its id, or by a ref the creator
+    # handed out; nothing about the stream depends on who created it.
+    other = await case.open_standalone(stream_id)
+    records = await take(other.read(topic=OUT), 2)
+    assert [r.value for r in records] == [{"n": 1}, {"n": 2}]
+    assert await other.latest(topic=OUT) == records[1].cursor
+    assert other.ref(topic=OUT) == StreamRef.for_standalone(stream_id, topic="out")
+    via_ref = await case.open_ref(created.ref(topic=OUT))
+    assert [r.value for r in await take(via_ref.read(), 2)] == [{"n": 1}, {"n": 2}]
+
+
+@pytest.mark.hosts_standalone_streams
+async def test_a_missing_standalone_stream_is_not_found(case: ProviderCase):
+    if case.waits_for_standalone_creation:
+        pytest.skip(
+            f"the {case.name} provider waits for a standalone stream to be created"
+        )
+    # get_stream_handle(stream_id=) creates nothing: the stream has to have
+    # been created on purpose, and a use before that says so.
+    stream = await case.open_standalone(new_stream_id())
+    with pytest.raises(StreamNotFoundError):
+        await stream.latest(topic=OUT)
+    with pytest.raises(StreamNotFoundError):
+        await take(stream.read(topic=OUT), 1)
+    with pytest.raises(StreamNotFoundError):
+        await stream.producer(topic=OUT, producer_id="writer", attempt=1).append(
+            {"n": 1}
+        )
+
+
+@pytest.mark.hosts_standalone_streams
+async def test_creating_a_standalone_stream_is_idempotent_for_one_policy(
+    case: ProviderCase,
+):
+    stream_id = new_stream_id()
+    first = await case.create_stream(stream_id, max_records=10)
+    # The same id and policy again is the same stream, not an error, so a
+    # retried create is harmless.
+    again = await case.create_stream(stream_id, max_records=10)
+    await first.producer(topic=OUT, producer_id="writer", attempt=1).append({"n": 1})
+    assert [r.value for r in await take(again.read(topic=OUT), 1)] == [{"n": 1}]
+    # A different policy on an existing id is a mistake, not a change.
+    with pytest.raises(ValueError):
+        await case.create_stream(stream_id, max_records=5)
+    for bad in (dict(max_records=0), dict(max_bytes=-1), dict(retention=timedelta(0))):
+        with pytest.raises(ValueError):
+            await case.create_stream(new_stream_id(), **bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.hosts_standalone_streams
+async def test_closing_a_standalone_stream_ends_reads_and_refuses_appends(
+    case: ProviderCase,
+):
+    stream_id = new_stream_id()
+    stream = await case.create_stream(stream_id)
+    producer = stream.producer(topic=OUT, producer_id="writer", attempt=1)
+    await producer.append({"n": 1})
+    # A reader parked on the tail before the close has to learn of it.
+    other = await case.open_standalone(stream_id)
+    parked = asyncio.ensure_future(drain(other.read(topic=OUT), timeout=10))
+    await asyncio.sleep(0.2)
+    await producer.append({"n": 2})
+
+    await stream.close()
+    assert [r.value for r in await parked] == [{"n": 1}, {"n": 2}]
+    # Sealed: the tail stays readable, and a read opened now ends by itself.
+    assert [r.value for r in await drain(stream.read(topic=OUT))] == [
+        {"n": 1},
+        {"n": 2},
+    ]
+    with pytest.raises(StreamClosedError):
+        await producer.append({"n": 3})
+    with pytest.raises(StreamClosedError):
+        await other.producer(topic=A, producer_id="late", attempt=1).append({"n": 3})
+    # Closing again is not an error.
+    await stream.close()
+
+
+@pytest.mark.hosts_standalone_streams
+async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCase):
+    by_count = await case.create_stream(new_stream_id(), max_records=2)
+    producer = by_count.producer(topic=OUT, producer_id="writer", attempt=1)
+    await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+    # BEGINNING is the oldest record still held, which the policy decided.
+    kept = await take(by_count.read(topic=OUT), 2)
+    assert [r.value for r in kept] == [{"n": 3}, {"n": 4}]
+
+    by_bytes = await case.create_stream(new_stream_id(), max_bytes=700)
+    producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
+    for n in range(3):
+        await producer.append({"n": n, "blob": "x" * 500})
+    kept = await take(by_bytes.read(topic=OUT), 1)
+    assert kept[0].value is not None and kept[0].value["n"] == 2
+
+    by_age = await case.create_stream(
+        new_stream_id(), retention=timedelta(milliseconds=200)
+    )
+    producer = by_age.producer(topic=OUT, producer_id="writer", attempt=1)
+    await producer.append({"n": "old"})
+    await asyncio.sleep(0.3)
+    await producer.append({"n": "new"})
+    kept = await take(by_age.read(topic=OUT), 1)
+    assert [r.value for r in kept] == [{"n": "new"}]
