@@ -31,7 +31,6 @@ does not know the service yet.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, Generic, TypeVar
@@ -67,8 +66,10 @@ from temporalio.streams._record import (
 )
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
+    CONTENT_HASH_KEY,
     RecordDecoder,
     WireRecord,
+    content_hash,
     cursor_position,
     mint_cursor,
     producer_identity,
@@ -77,7 +78,6 @@ from temporalio.streams._wire import (
 from temporalio.streams.providers import ProviderPlugin
 
 __all__ = [
-    "CONTENT_HASH_KEY",
     "NativeActivityStreamHandle",
     "NativeProducer",
     "NativeStreamHandle",
@@ -87,9 +87,6 @@ __all__ = [
 T = TypeVar("T")
 
 _PROVIDER = "native"
-
-CONTENT_HASH_KEY = "temporal.io/content-hash"
-"""The record metadata key carrying the hex SHA-256 of the plaintext body."""
 
 logger = logging.getLogger(__name__)
 
@@ -129,9 +126,11 @@ def _fingerprint(record: WireRecord) -> WireRecord:
     """
     if not record.HasField("body"):
         return record
-    digest = hashlib.sha256(record.body.SerializeToString()).hexdigest()
     record.metadata[CONTENT_HASH_KEY].CopyFrom(
-        Payload(metadata={"encoding": b"binary/plain"}, data=digest.encode())
+        Payload(
+            metadata={"encoding": b"binary/plain"},
+            data=content_hash(record.body).encode(),
+        )
     )
     return record
 

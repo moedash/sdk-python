@@ -19,14 +19,17 @@ import temporalio.converter
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamRecord
+from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
+from temporalio.bridge.worker import encode_completion
 from temporalio.client_stream import Appended
 from temporalio.converter import (
     DataConverter,
     PayloadCodec,
     StorageDriverWorkflowInfo,
 )
+from temporalio.streams._wire import CONTENT_HASH_KEY
 from temporalio.streams.providers import native
-from temporalio.streams.providers.native import CONTENT_HASH_KEY, NativeProducer
+from temporalio.streams.providers.native import NativeProducer
 
 
 class _NonceCodec(PayloadCodec):
@@ -120,3 +123,29 @@ def test_a_workflow_publish_is_stamped_on_the_workflow_thread(
     # reissues.
     native._NativeWriteSink("t").publish(StreamRecord(topic="t", body=body))
     assert staged[1].metadata[CONTENT_HASH_KEY] == stamped.metadata[CONTENT_HASH_KEY]
+
+
+async def test_the_workers_payload_pass_leaves_the_stamp_alone() -> None:
+    """The codec and the store rewrite the body and the other metadata, never the hash.
+
+    The server reads the declared hash as sent and refuses a value that is not
+    hex, so a codec that touched it would fail the workflow's own append.
+    """
+    converter = DataConverter(payload_codec=_NonceCodec())
+    body = converter.payload_converter.to_payloads([{"n": 3}])[0]
+    record = native._fingerprint(StreamRecord(topic="t", body=body))
+    record.metadata["note"].CopyFrom(Payload(data=b"plain"))
+    completion = WorkflowActivationCompletion()
+    command = completion.successful.commands.add()
+    command.append_stream_records.stream_name = "t"
+    command.append_stream_records.records.append(record)
+
+    await encode_completion(
+        completion, converter, encode_headers=False, storage_concurrency_limit=1
+    )
+
+    sent = completion.successful.commands[0].append_stream_records.records[0]
+    assert sent.body.metadata["encoding"] == b"binary/nonce"
+    assert sent.metadata["note"].metadata["encoding"] == b"binary/nonce"
+    assert sent.metadata[CONTENT_HASH_KEY].data == _plaintext_hash({"n": 3})
+    assert sent.metadata[CONTENT_HASH_KEY].metadata["encoding"] == b"binary/plain"

@@ -30,7 +30,8 @@ from temporalio.converter import (
     PayloadCodec,
 )
 from temporalio.streams import RecordKind
-from temporalio.streams.providers.native import CONTENT_HASH_KEY, NativeStreams
+from temporalio.streams._wire import CONTENT_HASH_KEY
+from temporalio.streams.providers.native import NativeStreams
 from temporalio.worker import Worker
 from tests.streams.test_streams_conformance import take
 from tests.test_extstore import InMemoryTestDriver
