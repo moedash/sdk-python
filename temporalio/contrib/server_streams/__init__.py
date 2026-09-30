@@ -457,4 +457,4 @@ class WorkflowStreamClient:
 
 
 def _stream_client(client: Client) -> StreamClient:
-    return shared_client(client.service_client.config.target_host, client.namespace)
+    return shared_client(client)

@@ -387,7 +387,14 @@ async def _native_case(client: Client) -> AsyncIterator[ProviderCase]:
         # BEGINNING on a truncated stream is covered on the stream client,
         # whose standalone streams can be truncated.
         yield ProviderCase(
-            "native", provider, client, host=host, task_queue=worker.task_queue
+            "native",
+            provider,
+            client,
+            host=host,
+            task_queue=worker.task_queue,
+            waits_for_standalone_creation=True,
+            bounds_standalone_bytes=False,
+            trims_open_stream_by_age=False,
         )
         for handle in hosts.values():
             await handle.terminate()
