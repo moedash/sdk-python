@@ -202,10 +202,15 @@ exclude = [
   'temporalio/api',
   'temporalio/bridge/proto',
   'temporalio/nexus/system/workflow_service',
+  'temporalio/streams/providers/_nexus_generated',
 ]
 
 [[tool.mypy.overrides]]
 module = "temporalio.nexus.system.workflow_service.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "temporalio.streams.providers._nexus_generated.*"
 ignore_errors = true
 
 [tool.pydocstyle]

@@ -38,21 +38,52 @@ services:
         output: { $ref: "#/$defs/ReadOutput" }
 
 $defs:
+  StreamRef:
+    type: object
+    description: >-
+      A stream, named by its owner and a topic: what an operation returns to
+      hand a stream to its caller, and what read and append take in place of
+      an owner spelled out. It names no cursor and no store, so the same
+      reference is good behind any endpoint that serves the owner.
+    properties:
+      kind:
+        type: string
+        enum: [workflow, activity, standalone]
+        description: >-
+          What owns the stream. A workflow's streams are keyed by workflow_id
+          and, when pinned, run_id. An activity's own streams are keyed by
+          activity_id and, when a workflow scheduled it, that workflow's ids.
+          A standalone stream has its own stream_id and no execution behind
+          it.
+      workflow_id:
+        type: string
+        description: >-
+          The owning workflow, or the workflow that scheduled the owning
+          activity. Required for a workflow owner.
+      run_id:
+        type: string
+        description: >-
+          Pin the owner to this run. Absent follows the execution chain
+          across continue-as-new, which is what a producer normally wants.
+      activity_id:
+        type: string
+        description: "The owning activity. Required for an activity owner."
+      stream_id:
+        type: string
+        description: "The stream's own id. Required for a standalone owner."
+      topic:
+        type: string
+        description: "The topic on the owner's stream."
+    required:
+      - kind
+      - topic
+    additionalProperties: false
+
   AppendInput:
     type: object
     description: "One append call: who is writing, where, and what."
     properties:
-      workflow_id:
-        type: string
-        description: "The workflow whose stream is being written."
-      run_id:
-        type: string
-        description: >-
-          The run to address. Empty addresses the workflow's execution chain,
-          which is what a producer normally wants.
-      topic:
-        type: string
-        description: "The topic of the workflow's stream to append to."
+      stream: { $ref: "#/$defs/StreamRef" }
       producer_id:
         type: string
         description: >-
@@ -95,8 +126,7 @@ $defs:
           Write FINISH for this producer after the batch: it will write nothing
           more on the topic. Says nothing about the producer's outcome.
     required:
-      - workflow_id
-      - topic
+      - stream
       - producer_id
       - attempt
       - sequence
@@ -120,17 +150,7 @@ $defs:
     type: object
     description: "One read call: where to resume from and how long to wait."
     properties:
-      workflow_id:
-        type: string
-        description: "The workflow whose stream is being read."
-      run_id:
-        type: string
-        description: >-
-          Pin the read to this run. Empty follows the workflow's execution
-          chain across continue-as-new.
-      topic:
-        type: string
-        description: "The topic of the workflow's stream to read."
+      stream: { $ref: "#/$defs/StreamRef" }
       after_token:
         type: string
         description: >-
@@ -166,8 +186,7 @@ $defs:
           count. Refused alongside an after_token, which is how a read
           resumes.
     required:
-      - workflow_id
-      - topic
+      - stream
     additionalProperties: false
 
   RecordWire:

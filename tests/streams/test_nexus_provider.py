@@ -4,12 +4,12 @@ The caller talks only to the stream endpoint; the handler fronts a storage
 provider's own handles, so these tests are the provider-hiding demonstration:
 nothing on the caller side names or could name the store.
 
-The loop test runs over the server's Nexus HTTP ingress and is gated behind
-``STREAMS_LIVE=nexus`` because it needs a dev server with an HTTP port and a
-registered Nexus endpoint. Environment: ``TEMPORAL_ADDRESS`` (default
-``localhost:7233``), ``TEMPORAL_HTTP`` (default ``http://127.0.0.1:7243``),
-and an endpoint named ``streams-e2e`` targeting task queue
-``streams-handlers-e2e``.
+The live tests run over the server's Nexus HTTP ingress and are gated behind
+``STREAMS_LIVE=nexus`` because they need a dev server with an HTTP port.
+Environment: ``TEMPORAL_ADDRESS`` (default ``localhost:7233``) and
+``TEMPORAL_HTTP`` (default ``http://127.0.0.1:7243``). Each live test
+registers its own Nexus endpoint through the operator service and deletes it
+at the end.
 
 Everything else stands the endpoint up in this process, because what it
 checks is the bytes the caller puts on the wire and the handler's own rules.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import gc
 import http.client
@@ -26,6 +27,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest import mock
@@ -35,8 +37,16 @@ import nexusrpc.handler
 import pytest
 
 import temporalio.converter
+from temporalio import nexus as temporal_nexus
+from temporalio import streams, workflow
 from temporalio.api.common.v1 import Payload
+from temporalio.api.nexus.v1 import EndpointSpec, EndpointTarget
+from temporalio.api.operatorservice.v1 import (
+    CreateNexusEndpointRequest,
+    DeleteNexusEndpointRequest,
+)
 from temporalio.client import Client
+from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
     BEGINNING,
@@ -45,11 +55,14 @@ from temporalio.streams import (
     RecordKind,
     StreamCursorError,
     StreamProducerError,
+    StreamRef,
     StreamUnsupportedError,
 )
+from temporalio.streams._ref import open_ref
 from temporalio.streams._wire import WireRecord
 from temporalio.streams.providers import nexus
 from temporalio.streams.providers._nexus_generated import AppendInput, ReadInput
+from temporalio.streams.providers._nexus_generated import StreamRef as WireStreamRef
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.nexus import (
     NexusStreamHandle,
@@ -67,12 +80,49 @@ live_only = pytest.mark.skipif(
     reason="needs a live server and nexus endpoint; run with STREAMS_LIVE=nexus",
 )
 
-ENDPOINT = "streams-e2e"
-HANDLER_TQ = "streams-handlers-e2e"
 APPEND_OPERATION = nexus._APPEND_OPERATION  # pyright: ignore[reportPrivateUsage]
 READ_OPERATION = nexus._READ_OPERATION  # pyright: ignore[reportPrivateUsage]
 INPUTS = "inputs"
 DECISIONS = "decisions"
+
+
+async def _live_client() -> Client:
+    return await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
+
+
+def _live_front(endpoint: str) -> NexusStreams:
+    return NexusStreams(
+        endpoint=endpoint,
+        http_address=os.environ.get("TEMPORAL_HTTP", "http://127.0.0.1:7243"),
+        read_wait=timedelta(seconds=5),
+    )
+
+
+@contextlib.asynccontextmanager
+async def _own_endpoint(
+    client: Client, name: str, task_queue: str
+) -> AsyncIterator[str]:
+    """Register a Nexus endpoint routed to ``task_queue`` for one test's life."""
+    created = await client.operator_service.create_nexus_endpoint(
+        CreateNexusEndpointRequest(
+            spec=EndpointSpec(
+                name=name,
+                target=EndpointTarget(
+                    worker=EndpointTarget.Worker(
+                        namespace=client.namespace, task_queue=task_queue
+                    )
+                ),
+            )
+        )
+    )
+    try:
+        yield name
+    finally:
+        await client.operator_service.delete_nexus_endpoint(
+            DeleteNexusEndpointRequest(
+                id=created.endpoint.id, version=created.endpoint.version
+            )
+        )
 
 
 @live_only
@@ -81,16 +131,16 @@ async def test_interface_loop_through_the_nexus_front():
     # provider; only the caller goes through the front, and it names the
     # endpoint the way an operator does, by name.
     store = WorkflowStreamsProvider()
-    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
-    front = NexusStreams(
-        endpoint=ENDPOINT,
-        http_address=os.environ.get("TEMPORAL_HTTP", "http://127.0.0.1:7243"),
-        read_wait=timedelta(seconds=5),
-    )
+    client = await _live_client()
     workflow_id = f"streams-nexus-live-{uuid.uuid4().hex}"
     handler = TemporalStreamsHandler(store, client)
+    handler_tq = f"handlers-{workflow_id}"
 
-    async with Worker(client, task_queue=HANDLER_TQ, nexus_service_handlers=[handler]):
+    async with (
+        _own_endpoint(client, workflow_id, handler_tq) as endpoint,
+        Worker(client, task_queue=handler_tq, nexus_service_handlers=[handler]),
+    ):
+        front = _live_front(endpoint)
         async with Worker(
             client,
             task_queue=f"tq-{workflow_id}",
@@ -319,6 +369,10 @@ async def test_without_a_codec_the_same_records_go_out_in_the_clear(
     assert b"tuna" in _answered_bodies(answered)
 
 
+def _ref(workflow_id: str, topic: str = INPUTS) -> WireStreamRef:
+    return WireStreamRef(kind="workflow", workflow_id=workflow_id, topic=topic)
+
+
 def _append(
     workflow_id: str,
     batch_index: int,
@@ -328,8 +382,7 @@ def _append(
 ) -> AppendInput:
     converter = temporalio.converter.DataConverter.default.payload_converter
     return AppendInput(
-        workflow_id=workflow_id,
-        topic=INPUTS,
+        stream=_ref(workflow_id),
         producer_id="model",
         attempt=1,
         # Batches of one, numbered in step with the batch index unless a
@@ -515,7 +568,7 @@ async def test_consecutive_reads_share_one_parked_subscription():
     first = await _dispatch(
         handler,
         READ_OPERATION,
-        ReadInput(workflow_id="wf", topic=INPUTS, max_records=1, wait_ms=200),
+        ReadInput(stream=_ref("wf"), max_records=1, wait_ms=200),
     )
     assert len(first.records) == 1
     parked = handler._subscriptions  # pyright: ignore[reportPrivateUsage]
@@ -526,8 +579,7 @@ async def test_consecutive_reads_share_one_parked_subscription():
         handler,
         READ_OPERATION,
         ReadInput(
-            workflow_id="wf",
-            topic=INPUTS,
+            stream=_ref("wf"),
             after_token=first.next_token,
             max_records=1,
             wait_ms=200,
@@ -540,7 +592,7 @@ async def test_consecutive_reads_share_one_parked_subscription():
     await _dispatch(
         handler,
         READ_OPERATION,
-        ReadInput(workflow_id="wf", topic=INPUTS, wait_ms=200),
+        ReadInput(stream=_ref("wf"), wait_ms=200),
     )
     assert len(parked) == 1 and next(iter(parked.values())).pump is not pump
     await handler.close()
@@ -552,7 +604,7 @@ async def test_the_read_wait_is_cut_to_the_request_deadline():
     started = asyncio.get_running_loop().time()
     answer = await handler.read(
         _context(READ_OPERATION, datetime.now(timezone.utc) + timedelta(seconds=1)),
-        ReadInput(workflow_id="wf", topic=INPUTS, wait_ms=60000),
+        ReadInput(stream=_ref("wf"), wait_ms=60000),
     )
     assert answer.records == [] and answer.next_token == "" and not answer.done
     assert asyncio.get_running_loop().time() - started < 5
@@ -711,7 +763,7 @@ async def test_a_failed_read_is_not_reported_as_the_end_of_the_stream():
         .append({"n": 1})
     )
 
-    request = ReadInput(workflow_id="wf", topic=INPUTS, wait_ms=200, max_records=10)
+    request = ReadInput(stream=_ref("wf"), wait_ms=200, max_records=10)
     with pytest.raises(RuntimeError, match="the store went away"):
         await _dispatch(handler, READ_OPERATION, request)
     # The retry from the same token has to re-subscribe rather than be
@@ -733,7 +785,7 @@ async def test_the_handler_does_not_grow_a_lock_per_address():
         await _dispatch(
             handler,
             READ_OPERATION,
-            ReadInput(workflow_id=workflow_id, topic=INPUTS, wait_ms=0, max_records=1),
+            ReadInput(stream=_ref(workflow_id), wait_ms=0, max_records=1),
         )
     gc.collect()
     # Held weakly, so an address nobody is reading or appending to leaves
@@ -821,11 +873,329 @@ async def test_the_front_carries_every_read_start(monkeypatch: pytest.MonkeyPatc
             handler,
             READ_OPERATION,
             ReadInput(
-                workflow_id="wf-starts",
-                topic=INPUTS,
+                stream=_ref("wf-starts"),
                 after_token=newest[0].cursor.token,
                 last_n=1,
             ),
         )
     assert both.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
     await handler.close()
+
+
+async def test_an_activity_owner_crosses_the_endpoint(monkeypatch: pytest.MonkeyPatch):
+    # The reference carries the owner, so an activity's own stream is reached
+    # through the same two operations and lands on the store's activity
+    # accessor, apart from the workflow's topics of the same name.
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
+    front = _front(None)
+    own = front.get_activity_stream_handle(None, "act", workflow_id="wf")
+    await own.producer(topic=INPUTS, producer_id="model", attempt=1).append({"n": 1})
+    records = await take(own.read(topic=INPUTS, result_type=dict), 1, timeout=30)
+    assert records[0].value == {"n": 1}
+    assert await _stored(store, "wf") == []
+    stored = store.get_activity_stream_handle(None, "act", workflow_id="wf")
+    assert [r.value async for r in _take_data(stored, 1)] == [{"n": 1}]
+    await handler.close()
+
+
+async def _take_data(stream: Any, count: int) -> AsyncIterator[Any]:
+    async for record in stream.read(topic=INPUTS, result_type=dict):
+        if record.kind is RecordKind.DATA:
+            yield record
+            count -= 1
+        if count == 0:
+            return
+
+
+async def test_an_owner_the_store_cannot_host_is_refused_under_its_own_class(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+):
+    # Whether an owner is supported is the store's answer, not the front's:
+    # the Workflow Streams store hosts only the streams of a workflow's
+    # activities, so a standalone activity's are refused, and its refusal
+    # reaches the caller as the class it raised.
+    handler = TemporalStreamsHandler(WorkflowStreamsProvider(), client)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
+    own = _front(None).get_activity_stream_handle(None, "act")
+    with pytest.raises(StreamUnsupportedError, match="activity"):
+        await own.producer(topic=INPUTS, producer_id="model", attempt=1).append(
+            {"n": 1}
+        )
+    with pytest.raises(StreamUnsupportedError, match="activity"):
+        await take(own.read(topic=INPUTS), 1)
+    # No provider addresses a standalone stream yet, so that owner is refused
+    # for every store.
+    standalone = WireStreamRef(kind="standalone", stream_id="s-1", topic=INPUTS)
+    with pytest.raises(nexusrpc.HandlerError) as refused:
+        await _dispatch(handler, READ_OPERATION, ReadInput(stream=standalone))
+    assert str(refused.value).startswith("StreamUnsupportedError: ")
+    await handler.close()
+
+
+async def test_a_reference_missing_its_owner_id_is_the_callers_fault():
+    handler = TemporalStreamsHandler(MemoryStreams(), None)
+    for ref in (
+        WireStreamRef(kind="workflow", topic=INPUTS),
+        WireStreamRef(kind="activity", workflow_id="wf", topic=INPUTS),
+        WireStreamRef(kind="standalone", topic=INPUTS),
+        WireStreamRef(kind="workflow", workflow_id="wf", topic=""),
+    ):
+        with pytest.raises(nexusrpc.HandlerError) as failed:
+            await _dispatch(handler, READ_OPERATION, ReadInput(stream=ref))
+        assert failed.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
+        with pytest.raises(nexusrpc.HandlerError) as failed:
+            request = _append("wf", 1, {"n": 1})
+            request.stream = ref
+            await _dispatch(handler, APPEND_OPERATION, request)
+        assert failed.value.type is nexusrpc.HandlerErrorType.BAD_REQUEST
+
+
+async def test_a_handle_names_its_stream_as_a_ref_that_opens_on_the_front(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store = MemoryStreams()
+    handler = TemporalStreamsHandler(store, None)
+    monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
+    front = _front(None)
+    handle = front.get_stream_handle(None, "wf", run_id="r1")
+    ref = handle.ref(topic=INPUTS)
+    assert ref == StreamRef.for_workflow("wf", run_id="r1", topic=INPUTS)
+    # Plain data: the default converter carries it the way an operation
+    # result or a workflow argument is carried.
+    converter = temporalio.converter.DataConverter.default.payload_converter
+    carried = converter.from_payloads([converter.to_payloads([ref])[0]], [StreamRef])
+    assert carried == [ref]
+    # Opened on the front, the ref reaches the same stream and its topic is
+    # the handle's default; the client accessor goes through open_ref. The
+    # in-process endpoint is reached by id, so no client is needed to resolve it.
+    no_client: Any = None
+    opened = open_ref(front, no_client, ref)
+    await opened.producer(producer_id="model", attempt=1).append({"n": 1})
+    records = await take(handle.read(topic=INPUTS, result_type=dict), 1, timeout=30)
+    assert records[0].value == {"n": 1}
+    assert opened.ref() == ref
+    # Every owner kind names itself.
+    assert front.get_activity_stream_handle(
+        None, "act", workflow_id="wf"
+    ).ref() == StreamRef.for_activity("act", workflow_id="wf")
+    assert front.get_standalone_stream_handle(None, "s-1").ref(
+        topic="t"
+    ) == StreamRef.for_standalone("s-1", topic="t")
+    await handler.close()
+
+
+async def test_the_front_refuses_what_the_contract_cannot_carry():
+    # No create and no seal operation: an owned stream cannot be closed by
+    # anyone, and a standalone stream is created and sealed on the store.
+    front = _front(None)
+    with pytest.raises(ValueError, match="only a standalone stream"):
+        await front.get_stream_handle(None, "wf").close()
+    with pytest.raises(StreamUnsupportedError, match="seals"):
+        await front.get_standalone_stream_handle(None, "s-1").close()
+    with pytest.raises(StreamUnsupportedError, match="creates"):
+        await front.create_standalone_stream(None, "s-1")
+    with pytest.raises(ValueError, match="stream_id"):
+        front.get_standalone_stream_handle(None, "")
+
+
+# ---------------------------------------------------------------------------
+# A stream as an operation result and as an operation input (June s8 b).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScoreUpdate:
+    """One score change."""
+
+    home: int
+    away: int
+
+
+@dataclass
+class GameRequest:
+    """Which game to start, and where its workflow runs."""
+
+    game_id: str
+    task_queue: str
+
+
+@dataclass
+class ScorePost:
+    """A score for the stream given, and whether it is the last one."""
+
+    stream: StreamRef
+    score: ScoreUpdate
+    last: bool = False
+
+
+@dataclass
+class CallerInput:
+    """The endpoint to call, the game to ask for, and the scores to post."""
+
+    endpoint: str
+    game_id: str
+    task_queue: str
+    scores: list[ScoreUpdate]
+
+
+SCORES = streams.topic("scores", ScoreUpdate)
+COMMANDS = streams.topic("commands", ScoreUpdate)
+
+
+@workflow.defn
+class ScoreboardGame:
+    """Reads posted scores on ``commands`` and publishes each on ``scores``."""
+
+    @workflow.run
+    async def run(self) -> int:
+        """Relay every posted score until the poster finishes, then finish."""
+        posted = 0
+        scores = workflow.stream_writer(SCORES)
+        async for record in workflow.stream_reader(COMMANDS):
+            if record.kind is RecordKind.FINISH:
+                break
+            if record.kind is RecordKind.DATA:
+                assert record.value is not None
+                scores.publish(record.value)
+                posted += 1
+        scores.finish()
+        return posted
+
+
+@nexusrpc.service
+class ScoreboardService:
+    """Starts a game and hands back its stream; takes a stream to post to."""
+
+    start_game: nexusrpc.Operation[GameRequest, StreamRef]
+    post_score: nexusrpc.Operation[ScorePost, None]
+
+
+@nexusrpc.handler.service_handler(service=ScoreboardService)
+class ScoreboardHandler:
+    """Serves the two operations as a client of the stream front."""
+
+    @nexusrpc.handler.sync_operation
+    async def start_game(
+        self, _ctx: nexusrpc.handler.StartOperationContext, input: GameRequest
+    ) -> StreamRef:
+        """Start the game workflow and return a ref to its ``scores`` topic."""
+        client = temporal_nexus.client()
+        # Reusing a running game makes a retried start hand back the same ref.
+        await client.start_workflow(
+            ScoreboardGame.run,
+            id=input.game_id,
+            task_queue=input.task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        )
+        return client.get_stream_handle(input.game_id).ref(topic=SCORES)
+
+    @nexusrpc.handler.sync_operation
+    async def post_score(
+        self, ctx: nexusrpc.handler.StartOperationContext, input: ScorePost
+    ) -> None:
+        """Append the score to the stream the caller named."""
+        # The request id is the producer, so a retried post writes once.
+        producer = (
+            temporal_nexus.client()
+            .get_stream_handle(input.stream)
+            .producer(producer_id=f"post-{ctx.request_id}", attempt=1)
+        )
+        await producer.append(input.score)
+        if input.last:
+            await producer.finish()
+
+
+@workflow.defn
+class ScoreboardCaller:
+    """Calls the operations and passes the ref on; it never reads the stream."""
+
+    @workflow.run
+    async def run(self, input: CallerInput) -> StreamRef:
+        """Start a game, post the scores to it, and return where to read them."""
+        scoreboard = workflow.create_nexus_client(
+            service=ScoreboardService, endpoint=input.endpoint
+        )
+        ref = await scoreboard.execute_operation(
+            ScoreboardService.start_game,
+            GameRequest(input.game_id, input.task_queue),
+        )
+        for index, score in enumerate(input.scores):
+            await scoreboard.execute_operation(
+                ScoreboardService.post_score,
+                ScorePost(
+                    ref.with_topic(COMMANDS), score, last=index == len(input.scores) - 1
+                ),
+            )
+        return ref
+
+
+@live_only
+async def test_an_operation_returns_a_stream_ref_and_another_takes_one():
+    # June s8 (b) without the emulation: the operation's result type is the
+    # SDK's StreamRef, the calling workflow passes it on as data, the client
+    # opens it on the front it carries and long-polls it, and a second
+    # operation appends to a stream it was given as input. The handlers are
+    # clients of the front like any process; only the game workflow's worker
+    # holds the store.
+    store = WorkflowStreamsProvider()
+    plain = await _live_client()
+    game_id = f"streams-nexus-ref-{uuid.uuid4().hex}"
+    handler_tq = f"handlers-{game_id}"
+    stream_handler = TemporalStreamsHandler(store, plain)
+
+    async with (
+        _own_endpoint(plain, game_id, handler_tq) as endpoint,
+        Worker(
+            plain,
+            task_queue=handler_tq,
+            nexus_service_handlers=[stream_handler],
+        ),
+    ):
+        front = _live_front(endpoint)
+        config = plain.config()
+        config["plugins"] = [front]
+        fronted = Client(**config)
+        async with (
+            Worker(
+                fronted,
+                task_queue=f"scoreboard-{game_id}",
+                nexus_service_handlers=[ScoreboardHandler()],
+            ),
+            Worker(
+                plain,
+                task_queue=f"tq-{game_id}",
+                workflows=[ScoreboardGame, ScoreboardCaller],
+                plugins=[store],
+            ),
+        ):
+            # The scoreboard service sits behind its own endpoint.
+            async with _own_endpoint(
+                plain, f"scoreboard-{game_id}", f"scoreboard-{game_id}"
+            ) as scoreboard_endpoint:
+                posted = [ScoreUpdate(1, 0), ScoreUpdate(1, 1), ScoreUpdate(2, 1)]
+                ref = await plain.execute_workflow(
+                    ScoreboardCaller.run,
+                    CallerInput(scoreboard_endpoint, game_id, f"tq-{game_id}", posted),
+                    id=f"{game_id}-caller",
+                    task_queue=f"tq-{game_id}",
+                )
+                assert ref == StreamRef.for_workflow(game_id, topic=SCORES)
+
+                # The ref is plain data the client opens on its own provider,
+                # here the front, and reads with the endpoint's long poll. It
+                # names the topic, not the record type, so the reader says
+                # what to decode as, the way a runtime topic name does.
+                records = await take(
+                    fronted.get_stream_handle(ref).read(result_type=ScoreUpdate), 4, 60
+                )
+                assert [record.kind for record in records] == [
+                    RecordKind.DATA,
+                    RecordKind.DATA,
+                    RecordKind.DATA,
+                    RecordKind.FINISH,
+                ]
+                assert [record.value for record in records[:3]] == posted
+                assert await plain.get_workflow_handle(game_id).result() == 3
+        await stream_handler.close()
