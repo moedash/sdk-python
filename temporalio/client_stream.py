@@ -27,8 +27,10 @@ change before this is a real feature:
 A failed call raises :class:`temporalio.streams.StreamNotFoundError` when the
 server answers ``NOT_FOUND``,
 :class:`temporalio.streams.StreamProducerError` when it refuses a producer
-sequence it already holds, and :class:`temporalio.service.RPCError`
-otherwise, never the transport's own exception type.
+sequence it already holds, :class:`temporalio.streams.StreamCursorError` when
+it refuses a read below the retention floor, and
+:class:`temporalio.service.RPCError` otherwise, never the transport's own
+exception type. :func:`translate_error` is the one place that decides.
 
 A failure sdk-core would retry is retried here, on the same codes and with the
 same default :class:`temporalio.service.RetryConfig`, because this channel is
@@ -71,7 +73,11 @@ from temporalio.service import (
     TLSConfig,
     __version__,
 )
-from temporalio.streams import StreamNotFoundError, StreamProducerError
+from temporalio.streams import (
+    StreamCursorError,
+    StreamNotFoundError,
+    StreamProducerError,
+)
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -87,17 +93,28 @@ __all__ = [
     "close_shared_clients",
     "shared_client",
     "shared_key",
+    "translate_error",
 ]
 
 _T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
-# The server refuses a producer sequence it already holds with a message and
-# no typed detail, so the phrase is the only thing to match on. Both refusals
-# it sends carry it: a repeat with different content, and one behind the
-# sequence it accepted last.
-_PRODUCER_CONFLICT = "producer sequence"
+# A refusal the caller has to act on is a FAILED_PRECONDITION whose message
+# begins with a reason token and ": ", since the service carries no typed
+# detail for these yet. A repeat with different content and one behind the
+# sequence the server accepted last are both a producer error; a read below
+# the retention floor is a cursor error.
+_REASON_SEPARATOR = ": "
+_REASONS: dict[str, type[Exception]] = {
+    "STREAM_PRODUCER_CONFLICT": StreamProducerError,
+    "STREAM_PRODUCER_STALE_SEQUENCE": StreamProducerError,
+    "STREAM_CURSOR_BELOW_FLOOR": StreamCursorError,
+}
+# The phrases a server built before the tokens existed sends for the same
+# refusals, so a reader of either server gets the typed error.
+_PRODUCER_PHRASE = "producer sequence"
+_CURSOR_PHRASE = "below the stream's floor"
 
 # The codes sdk-core retries.
 _RETRYABLE = frozenset(
@@ -457,17 +474,37 @@ def _to_public(record: stream.StreamRecord) -> StreamEntry:
     return StreamEntry(record=out, offset=record.offset)
 
 
-def _translate(error: grpc.aio.AioRpcError) -> Exception:
-    code = error.code()
-    details = error.details() or code.name
+def translate_error(
+    code: grpc.StatusCode, details: str, raw_status: bytes = b""
+) -> Exception:
+    """The SDK error for one failed call, from its status code and message.
+
+    ``NOT_FOUND`` is :class:`temporalio.streams.StreamNotFoundError`. A
+    ``FAILED_PRECONDITION`` whose message begins with a reason token is the
+    error the token names: a producer refusal, a repeat with different content
+    or one behind the sequence the server accepted last, is
+    :class:`temporalio.streams.StreamProducerError`, because the caller asked
+    to be deduplicated and could not be; a read below the retention floor is
+    :class:`temporalio.streams.StreamCursorError`. Everything else is
+    :class:`temporalio.service.RPCError` with the code and the raw status.
+    """
+    details = details or code.name
     if code is grpc.StatusCode.NOT_FOUND:
         return StreamNotFoundError(details)
-    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_CONFLICT in details:
-        # A producer sequence the store already holds, either with different
-        # content or behind the one it accepted last. The caller asked to be
-        # deduplicated and could not be, which is a condition of its own.
+    if code is grpc.StatusCode.FAILED_PRECONDITION:
+        token, separator, _ = details.partition(_REASON_SEPARATOR)
+        typed = _REASONS.get(token) if separator else None
+        if typed is not None:
+            return typed(details)
+        if _CURSOR_PHRASE in details:
+            return StreamCursorError(details)
+    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_PHRASE in details:
         return StreamProducerError(details)
-    return RPCError(details, RPCStatusCode(code.value[0]), _raw_status(error))
+    return RPCError(details, RPCStatusCode(code.value[0]), raw_status)
+
+
+def _translate(error: grpc.aio.AioRpcError) -> Exception:
+    return translate_error(error.code(), error.details() or "", _raw_status(error))
 
 
 async def _call(
