@@ -233,7 +233,13 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     async def truncate(workflow_id: str, topic: str, keep: int) -> None:
         provider.truncate(workflow_id, topic, keep=keep)
 
-    yield ProviderCase("memory", provider, truncate=truncate)
+    yield ProviderCase(
+        "memory",
+        provider,
+        truncate=truncate,
+        bounds_standalone_bytes=True,
+        trims_open_stream_by_age=True,
+    )
     provider.reset()
 
 

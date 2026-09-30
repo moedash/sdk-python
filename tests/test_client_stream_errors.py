@@ -66,6 +66,14 @@ def test_an_append_on_a_sealed_stream_is_a_closed_error(details: str) -> None:
     assert str(error) == details
 
 
+def test_a_create_with_another_policy_is_a_value_error() -> None:
+    error = translate_error(
+        grpc.StatusCode.FAILED_PRECONDITION,
+        "STREAM_POLICY_MISMATCH: stream exists keeping 10 records, asked for 5",
+    )
+    assert type(error) is ValueError
+
+
 def test_not_found_is_a_not_found_error() -> None:
     error = translate_error(grpc.StatusCode.NOT_FOUND, "no stream with id 's'")
     assert isinstance(error, StreamNotFoundError)
