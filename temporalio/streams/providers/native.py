@@ -31,11 +31,13 @@ does not know the service yet.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any, Generic, TypeVar
 
 from temporalio import workflow
+from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamStartPosition
 from temporalio.client import Client, WorkflowHistoryEventFilterType
 from temporalio.client_stream import (
@@ -71,6 +73,7 @@ from temporalio.streams._wire import (
 from temporalio.streams.providers import ProviderPlugin
 
 __all__ = [
+    "CONTENT_HASH_KEY",
     "NativeActivityStreamHandle",
     "NativeProducer",
     "NativeStreamHandle",
@@ -80,6 +83,9 @@ __all__ = [
 T = TypeVar("T")
 
 _PROVIDER = "native"
+
+CONTENT_HASH_KEY = "temporal.io/content-hash"
+"""The record metadata key carrying the hex SHA-256 of the plaintext body."""
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +114,22 @@ def _position(after: Cursor) -> tuple[str, int] | None:
             f"cursor {after.token!r} does not name a run and an offset on the "
             "native provider"
         ) from None
+
+
+def _fingerprint(record: WireRecord) -> WireRecord:
+    """Stamp ``record`` with the hash of its body as converted, before a codec or offload.
+
+    The server deduplicates a producer's repeat on this when present, so a
+    codec that encrypts with a fresh nonce per call cannot turn a retry into
+    a divergent write. A record without a body has nothing to compare.
+    """
+    if not record.HasField("body"):
+        return record
+    digest = hashlib.sha256(record.body.SerializeToString()).hexdigest()
+    record.metadata[CONTENT_HASH_KEY].CopyFrom(
+        Payload(metadata={"encoding": b"binary/plain"}, data=digest.encode())
+    )
+    return record
 
 
 async def _encode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
@@ -169,8 +191,9 @@ class _NativeWriteSink:
     def publish(self, record: WireRecord) -> None:
         # Held by the runtime until the task completes, when the task's
         # records on this topic become one command the server applies with
-        # the task: rule 1 through the server's own commit.
-        workflow._append_stream_records([record], stream_name=self._topic)
+        # the task: rule 1 through the server's own commit. The body is still
+        # plaintext here; the worker's payload pass runs after the task.
+        workflow._append_stream_records([_fingerprint(record)], stream_name=self._topic)
 
 
 class _NativeWorkflowProvider:
@@ -311,7 +334,7 @@ class NativeProducer(Generic[T]):
         if not self._handle.owner_run_id:
             self._handle.pin(await self._pin())
         for record in records:
-            await _encode_body(self._codec, record)
+            await _encode_body(self._codec, _fingerprint(record))
         appended = await self._handle.append(
             *records, producer_id=self._writer, sequence=self._sequence
         )
