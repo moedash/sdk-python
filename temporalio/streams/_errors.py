@@ -12,6 +12,7 @@ from __future__ import annotations
 import temporalio.exceptions
 
 __all__ = [
+    "StreamClosedError",
     "StreamCursorError",
     "StreamError",
     "StreamNotFoundError",
@@ -34,6 +35,13 @@ class StreamCursorError(StreamError):
 
 class StreamProducerError(StreamError):
     """The producer attempt or sequence conflicts with what the store holds."""
+
+
+class StreamClosedError(StreamError):
+    """The standalone stream was sealed, so it takes no more records.
+
+    Its retained records stay readable; only appends are refused.
+    """
 
 
 class StreamUnsupportedError(StreamError):

@@ -12,6 +12,7 @@ from typing import Generic, TypeVar
 
 __all__ = [
     "BEGINNING",
+    "END",
     "Cursor",
     "RecordKind",
     "StreamRecord",
@@ -79,6 +80,36 @@ class Cursor:
 
 BEGINNING = Cursor("")
 """Read from the oldest record the stream still retains."""
+
+END = Cursor("$end")
+"""Read only what is appended after the read starts.
+
+Provider-neutral, like :data:`BEGINNING`. It is resolved when the read
+starts, not when it is called, so it cannot position a client before it
+sends something; :meth:`temporalio.streams.StreamHandle.latest` does that.
+"""
+
+
+def check_read_start(after: Cursor, last: int | None) -> None:
+    """Refuse a read start that names two places, or a count that names none.
+
+    ``after=`` resumes a read and ``last=`` starts one, so a call gives one or
+    the other. ``BEGINNING`` is the default for ``after=``, and passing it
+    alongside ``last=`` is the same as passing ``last=`` alone.
+
+    Raises:
+        ValueError: ``last`` is not a positive int, or it was given together
+            with a cursor.
+    """
+    if last is None:
+        return
+    if isinstance(last, bool) or not isinstance(last, int) or last <= 0:
+        raise ValueError(f"last must be a positive int, got {last!r}")
+    if after != BEGINNING:
+        raise ValueError(
+            "pass either after= or last=, not both: after= resumes a read and "
+            "last= starts one"
+        )
 
 
 @dataclass(frozen=True)

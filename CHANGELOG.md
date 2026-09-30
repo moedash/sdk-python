@@ -44,7 +44,13 @@ to include examples, links to docs, or any other relevant information.
   anywhere a client is held. A topic is a typed definition,
   `streams.topic("inputs", Token)`, shared by workflow, activity and client
   code; a plain string names a topic decided at runtime. The record on the wire
-  is `temporal.api.stream.v1.StreamRecord` on every provider.
+  is `temporal.api.stream.v1.StreamRecord` on every provider. A stream is
+  handed to another process as a `streams.StreamRef`, plain data naming the
+  owner and, when it has one, the topic, which `client.get_stream_handle(ref)`
+  and `activity.stream_handle(ref)` open; `client.create_stream(stream_id, ...)`
+  creates a standalone stream with a retention policy, and its handle's
+  `close()` seals it. A provider runs record bodies through the client's data
+  converter, so a payload codec and external storage apply to them.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against, and
   `temporalio.streams.providers.redis.RedisStreams` serves the same interface

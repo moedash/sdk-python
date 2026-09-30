@@ -34,6 +34,7 @@ import temporalio.streams
 from temporalio.converter._payload_converter import (
     _TemporalTransferTypePayloadConverter,
 )
+from temporalio.streams._ref import open_ref
 
 from .types import CallableType
 
@@ -301,13 +302,36 @@ def client() -> Client:
     return client
 
 
+@overload
+def stream_handle(
+    workflow_id: temporalio.streams.StreamRef,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.RefHandle: ...
+
+
+@overload
 def stream_handle(
     workflow_id: str | None = None,
     *,
     run_id: str | None = None,
     scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.StreamHandle: ...
+
+
+def stream_handle(
+    workflow_id: str | temporalio.streams.StreamRef | None = None,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
 ) -> temporalio.streams.StreamHandle:
     """Return a stream handle from the provider the worker was given.
+
+    A :py:class:`temporalio.streams.StreamRef` in place of ``workflow_id``,
+    such as one this activity received as an argument, opens the stream it
+    names, whatever owns it, and takes no other argument; the handle's calls
+    that name no topic then address a topic the ref names.
 
     Which stream a call with no ``workflow_id`` reaches is decided by where
     the activity runs, never by what exists:
@@ -327,14 +351,17 @@ def stream_handle(
     status.
 
     Name a ``workflow_id`` to address another workflow; ``run_id`` then pins
-    the handle to one run and its absence follows the execution chain. See
-    :py:mod:`temporalio.streams`.
+    the handle to one run and its absence follows the execution chain. A
+    ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+    :py:data:`temporalio.streams.END` or at the last ``N`` records with
+    ``last=N``. See :py:mod:`temporalio.streams`.
 
     Like :py:func:`client`, this is only available in ``async def``
     activities.
 
     Args:
-        workflow_id: Another workflow whose stream to address.
+        workflow_id: Another workflow whose stream to address, or a
+            :py:class:`temporalio.streams.StreamRef` naming the stream.
         run_id: The run of ``workflow_id`` to pin to.
         scope: ``"activity"`` for this activity's own streams,
             ``"workflow"`` for its workflow's. Without it the rule above
@@ -352,8 +379,8 @@ def stream_handle(
             provider, or its provider cannot hold a stream an activity owns.
             Register one with ``Client.connect(plugins=[provider])`` or
             ``Worker(plugins=[provider])``.
-        ValueError: ``run_id`` was given without ``workflow_id``, or
-            ``scope="activity"`` with one.
+        ValueError: ``run_id`` was given without ``workflow_id``,
+            ``scope="activity"`` with one, or a ref with either.
     """
     context = _Context.current()
     provider = context.stream_provider
@@ -362,6 +389,12 @@ def stream_handle(
             "no stream provider is configured on this worker; register one with "
             "Client.connect(plugins=[provider]) or Worker(plugins=[provider])"
         )
+    if isinstance(workflow_id, temporalio.streams.StreamRef):
+        if run_id is not None or scope is not None:
+            raise ValueError(
+                "a StreamRef names the stream in full, so it takes no run_id or scope"
+            )
+        return open_ref(provider, client(), workflow_id)
     if workflow_id is not None:
         if scope == "activity":
             raise ValueError(
