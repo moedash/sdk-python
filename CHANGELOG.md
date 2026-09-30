@@ -67,9 +67,11 @@ to include examples, links to docs, or any other relevant information.
   `TemporalStreamsHandler` serves that endpoint by fronting the provider's own
   handles. Its contract is defined in `temporal_streams.nexusrpc.yaml` and the
   bindings are generated from it; a record crosses as the serialized
-  `StreamRecord` proto. Configure the front with `data_converter=` to run a
-  payload codec on the caller side, so records are encoded before they leave
-  the process.
+  `StreamRecord` proto, and both operations address a stream by a `StreamRef`
+  naming its owner (a workflow, an activity or a standalone stream) and topic,
+  which the handler maps onto the store's accessor for that owner. Configure
+  the front with `data_converter=` to run a payload codec on the caller side,
+  so records are encoded before they leave the process.
 
 ### Changed
 
