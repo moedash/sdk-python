@@ -67,6 +67,7 @@ from temporalio.streams import (
     StreamProducerError,
     StreamProvider,
     StreamRef,
+    StreamUnsupportedError,
     Supersession,
     topic,
 )
@@ -111,6 +112,11 @@ class ProviderCase:
     waits_for_standalone_creation: bool = False
     """A read on a standalone stream id that does not exist yet parks until
     the first write instead of raising ``StreamNotFoundError``."""
+    bounds_standalone_bytes: bool = True
+    """A standalone stream's policy can bound the bytes it keeps."""
+    trims_open_stream_by_age: bool = True
+    """A standalone stream drops records older than ``retention`` while it is
+    open, rather than keeping them that long after it closes."""
 
     async def open(
         self,
@@ -238,7 +244,13 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     async def truncate(workflow_id: str, topic: str, keep: int) -> None:
         provider.truncate(workflow_id, topic, keep=keep)
 
-    yield ProviderCase("memory", provider, truncate=truncate)
+    yield ProviderCase(
+        "memory",
+        provider,
+        truncate=truncate,
+        bounds_standalone_bytes=True,
+        trims_open_stream_by_age=True,
+    )
     provider.reset()
 
 
@@ -315,8 +327,10 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             task_queue=worker.task_queue,
             truncate=truncate,
             # Every log is a running workflow's state; a stream with no owner
-            # has no workflow to live in.
+            # has no workflow to live in, so neither of its policies exists.
             hosts_standalone_streams=False,
+            bounds_standalone_bytes=False,
+            trims_open_stream_by_age=False,
         )
         for handle in hosts.values():
             await handle.terminate()
@@ -807,7 +821,9 @@ async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
         external_storage=ExternalStorage(drivers=[driver], payload_size_threshold=256),
     )
     workflow_id = new_workflow_id()
-    stream = await case.open(workflow_id, client=_client_with(client, converter))
+    stream = await case.open(
+        workflow_id, client=_client_with(case.client or client, converter)
+    )
     producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
     small = {"n": 1}
     large = {"blob": "x" * 1024}
@@ -830,7 +846,9 @@ async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     codec = NonceCodec()
     converter = dataclasses.replace(DataConverter.default, payload_codec=codec)
     workflow_id = new_workflow_id()
-    stream = await case.open(workflow_id, client=_client_with(client, converter))
+    stream = await case.open(
+        workflow_id, client=_client_with(case.client or client, converter)
+    )
     first = stream.producer(topic=OUT, producer_id="model", attempt=1)
     landed = await first.append({"id": "r1"})
     assert codec.encoded == 1
@@ -969,13 +987,19 @@ async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCas
     kept = await take(by_count.read(topic=OUT), 2)
     assert [r.value for r in kept] == [{"n": 3}, {"n": 4}]
 
-    by_bytes = await case.create_stream(new_stream_id(), max_bytes=700)
-    producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
-    for n in range(3):
-        await producer.append({"n": n, "blob": "x" * 500})
-    kept = await take(by_bytes.read(topic=OUT), 1)
-    assert kept[0].value is not None and kept[0].value["n"] == 2
+    if case.bounds_standalone_bytes:
+        by_bytes = await case.create_stream(new_stream_id(), max_bytes=700)
+        producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
+        for n in range(3):
+            await producer.append({"n": n, "blob": "x" * 500})
+        kept = await take(by_bytes.read(topic=OUT), 1)
+        assert kept[0].value is not None and kept[0].value["n"] == 2
+    else:
+        with pytest.raises(StreamUnsupportedError):
+            await case.create_stream(new_stream_id(), max_bytes=700)
 
+    if not case.trims_open_stream_by_age:
+        return
     by_age = await case.create_stream(
         new_stream_id(), retention=timedelta(milliseconds=200)
     )
