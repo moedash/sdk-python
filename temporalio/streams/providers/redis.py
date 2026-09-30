@@ -24,7 +24,20 @@ The mapping, in one place:
   closing is sent again after a short wait: a run that continues as new hands
   the log to its successor, the records are already where the successor
   reads them, and only the wake has to follow. The retries stop when the
-  chain's current run takes the wake or the chain proves terminal.
+  chain's current run takes the wake or the chain proves terminal. A run
+  still refusing when the window passes is inside a Workflow Task that tried
+  to close it while the wake sat buffered; the wake is dropped, because the
+  record is in the log and a run that does not close after all rechecks the
+  log at its next park.
+- A reset run inherits the base run's History up to the reset point, and
+  with it the ranges the base run's task completions recorded. It re-reads
+  them from the log and replays them against the inherited markers, so the
+  batches those tasks published are not published again, and live reading
+  continues from the last inherited boundary. The reset-point task itself is
+  run again, and what the base run consumed after the reset point is still
+  in the log, so the reset run reads it again and publishes again: an
+  outside reader sees that task's batch twice, once from each run. Nothing
+  in the log marks the reset.
 - A record rides as the transport's payload: the serialized ``StreamRecord``
   proto as a ``binary/plain`` value, which the worker's codec encodes and
   decodes like any other payload.
@@ -701,6 +714,16 @@ _STILL_CONSUMING: Final = (
     WorkflowExecutionStatus.CONTINUED_AS_NEW,
 )
 
+#: What the server says when a Signal reaches a run whose Workflow Task is
+#: closing it: on a continue-as-new handover for an instant, and after a task
+#: that tried to close while the Signal sat buffered, until the next one settles.
+_CLOSING_REFUSAL: Final = "workflow is closing"
+
+
+def _refused_as_closing(error: WakeNotAcknowledgedError) -> bool:
+    """Whether the server refused a wake because the run is closing."""
+    return _CLOSING_REFUSAL in str(error)
+
 
 def _storage_error(error: Exception, what: str) -> StreamError:
     return StreamError(f"{what}: {error}")
@@ -906,16 +929,33 @@ class RedisProducer(Generic[T]):
         workflow id as every wake is, until the chain's current run takes it.
         A chain that has ended instead is the ordinary ending of a terminal
         record racing the consumer acting on it, not an error.
+
+        A run that still refuses when the window passes is inside a Workflow
+        Task that tried to close it while this wake sat buffered, which the
+        server answers by failing that task and holding the run closed to
+        Signals until the next one settles. The wake is dropped then: if the
+        run closes, nothing is owed; if it does not, its next park rechecks
+        the log and finds the record, the transport's own rule for a record
+        appended before a park. Any other refusal that outlasts the window is
+        raised.
         """
         deadline = time.monotonic() + _WAKE_RETRY_WINDOW.total_seconds()
         while True:
             try:
                 await self._input.wake()
                 return
-            except WakeNotAcknowledgedError:
+            except WakeNotAcknowledgedError as error:
                 if await self._chain_is_terminal():
                     return
                 if time.monotonic() >= deadline:
+                    if _refused_as_closing(error):
+                        logger.info(
+                            "dropping the wake for %r on topic %r: the run is closing a "
+                            "Workflow Task, and its next park rechecks the log",
+                            self._workflow_id,
+                            self._topic,
+                        )
+                        return
                     raise
             except TransportStreamError as error:
                 raise _storage_error(error, "the wake could not be sent") from error

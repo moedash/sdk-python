@@ -137,10 +137,23 @@ async def test_a_wake_refused_by_a_finished_chain_is_the_ordinary_ending(
 
 
 @pytest.mark.usefixtures("quick_wake_retries")
-async def test_a_wake_refused_for_the_whole_window_is_raised():
+async def test_a_wake_refused_as_closing_for_the_whole_window_is_dropped():
+    # The run is inside a Workflow Task that tried to close it while the wake
+    # sat buffered. The record is in the log, so if the run stays open its
+    # next park rechecks the log and finds it; the producer is not failed.
     client = _ChainClient(WorkflowExecutionStatus.RUNNING)
     wakes = _RefusingInput(refusals=99)
-    with pytest.raises(WakeNotAcknowledgedError, match="closing"):
+    await _waking_producer(client, wakes)._wake()
+    assert wakes.calls > 1
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_for_another_reason_for_the_whole_window_is_raised():
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(
+        refusals=99, error=WakeNotAcknowledgedError("signal rate limited", pending=[])
+    )
+    with pytest.raises(WakeNotAcknowledgedError, match="rate limited"):
         await _waking_producer(client, wakes)._wake()
     assert wakes.calls > 1
 

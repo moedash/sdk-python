@@ -818,6 +818,169 @@ async def test_an_identity_claimed_with_other_bytes_refuses_the_first_append(
 
 
 @workflow.defn
+class NudgedLoop:
+    """The contract loop with a signal that does nothing but complete a task."""
+
+    def __init__(self) -> None:
+        self._nudges = 0
+
+    @workflow.signal
+    def nudge(self) -> None:
+        self._nudges += 1
+
+    @workflow.run
+    async def run(self) -> list[int]:
+        decisions = workflow.stream_writer(DECISIONS)
+        seen: list[int] = []
+        async for record in workflow.stream_reader(INPUTS):
+            if record.kind is RecordKind.FINISH:
+                break
+            if record.kind is not RecordKind.DATA:
+                continue
+            assert record.value is not None
+            decisions.publish({"decided": record.value["n"]})
+            seen.append(record.value["n"])
+        decisions.finish()
+        return seen
+
+
+async def _completed_tasks(client: Client, workflow_id: str, run_id: str) -> list[int]:
+    return [
+        event.event_id
+        async for event in client.get_workflow_handle(
+            workflow_id, run_id=run_id
+        ).fetch_history_events()
+        if event.HasField("workflow_task_completed_event_attributes")
+    ]
+
+
+async def _reset_at(client: Client, workflow_id: str, run_id: str, *, task: int) -> str:
+    """Reset ``run_id`` at its ``task``-th completed Workflow Task; the new run id.
+
+    The server keeps History up to that task's completion and runs the task
+    again, so the tasks before it are inherited and the task itself is not.
+    """
+    from temporalio.api.common.v1 import WorkflowExecution
+    from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
+
+    completed = await _completed_tasks(client, workflow_id, run_id)
+    response = await client.workflow_service.reset_workflow_execution(
+        ResetWorkflowExecutionRequest(
+            namespace=client.namespace,
+            workflow_execution=WorkflowExecution(
+                workflow_id=workflow_id, run_id=run_id
+            ),
+            reason="streams: reset mid-stream",
+            workflow_task_finish_event_id=completed[task],
+            request_id=uuid.uuid4().hex,
+        )
+    )
+    return response.run_id
+
+
+async def _consume_two_then_nudge(
+    live_client: Client, provider: RedisStreams, workflow_id: str, task_queue: str
+) -> tuple[str, Any, Any]:
+    """Two records in two tasks, then a task that consumes nothing; the base run."""
+    handle = await live_client.start_workflow(
+        NudgedLoop.run, id=workflow_id, task_queue=task_queue
+    )
+    base_run = handle.result_run_id
+    assert base_run is not None
+    stream = provider.get_stream_handle(live_client, workflow_id)
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    await producer.append({"n": 1})
+    await take(stream.read(topic=DECISIONS), 1, 60)
+    await producer.append({"n": 2})
+    await take(stream.read(topic=DECISIONS), 2, 60)
+    before = len(await _completed_tasks(live_client, workflow_id, base_run))
+    await handle.signal(NudgedLoop.nudge)
+    for _ in range(300):
+        if len(await _completed_tasks(live_client, workflow_id, base_run)) > before:
+            break
+        await asyncio.sleep(0.1)
+    return base_run, stream, producer
+
+
+async def test_a_reset_run_replays_the_inherited_ranges_and_continues(
+    live_client: Client, provider: RedisStreams
+):
+    # Reset at the completion of the task the nudge woke, which consumed and
+    # published nothing: both consuming tasks are inherited. Their ranges are
+    # re-read from the log and replayed against the inherited markers, so
+    # their decisions are not published again, and reading continues from the
+    # last inherited boundary.
+    workflow_id = f"streams-redis-reset-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[NudgedLoop],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        base_run, stream, producer = await _consume_two_then_nudge(
+            live_client, provider, workflow_id, f"tq-{workflow_id}"
+        )
+        reset_run = await _reset_at(live_client, workflow_id, base_run, task=-1)
+        assert reset_run != base_run
+
+        await producer.append({"n": 3})
+        await producer.finish()
+        continued = live_client.get_workflow_handle(workflow_id, run_id=reset_run)
+        assert await asyncio.wait_for(continued.result(), 90) == [1, 2, 3]
+        decisions = [r async for r in stream.read(topic=DECISIONS)]
+        assert [(r.kind, r.value) for r in decisions] == [
+            (RecordKind.DATA, {"decided": 1}),
+            (RecordKind.DATA, {"decided": 2}),
+            (RecordKind.DATA, {"decided": 3}),
+            (RecordKind.FINISH, None),
+        ]
+
+    # Offline, the reset run's History reads the inherited ranges from the log.
+    await Replayer(workflows=[NudgedLoop], plugins=[provider]).replay_workflow(
+        await continued.fetch_history()
+    )
+
+
+async def test_a_reset_point_task_is_run_again_from_the_log(
+    live_client: Client, provider: RedisStreams
+):
+    # Reset at the second consuming task's completion: the first task is
+    # inherited and the second is run again. The record it consumed is still
+    # in the log, so the reset run reads it again and publishes again, and an
+    # outside reader sees that decision from both runs.
+    workflow_id = f"streams-redis-reset-rerun-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[NudgedLoop],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        base_run, stream, producer = await _consume_two_then_nudge(
+            live_client, provider, workflow_id, f"tq-{workflow_id}"
+        )
+        reset_run = await _reset_at(live_client, workflow_id, base_run, task=1)
+
+        await producer.append({"n": 3})
+        await producer.finish()
+        continued = live_client.get_workflow_handle(workflow_id, run_id=reset_run)
+        assert await asyncio.wait_for(continued.result(), 90) == [1, 2, 3]
+        decisions = [r.value async for r in stream.read(topic=DECISIONS)]
+        assert decisions == [
+            {"decided": 1},
+            {"decided": 2},
+            {"decided": 2},
+            {"decided": 3},
+            None,
+        ]
+
+    await Replayer(workflows=[NudgedLoop], plugins=[provider]).replay_workflow(
+        await continued.fetch_history()
+    )
+
+
+@workflow.defn
 class EchoOnOneTopic:
     """Reads ``inputs`` and answers each value on the same topic.
 
