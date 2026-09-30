@@ -54,6 +54,12 @@ talks to two stores. This module keeps the shared types, the errors and the
 protocols a provider implements; nothing here that workflow code imports does
 I/O.
 
+A handle is bound to its client and provider, so a stream is handed to another
+process as a :class:`StreamRef`: the owner and the topic as plain data, with
+no cursor and no provider name. :meth:`StreamHandle.ref` makes one, the
+default data converter carries it as JSON, and the receiver opens it with
+``client.get_stream_handle(ref)`` or ``activity.stream_handle(ref)`` on
+whatever provider its client has.
 
 A stream can also stand alone, with an id of its own and no owner.
 ``client.create_stream(stream_id, retention=...)`` creates it with a retention
@@ -115,6 +121,7 @@ from temporalio.streams._record import (
     StreamRecord,
     Supersession,
 )
+from temporalio.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.streams._topic import (
     DEFAULT_TOPIC,
     StreamTopic,
@@ -135,10 +142,12 @@ __all__ = [
     "StreamError",
     "StreamHandle",
     "StreamNotFoundError",
+    "StreamOwnerKind",
     "StreamProducer",
     "StreamProducerError",
     "StreamProvider",
     "StreamRecord",
+    "StreamRef",
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",

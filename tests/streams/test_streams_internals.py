@@ -32,6 +32,7 @@ from temporalio.streams import (
     Cursor,
     RecordKind,
     StreamCursorError,
+    StreamRef,
     Supersession,
     _ids,
     _wire,
@@ -246,3 +247,32 @@ async def test_content_fingerprint_is_taken_before_the_codec():
         await decode_body(converter, record)
     assert [r.body for r in first] == [r.body for r in batch({"n": 1}, {"n": 2})]
     assert all(CONTENT_HASH_KEY in r.metadata for r in first)
+
+
+async def test_a_stream_ref_names_one_owner_and_travels_as_json():
+    workflow = StreamRef.for_workflow("wf", run_id="r", topic="out")
+    activity = StreamRef.for_activity("act", workflow_id="wf", topic="progress")
+    standalone = StreamRef.for_standalone("shared")
+    assert workflow == StreamRef("workflow", "out", workflow_id="wf", run_id="r")
+    assert activity.kind == "activity" and activity.activity_id == "act"
+    assert standalone == StreamRef("standalone", "output", stream_id="shared")
+    assert standalone.with_topic("x").topic == "x"
+
+    for bad in (
+        dict(kind="workflow"),
+        dict(kind="workflow", workflow_id="wf", stream_id="s"),
+        dict(kind="activity", workflow_id="wf"),
+        dict(kind="standalone", stream_id="s", workflow_id="wf"),
+        dict(kind="standalone"),
+        dict(kind="nexus", stream_id="s"),
+        dict(kind="workflow", workflow_id="wf", topic=""),
+    ):
+        with pytest.raises(ValueError):
+            StreamRef(**bad)  # type: ignore[arg-type]
+
+    converter = DataConverter.default
+    for ref in (workflow, activity, standalone):
+        [carried] = await converter.decode(await converter.encode([ref]), [StreamRef])
+        assert carried == ref
+    payload = (await converter.encode([standalone]))[0]
+    assert payload.metadata["encoding"] == b"json/plain"

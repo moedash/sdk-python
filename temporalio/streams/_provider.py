@@ -29,6 +29,7 @@ from temporalio.streams._topic import StreamTopic
 
 if TYPE_CHECKING:
     from temporalio.client import Client
+    from temporalio.streams._ref import StreamRef
 
 __all__ = [
     "ReadSource",
@@ -95,15 +96,23 @@ class StreamProducer(Protocol[T_contra]):
 
 
 class StreamHandle(Protocol):
-    """One workflow's stream, addressed by topic, from outside workflow code.
+    """One owner's stream, addressed by topic, from outside workflow code.
 
-    A handle follows the workflow's execution chain unless it was opened with
-    a ``run_id``, in which case it is pinned to that run. A topic is a
-    :class:`temporalio.streams.StreamTopic` definition, which carries the
-    record type, or a plain string with ``result_type=`` for a name decided
-    at runtime. A transport failure surfaces as
-    :class:`temporalio.service.RPCError`, never as the transport's own
-    exception type.
+    The owner is a workflow, an activity, or a standalone stream that has an
+    id of its own and no owner. A handle on a workflow follows its execution
+    chain unless it was opened with a ``run_id``, in which case it is pinned
+    to that run. A topic is a :class:`temporalio.streams.StreamTopic`
+    definition, which carries the record type, or a plain string with
+    ``result_type=`` for a name decided at runtime. A transport failure
+    surfaces as :class:`temporalio.service.RPCError`, never as the
+    transport's own exception type.
+
+    A handle is bound to its client and provider. To hand a stream to another
+    process, :meth:`ref` names it as a :class:`temporalio.streams.StreamRef`,
+    which is plain data; the receiver opens it with
+    :meth:`temporalio.client.Client.get_stream_handle` or
+    :func:`temporalio.activity.stream_handle`, and calls that name no topic
+    on that handle address the ref's topic.
     """
 
     @overload
@@ -217,6 +226,17 @@ class StreamHandle(Protocol):
         """
         ...
 
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A :class:`temporalio.streams.StreamRef` to ``topic`` of this owner.
+
+        Without ``topic`` it names :data:`temporalio.streams.DEFAULT_TOPIC`,
+        or the topic this handle was opened from a ref with. The ref carries
+        the owner exactly as this handle addresses it, a ``run_id`` included
+        when the handle is pinned, and no cursor or provider name, so it can
+        travel as a workflow argument, an activity result or a Nexus
+        operation input or result and be opened wherever a client is.
+        """
+        ...
 
     async def close(self) -> None:
         """Seal the standalone stream this handle is on.
