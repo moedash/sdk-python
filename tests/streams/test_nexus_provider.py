@@ -913,11 +913,12 @@ async def test_an_owner_the_store_cannot_host_is_refused_under_its_own_class(
     client: Client, monkeypatch: pytest.MonkeyPatch
 ):
     # Whether an owner is supported is the store's answer, not the front's:
-    # the Workflow Streams store has no activity accessor, and its refusal
+    # the Workflow Streams store hosts only the streams of a workflow's
+    # activities, so a standalone activity's are refused, and its refusal
     # reaches the caller as the class it raised.
     handler = TemporalStreamsHandler(WorkflowStreamsProvider(), client)
     monkeypatch.setattr(nexus, "_post", _in_process_endpoint(handler, [], []))
-    own = _front(None).get_activity_stream_handle(None, "act", workflow_id="wf")
+    own = _front(None).get_activity_stream_handle(None, "act")
     with pytest.raises(StreamUnsupportedError, match="activity"):
         await own.producer(topic=INPUTS, producer_id="model", attempt=1).append(
             {"n": 1}
