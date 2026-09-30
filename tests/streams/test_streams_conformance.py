@@ -83,6 +83,11 @@ class ProviderCase:
     truncate: Callable[[str, str, int], Awaitable[None]] | None = None
     """Drops all but the newest records of a workflow's topic, standing in
     for retention, or ``None`` when the provider offers no way to."""
+    bounds_standalone_bytes: bool = True
+    """A standalone stream's policy can bound the bytes it keeps."""
+    trims_open_stream_by_age: bool = True
+    """A standalone stream drops records older than ``retention`` while it is
+    open, rather than keeping them that long after it closes."""
 
     async def open(
         self,
@@ -168,7 +173,13 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     async def truncate(workflow_id: str, topic: str, keep: int) -> None:
         provider.truncate(workflow_id, topic, keep=keep)
 
-    yield ProviderCase("memory", provider, truncate=truncate)
+    yield ProviderCase(
+        "memory",
+        provider,
+        truncate=truncate,
+        bounds_standalone_bytes=True,
+        trims_open_stream_by_age=True,
+    )
     provider.reset()
 
 
