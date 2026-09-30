@@ -67,6 +67,7 @@ from temporalio.streams._record import (
     StreamRecord,
     check_read_start,
 )
+from temporalio.streams._ref import StreamRef
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -514,6 +515,20 @@ class MemoryStreamHandle:
         store = self._store(name)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return MemoryProducer(store, self._converter, name, producer_id, attempt)
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A ref to ``topic`` of this owner's stream, pinned as this handle is."""
+        if self._activity_id is not None:
+            return StreamRef.for_activity(
+                self._activity_id,
+                workflow_id=self._workflow_id,
+                run_id=self._run_id,
+                topic=topic,
+            )
+        assert self._workflow_id is not None
+        return StreamRef.for_workflow(
+            self._workflow_id, run_id=self._run_id, topic=topic
+        )
 
     async def close(self) -> None:
         """Refuse: a workflow's stream ends with the workflow, not by a caller."""

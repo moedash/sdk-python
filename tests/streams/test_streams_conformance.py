@@ -11,10 +11,15 @@ which capabilities it lacks, so the cases marked ``reports_positions`` are
 skipped with a reason on a provider whose ``append()`` learns positions at
 read time.
 
-What this file pins down is the contract: the record on the wire, producer
-identity, retry deduplication, positions, supersession, topic addressing,
-cursor resumption, cursor ownership, and store keys that cannot collide. The
-workflow-side handles and the two rules about Workflow Tasks live in
+What this file pins down is what a provider owes: producer identity, retry
+deduplication, positions, supersession, topic addressing, cursor resumption,
+cursor ownership, releasing a read the caller stopped early, naming a stream
+as a ``StreamRef``, and running bodies through the client's data converter so
+external storage applies and a retry through a nondeterministic codec still
+matches its original. Every case here goes through the public surface, so a
+new provider answers this file and nothing else. The shared pieces no provider
+implements are unit-tested in ``test_streams_internals``; the workflow-side
+handles and the two rules about Workflow Tasks live in
 ``test_streams_workflow``.
 """
 
@@ -49,7 +54,9 @@ from temporalio.streams import (
     RecordKind,
     StreamCursorError,
     StreamHandle,
+    StreamProducerError,
     StreamProvider,
+    StreamRef,
     Supersession,
     _ids,
     _wire,
@@ -609,6 +616,29 @@ async def test_a_read_start_names_one_place(case: ProviderCase):
         stream.read(topic=OUT, after=END, last=1)
 
 
+async def test_a_ref_names_the_stream_and_round_trips_as_data(case: ProviderCase):
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id)
+    ref = stream.ref(topic=OUT)
+    assert ref == StreamRef.for_workflow(workflow_id, topic="out")
+    assert (ref.kind, ref.run_id, ref.activity_id, ref.stream_id) == (
+        "workflow",
+        None,
+        None,
+        None,
+    )
+    # Without a topic the ref names the owner alone; the reader names one.
+    assert stream.ref().topic is None
+    assert stream.ref().with_topic(A) == stream.ref(topic=A)
+    # A pinned handle hands out a pinned ref.
+    pinned = await case.open(workflow_id, run_id="run-1")
+    assert pinned.ref(topic=OUT).run_id == "run-1"
+
+    # Plain data through the default converter, so it can be a workflow
+    # argument, an activity result or a Nexus operation input or result.
+    converter = DataConverter.default
+    [carried] = await converter.decode(await converter.encode([ref]), [StreamRef])
+    assert carried == ref
 
 
 async def test_an_owned_stream_cannot_be_closed_by_a_handle(case: ProviderCase):
