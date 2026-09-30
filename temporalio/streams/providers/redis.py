@@ -59,12 +59,16 @@ The mapping, in one place:
   batch limits are lifted for this provider, because a synchronous publish
   cannot wait for the worker to stage a full batch; a batch it cannot stage
   fails the task.
-- Retention is trimming, with no consumer floor. When ``retention`` or
-  ``max_len`` is set, every append the provider makes trims the key it wrote,
-  an activity's stream included, whatever any reader has reached. A replay
-  that reaches a recorded range the trim removed fails its Workflow Task, an
-  outside cursor below the trim is refused, and a fully trimmed topic reads
-  as empty.
+- Retention is trimming, with no consumer floor. By default a record older
+  than :data:`DEFAULT_RETENTION`, seven days, is trimmed by the next append
+  the provider makes to its key, an activity's stream included, whatever any
+  reader has reached; ``retention=None`` turns the age trim off, and
+  ``max_len`` adds a count cap that is off by default. A replay that reaches
+  a recorded range the trim removed fails its Workflow Task, an outside
+  cursor below the trim is refused, and a fully trimmed topic reads as
+  empty. A run that has to replay cold after seven days of consuming fails,
+  so a long-lived consumer continues as new inside the window, or is
+  configured with a longer one.
 """
 
 from __future__ import annotations
@@ -160,7 +164,7 @@ from temporalio.streams._wire import (
 from temporalio.streams.providers import ProviderPlugin
 from temporalio.worker import ReplayerConfig, WorkerConfig
 
-__all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
+__all__ = ["DEFAULT_RETENTION", "RedisProducer", "RedisStreamHandle", "RedisStreams"]
 
 T = TypeVar("T")
 
@@ -168,6 +172,15 @@ _PROVIDER = "redis"
 _INPUT_PREFIX = "in:"
 _REDIS_ID = re.compile(r"\d+-\d+")
 _READ_BATCH = 256
+
+#: How long a record is kept when the constructor is not told otherwise.
+#:
+#: An age rather than a count, because the count a topic can afford depends on
+#: its record size and the age does not, and because a count cap refuses a task
+#: whose batch does not fit under it. Seven days is long enough to replay a
+#: consumer that was evicted over a weekend and short enough that a chain
+#: nobody reads any more does not keep its records for good.
+DEFAULT_RETENTION: Final = timedelta(days=7)
 
 #: How long a wake the server refused is sent again before it is given up, and
 #: the pause between attempts. The pause is there because in the instant between
@@ -1282,7 +1295,7 @@ class RedisStreams(ProviderPlugin):
         idle_timeout: timedelta = timedelta(seconds=1),
         backend: Any | None = None,
         poll_interval: timedelta = timedelta(milliseconds=500),
-        retention: timedelta | None = None,
+        retention: timedelta | None = DEFAULT_RETENTION,
         max_len: int | None = None,
     ) -> None:
         """Create the provider.
@@ -1294,13 +1307,17 @@ class RedisStreams(ProviderPlugin):
             idle_timeout: How long a workflow reader with nothing to read
                 holds its Workflow Task open before the worker parks it.
             backend: A transport backend the caller constructed and owns. It
-                is trimmed by its owner, so it takes neither ``retention`` nor
-                ``max_len``.
+                is trimmed by its owner, so it takes no ``max_len`` and no
+                ``retention`` other than the default, which does not apply
+                to it.
             poll_interval: How long an outside reader that is caught up waits
                 for a record before asking whether the workflow closed.
             retention: Trim records older than this from a topic's input and
-                output keys on every append the provider makes to them. This
-                is retention without a consumer floor: nothing holds a record
+                output keys on every append the provider makes to them.
+                :data:`DEFAULT_RETENTION`, seven days, unless the caller says
+                otherwise; ``None`` keeps every record until ``max_len``
+                trims it, or for good when that is unset too. This is
+                retention without a consumer floor: nothing holds a record
                 for a reader that has not reached it. A workflow whose replay
                 reaches a recorded range past the window fails its Workflow
                 Task with the transport's ``StreamIntegrityError`` until the
@@ -1309,15 +1326,18 @@ class RedisStreams(ProviderPlugin):
                 behind the window misses records. The floor the server-side
                 provider keeps would need a consumer registry in Redis.
             max_len: Keep at most this many entries per key, trimmed on the
-                same appends and with the same consequences. It must exceed
-                the largest batch a task publishes, or a stage is trimmed
-                before its commit.
+                same appends and with the same consequences. Off unless set.
+                It must exceed the largest batch a task publishes, or a stage
+                is trimmed before its commit; a batch at or above it is
+                refused where it is staged.
         """
         if retention is not None and retention <= timedelta(0):
             raise ValueError("retention must be positive")
         if max_len is not None and max_len < 1:
             raise ValueError("max_len must be positive")
-        if backend is not None and (retention is not None or max_len is not None):
+        if backend is not None and (
+            retention not in (None, DEFAULT_RETENTION) or max_len is not None
+        ):
             raise ValueError(
                 "retention and max_len trim the backend this provider opens; a "
                 "backend handed in is trimmed by its owner"

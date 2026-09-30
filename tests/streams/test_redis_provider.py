@@ -24,6 +24,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
 from temporalio.streams.providers import redis as redis_provider
 from temporalio.streams.providers.redis import (
+    DEFAULT_RETENTION,
     RedisProducer,
     RedisStreams,
     _ActivityOwner,
@@ -251,7 +252,30 @@ def test_retention_options_are_checked_at_construction():
         RedisStreams(retention=timedelta(0))
     with pytest.raises(ValueError, match="max_len"):
         RedisStreams(max_len=0)
-    # A backend the caller owns is the caller's to trim.
+    # A backend the caller owns is the caller's to trim; the default window
+    # is not a request to trim it.
     with pytest.raises(ValueError, match="trimmed by its owner"):
         RedisStreams(backend=object(), max_len=10)
+    with pytest.raises(ValueError, match="trimmed by its owner"):
+        RedisStreams(backend=object(), retention=timedelta(hours=1))
+    RedisStreams(backend=object())
     RedisStreams(retention=timedelta(hours=1), max_len=10)
+
+
+async def test_the_default_window_is_an_age_and_can_be_turned_off():
+    # Nothing is trimmed on a topic nobody appends to, so the default has to
+    # be a window that every append applies; a count cap would refuse a task
+    # whose batch does not fit under it, so that one stays off.
+    provider = RedisStreams()
+    try:
+        backend = provider._require_backend()
+        assert backend._retention == DEFAULT_RETENTION == timedelta(days=7)
+        assert backend._max_len is None
+        assert backend.describe_window() == f"retention={DEFAULT_RETENTION}"
+    finally:
+        await provider.close()
+    unbounded = RedisStreams(retention=None)
+    try:
+        assert unbounded._require_backend().describe_window() == "no retention"
+    finally:
+        await unbounded.close()

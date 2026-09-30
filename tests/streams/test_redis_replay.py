@@ -324,7 +324,8 @@ async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Clie
         # external storage cause, and a message that names the window.
         message = str(failure.value)
         assert "StreamIntegrityError" in message and "ExternalStorageFailure" in message
-        assert "past the redis provider's retention (max_len=6)" in message
+        assert "past the redis provider's retention (" in message
+        assert "max_len=6)" in message
 
         # An outside cursor below the trim is refused, not resumed from the
         # first retained record.
