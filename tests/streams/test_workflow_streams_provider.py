@@ -20,7 +20,8 @@ from typing import Any
 import pytest
 
 from temporalio import activity, workflow
-from temporalio.api.common.v1 import Payload
+from temporalio.api.common.v1 import Payload, WorkflowExecution
+from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
@@ -552,6 +553,119 @@ async def test_a_poll_that_arrives_before_the_first_task_is_retried(
         await asyncio.wait_for(reader, 30)
         await handle.result()
     assert seen == [(RecordKind.DATA, {"run": 0, "n": 1}), (RecordKind.FINISH, None)]
+
+
+async def _reset_at_last_completed_task(
+    client: Client, workflow_id: str, run_id: str
+) -> str:
+    """Reset ``run_id`` at its last completed task; the id of the run reset into."""
+    completion_id = 0
+    events = client.get_workflow_handle(
+        workflow_id, run_id=run_id
+    ).fetch_history_events()
+    async for event in events:
+        if event.HasField("workflow_task_completed_event_attributes"):
+            completion_id = event.event_id
+    assert completion_id
+    answer = await client.workflow_service.reset_workflow_execution(
+        ResetWorkflowExecutionRequest(
+            namespace=client.namespace,
+            workflow_execution=WorkflowExecution(
+                workflow_id=workflow_id, run_id=run_id
+            ),
+            reason="re-run from the last completed task",
+            workflow_task_finish_event_id=completion_id,
+            request_id=uuid.uuid4().hex,
+        )
+    )
+    return answer.run_id
+
+
+async def _collect_records(records: Any, into: list[Any]) -> None:
+    async for record in records:
+        into.append(record)
+
+
+def _run_and_offset(record: Any) -> tuple[str, int]:
+    _, run_id, offset = record.cursor.token.split(":")
+    return run_id, int(offset)
+
+
+async def test_a_live_read_without_a_run_id_follows_a_reset(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, Rolling, plugins=[provider]) as worker:
+        handle = await client.start_workflow(
+            Rolling.run, 0, id=workflow_id, task_queue=worker.task_queue
+        )
+        base_run = handle.result_run_id
+        assert base_run is not None
+        seen: list[Any] = []
+        reader = asyncio.create_task(
+            _collect_records(
+                provider.get_stream_handle(client, workflow_id).read(
+                    topic=DECISIONS, result_type=dict
+                ),
+                seen,
+            )
+        )
+        await handle.signal(Rolling.emit, 1)
+        await handle.signal(Rolling.emit, 2)
+        await assert_eventually_len(seen, 2, reader)
+
+        # The base run is closed by the reset with nothing in its own History
+        # to say so; the reader learns where it went from describe. The reset
+        # run replays the base run's History up to the last completed task,
+        # so its log holds the same two records at the same offsets, and the
+        # read carries on from the position it had reached.
+        reset_run = await _reset_at_last_completed_task(client, workflow_id, base_run)
+        assert reset_run != base_run
+        current = client.get_workflow_handle(workflow_id)
+        assert (await current.describe()).run_id == reset_run
+        await current.signal(Rolling.emit, 3)
+        await current.signal(Rolling.emit, 4)
+        await assert_eventually_len(seen, 4, reader)
+        await current.signal(Rolling.release)
+        await asyncio.wait_for(reader, 30)
+        await current.result()
+
+        assert [(r.kind, r.value) for r in seen] == [
+            (RecordKind.DATA, {"run": 0, "n": 1}),
+            (RecordKind.DATA, {"run": 0, "n": 2}),
+            (RecordKind.DATA, {"run": 0, "n": 3}),
+            (RecordKind.DATA, {"run": 0, "n": 4}),
+            (RecordKind.FINISH, None),
+        ]
+        # Two records from the base run, then the reset run's, whose offsets
+        # continue where the base run's log stood at the reset point.
+        assert [_run_and_offset(r) for r in seen] == [
+            (base_run, 0),
+            (base_run, 1),
+            (reset_run, 2),
+            (reset_run, 3),
+            (reset_run, 4),
+        ]
+        # A handle pinned to the base run ends with it. Both closed runs are
+        # served by the tail Query, which needs the worker still up.
+        pinned = provider.get_stream_handle(client, workflow_id, run_id=base_run)
+        pinned_records: list[Any] = []
+        await asyncio.wait_for(
+            _collect_records(pinned.read(topic=DECISIONS), pinned_records), 30
+        )
+        assert [_run_and_offset(r) for r in pinned_records] == [
+            (base_run, 0),
+            (base_run, 1),
+        ]
+        # BEGINNING on the chain starts at the base run, whose start event the
+        # reset run copied, and a resume from a base run cursor crosses over.
+        chain = provider.get_stream_handle(client, workflow_id)
+        resumed = await take(chain.read(topic=DECISIONS, after=seen[1].cursor), 3)
+        assert [_run_and_offset(r) for r in resumed] == [
+            (reset_run, 2),
+            (reset_run, 3),
+            (reset_run, 4),
+        ]
 
 
 async def test_a_running_workflow_without_the_provider_fails_the_read_clearly(

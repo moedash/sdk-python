@@ -35,7 +35,11 @@ The mapping, in one place:
   cursor names the run as well as the offset. A handle without a run id
   reads run after run: each log through the poll Update while its run is
   open and through the tail Query once it has closed, then the successor's
-  from its first record.
+  from its first record. A run that was reset is followed too, into the run
+  describe names, at the position the read had reached: the reset run
+  rebuilt the base run's log up to the reset point by replay, so the items
+  before it sit at the same offsets. The reset itself is not reported to
+  the reader as a record; that is a wire change for a later round.
 - The workflow-side stream object belongs to the workflow instance, found
   through the handler the shipped class registers on it. An evicted and
   rebuilt workflow gets its own, so a task that failed leaks nothing into
@@ -594,6 +598,11 @@ class WorkflowStreamsHandle:
         holds: the poll Update reads offset zero as the log's base. ``END``
         and ``last=`` start on the current run, or the pinned one, at an
         offset its workflow answers by Query when the read starts.
+
+        The chain is followed across continue-as-new, into the successor's
+        log from its first record, and across a reset, into the run describe
+        names at the position the read had reached. A handle pinned to a run
+        ends with that run either way.
         """
         check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
@@ -662,15 +671,44 @@ class WorkflowStreamsHandle:
                         yield record
                 if not more:
                     break
-            if (
-                self._run_id is not None
-                or status != WorkflowExecutionStatus.CONTINUED_AS_NEW
-            ):
+            if self._run_id is not None:
                 return
+            following = await self._following(handle, status, tail_offset)
+            if following is None:
+                return
+            run_id, offset = following
+
+    async def _following(
+        self,
+        handle: WorkflowHandle[Any, Any],
+        status: WorkflowExecutionStatus,
+        position: int,
+    ) -> tuple[str, int] | None:
+        """The run that carries on after ``handle``'s, and where to read it from.
+
+        A continue-as-new names its successor in the close event, and the
+        successor's log starts over at zero. A reset does not: the base run is
+        closed with no word of it in its own History, and only describe names
+        the run reset from it. That run rebuilt its log by replaying the base
+        run's History up to the reset point, so the items before that point
+        sit at the same offsets in both logs, and the read carries on at the
+        position it reached. Past the reset point the two logs differ, and a
+        reader already there is not told: reporting the reset to consumers as
+        a record is a wire change for a later round.
+        """
+        if status == WorkflowExecutionStatus.CONTINUED_AS_NEW:
             successor = await self._successor(handle)
-            if successor is None:
-                return
-            run_id, offset = successor, 0
+            return None if successor is None else (successor, 0)
+        reset_run = await self._reset_run(handle)
+        return None if reset_run is None else (reset_run, position)
+
+    async def _reset_run(self, handle: WorkflowHandle[Any, Any]) -> str | None:
+        """The run ``handle``'s run was reset into, which only describe reports."""
+        description = await self._describe(handle)
+        if description is None:
+            return None
+        extended = description.raw_description.workflow_extended_info
+        return extended.reset_run_id or None
 
     async def _poll(
         self, handle: WorkflowHandle[Any, Any], topic: str, offset: int
@@ -804,7 +842,13 @@ class WorkflowStreamsHandle:
         try:
             async for event in self._handle(run_id).fetch_history_events(page_size=1):
                 attributes = event.workflow_execution_started_event_attributes
-                return attributes.continued_execution_run_id or None
+                if attributes.continued_execution_run_id:
+                    return attributes.continued_execution_run_id
+                # A reset run's start event is the base run's, copied, and the
+                # original run id it carries is kept across resets, so it names
+                # the run the chain of resets began from.
+                original = attributes.original_execution_run_id
+                return original if original and original != run_id else None
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
