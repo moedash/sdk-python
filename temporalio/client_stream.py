@@ -18,14 +18,19 @@ change before this is a real feature:
 - **This client is for use outside a Workflow.** Workflow code publishes and
   consumes with ``workflow.append_stream_records`` and
   ``workflow.read_stream_records`` instead.
-- **No TLS or API-key support**, for the same reason: the channel is built
-  here rather than by the machinery that normally handles that.
+- **The channel mirrors the client's connection rather than sharing it.**
+  :class:`Connection` reads a :class:`temporalio.service.ConnectConfig` and
+  opens a ``grpcio`` channel with the same target, TLS material, API key,
+  headers and keep-alive, so a client connected to Temporal Cloud reaches the
+  stream service the same way. What it cannot mirror is noted on that class.
 
 A failed call raises :class:`temporalio.streams.StreamNotFoundError` when the
 server answers ``NOT_FOUND``,
 :class:`temporalio.streams.StreamProducerError` when it refuses a producer
-sequence it already holds, and :class:`temporalio.service.RPCError`
-otherwise, never the transport's own exception type.
+sequence it already holds, :class:`temporalio.streams.StreamCursorError` when
+it refuses a read below the retention floor, and
+:class:`temporalio.service.RPCError` otherwise, never the transport's own
+exception type. :func:`translate_error` is the one place that decides.
 
 A failure sdk-core would retry is retried here, on the same codes and with the
 same default :class:`temporalio.service.RetryConfig`, because this channel is
@@ -47,7 +52,7 @@ import time
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import google.protobuf.duration_pb2
 import grpc
@@ -60,11 +65,26 @@ from temporalio.api.enums.v1 import ResourceExhaustedCause
 from temporalio.api.errordetails.v1 import ResourceExhaustedFailure
 from temporalio.api.stream.v1 import StreamRecord, StreamStartPosition
 from temporalio.api.streamservice.v1 import service_pb2_grpc
-from temporalio.service import RetryConfig, RPCError, RPCStatusCode
-from temporalio.streams import StreamNotFoundError, StreamProducerError
+from temporalio.service import (
+    ConnectConfig,
+    RetryConfig,
+    RPCError,
+    RPCStatusCode,
+    TLSConfig,
+    __version__,
+)
+from temporalio.streams import (
+    StreamCursorError,
+    StreamNotFoundError,
+    StreamProducerError,
+)
+
+if TYPE_CHECKING:
+    from temporalio.client import Client
 
 __all__ = [
     "Appended",
+    "Connection",
     "Page",
     "StreamClient",
     "StreamEntry",
@@ -72,17 +92,29 @@ __all__ = [
     "WorkflowStreamHandle",
     "close_shared_clients",
     "shared_client",
+    "shared_key",
+    "translate_error",
 ]
 
 _T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
-# The server refuses a producer sequence it already holds with a message and
-# no typed detail, so the phrase is the only thing to match on. Both refusals
-# it sends carry it: a repeat with different content, and one behind the
-# sequence it accepted last.
-_PRODUCER_CONFLICT = "producer sequence"
+# A refusal the caller has to act on is a FAILED_PRECONDITION whose message
+# begins with a reason token and ": ", since the service carries no typed
+# detail for these yet. A repeat with different content and one behind the
+# sequence the server accepted last are both a producer error; a read below
+# the retention floor is a cursor error.
+_REASON_SEPARATOR = ": "
+_REASONS: dict[str, type[Exception]] = {
+    "STREAM_PRODUCER_CONFLICT": StreamProducerError,
+    "STREAM_PRODUCER_STALE_SEQUENCE": StreamProducerError,
+    "STREAM_CURSOR_BELOW_FLOOR": StreamCursorError,
+}
+# The phrases a server built before the tokens existed sends for the same
+# refusals, so a reader of either server gets the typed error.
+_PRODUCER_PHRASE = "producer sequence"
+_CURSOR_PHRASE = "below the stream's floor"
 
 # The codes sdk-core retries.
 _RETRYABLE = frozenset(
@@ -204,6 +236,145 @@ def _retry_after(
     return delay
 
 
+class _Headers(grpc.aio.UnaryUnaryClientInterceptor):
+    """Attaches the connection's headers to every call, as Core's interceptor does."""
+
+    def __init__(self, headers: Sequence[tuple[str, str | bytes]]) -> None:
+        self._headers = headers
+
+    async def intercept_unary_unary(  # type: ignore[override]
+        self,
+        continuation: Callable[[grpc.aio.ClientCallDetails, Any], Awaitable[Any]],
+        client_call_details: grpc.aio.ClientCallDetails,
+        request: Any,
+    ) -> Any:
+        # The aio metadata iterates as (key, value) pairs at runtime, whatever
+        # shape the stubs give its items.
+        given: Any = client_call_details.metadata
+        metadata = grpc.aio.Metadata(*(given or ()))
+        for key, value in self._headers:
+            # A header the caller set on the call wins over the connection's.
+            if key not in metadata:
+                metadata.add(key, value)
+        details = client_call_details._replace(metadata=metadata)  # type: ignore[attr-defined]
+        return await continuation(details, request)
+
+
+@dataclass(frozen=True)
+class Connection:
+    """How a stream channel reaches a frontend, taken from a client's connection.
+
+    :meth:`from_config` reads what ``Client.connect`` was given and this opens
+    a ``grpc.aio`` channel that behaves the same way: the target, TLS with the
+    same root CA, client certificate and key, the API key as a bearer
+    ``authorization`` header, the client's default headers and keep-alive.
+    Two clients with the same settings yield equal connections, which is what
+    lets them share one channel per namespace.
+
+    Two things ``grpcio`` cannot express the way sdk-core does. It has one
+    override for both the TLS server name it sends and the name it verifies,
+    so ``verification_server_name`` takes that override when set and
+    ``domain`` otherwise, while ``domain`` alone still sets the HTTP/2
+    authority. And it reads the settings once, when the channel is opened, so
+    an API key or header updated on the client afterwards reaches the stream
+    channel only through a new connection.
+    """
+
+    target: str
+    secure: bool
+    server_root_ca_cert: bytes | None = None
+    client_cert: bytes | None = None
+    client_private_key: bytes | None = None
+    server_name: str | None = None
+    authority: str | None = None
+    headers: tuple[tuple[str, str | bytes], ...] = ()
+    keep_alive: tuple[int, int] | None = None
+    http_proxy: str | None = None
+
+    @staticmethod
+    def from_config(config: ConnectConfig) -> Connection:
+        """Read a :class:`temporalio.service.ConnectConfig` the way the bridge does."""
+        target = config.target_host
+        tls: TLSConfig | None = None
+        if "://" in target:
+            # The bridge still accepts a URL with a scheme; the scheme decides.
+            scheme, _, target = target.partition("://")
+            secure = scheme == "https"
+            if isinstance(config.tls, TLSConfig):
+                tls = config.tls
+        elif isinstance(config.tls, TLSConfig):
+            secure, tls = True, config.tls
+        elif config.tls:
+            secure = True
+        else:
+            # TLS is on by default when an API key is given and tls was left unset.
+            secure = config.tls is None and config.api_key is not None
+
+        headers: list[tuple[str, str | bytes]] = [
+            ("client-name", "temporal-python"),
+            ("client-version", __version__),
+        ]
+        given = {key.lower() for key in config.rpc_metadata}
+        if config.api_key is not None and "authorization" not in given:
+            headers.append(("authorization", f"Bearer {config.api_key}"))
+        headers.extend(config.rpc_metadata.items())
+
+        proxy = config.http_connect_proxy_config
+        http_proxy: str | None = None
+        if proxy is not None:
+            auth = (
+                f"{proxy.basic_auth[0]}:{proxy.basic_auth[1]}@"
+                if proxy.basic_auth
+                else ""
+            )
+            http_proxy = f"http://{auth}{proxy.target_host}"
+
+        keep_alive = config.keep_alive_config
+        return Connection(
+            target=target,
+            secure=secure,
+            server_root_ca_cert=tls.server_root_ca_cert if tls else None,
+            client_cert=tls.client_cert if tls else None,
+            client_private_key=tls.client_private_key if tls else None,
+            server_name=((tls.verification_server_name or tls.domain) if tls else None),
+            authority=tls.domain if tls else None,
+            headers=tuple(headers),
+            keep_alive=(
+                (keep_alive.interval_millis, keep_alive.timeout_millis)
+                if keep_alive
+                else None
+            ),
+            http_proxy=http_proxy,
+        )
+
+    def channel(self) -> grpc.aio.Channel:
+        """Open a channel with these settings. Nothing is sent until the first call."""
+        options: list[tuple[str, Any]] = []
+        if self.keep_alive is not None:
+            options.append(("grpc.keepalive_time_ms", self.keep_alive[0]))
+            options.append(("grpc.keepalive_timeout_ms", self.keep_alive[1]))
+        if self.server_name:
+            options.append(("grpc.ssl_target_name_override", self.server_name))
+        if self.authority:
+            options.append(("grpc.default_authority", self.authority))
+        if self.http_proxy:
+            options.append(("grpc.http_proxy", self.http_proxy))
+        # The stubs do not know the aio interceptor base as a ClientInterceptor.
+        interceptors: Any = [_Headers(self.headers)] if self.headers else None
+        if not self.secure:
+            return grpc.aio.insecure_channel(
+                self.target, options=options, interceptors=interceptors
+            )
+        credentials = grpc.ssl_channel_credentials(
+            root_certificates=self.server_root_ca_cert,
+            private_key=self.client_private_key,
+            certificate_chain=self.client_cert,
+        )
+        return grpc.aio.secure_channel(
+            self.target, credentials, options=options, interceptors=interceptors
+        )
+
+
 @dataclass(frozen=True)
 class Appended:
     """Where one append landed.
@@ -303,17 +474,37 @@ def _to_public(record: stream.StreamRecord) -> StreamEntry:
     return StreamEntry(record=out, offset=record.offset)
 
 
-def _translate(error: grpc.aio.AioRpcError) -> Exception:
-    code = error.code()
-    details = error.details() or code.name
+def translate_error(
+    code: grpc.StatusCode, details: str, raw_status: bytes = b""
+) -> Exception:
+    """The SDK error for one failed call, from its status code and message.
+
+    ``NOT_FOUND`` is :class:`temporalio.streams.StreamNotFoundError`. A
+    ``FAILED_PRECONDITION`` whose message begins with a reason token is the
+    error the token names: a producer refusal, a repeat with different content
+    or one behind the sequence the server accepted last, is
+    :class:`temporalio.streams.StreamProducerError`, because the caller asked
+    to be deduplicated and could not be; a read below the retention floor is
+    :class:`temporalio.streams.StreamCursorError`. Everything else is
+    :class:`temporalio.service.RPCError` with the code and the raw status.
+    """
+    details = details or code.name
     if code is grpc.StatusCode.NOT_FOUND:
         return StreamNotFoundError(details)
-    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_CONFLICT in details:
-        # A producer sequence the store already holds, either with different
-        # content or behind the one it accepted last. The caller asked to be
-        # deduplicated and could not be, which is a condition of its own.
+    if code is grpc.StatusCode.FAILED_PRECONDITION:
+        token, separator, _ = details.partition(_REASON_SEPARATOR)
+        typed = _REASONS.get(token) if separator else None
+        if typed is not None:
+            return typed(details)
+        if _CURSOR_PHRASE in details:
+            return StreamCursorError(details)
+    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_PHRASE in details:
         return StreamProducerError(details)
-    return RPCError(details, RPCStatusCode(code.value[0]), _raw_status(error))
+    return RPCError(details, RPCStatusCode(code.value[0]), raw_status)
+
+
+def _translate(error: grpc.aio.AioRpcError) -> Exception:
+    return translate_error(error.code(), error.details() or "", _raw_status(error))
 
 
 async def _call(
@@ -390,16 +581,31 @@ class StreamClient:
         *,
         retry_config: RetryConfig | None = None,
     ) -> StreamClient:
-        """Open a channel to a frontend.
+        """Open a plaintext channel to a frontend, for a local server.
 
         Separate from ``Client.connect`` because this does not share the
-        connection the rest of the SDK uses.
+        connection the rest of the SDK uses; :meth:`for_connection` opens
+        one with a client's settings.
         """
         return StreamClient(
             grpc.aio.insecure_channel(target_host),
             namespace,
             retry_config=retry_config,
         )
+
+    @staticmethod
+    def for_connection(
+        connection: Connection,
+        namespace: str = "default",
+        *,
+        retry_config: RetryConfig | None = None,
+    ) -> StreamClient:
+        """Open a channel the way ``connection`` describes.
+
+        ``retry_config`` left ``None`` is the SDK's default; pass the client's
+        own to retry as its other calls do.
+        """
+        return StreamClient(connection.channel(), namespace, retry_config=retry_config)
 
     async def close(self) -> None:
         """Close the underlying channel."""
@@ -941,36 +1147,48 @@ def _page(out: stream.PollMessagesOutput) -> Page:
     )
 
 
-# One channel per loop, target and namespace, shared by every handle in the
+# One channel per loop, connection and namespace, shared by every handle in the
 # process. A channel is multiplexed and long lived, and callers open a handle
 # per subscription, which would otherwise be a connection per subscription. The
 # loop is the key because a grpc.aio channel belongs to the loop that made it,
 # and it is held weakly so a loop that is gone cannot lend its channel to a
 # successor that happens to reuse its id.
+SharedKey = tuple[Connection, str]
+
 _shared: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[tuple[str, str], StreamClient]
+    asyncio.AbstractEventLoop, dict[SharedKey, StreamClient]
 ] = weakref.WeakKeyDictionary()
 
 
-def shared_client(target_host: str, namespace: str) -> StreamClient:
-    """The process-wide client for ``target_host`` and ``namespace`` on this loop."""
+def shared_key(client: Client) -> SharedKey:
+    """What names the shared channel ``client`` reaches the stream service through."""
+    return Connection.from_config(client.service_client.config), client.namespace
+
+
+def shared_client(client: Client) -> StreamClient:
+    """The process-wide stream client on this loop for ``client``'s connection and namespace.
+
+    Opened with the client's connection settings and its ``retry_config``, so
+    a call on it authenticates and retries as the client's other calls do.
+    """
     per_loop = _shared.setdefault(asyncio.get_running_loop(), {})
-    key = (target_host, namespace)
+    key = shared_key(client)
     existing = per_loop.get(key)
     if existing is None:
-        existing = per_loop[key] = StreamClient.connect(target_host, namespace)
+        existing = per_loop[key] = StreamClient.for_connection(
+            key[0], key[1], retry_config=client.service_client.config.retry_config
+        )
     return existing
 
 
-async def close_shared_clients(*keys: tuple[str, str]) -> None:
+async def close_shared_clients(*keys: SharedKey) -> None:
     """Close the shared clients this loop opened for ``keys``, or all of them.
 
-    A provider closes the ones it opened, named by ``(target host,
-    namespace)``: another provider on the same loop may still be reading
-    through a channel of its own, and taking that out from under it is not
-    this one's to do. With no keys it closes every one, which is what a
-    process finished with streams wants, and what a test that opened a loop
-    of its own wants.
+    A provider closes the ones it opened, named by :func:`shared_key`:
+    another provider on the same loop may still be reading through a channel
+    of its own, and taking that out from under it is not this one's to do.
+    With no keys it closes every one, which is what a process finished with
+    streams wants, and what a test that opened a loop of its own wants.
     """
     loop = asyncio.get_running_loop()
     if not keys:

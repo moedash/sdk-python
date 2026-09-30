@@ -14,10 +14,12 @@ misreading it deep in a generator.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from typing import Any
 
 import temporalio.converter
+from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamRecord as WireRecord
 from temporalio.api.stream.v1 import StreamRecordKind
 from temporalio.streams._errors import StreamCursorError
@@ -25,14 +27,30 @@ from temporalio.streams._policy import AttemptTracker
 from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
 
 __all__ = [
+    "CONTENT_HASH_KEY",
     "RecordDecoder",
     "WireRecord",
+    "content_hash",
     "cursor_position",
     "from_wire",
     "mint_cursor",
     "producer_identity",
     "to_wire",
 ]
+
+CONTENT_HASH_KEY = "temporal.io/content-hash"
+"""The record metadata key under which a producer declares its body's identity.
+
+The value is the lowercase hex SHA-256 of the body as the payload converter
+produced it, before any codec or offload, so a store can tell a retry from a
+divergent repeat whatever the encoding did to the bytes. It is read as sent:
+nothing may encode or offload this one metadata payload.
+"""
+
+
+def content_hash(body: Payload) -> str:
+    """The lowercase hex SHA-256 of ``body`` as converted."""
+    return hashlib.sha256(body.SerializeToString()).hexdigest()
 
 
 def to_wire(

@@ -28,27 +28,35 @@ space where it inherited a subscription, so the read resumes at the floor the
 stream reports rather than at zero.
 
 Prototype support for AI-198. It needs a server built from that branch and
-opens its own gRPC channel to it, because sdk-core does not know the stream
-service yet, which is also why it does not support TLS or API keys.
+reaches the stream service on a channel of its own, opened with the client's
+connection settings (target, TLS, API key, headers, retries), because sdk-core
+does not know the service yet.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, Generic, TypeVar
 
 from temporalio import workflow
+from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamStartPosition
 from temporalio.client import Client, WorkflowHistoryEventFilterType
 from temporalio.client_stream import (
     Page,
+    SharedKey,
     StreamClient,
     WorkflowStreamHandle,
     close_shared_clients,
     shared_client,
+    shared_key,
 )
-from temporalio.converter import PayloadCodec, PayloadConverter
+from temporalio.converter import (
+    DataConverter,
+    StorageDriverStoreContext,
+    StorageDriverWorkflowInfo,
+)
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, WriteSink
@@ -62,8 +70,10 @@ from temporalio.streams._record import (
 )
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
+    CONTENT_HASH_KEY,
     RecordDecoder,
     WireRecord,
+    content_hash,
     cursor_position,
     mint_cursor,
     producer_identity,
@@ -111,21 +121,42 @@ def _position(after: Cursor) -> tuple[str, int] | None:
         ) from None
 
 
-async def _encode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
-    # The worker's payload visitor runs a codec over the bodies a workflow
-    # publishes and receives; the outside half has no such pass, so it applies
-    # the client's codec here or the two sides would not agree.
-    if codec is None or not record.HasField("body"):
+def _fingerprint(record: WireRecord) -> WireRecord:
+    """Stamp ``record`` with the hash of its body as converted, before a codec or offload.
+
+    The server deduplicates a producer's repeat on this when present, so a
+    codec that encrypts with a fresh nonce per call cannot turn a retry into
+    a divergent write. A record without a body has nothing to compare.
+    """
+    if not record.HasField("body"):
         return record
-    encoded = await codec.encode([record.body])
-    record.body.CopyFrom(encoded[0])
+    record.metadata[CONTENT_HASH_KEY].CopyFrom(
+        Payload(
+            metadata={"encoding": b"binary/plain"},
+            data=content_hash(record.body).encode(),
+        )
+    )
     return record
 
 
-async def _decode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
-    if codec is None or not record.HasField("body"):
+async def _encode_body(converter: DataConverter, record: WireRecord) -> WireRecord:
+    # The worker's payload pass runs the codec and then the external store over
+    # the bodies a workflow publishes and receives; the outside half has no such
+    # pass, so it applies the client's data converter here in the same order,
+    # or the two sides would not agree.
+    if not record.HasField("body"):
         return record
-    decoded = await codec.decode([record.body])
+    encoded = await converter._encode_payload_sequence([record.body])
+    stored = await converter._external_store_payload_sequence(encoded)
+    record.body.CopyFrom(stored[0])
+    return record
+
+
+async def _decode_body(converter: DataConverter, record: WireRecord) -> WireRecord:
+    if not record.HasField("body"):
+        return record
+    retrieved = await converter._external_retrieve_payload_sequence([record.body])
+    decoded = await converter._decode_payload_sequence(retrieved)
     record.body.CopyFrom(decoded[0])
     return record
 
@@ -170,8 +201,9 @@ class _NativeWriteSink:
     def publish(self, record: WireRecord) -> None:
         # Held by the runtime until the task completes, when the task's
         # records on this topic become one command the server applies with
-        # the task: rule 1 through the server's own commit.
-        workflow._append_stream_records([record], stream_name=self._topic)
+        # the task: rule 1 through the server's own commit. The body is still
+        # plaintext here; the worker's payload pass runs after the task.
+        workflow._append_stream_records([_fingerprint(record)], stream_name=self._topic)
 
 
 class _NativeWorkflowProvider:
@@ -227,17 +259,24 @@ class NativeProducer(Generic[T]):
         self,
         handle: WorkflowStreamHandle,
         pin: Any,
-        codec: PayloadCodec | None,
-        converter: PayloadConverter,
+        converter: DataConverter,
+        store_target: Callable[[str], StorageDriverWorkflowInfo],
         topic: str,
         producer_id: str,
         attempt: int,
     ) -> None:
-        """Bind this producer to ``topic`` on the stream ``handle`` names."""
+        """Bind this producer to ``topic`` on the stream ``handle`` names.
+
+        ``converter`` is the client's data converter, applied to every body
+        as the worker applies it to a workflow's own records. ``store_target``
+        names the execution an offloaded body is stored under, given the run
+        the producer pinned.
+        """
         self._handle = handle
         self._pin = pin
-        self._codec = codec
         self._converter = converter
+        self._store_target = store_target
+        self._bound: DataConverter | None = None
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
@@ -279,7 +318,7 @@ class NativeProducer(Generic[T]):
         return await self._write(
             [
                 to_wire(
-                    self._converter,
+                    self._converter.payload_converter,
                     topic=self._topic,
                     kind=RecordKind.DATA,
                     value=value,
@@ -296,7 +335,7 @@ class NativeProducer(Generic[T]):
         await self._write(
             [
                 to_wire(
-                    self._converter,
+                    self._converter.payload_converter,
                     topic=self._topic,
                     kind=RecordKind.FINISH,
                     producer_id=self._producer_id,
@@ -311,8 +350,16 @@ class NativeProducer(Generic[T]):
         # out names the run its records landed in.
         if not self._handle.owner_run_id:
             self._handle.pin(await self._pin())
+        if self._bound is None:
+            # An offloaded body is stored under the execution that owns the
+            # stream, as the worker stores a workflow's own.
+            self._bound = self._converter._with_store_context(
+                StorageDriverStoreContext(
+                    target=self._store_target(self._handle.owner_run_id)
+                )
+            )
         for record in records:
-            await _encode_body(self._codec, record)
+            await _encode_body(self._bound, _fingerprint(record))
         appended = await self._handle.append(
             *records, producer_id=self._writer, sequence=self._sequence
         )
@@ -330,7 +377,7 @@ class NativeStreamHandle:
         workflow_id: str,
         run_id: str | None,
         *,
-        opened: set[tuple[str, str]] | None = None,
+        opened: set[SharedKey] | None = None,
     ) -> None:
         """Address ``workflow_id``'s topics, pinned to ``run_id`` when one is given.
 
@@ -341,20 +388,16 @@ class NativeStreamHandle:
         self._workflow_id = workflow_id
         self._run_id = run_id
         self._opened = set() if opened is None else opened
+        self._data_converter = client.data_converter
         self._converter = client.data_converter.payload_converter
-        self._codec = client.data_converter.payload_codec
         self._streams: StreamClient | None = None
 
     def _service(self) -> StreamClient:
         # Resolved on first use, because the shared channel belongs to the
         # running loop and a handle may be made before there is one.
         if self._streams is None:
-            key = (
-                self._client.service_client.config.target_host,
-                self._client.namespace,
-            )
-            self._streams = shared_client(*key)
-            self._opened.add(key)
+            self._streams = shared_client(self._client)
+            self._opened.add(shared_key(self._client))
         return self._streams
 
     def _stream(self, topic: str, run_id: str) -> WorkflowStreamHandle:
@@ -429,7 +472,7 @@ class NativeStreamHandle:
                     )
                 start = None
                 for entry in page.entries:
-                    record = await _decode_body(self._codec, entry.record)
+                    record = await _decode_body(self._data_converter, entry.record)
                     for out in decoder.decode(_cursor(run_id, entry.offset), record):
                         yield out
                 offset = page.next_offset
@@ -493,11 +536,17 @@ class NativeStreamHandle:
         return NativeProducer(
             self._stream(topic, self._run_id or ""),
             self._current_run,
-            self._codec,
-            self._converter,
+            self._data_converter,
+            self._store_target,
             topic,
             producer_id,
             attempt,
+        )
+
+    def _store_target(self, run_id: str) -> StorageDriverWorkflowInfo:
+        """The execution an offloaded body of this owner's stream is stored under."""
+        return StorageDriverWorkflowInfo(
+            namespace=self._client.namespace, id=self._workflow_id, run_id=run_id
         )
 
     async def _current_run(self) -> str:
@@ -625,7 +674,7 @@ class NativeActivityStreamHandle(NativeStreamHandle):
         workflow_id: str | None,
         run_id: str | None,
         *,
-        opened: set[tuple[str, str]] | None = None,
+        opened: set[SharedKey] | None = None,
     ) -> None:
         """Address ``activity_id``'s topics, pinned to ``run_id`` when one is given."""
         super().__init__(client, workflow_id or "", run_id, opened=opened)
@@ -635,6 +684,13 @@ class NativeActivityStreamHandle(NativeStreamHandle):
         return self._service().activity_stream(
             self._activity_id, topic, workflow_id=self._workflow_id, run_id=run_id
         )
+
+    def _store_target(self, run_id: str) -> StorageDriverWorkflowInfo:
+        # A workflow's activity stores under that workflow, as the worker does
+        # for its activities; a standalone activity has no workflow to name.
+        if self._workflow_id:
+            return super()._store_target(run_id)
+        return StorageDriverWorkflowInfo(namespace=self._client.namespace)
 
     async def _current_run(self) -> str:
         if self._workflow_id:
@@ -675,7 +731,7 @@ class NativeStreams(ProviderPlugin):
         """Create the provider."""
         # What this provider's handles opened, so closing it leaves another
         # provider's channels on the same loop alone.
-        self._opened: set[tuple[str, str]] = set()
+        self._opened: set[SharedKey] = set()
 
     def workflow_provider(self) -> _NativeWorkflowProvider:
         """The workflow half, over the server's commands and delivered ranges."""
