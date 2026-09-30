@@ -29,8 +29,7 @@ from temporalio.converter import (
     JSONProtoPayloadConverter,
     PayloadCodec,
 )
-from temporalio.streams import RecordKind
-from temporalio.streams._wire import CONTENT_HASH_KEY
+from temporalio.streams import CONTENT_HASH_KEY, RecordKind
 from temporalio.streams.providers.native import NativeStreams
 from temporalio.worker import Worker
 from tests.streams.test_streams_conformance import take

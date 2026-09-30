@@ -27,7 +27,7 @@ from temporalio.converter import (
     PayloadCodec,
     StorageDriverWorkflowInfo,
 )
-from temporalio.streams._wire import CONTENT_HASH_KEY
+from temporalio.streams import CONTENT_HASH_KEY
 from temporalio.streams.providers import native
 from temporalio.streams.providers.native import NativeProducer
 
