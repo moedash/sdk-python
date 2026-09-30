@@ -73,7 +73,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generic, Literal, NoReturn, TypeVar, cast
+from typing import Any, Generic, NoReturn, TypeVar, cast
 
 import nexusrpc
 import nexusrpc.handler
@@ -87,6 +87,7 @@ from temporalio.client import Client, ClientConfig
 from temporalio.common import RawValue
 from temporalio.service import ConnectConfig, RPCError, RPCStatusCode, ServiceClient
 from temporalio.streams._errors import (
+    StreamClosedError,
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
@@ -102,6 +103,7 @@ from temporalio.streams._record import (
     StreamRecord,
     check_read_start,
 )
+from temporalio.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -129,7 +131,6 @@ __all__ = [
 
 T = TypeVar("T")
 
-_Kind = Literal["workflow", "activity", "standalone"]
 # The reference's identity on the handler, topic included, so one parked read
 # and one producer state key on exactly what the wire names.
 _StreamKey = tuple[str, str, str, str, str, str]
@@ -182,6 +183,7 @@ _STREAM_ERRORS: dict[str, type[StreamError]] = {
         StreamNotFoundError,
         StreamCursorError,
         StreamProducerError,
+        StreamClosedError,
         StreamUnsupportedError,
     )
 }
@@ -236,13 +238,13 @@ def _stream_key(ref: WireStreamRef) -> _StreamKey:
 class _Address:
     """The owner a handle is bound to; a topic completes it into a reference."""
 
-    kind: _Kind
+    kind: StreamOwnerKind
     workflow_id: str | None = None
     run_id: str | None = None
     activity_id: str | None = None
     stream_id: str | None = None
 
-    def ref(self, topic: str) -> WireStreamRef:
+    def wire(self, topic: str) -> WireStreamRef:
         return WireStreamRef(
             kind=self.kind,
             workflow_id=self.workflow_id,
@@ -250,6 +252,18 @@ class _Address:
             activity_id=self.activity_id,
             stream_id=self.stream_id,
             topic=topic,
+        )
+
+    def ref(self, topic: str) -> StreamRef:
+        # The same members under the SDK's own name, so what an operation
+        # returns is what client.get_stream_handle(ref) opens.
+        return StreamRef(
+            self.kind,
+            topic,
+            workflow_id=self.workflow_id,
+            run_id=self.run_id,
+            activity_id=self.activity_id,
+            stream_id=self.stream_id,
         )
 
 
@@ -355,12 +369,8 @@ class TemporalStreamsHandler:
                 workflow_id=ref.workflow_id or None,
                 run_id=ref.run_id or None,
             )
-        # The provider protocol reaches a stream through its owning execution;
-        # a standalone stream has none, so no store behind the endpoint can be
-        # asked for it yet.
-        raise StreamUnsupportedError(
-            "the store behind the endpoint cannot host a standalone stream: a "
-            "provider addresses a stream by its owning workflow or activity"
+        return self._provider.get_standalone_stream_handle(
+            client, cast(str, ref.stream_id)
         )
 
     @nexusrpc.handler.sync_operation
@@ -966,7 +976,7 @@ class NexusStreamHandle:
         )
         token = after.token
         last_n = last
-        stream = self._address.ref(topic)
+        stream = self._address.wire(topic)
         while True:
             answer = await self._front.invoke(
                 _READ_OPERATION,
@@ -1005,7 +1015,7 @@ class NexusStreamHandle:
         topic, _ = resolve_topic(topic)
         answer = await self._front.invoke(
             _READ_OPERATION,
-            ReadInput(stream=self._address.ref(topic), latest_only=True),
+            ReadInput(stream=self._address.wire(topic), latest_only=True),
             ReadOutput,
             timeout=_APPEND_TIMEOUT,
         )
@@ -1023,7 +1033,37 @@ class NexusStreamHandle:
         topic, _ = resolve_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return NexusProducer(
-            self._front, self._address.ref(topic), producer_id, attempt
+            self._front, self._address.wire(topic), producer_id, attempt
+        )
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A :class:`temporalio.streams.StreamRef` to ``topic`` of this owner.
+
+        Plain data naming the owner as this handle addresses it and the
+        topic, with no cursor and no endpoint, so an operation can return it
+        and whoever receives it opens it with ``client.get_stream_handle(ref)``
+        on the front or on the store itself.
+        """
+        name, _ = resolve_topic(topic)
+        return self._address.ref(name)
+
+    async def close(self) -> None:
+        """Refused: the contract carries no operation that seals a stream.
+
+        Raises:
+            ValueError: The handle is on a workflow's or an activity's stream,
+                which ends with its owner.
+            StreamUnsupportedError: The handle is on a standalone stream; seal
+                it on the store's own handle.
+        """
+        if self._address.kind != "standalone":
+            raise ValueError(
+                "only a standalone stream can be closed; this handle is on an owner's "
+                "stream, which ends when the owner does"
+            )
+        raise StreamUnsupportedError(
+            "the stream endpoint has no operation that seals a standalone stream; "
+            "close it on the store's own handle"
         )
 
 
@@ -1129,6 +1169,42 @@ class NexusStreams(StreamProvider, temporalio.client.Plugin):
         return NexusStreamHandle(
             _Front(self, client),
             _Address("activity", workflow_id, run_id, activity_id),
+        )
+
+    def get_standalone_stream_handle(
+        self, client: Client | None, stream_id: str
+    ) -> NexusStreamHandle:
+        """A handle on the standalone stream ``stream_id``, through the endpoint.
+
+        The reference carries the standalone owner across; the store behind
+        the endpoint answers whether it hosts one, and a refusal reaches the
+        caller as :class:`temporalio.streams.StreamUnsupportedError` on the
+        first call.
+        """
+        if not stream_id:
+            raise ValueError("stream_id must not be empty")
+        return NexusStreamHandle(
+            _Front(self, client), _Address("standalone", stream_id=stream_id)
+        )
+
+    async def create_standalone_stream(
+        self,
+        client: Client | None,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> NoReturn:
+        """Refused: the contract carries no operation that creates a stream.
+
+        Raises:
+            StreamUnsupportedError: Always. Create the stream on the store
+                behind the endpoint and hand its reference to callers.
+        """
+        raise StreamUnsupportedError(
+            "the stream endpoint has no operation that creates a standalone stream; "
+            "create it on the store behind the endpoint and pass its StreamRef"
         )
 
     async def close(self) -> None:
