@@ -23,6 +23,8 @@ so nobody mistakes it for evidence:
   waits for the workflow.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the
   oldest ones, which stands in for a store's retention in tests.
+- It does not host standalone streams; both standalone calls raise
+  :class:`temporalio.streams.StreamUnsupportedError`.
 - The outside path encodes and decodes bodies through the client's data
   converter, codec and external storage included, and fingerprints a retry
   over the converted bytes first. The workflow half has no client, so a
@@ -101,8 +103,9 @@ class _Topic:
         self.records: list[bytes] = []
         # Dedupe identity is (producer#attempt, first sequence of the append),
         # the same pair the storage providers use, mapped to where the batch
-        # landed so a repeat can answer with the original position.
-        self.seen: dict[tuple[str, int], tuple[int, int]] = {}
+        # landed and a digest of what it held, so a repeat answers with the
+        # original position and a divergent one is told apart from it.
+        self.seen: dict[tuple[str, int], tuple[int, int, bytes]] = {}
         # Each waiter is parked with the loop it belongs to. A workflow's
         # publish runs on the workflow thread, and waking a foreign loop's
         # future from there needs call_soon_threadsafe or the loop stays
@@ -144,9 +147,9 @@ class _Topic:
                     )
                 return first, count
         first = self.head
-        self.records.extend(wire.SerializeToString() for wire in wires)
+        self.records.extend(bodies)
         if writer is not None:
-            self.seen[key] = (first, len(wires))
+            self.seen[key] = (first, len(wires), content)
         waiters, self._waiters = self._waiters, []
         for loop, future in waiters:
             loop.call_soon_threadsafe(_wake, future)
@@ -512,6 +515,13 @@ class MemoryStreamHandle:
         producer_id, attempt = producer_identity(producer_id, attempt)
         return MemoryProducer(store, self._converter, name, producer_id, attempt)
 
+    async def close(self) -> None:
+        """Refuse: a workflow's stream ends with the workflow, not by a caller."""
+        raise ValueError(
+            "only a standalone stream can be closed; this handle is on a workflow's "
+            "stream, which ends when the workflow does"
+        )
+
 
 class MemoryStreams(ProviderPlugin):
     """The in-memory provider, one list per topic.
@@ -577,6 +587,36 @@ class MemoryStreams(ProviderPlugin):
         a read waits until the caller closes it.
         """
         return MemoryStreamHandle(self, client, workflow_id, run_id, activity_id)
+
+    async def create_standalone_stream(
+        self,
+        client: Client | None,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> MemoryStreamHandle:
+        """Refuse: this provider keeps no stream without an owner.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the memory provider does not host standalone streams"
+        )
+
+    def get_standalone_stream_handle(
+        self, client: Client | None, stream_id: str
+    ) -> MemoryStreamHandle:
+        """Refuse: this provider keeps no stream without an owner.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the memory provider does not host standalone streams"
+        )
 
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection."""

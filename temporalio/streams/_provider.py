@@ -20,6 +20,7 @@ lists and :func:`temporalio.streams.encode_body` and
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload
 
 from temporalio.api.stream.v1 import StreamRecord as WireRecord
@@ -204,6 +205,21 @@ class StreamHandle(Protocol):
         """
         ...
 
+    async def close(self) -> None:
+        """Seal the standalone stream this handle is on.
+
+        A sealed stream takes no more records: a later ``append`` raises
+        :class:`temporalio.streams.StreamClosedError`, while everything it
+        retains stays readable and a read on it ends once that tail has been
+        delivered. Idempotent. Only a standalone stream can be closed here,
+        because an owned stream ends with its owner.
+
+        Raises:
+            ValueError: This handle is on a workflow's or an activity's
+                stream.
+        """
+        ...
+
 
 class ReadSource(Protocol):
     """One subscription, as a provider supplies it to the workflow thread."""
@@ -316,6 +332,15 @@ class StreamProvider(Protocol):
     :func:`temporalio.streams.encode_body`,
     :func:`temporalio.streams.decode_body` and
     :func:`temporalio.streams.content_fingerprint` are that rule in code.
+
+    **Standalone streams.** A stream can have an id of its own and no owner.
+    It is created on purpose, with :meth:`create_standalone_stream` and a
+    retention policy, and sealed on purpose, with the handle's ``close``. It
+    is addressed by topic like an owner's streams; how a provider lays its
+    topics out in the store is its own. A provider whose store cannot hold a
+    stream without an owner raises
+    :class:`temporalio.streams.StreamUnsupportedError` from both standalone
+    calls.
     """
 
     def workflow_provider(self) -> WorkflowStreamProvider:
@@ -354,6 +379,49 @@ class StreamProvider(Protocol):
         Raises:
             StreamUnsupportedError: The provider's store cannot hold a stream
                 an activity owns.
+        """
+        ...
+
+    async def create_standalone_stream(
+        self,
+        client: Client,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> StreamHandle:
+        """Create the standalone stream ``stream_id`` and return a handle on it.
+
+        The three policy arguments bound what the stream retains: records
+        older than ``retention``, beyond the newest ``max_records``, or past
+        ``max_bytes`` of stored records are dropped, and ``None`` leaves that
+        bound to the provider's default. Creating a stream that exists with
+        the same policy returns a handle on it, so a retried create is
+        harmless.
+
+        Raises:
+            ValueError: ``stream_id`` is empty, a bound is not positive, or
+                the stream exists with a different policy.
+            StreamUnsupportedError: The provider's store cannot hold a stream
+                without an owner.
+        """
+        ...
+
+    def get_standalone_stream_handle(
+        self, client: Client, stream_id: str
+    ) -> StreamHandle:
+        """A handle on the standalone stream ``stream_id``, which must exist.
+
+        Nothing here creates the stream: the first ``read``, ``latest`` or
+        ``producer`` on a stream that does not exist raises
+        :class:`temporalio.streams.StreamNotFoundError`, unless the provider
+        can wait for the stream to be created, in which case a ``read`` parks
+        until the first write and says so in its own documentation.
+
+        Raises:
+            StreamUnsupportedError: The provider's store cannot hold a stream
+                without an owner.
         """
         ...
 
