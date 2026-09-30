@@ -322,8 +322,10 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             task_queue=worker.task_queue,
             truncate=truncate,
             # Every log is a running workflow's state; a stream with no owner
-            # has no workflow to live in.
+            # has no workflow to live in, so neither of its policies exists.
             hosts_standalone_streams=False,
+            bounds_standalone_bytes=False,
+            trims_open_stream_by_age=False,
         )
         for handle in hosts.values():
             await handle.terminate()
