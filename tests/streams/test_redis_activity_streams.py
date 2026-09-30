@@ -4,10 +4,12 @@
 ``STREAMS_LIVE=redis``. This module covers what only this store does: how a
 read learns that a workflow's activity is terminal without the server saying
 so, that an activity that never wrote is read until its workflow closes,
-that retention trims an activity's stream like any other, and that nothing
-gates an append once the owner is terminal. All need a dev server
-(``TEMPORAL_ADDRESS`` or the test environment's own) and a Redis
-(``TEMPORAL_TEST_REDIS_URL`` or ``AI198_REDIS_URL``).
+that retention trims an activity's stream like any other, that nothing
+gates an append once the owner is terminal, and that an activity's streams
+belong to the run its execution is in, so an id started again in a new run
+starts new ones. All need a dev server (``TEMPORAL_ADDRESS`` or the test
+environment's own) and a Redis (``TEMPORAL_TEST_REDIS_URL`` or
+``AI198_REDIS_URL``).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from temporalio.testing import WorkflowEnvironment
 from tests.helpers import new_worker
 from tests.streams.test_activity_streams import (
     TOKENS,
+    RunsOneActivity,
     read_all,
     summary,
     write_by_default,
@@ -189,7 +192,8 @@ async def test_retention_trims_an_activity_stream_too(client: Client):
 
 async def test_an_append_after_the_owner_is_terminal_still_lands(live: Client):
     # The store has no gate the server would have: a late attempt writes, and
-    # a reader that already ended is not told.
+    # a reader that already ended is not told. The handle names no run, so it
+    # describes the finished activity and lands on that run's stream.
     activity_id = f"streams-redis-saa-late-{uuid.uuid4().hex}"
     async with new_worker(live, activities=[write_by_default]) as worker:
         handle = await live.start_activity(
@@ -212,4 +216,73 @@ async def test_an_append_after_the_owner_is_terminal_still_lands(live: Client):
         (RecordKind.FINISH, 1, None),
         (RecordKind.SUPERSEDED, 2, None),
         (RecordKind.DATA, 2, "late"),
+    ]
+    # Pinned to the run, the same stream reads the same way.
+    pinned = live.get_stream_handle(activity_id=activity_id, run_id=handle.run_id)
+    assert summary(await read_all(pinned.read(topic=TOKENS), timeout=10)) == summary(
+        records
+    )
+
+
+async def test_a_standalone_activity_id_started_again_starts_a_new_stream(
+    live: Client,
+):
+    # The stream belongs to the activity execution, which is its run, not to
+    # the id: the second execution under the same id writes to a new stream,
+    # a handle without a run reads the current one, and a run pins the other.
+    activity_id = f"streams-redis-saa-again-{uuid.uuid4().hex}"
+    async with new_worker(live, activities=[write_by_default]) as worker:
+        runs = []
+        for label in ("first", "second"):
+            handle = await live.start_activity(
+                write_by_default,
+                label,
+                id=activity_id,
+                task_queue=worker.task_queue,
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            assert await handle.result() == activity_id
+            runs.append(handle.run_id)
+    assert runs[0] != runs[1]
+    current = live.get_stream_handle(activity_id=activity_id)
+    assert summary(await read_all(current.read(topic=TOKENS), timeout=10)) == [
+        (RecordKind.DATA, 1, "second"),
+        (RecordKind.FINISH, 1, None),
+    ]
+    earlier = live.get_stream_handle(activity_id=activity_id, run_id=runs[0])
+    assert summary(await read_all(earlier.read(topic=TOKENS), timeout=10)) == [
+        (RecordKind.DATA, 1, "first"),
+        (RecordKind.FINISH, 1, None),
+    ]
+
+
+async def test_a_workflow_activity_in_a_new_run_starts_a_new_stream(live: Client):
+    # The same workflow id run again schedules the same activity id; keyed by
+    # the workflow's run, the two executions keep their streams apart.
+    workflow_id = f"streams-redis-wfa-again-{uuid.uuid4().hex}"
+    async with new_worker(
+        live, RunsOneActivity, activities=[write_to_own_streams]
+    ) as worker:
+        runs = []
+        for label in ("first", "second"):
+            handle = await live.start_workflow(
+                RunsOneActivity.run,
+                args=["write_to_own_streams", label],
+                id=workflow_id,
+                task_queue=worker.task_queue,
+            )
+            await handle.result()
+            runs.append(handle.result_run_id)
+    assert runs[0] != runs[1]
+    current = live.get_stream_handle(workflow_id, activity_id="streamer")
+    assert summary(await read_all(current.read(topic=TOKENS), timeout=10)) == [
+        (RecordKind.DATA, 1, "second"),
+        (RecordKind.FINISH, 1, None),
+    ]
+    earlier = live.get_stream_handle(
+        workflow_id, activity_id="streamer", run_id=runs[0]
+    )
+    assert summary(await read_all(earlier.read(topic=TOKENS), timeout=10)) == [
+        (RecordKind.DATA, 1, "first"),
+        (RecordKind.FINISH, 1, None),
     ]

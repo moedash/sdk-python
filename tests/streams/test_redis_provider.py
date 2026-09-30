@@ -162,18 +162,25 @@ class _NoRedis:
 
 
 def test_activity_keys_encode_their_ids_and_never_meet_chain_keys():
+    # The run is part of the key: a workflow's activity is keyed by the
+    # workflow's run and a standalone one by its own, so an id started again
+    # in a new run starts a new stream.
     assert (
-        _ActivityOwner("ns", "wf", "act", None).key("p", "t")
-        == "p:ns:activity/wf/act:t"
+        _ActivityOwner("ns", "wf", "act", "run").key("p", "t")
+        == "p:ns:activity/wf/run/act:t"
     )
     assert (
-        _ActivityOwner("ns", None, "act", None).key("p", "t") == "p:ns:activity//act:t"
+        _ActivityOwner("ns", None, "act", "run").key("p", "t")
+        == "p:ns:activity//run/act:t"
     )
     # An id holding a separator is encoded, so it cannot move a boundary.
     assert (
-        _ActivityOwner("n:s", "w/f", "a:c", None).key("p", "t/u")
-        == "p:n%3As:activity/w%2Ff/a%3Ac:t%2Fu"
+        _ActivityOwner("n:s", "w/f", "a:c", "r/1").key("p", "t/u")
+        == "p:n%3As:activity/w%2Ff/r%2F1/a%3Ac:t%2Fu"
     )
+    # A key needs the run; a handle opened without one resolves it first.
+    with pytest.raises(RuntimeError, match="not resolved"):
+        _ActivityOwner("ns", "wf", "act", None).key("p", "t")
     # A chain key percent-encodes every id, so none of its components holds a
     # "/" however the ids are chosen, and the owner component here always does.
     backend = RedisStreamBackend(client=_NoRedis(), key_prefix="p")
@@ -185,7 +192,7 @@ def test_activity_keys_encode_their_ids_and_never_meet_chain_keys():
         direction=StreamDirection.OUTPUT,
     )
     assert "/" not in backend.stream_key(forged)
-    assert backend.stream_key(forged) != _ActivityOwner("ns", "wf", "act", None).key(
+    assert backend.stream_key(forged) != _ActivityOwner("ns", "wf", "act", "t").key(
         "p", "t"
     )
 

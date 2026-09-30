@@ -40,21 +40,25 @@ The mapping, in one place:
   follows continue-as-new by construction and ``run_id`` only decides whose
   close ends a read.
 - An activity's own streams are one Redis stream per topic, keyed by the
-  namespace, the workflow id, empty for a standalone activity, and the
-  activity id. The owner is one key component joined with ``/``, a character
-  the chain keys percent-encode out of every id, so no chain key and no key
-  derived from one can name an activity's stream. There is no input stream,
-  because no workflow reads these, and no staging, because an activity's
-  append is visible as soon as the store accepts it. The key holds the
-  activity id and not its run, so a retry writes to the same stream, which a
-  reader sees as ``SUPERSEDED``, and an id started again continues it. A
-  read ends when the owner is terminal and the retained tail is delivered: a
-  standalone activity is described directly, and a workflow's activity
-  through its workflow, whose close ends the read, as does the activity
-  leaving the pending set once its stream exists. An activity that never
-  wrote has no stream, so a read on it waits for the workflow. Nothing gates
-  an append after that, so a late attempt still lands, and a read that has
-  ended does not see it.
+  namespace, the workflow id, empty for a standalone activity, the run the
+  activity execution belongs to, and the activity id. The run is the
+  workflow's for a workflow's activity and the activity's own for a
+  standalone one, so a retry writes to the same stream, which a reader sees
+  as ``SUPERSEDED``, and an id started again, in a new run, starts a new
+  one, as it does on the server-side provider. Inside the activity the run
+  is in its info; a handle opened outside without one describes the owner
+  and takes its current run. The owner is one key component joined with
+  ``/``, a character the chain keys percent-encode out of every id, so no
+  chain key and no key derived from one can name an activity's stream.
+  There is no input stream, because no workflow reads these, and no
+  staging, because an activity's append is visible as soon as the store
+  accepts it. A read ends when the owner is terminal and the retained tail
+  is delivered: a standalone activity is described directly, and a
+  workflow's activity through its workflow, whose close ends the read, as
+  does the activity leaving the pending set once its stream exists. An
+  activity that never wrote has no stream, so a read on it waits for the
+  workflow. Nothing gates an append after that, so a late attempt still
+  lands, and a read that has ended does not see it.
 - A task's publishes are staged as one batch. The transport's own per-task
   batch limits are lifted for this provider, because a synchronous publish
   cannot wait for the worker to stage a full batch; a batch it cannot stage
@@ -78,7 +82,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncGenerator, Coroutine, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Final, Generic, TypeVar
 from urllib.parse import quote
@@ -422,10 +426,13 @@ def _prefix(backend: Any) -> str:
 class _ActivityOwner:
     """The activity whose streams a handle addresses, and where Redis keeps them.
 
-    ``workflow_id`` is ``None`` for a standalone activity. ``run_id`` pins the
+    ``workflow_id`` is ``None`` for a standalone activity. ``run_id`` is the
     workflow's run for a workflow's activity and the activity's own run for a
-    standalone one: it decides whose close ends a read and never which key is
-    read, because an activity's streams belong to the activity id.
+    standalone one. It is part of the key, so an activity execution's streams
+    are its own and an id started again in a new run starts new ones, and it
+    decides whose close ends a read. ``None`` means the run is not known yet:
+    a handle opened outside without one asks the server for the current run
+    before it touches a key.
     """
 
     namespace: str
@@ -435,12 +442,14 @@ class _ActivityOwner:
 
     def key(self, key_prefix: str, topic: str) -> str:
         """The Redis stream holding ``topic`` of this activity's streams."""
+        if self.run_id is None:
+            raise RuntimeError(f"the run of {self} was not resolved before its key")
         # The chain keys percent-encode every id, so none of their components
         # holds a "/", and a component built around one can never equal a
         # chain key or a key derived from one.
         namespace = quote(self.namespace, safe="")
         owner = f"activity/{quote(self.workflow_id or '', safe='')}/"
-        owner += quote(self.activity_id, safe="")
+        owner += f"{quote(self.run_id, safe='')}/{quote(self.activity_id, safe='')}"
         return f"{key_prefix}:{namespace}:{owner}:{quote(topic, safe='')}"
 
     def context(self) -> SerializationContext:
@@ -469,6 +478,34 @@ class _ActivityOwner:
         if self.workflow_id is None:
             return f"activity {self.activity_id!r}"
         return f"activity {self.activity_id!r} of workflow {self.workflow_id!r}"
+
+
+async def _resolve_owner(client: Client, owner: _ActivityOwner) -> _ActivityOwner:
+    """``owner`` with its run known, or ``StreamNotFoundError`` when the server does not know it.
+
+    One describe: it says whether the owner exists and, for a handle opened
+    without a run, which run is current. A standalone activity is described
+    itself; a workflow's activity is described through its workflow, because
+    the server does not describe it on its own.
+    """
+    try:
+        if owner.workflow_id is None:
+            described = await client.get_activity_handle(
+                owner.activity_id, run_id=owner.run_id
+            ).describe()
+            run_id = owner.run_id or described.activity_run_id
+        else:
+            description = await client.get_workflow_handle(
+                owner.workflow_id, run_id=owner.run_id
+            ).describe()
+            run_id = owner.run_id or description.run_id
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            raise StreamNotFoundError(f"{owner} was not found") from error
+        raise
+    if not run_id:
+        raise StreamNotFoundError(f"the server reports no run for {owner}")
+    return replace(owner, run_id=run_id)
 
 
 async def _retained(client: Any, name: str, offset: Offset) -> bool:
@@ -803,6 +840,9 @@ class RedisProducer(Generic[T]):
         if self._owner is not None:
             # No transport producer to bind and no one to wake: an activity's
             # stream has no workflow reader and no chain to check the key against.
+            # Inside the activity the run is known and nothing is described.
+            if self._owner.run_id is None:
+                self._owner = await _resolve_owner(self._client, self._owner)
             self._name = self._owner.key(_prefix(backend), self._topic)
             self._owned = _OwnedAppend(backend)
             self._codec = StreamPayloadCodec(
@@ -1018,7 +1058,9 @@ class RedisStreamHandle:
             self._converter, result_type, after=after, warn=logger.warning
         )
         backend = self._streams._require_backend()
-        await self._require_owner(owner)
+        # Described on every read, so a handle without a run reads the run that
+        # is current when the read starts, and ends with it.
+        owner = await _resolve_owner(self._client, owner)
         store = backend._client
         name = owner.key(_prefix(backend), topic)
         if (
@@ -1062,22 +1104,6 @@ class RedisStreamHandle:
             # One more pass after learning the owner is terminal, so a record
             # that landed between the read and the describe is not lost.
             closed = await self._owner_closed(owner, store, name)
-
-    async def _require_owner(self, owner: _ActivityOwner) -> None:
-        """Raise ``StreamNotFoundError`` when the server does not know ``owner``."""
-        try:
-            if owner.workflow_id is None:
-                await self._client.get_activity_handle(
-                    owner.activity_id, run_id=owner.run_id
-                ).describe()
-            else:
-                await self._client.get_workflow_handle(
-                    owner.workflow_id, run_id=owner.run_id
-                ).describe()
-        except RPCError as error:
-            if error.status == RPCStatusCode.NOT_FOUND:
-                raise StreamNotFoundError(f"{owner} was not found") from error
-            raise
 
     async def _owner_closed(self, owner: _ActivityOwner, store: Any, name: str) -> bool:
         """Whether the owning activity is terminal, as far as this store can tell.
@@ -1238,8 +1264,9 @@ class RedisStreamHandle:
         topic, _ = resolve_topic(topic)
         backend = self._streams._require_backend()
         if self._owner is not None:
+            owner = await _resolve_owner(self._client, self._owner)
             newest: Any = await backend._client.xrevrange(
-                self._owner.key(_prefix(backend), topic), "+", "-", count=1
+                owner.key(_prefix(backend), topic), "+", "-", count=1
             )
             if not newest:
                 return BEGINNING
@@ -1404,13 +1431,15 @@ class RedisStreams(ProviderPlugin):
         """A handle on the topics ``activity_id`` owns, apart from any workflow's.
 
         Without ``workflow_id`` the activity is a standalone one and ``run_id``
-        pins its run; with one it is that workflow's activity and ``run_id``
-        pins the workflow's run. The streams are keyed by the activity id and
-        not its run, so a retry writes to the same ones and a reader sees the
-        attempt change as ``SUPERSEDED``, and an id started again continues
-        them. A read ends when the activity is terminal and the retained tail
-        is delivered; the store has no gate on an append after that, so a late
-        attempt still lands, and a read that has ended does not see it.
+        names its run; with one it is that workflow's activity and ``run_id``
+        names the workflow's run. The streams are keyed by that run, so a
+        retry writes to the same ones and a reader sees the attempt change as
+        ``SUPERSEDED``, while an id started again in a new run starts new
+        ones. Without ``run_id`` each read, ``latest()`` and the first append
+        of a producer describe the owner and take the run current at that
+        moment. A read ends when the activity is terminal and the retained
+        tail is delivered; the store has no gate on an append after that, so
+        a late attempt still lands, and a read that has ended does not see it.
         """
         return RedisStreamHandle(self, client, workflow_id, run_id, activity_id)
 
