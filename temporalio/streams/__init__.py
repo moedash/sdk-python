@@ -62,11 +62,26 @@ release.
 
 The record on the wire is ``temporal.api.stream.v1.StreamRecord`` on every
 provider, with the user's value in ``body`` as an ordinary payload, so a
-reader in any language decodes the same bytes and a payload codec applies.
+reader in any language decodes the same bytes and a payload codec applies. A
+provider owes that body what the SDK gives every payload it sends: it encodes
+it through the client's data converter, so the codec and the
+:class:`temporalio.converter.ExternalStorage` drivers apply, it takes the
+retry fingerprint over the converted bytes before either runs and leaves the
+plaintext hash on the record under :data:`CONTENT_HASH_KEY`, and it offloads a
+workflow's own publish off the workflow thread. :func:`encode_body`,
+:func:`decode_body` and :func:`content_fingerprint` are the shared code for
+that; :class:`StreamProvider` states the rule.
 """
 
 from __future__ import annotations
 
+from temporalio.streams._body import (
+    CONTENT_HASH_KEY,
+    content_fingerprint,
+    content_hash,
+    decode_body,
+    encode_body,
+)
 from temporalio.streams._errors import (
     StreamCursorError,
     StreamError,
@@ -99,6 +114,7 @@ from temporalio.streams._topic import (
 
 __all__ = [
     "BEGINNING",
+    "CONTENT_HASH_KEY",
     "DEFAULT_TOPIC",
     "END",
     "Cursor",
@@ -117,6 +133,10 @@ __all__ = [
     "Supersession",
     "WorkflowStreamProvider",
     "WriteSink",
+    "content_fingerprint",
+    "content_hash",
+    "decode_body",
+    "encode_body",
     "resolve_topic",
     "topic",
 ]
