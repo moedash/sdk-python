@@ -24,8 +24,9 @@ reads run after run, learning from the poll that a run's stream is closed and
 from the run's close event who came next; with a run id it is pinned.
 
 Prototype support for AI-198. It needs a server built from that branch and
-opens its own gRPC channel to it, because sdk-core does not know the stream
-service yet, which is also why it does not support TLS or API keys.
+reaches the stream service on a channel of its own, opened with the client's
+connection settings (target, TLS, API key, headers, retries), because sdk-core
+does not know the service yet.
 """
 
 from __future__ import annotations
@@ -39,10 +40,12 @@ from temporalio.api.stream.v1 import StreamStartPosition
 from temporalio.client import Client, WorkflowHistoryEventFilterType
 from temporalio.client_stream import (
     Page,
+    SharedKey,
     StreamClient,
     WorkflowStreamHandle,
     close_shared_clients,
     shared_client,
+    shared_key,
 )
 from temporalio.converter import PayloadCodec, PayloadConverter
 from temporalio.service import RPCError, RPCStatusCode
@@ -326,7 +329,7 @@ class NativeStreamHandle:
         workflow_id: str,
         run_id: str | None,
         *,
-        opened: set[tuple[str, str]] | None = None,
+        opened: set[SharedKey] | None = None,
     ) -> None:
         """Address ``workflow_id``'s topics, pinned to ``run_id`` when one is given.
 
@@ -345,12 +348,8 @@ class NativeStreamHandle:
         # Resolved on first use, because the shared channel belongs to the
         # running loop and a handle may be made before there is one.
         if self._streams is None:
-            key = (
-                self._client.service_client.config.target_host,
-                self._client.namespace,
-            )
-            self._streams = shared_client(*key)
-            self._opened.add(key)
+            self._streams = shared_client(self._client)
+            self._opened.add(shared_key(self._client))
         return self._streams
 
     def _stream(self, topic: str, run_id: str) -> WorkflowStreamHandle:
@@ -564,7 +563,7 @@ class NativeActivityStreamHandle(NativeStreamHandle):
         workflow_id: str | None,
         run_id: str | None,
         *,
-        opened: set[tuple[str, str]] | None = None,
+        opened: set[SharedKey] | None = None,
     ) -> None:
         """Address ``activity_id``'s topics, pinned to ``run_id`` when one is given."""
         super().__init__(client, workflow_id or "", run_id, opened=opened)
@@ -614,7 +613,7 @@ class NativeStreams(ProviderPlugin):
         """Create the provider."""
         # What this provider's handles opened, so closing it leaves another
         # provider's channels on the same loop alone.
-        self._opened: set[tuple[str, str]] = set()
+        self._opened: set[SharedKey] = set()
 
     def workflow_provider(self) -> _NativeWorkflowProvider:
         """The workflow half, over the server's commands and delivered ranges."""
