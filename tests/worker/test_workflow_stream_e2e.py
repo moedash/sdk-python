@@ -770,9 +770,9 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
     The reset re-runs the task named by the reset point, so the base run's
     history is copied up to that task and the ranges recorded in the copy are
     what the reset run replays, from the base run's streams. The inherited
-    ``inputs`` stream is the reset run's own from the inherited cursor on: it
-    starts empty at that offset, and the input the re-run task had consumed is
-    not delivered again, so the next input takes that offset. The
+    ``inputs`` stream is the reset run's own from the inherited cursor on: the
+    server seeds it with the input the re-run task had consumed, at the offset
+    it held, so the re-run task reads it again and the next input follows. The
     ``decisions`` stream, which the base run only published to, starts at zero.
     A handle without a run id follows the base run into the reset run and starts
     each stream at the floor it reports; a handle pinned to the base run ends
@@ -792,7 +792,7 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
             assert base_run
             producer = await _feed_two(client, workflow_id)
             # A third input in a task of its own, which is the task the reset
-            # re-runs: its consumption is dropped with it.
+            # re-runs: the reset run is seeded with it and consumes it again.
             await producer.append({"n": 3})
             base_stream = client.get_stream_handle(workflow_id, run_id=base_run)
             await take(
@@ -839,8 +839,9 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
                 60,
             )
             # The first two decisions were replayed from the base run's stream;
-            # the third input went with the task the reset re-ran.
+            # the third input came back with the task the reset re-ran.
             assert trace == TWO_DECISIONS + [
+                {"kind": "decision", "n": 3},
                 {"kind": "decision", "n": 4},
                 {"kind": "finish", "producer": "model2"},
             ]
@@ -874,9 +875,11 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
                 ({"decided": 1}, base_run, 0),
                 ({"decided": 2}, base_run, 1),
                 ({"decided": 3}, base_run, 2),
-                ({"decided": 4}, reset_run, 0),
-                (None, reset_run, 1),
+                ({"decided": 3}, reset_run, 0),
+                ({"decided": 4}, reset_run, 1),
+                (None, reset_run, 2),
             ]
+            # The seeded input sits at the offset it held in the base run.
             inputs = await asyncio.wait_for(
                 _collect(client, workflow_id, INPUTS, None), 30
             )
@@ -884,18 +887,23 @@ async def test_a_reset_run_is_followed_and_replayed() -> None:
                 ({"n": 1}, base_run, 0),
                 ({"n": 2}, base_run, 1),
                 ({"n": 3}, base_run, 2),
-                ({"n": 4}, reset_run, 2),
-                (None, reset_run, 3),
+                ({"n": 3}, reset_run, 2),
+                ({"n": 4}, reset_run, 3),
+                (None, reset_run, 4),
             ]
             latest = await client.get_stream_handle(workflow_id).latest(topic=INPUTS)
-            assert latest.token == f"native:{reset_run}:3"
+            assert latest.token == f"native:{reset_run}:4"
 
             # Pinned to the reset run, BEGINNING is the floor its inherited
             # stream starts at. Offset zero, which it never held, is refused.
             from_floor = await asyncio.wait_for(
                 _collect(client, workflow_id, INPUTS, reset_run), 30
             )
-            assert from_floor == [({"n": 4}, reset_run, 2), (None, reset_run, 3)]
+            assert from_floor == [
+                ({"n": 3}, reset_run, 2),
+                ({"n": 4}, reset_run, 3),
+                (None, reset_run, 4),
+            ]
 
         # The reset run's history: the base run's events, the reset marker
         # naming both runs, then its own. The replayer fetches the first era
