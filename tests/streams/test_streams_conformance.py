@@ -60,6 +60,7 @@ from temporalio.streams import (
     StreamProducerError,
     StreamProvider,
     StreamRef,
+    StreamUnsupportedError,
     Supersession,
     topic,
 )
@@ -636,7 +637,9 @@ async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
         external_storage=ExternalStorage(drivers=[driver], payload_size_threshold=256),
     )
     workflow_id = new_workflow_id()
-    stream = await case.open(workflow_id, client=_client_with(client, converter))
+    stream = await case.open(
+        workflow_id, client=_client_with(case.client or client, converter)
+    )
     producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
     small = {"n": 1}
     large = {"blob": "x" * 1024}
@@ -658,7 +661,9 @@ async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     codec = NonceCodec()
     converter = dataclasses.replace(DataConverter.default, payload_codec=codec)
     workflow_id = new_workflow_id()
-    stream = await case.open(workflow_id, client=_client_with(client, converter))
+    stream = await case.open(
+        workflow_id, client=_client_with(case.client or client, converter)
+    )
     first = stream.producer(topic=OUT, producer_id="model", attempt=1)
     landed = await first.append({"id": "r1"})
     assert codec.encoded == 1
@@ -797,13 +802,19 @@ async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCas
     kept = await take(by_count.read(topic=OUT), 2)
     assert [r.value for r in kept] == [{"n": 3}, {"n": 4}]
 
-    by_bytes = await case.create_stream(new_stream_id(), max_bytes=700)
-    producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
-    for n in range(3):
-        await producer.append({"n": n, "blob": "x" * 500})
-    kept = await take(by_bytes.read(topic=OUT), 1)
-    assert kept[0].value is not None and kept[0].value["n"] == 2
+    if case.bounds_standalone_bytes:
+        by_bytes = await case.create_stream(new_stream_id(), max_bytes=700)
+        producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
+        for n in range(3):
+            await producer.append({"n": n, "blob": "x" * 500})
+        kept = await take(by_bytes.read(topic=OUT), 1)
+        assert kept[0].value is not None and kept[0].value["n"] == 2
+    else:
+        with pytest.raises(StreamUnsupportedError):
+            await case.create_stream(new_stream_id(), max_bytes=700)
 
+    if not case.trims_open_stream_by_age:
+        return
     by_age = await case.create_stream(
         new_stream_id(), retention=timedelta(milliseconds=200)
     )
