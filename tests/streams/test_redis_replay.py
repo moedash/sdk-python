@@ -225,28 +225,29 @@ async def test_query_after_completion_replays_the_final_task(
         assert values == [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}]
 
 
-async def _key_lengths(
+async def _log_length(
     streams: RedisStreams, client: Client, workflow_id: str, topic: str
-) -> tuple[int, int]:
-    """How many entries the topic's input and output keys hold."""
+) -> int:
+    """How many entries the topic's log holds.
+
+    Both of the transport's keys for the topic render onto the log, which is
+    what makes it one; asked through both so a test would notice if they came
+    apart.
+    """
     import redis.asyncio
 
     backend = streams._require_backend()
     chain = await _chain(client, workflow_id)
     store = redis.asyncio.from_url(redis_url())
     try:
-        return (
-            await store.xlen(
-                backend.stream_key(
-                    chain.stream_key(topic, direction=StreamDirection.INPUT)
-                )
-            ),
-            await store.xlen(
-                backend.stream_key(
-                    chain.stream_key(topic, direction=StreamDirection.OUTPUT)
-                )
-            ),
+        by_input = backend.stream_key(
+            chain.stream_key(topic, direction=StreamDirection.INPUT)
         )
+        by_output = backend.stream_key(
+            chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+        )
+        assert by_input == by_output
+        return await store.xlen(by_input)
     finally:
         await store.aclose()
 
@@ -297,10 +298,7 @@ async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Clie
             assert len(await handle.result()) == 4
             before = await take(stream.read(topic=INPUTS), 4, 60)
         history = await handle.fetch_history()
-        assert await _key_lengths(streams, live_client, workflow_id, INPUTS.name) == (
-            4,
-            4,
-        )
+        assert await _log_length(streams, live_client, workflow_id, INPUTS.name) == 4
 
         # Inside the window the recorded ranges read back and the replay passes.
         await Replayer(workflows=[ContractLoop], plugins=[streams]).replay_workflow(
@@ -309,10 +307,7 @@ async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Clie
 
         late = stream.producer(topic=INPUTS, producer_id="late", attempt=1)
         cursors = [await late.append({"n": n}) for n in range(10, 16)]
-        assert await _key_lengths(streams, live_client, workflow_id, INPUTS.name) == (
-            6,
-            6,
-        )
+        assert await _log_length(streams, live_client, workflow_id, INPUTS.name) == 6
 
         # The recorded input ranges are gone, and the replay says so rather
         # than delivering fewer records.
@@ -364,11 +359,8 @@ async def test_retention_by_age_trims_older_entries(live_client: Client):
             await asyncio.sleep(0.6)
             # The append that crosses the window is what trims the two before it.
             third = await producer.append({"n": 3})
-            assert await _key_lengths(
-                streams, live_client, workflow_id, INPUTS.name
-            ) == (
-                1,
-                1,
+            assert (
+                await _log_length(streams, live_client, workflow_id, INPUTS.name) == 1
             )
             assert await stream.latest(topic=INPUTS) == third
             with pytest.raises(StreamCursorError, match="retention has trimmed"):
@@ -733,13 +725,12 @@ async def test_a_batch_the_window_cannot_hold_is_refused_at_the_stage(
         await streams.close()
 
 
-async def test_a_producer_record_lands_on_both_keys_or_on_neither(
+async def test_a_producer_record_lands_once_however_often_it_is_sent(
     live_client: Client, provider: RedisStreams
 ):
-    # The workflow reads the input key and outside readers read the output key.
-    # Written one at a time, a crash between them leaves a record the workflow
-    # acts on that no outside reader can ever see.
-    workflow_id = f"streams-redis-pair-{uuid.uuid4().hex}"
+    # One log per topic: an outside record is written once, where the
+    # workflow's subscription and outside readers both find it.
+    workflow_id = f"streams-redis-once-{uuid.uuid4().hex}"
     async with Worker(
         live_client,
         task_queue=f"tq-{workflow_id}",
@@ -753,10 +744,7 @@ async def test_a_producer_record_lands_on_both_keys_or_on_neither(
             topic=INPUTS, producer_id="model", attempt=1
         )
         await producer.append({"n": 1}, {"n": 2}, {"n": 3})
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            3,
-            3,
-        )
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 3
 
         # A producer that comes back with a fresh sequence re-appends the same
         # identities, which the script reuses rather than doubling.
@@ -764,16 +752,13 @@ async def test_a_producer_record_lands_on_both_keys_or_on_neither(
             topic=INPUTS, producer_id="model", attempt=1
         )
         await again.append({"n": 1}, {"n": 2}, {"n": 3})
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            3,
-            3,
-        )
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 3
 
         await handle.signal(StreamHost.release)
         await handle.result()
 
 
-async def test_a_repeat_under_one_identity_with_other_bytes_writes_neither_key(
+async def test_a_repeat_under_one_identity_with_other_bytes_writes_nothing(
     live_client: Client, provider: RedisStreams
 ):
     workflow_id = f"streams-redis-conflict-{uuid.uuid4().hex}"
@@ -793,22 +778,18 @@ async def test_a_repeat_under_one_identity_with_other_bytes_writes_neither_key(
         other = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
         with pytest.raises(StreamProducerError, match="sequence 0"):
             await other.append({"n": 99})
-        # The refusal wrote nothing on either key.
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            1,
-            1,
-        )
+        # The refusal wrote nothing.
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 1
         await handle.signal(StreamHost.release)
         await handle.result()
 
 
-async def test_a_refused_output_half_leaves_the_input_key_untouched(
+async def test_an_identity_claimed_with_other_bytes_refuses_the_first_append(
     live_client: Client, provider: RedisStreams
 ):
-    # The two keys are one write. Written one at a time, the input half lands
-    # before the output half is refused, and the workflow then consumes a record
-    # no outside reader can ever see.
-    workflow_id = f"streams-redis-atomic-{uuid.uuid4().hex}"
+    # The idempotency hash is read before the log is touched, so a claim that
+    # disagrees with the record refuses it without writing.
+    workflow_id = f"streams-redis-claimed-{uuid.uuid4().hex}"
     async with Worker(
         live_client,
         task_queue=f"tq-{workflow_id}",
@@ -820,11 +801,9 @@ async def test_a_refused_output_half_leaves_the_input_key_untouched(
         )
         backend = provider._require_backend()
         chain = await _chain(live_client, workflow_id)
-        output_key = chain.stream_key(INPUTS.name, direction=StreamDirection.OUTPUT)
-        # Claim the output half's first identity with other bytes, which is what a
-        # refusal of that half looks like from the producer's side.
+        key = chain.stream_key(INPUTS.name, direction=StreamDirection.OUTPUT)
         await backend._client.hset(
-            backend._idempotency_key(output_key), "model#1/0", "1-0|" + "0" * 64
+            backend._idempotency_key(key), "model#1/0", "1-0|" + "0" * 64
         )
 
         producer = provider.get_stream_handle(live_client, workflow_id).producer(
@@ -833,9 +812,82 @@ async def test_a_refused_output_half_leaves_the_input_key_untouched(
         with pytest.raises(StreamProducerError, match="sequence 0"):
             await producer.append({"n": 1})
 
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            0,
-            0,
-        )
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 0
         await handle.signal(StreamHost.release)
         await handle.result()
+
+
+@workflow.defn
+class EchoOnOneTopic:
+    """Reads ``inputs`` and answers each value on the same topic.
+
+    Its own records land in the log it reads, so what it returns says whether
+    it read them back.
+    """
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        seen: list[Any] = []
+        out = workflow.stream_writer(INPUTS)
+        async for record in workflow.stream_reader(INPUTS):
+            if record.kind is RecordKind.FINISH:
+                break
+            if record.kind is not RecordKind.DATA:
+                continue
+            seen.append(record.value)
+            out.publish({"echo": record.value})
+        out.finish()
+        return seen
+
+    @workflow.query
+    def probe(self) -> int:
+        return 1
+
+
+async def test_a_workflow_does_not_read_its_own_records_from_the_shared_log(
+    live_client: Client, provider: RedisStreams
+):
+    workflow_id = f"streams-redis-echo-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[EchoOnOneTopic],
+        plugins=[provider],
+    ) as worker:
+        handle = await live_client.start_workflow(
+            EchoOnOneTopic.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await producer.append({"n": 1}, {"n": 2})
+        # The echoes are promoted into the same log the producer wrote to.
+        first_four = await take(stream.read(topic=INPUTS), 4, 60)
+        assert sorted(
+            ((r.producer_id, r.value) for r in first_four), key=str
+        ) == sorted(
+            [
+                ("model", {"n": 1}),
+                ("model", {"n": 2}),
+                ("", {"echo": {"n": 1}}),
+                ("", {"echo": {"n": 2}}),
+            ],
+            key=str,
+        )
+        await producer.finish()
+        # The workflow saw the producer's records and none of its echoes.
+        assert await asyncio.wait_for(handle.result(), 60) == [{"n": 1}, {"n": 2}]
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 6
+
+        # A cold query replays the run against the log with its own entries
+        # in every recorded range; the read filters them the way the live one did.
+        assert await handle.query(EchoOnOneTopic.probe) == 1
+        everything = [r async for r in stream.read(topic=INPUTS)]
+        assert [(r.producer_id, r.kind) for r in everything if r.producer_id == ""] == [
+            ("", RecordKind.DATA),
+            ("", RecordKind.DATA),
+            ("", RecordKind.FINISH),
+        ]
+
+    await Replayer(workflows=[EchoOnOneTopic], plugins=[provider]).replay_workflow(
+        await handle.fetch_history()
+    )

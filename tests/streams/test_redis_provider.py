@@ -29,8 +29,7 @@ from temporalio.streams.providers.redis import (
     RedisStreams,
     _ActivityOwner,
     _drive,
-    _outside_position,
-    _workflow_position,
+    _position,
 )
 
 
@@ -205,18 +204,21 @@ def test_an_activity_owner_names_itself_for_messages():
     )
 
 
-def test_outside_cursors_name_output_positions():
-    assert _outside_position(BEGINNING) is None
-    position = _outside_position(Cursor("redis:1700000000000-3"))
+def test_cursors_name_entries_of_the_topics_one_log():
+    assert _position(BEGINNING) is None
+    position = _position(Cursor("redis:1700000000000-3"))
     assert position is not None and position.token == "1700000000000-3"
-    # A workflow-side cursor names the input log, which outside code cannot
-    # read from, and a token another provider minted is refused the same way.
+    # A workflow reader and an outside reader name the same log, so either
+    # side's cursor seeds the other. The form the two-key layout minted for
+    # workflow readers named an entry of the input key, which is the log now.
+    legacy = _position(Cursor("redis:in:1700000000000-3"))
+    assert legacy is not None and legacy.token == "1700000000000-3"
     with pytest.raises(StreamCursorError):
-        _outside_position(Cursor("redis:in:1700000000000-3"))
+        _position(Cursor("memory:3"))
     with pytest.raises(StreamCursorError):
-        _outside_position(Cursor("memory:3"))
+        _position(Cursor("redis:not-an-id"))
     with pytest.raises(StreamCursorError):
-        _outside_position(Cursor("redis:not-an-id"))
+        _position(Cursor("redis:in:not-an-id"))
 
 
 def test_a_publish_that_completes_at_once_is_driven_to_the_end():
@@ -240,33 +242,25 @@ def test_a_publish_that_would_wait_fails_loudly():
     asyncio.run(run())
 
 
-def test_workflow_cursors_name_input_positions():
-    assert _workflow_position(BEGINNING) is None
-    position = _workflow_position(Cursor("redis:in:1700000000000-3"))
-    assert position is not None and position.token == "1700000000000-3"
-    # An outside cursor names the output stream, whose entry ids are not the
-    # input stream's, so it cannot seed a workflow reader.
-    with pytest.raises(StreamCursorError, match="output stream"):
-        _workflow_position(Cursor("redis:1700000000000-3"))
-    with pytest.raises(StreamCursorError):
-        _workflow_position(Cursor("memory:3"))
-    with pytest.raises(StreamCursorError):
-        _workflow_position(Cursor("redis:in:not-an-id"))
-
-
 def test_retention_options_are_checked_at_construction():
     with pytest.raises(ValueError, match="retention"):
         RedisStreams(retention=timedelta(0))
     with pytest.raises(ValueError, match="max_len"):
         RedisStreams(max_len=0)
-    # A backend the caller owns is the caller's to trim; the default window
-    # is not a request to trim it.
-    with pytest.raises(ValueError, match="trimmed by its owner"):
-        RedisStreams(backend=object(), max_len=10)
-    with pytest.raises(ValueError, match="trimmed by its owner"):
-        RedisStreams(backend=object(), retention=timedelta(hours=1))
-    RedisStreams(backend=object())
     RedisStreams(retention=timedelta(hours=1), max_len=10)
+
+
+async def test_a_client_the_caller_opened_gets_the_providers_layout_and_stays_open():
+    # The layout and the trims are the provider's whichever connection it
+    # runs on, and closing the provider does not close a caller's client.
+    client = _NoRedis()
+    provider = RedisStreams(client=client, max_len=10)
+    backend = provider._require_backend()
+    assert backend._client is client
+    assert backend.describe_window() == f"retention={DEFAULT_RETENTION}, max_len=10"
+    await provider.close()
+    assert provider._require_backend() is not backend
+    assert provider._require_backend()._client is client
 
 
 async def test_the_default_window_is_an_age_and_can_be_turned_off():
