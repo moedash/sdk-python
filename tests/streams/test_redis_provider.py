@@ -7,13 +7,61 @@ from datetime import timedelta
 
 import pytest
 
+from temporalio.contrib.external_workflow_streams import StreamDirection
+from temporalio.contrib.external_workflow_streams._backend import StreamKey
+from temporalio.contrib.external_workflow_streams._redis import RedisStreamBackend
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
 from temporalio.streams.providers.redis import (
     RedisStreams,
+    _ActivityOwner,
     _drive,
     _outside_position,
     _workflow_position,
 )
+
+
+class _NoRedis:
+    """Enough of a Redis client to construct a backend and render its keys."""
+
+    def register_script(self, _script: str) -> None:
+        return None
+
+
+def test_activity_keys_encode_their_ids_and_never_meet_chain_keys():
+    assert (
+        _ActivityOwner("ns", "wf", "act", None).key("p", "t")
+        == "p:ns:activity/wf/act:t"
+    )
+    assert (
+        _ActivityOwner("ns", None, "act", None).key("p", "t") == "p:ns:activity//act:t"
+    )
+    # An id holding a separator is encoded, so it cannot move a boundary.
+    assert (
+        _ActivityOwner("n:s", "w/f", "a:c", None).key("p", "t/u")
+        == "p:n%3As:activity/w%2Ff/a%3Ac:t%2Fu"
+    )
+    # A chain key percent-encodes every id, so none of its components holds a
+    # "/" however the ids are chosen, and the owner component here always does.
+    backend = RedisStreamBackend(client=_NoRedis(), key_prefix="p")
+    forged = StreamKey(
+        namespace="ns",
+        workflow_id="activity/wf/act",
+        first_execution_run_id="t",
+        stream_name="t",
+        direction=StreamDirection.OUTPUT,
+    )
+    assert "/" not in backend.stream_key(forged)
+    assert backend.stream_key(forged) != _ActivityOwner("ns", "wf", "act", None).key(
+        "p", "t"
+    )
+
+
+def test_an_activity_owner_names_itself_for_messages():
+    assert str(_ActivityOwner("ns", None, "act", None)) == "activity 'act'"
+    assert (
+        str(_ActivityOwner("ns", "wf", "act", "run"))
+        == "activity 'act' of workflow 'wf'"
+    )
 
 
 def test_outside_cursors_name_output_positions():
