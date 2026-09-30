@@ -15,7 +15,7 @@ reaches into private SDK code or adds a feature.
 | Workflow as Producer: as return type | `s4_workflow_as_generator.py` | emulated | Default-topic publishes plus `FINISH`, result from the workflow; the generator signature is sugar not built |
 | Activity as Producer: as named handle | `s5_activity_producers.py` | implemented | Workflow topic (Path B), `scope="activity"`, standalone activity; the last two on native, memory and Redis |
 | Activity as Producer: as return type | `s6_activity_as_generator.py` | emulated | Appends plus a heartbeat checkpoint; the retry resumes and readers see `SUPERSEDED` |
-| Workflow as Consumer | `s7_workflow_consumer.py` | implemented; foreign stream unsupported | Own inbound topic across continue-as-new, carrying a checkpoint because a run's topic is its own; reading a foreign stream from a workflow is rule 5 |
+| Workflow as Consumer | `s7_workflow_consumer.py` | implemented; foreign stream unsupported | Own inbound topic across continue-as-new, handing over per batch with one producer per batch and carrying a checkpoint; runs on native, Workflow Streams and Redis, memory skips by design; reading a foreign stream from a workflow is rule 5 |
 | Client as Consumer over Standalone Nexus | `s8_nexus_consumers.py` (a) | implemented | Activity reads through the `NexusStreams` front and resumes from a heartbeat cursor |
 | Nexus operation handler | `s8_nexus_consumers.py` (b) | emulated | The operation returns a `StreamRef` that the client reads through the front; streams as operation results are the nexgen IDL follow-on |
 | Workflow as Consumer over Nexus | `s8_nexus_consumers.py` docstring | unsupported by design | A workflow's reads ride its Workflow Task and never cross Nexus |
@@ -40,13 +40,10 @@ streams, and `s8` needs the server's Nexus HTTP ingress (`--http`, default
 commands above point every provider at it. `s8` creates and deletes its own
 Nexus endpoint. `memory` is offered here, not in the parent examples,
 because it is not replay-safe; these scenarios keep a warm cache. `redis`
-runs with `--redis` naming a local Redis: `s1` apart from (d), `s3` to `s6`
-with all three parts of `s5`, and `s8` ran green against the stream server,
-and `s2` refuses as on every provider but `native`. `s7` fails on `redis`:
-the sender's `finish()` lands while the consumer run is continuing as new,
-the closing run refuses the provider's wake, and the producer raises
-`WakeNotAcknowledgedError` instead of waking the successor. That is open on
-the Redis provider, so `run.py redis` stops there.
+runs with `--redis` naming a local Redis: `s1` apart from (d) and `s3` to
+`s8`, with all three parts of `s5` and `s7` handing over per batch, ran
+green against the stream server, and `s2` refuses as on every provider but
+`native`.
 
 A scenario a provider cannot serve says so in its output and moves on:
 `s2` on anything but `native`, `s5` (b) and (c) on `workflow_streams`,

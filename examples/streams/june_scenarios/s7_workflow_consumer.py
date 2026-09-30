@@ -9,6 +9,7 @@ release.
 
     python -m examples.streams.june_scenarios.s7_workflow_consumer workflow_streams
     python -m examples.streams.june_scenarios.s7_workflow_consumer native --address 127.0.0.1:7333
+    python -m examples.streams.june_scenarios.s7_workflow_consumer redis --address 127.0.0.1:7333 --redis redis://127.0.0.1:6379
 
 His shape is ``workflow.StreamHandle[ProgressUpdate](stream_id="...",
 offset=offset)`` with ``continue_as_new(update.offset)``. Ours is
@@ -26,7 +27,10 @@ from the previous run is refused there. So the run hands over at a batch
 boundary, marked by the sender's ``FINISH``, and what it carries is its own
 checkpoint: what it has applied so far. The sender waits for the successor
 before writing the next batch, which is the one piece of coordination the
-per-run topic asks for.
+per-run topic asks for. On ``redis`` the stream spans the chain and a
+successor resumes where its predecessor committed, so the same handover
+works there; each batch is its own producer, because a producer's identity
+must not repeat with different content on one stream.
 
 The memory provider keys a topic by workflow rather than by run, so a
 successor would read its predecessor's batches again; it is skipped there.
@@ -126,9 +130,13 @@ async def run(args: argparse.Namespace) -> None:
             run_id: str | None = None
             for number, batch in enumerate(batches, start=1):
                 run_id = await current_run(client, workflow_id, run_id)
-                # A producer made now writes to the run that is current now.
+                # A producer made now writes to the run that is current now,
+                # and each batch is its own producer: a producer's (id, attempt,
+                # sequence) must not repeat with different content on the same
+                # stream, and on a store whose stream spans the chain every
+                # batch lands on one stream.
                 sender = client.get_stream_handle(workflow_id).producer(
-                    topic=COMMANDS, producer_id="console", attempt=1
+                    topic=COMMANDS, producer_id=f"console-{number}", attempt=1
                 )
                 for op in batch:
                     await sender.append(Command(op))
