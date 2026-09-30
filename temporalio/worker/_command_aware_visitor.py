@@ -27,7 +27,7 @@ from temporalio.bridge.proto.workflow_commands.workflow_commands_pb2 import (
     StartChildWorkflowExecution,
     WorkflowCommand,
 )
-from temporalio.streams._wire import CONTENT_HASH_KEY
+from temporalio.streams._body import CONTENT_HASH_KEY
 
 
 @dataclass(frozen=True)

@@ -276,5 +276,7 @@ async def test_a_standalone_activity_has_no_workflow_to_address(setup: ActivityS
 
 
 async def test_get_stream_handle_needs_an_owner(setup: ActivitySetup):
-    with pytest.raises(ValueError, match="workflow_id or the activity_id"):
+    with pytest.raises(
+        ValueError, match="workflow_id, the activity_id or the stream_id"
+    ):
         setup.client.get_stream_handle()

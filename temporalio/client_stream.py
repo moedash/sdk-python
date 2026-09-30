@@ -28,9 +28,11 @@ A failed call raises :class:`temporalio.streams.StreamNotFoundError` when the
 server answers ``NOT_FOUND``,
 :class:`temporalio.streams.StreamProducerError` when it refuses a producer
 sequence it already holds, :class:`temporalio.streams.StreamCursorError` when
-it refuses a read below the retention floor, and
-:class:`temporalio.service.RPCError` otherwise, never the transport's own
-exception type. :func:`translate_error` is the one place that decides.
+it refuses a read below the retention floor,
+:class:`temporalio.streams.StreamClosedError` when it refuses an append to a
+sealed stream, and :class:`temporalio.service.RPCError` otherwise, never the
+transport's own exception type. :func:`translate_error` is the one place that
+decides.
 
 A failure sdk-core would retry is retried here, on the same codes and with the
 same default :class:`temporalio.service.RetryConfig`, because this channel is
@@ -52,9 +54,9 @@ import time
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
-import google.protobuf.duration_pb2
 import grpc
 import grpc.aio
 from google.protobuf.message import Message
@@ -74,6 +76,7 @@ from temporalio.service import (
     __version__,
 )
 from temporalio.streams import (
+    StreamClosedError,
     StreamCursorError,
     StreamNotFoundError,
     StreamProducerError,
@@ -112,9 +115,11 @@ _REASONS: dict[str, type[Exception]] = {
     "STREAM_CURSOR_BELOW_FLOOR": StreamCursorError,
 }
 # The phrases a server built before the tokens existed sends for the same
-# refusals, so a reader of either server gets the typed error.
+# refusals, so a reader of either server gets the typed error. An append on a
+# sealed stream has no token yet and is matched on its whole message.
 _PRODUCER_PHRASE = "producer sequence"
 _CURSOR_PHRASE = "below the stream's floor"
+_CLOSED_PHRASE = "stream is closed"
 
 # The codes sdk-core retries.
 _RETRYABLE = frozenset(
@@ -498,6 +503,8 @@ def translate_error(
             return typed(details)
         if _CURSOR_PHRASE in details:
             return StreamCursorError(details)
+        if details == _CLOSED_PHRASE:
+            return StreamClosedError(details)
     if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_PHRASE in details:
         return StreamProducerError(details)
     return RPCError(details, RPCStatusCode(code.value[0]), raw_status)
@@ -615,20 +622,21 @@ class StreamClient:
         self,
         stream_id: str,
         *,
-        retention: float | None = None,
+        retention: float | timedelta | None = None,
         max_items: int | None = None,
     ) -> StreamHandle:
         """Create a stream and return a handle to it.
 
-        ``retention`` is how long a closed stream stays readable, in seconds.
-        ``max_items`` caps how many records remain readable, dropping the
-        oldest, which bounds storage for a stream nobody truncates.
+        ``retention`` is how long a closed stream stays readable, in seconds
+        or as a ``timedelta``. ``max_items`` caps how many records remain
+        readable, dropping the oldest, which bounds storage for a stream
+        nobody truncates.
         """
         lifecycle = stream.StreamLifecycle()
         if retention is not None:
-            lifecycle.retention.CopyFrom(
-                google.protobuf.duration_pb2.Duration(seconds=int(retention))
-            )
+            if not isinstance(retention, timedelta):
+                retention = timedelta(seconds=retention)
+            lifecycle.retention.FromTimedelta(retention)
         if max_items is not None:
             lifecycle.max_items = max_items
 
