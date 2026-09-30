@@ -57,6 +57,21 @@ talks to two stores. This module keeps the shared types, the errors and the
 protocols a provider implements; nothing here that workflow code imports does
 I/O.
 
+A handle is bound to its client and provider, so a stream is handed to another
+process as a :class:`StreamRef`: the owner and the topic as plain data, with
+no cursor and no provider name. :meth:`StreamHandle.ref` makes one, the
+default data converter carries it as JSON, and the receiver opens it with
+``client.get_stream_handle(ref)`` or ``activity.stream_handle(ref)`` on
+whatever provider its client has.
+
+A stream can also stand alone, with an id of its own and no owner.
+``client.create_stream(stream_id, retention=...)`` creates it with a retention
+policy and returns its handle, ``client.get_stream_handle(stream_id=...)``
+reaches an existing one, and the handle's ``close()`` seals it, after which
+appends are refused with :class:`StreamClosedError` and the retained records
+stay readable. A provider whose store cannot hold an ownerless stream raises
+:class:`StreamUnsupportedError` for both.
+
 What the contract does not promise: that a :attr:`RecordKind.FINISH` record
 means the writing activity succeeded, that a superseded attempt's records can
 be withdrawn, or that a stream outlives the retention its provider is
@@ -65,12 +80,28 @@ release.
 
 The record on the wire is ``temporal.api.stream.v1.StreamRecord`` on every
 provider, with the user's value in ``body`` as an ordinary payload, so a
-reader in any language decodes the same bytes and a payload codec applies.
+reader in any language decodes the same bytes and a payload codec applies. A
+provider owes that body what the SDK gives every payload it sends: it encodes
+it through the client's data converter, so the codec and the
+:class:`temporalio.converter.ExternalStorage` drivers apply, it takes the
+retry fingerprint over the converted bytes before either runs and leaves the
+plaintext hash on the record under :data:`CONTENT_HASH_KEY`, and it offloads a
+workflow's own publish off the workflow thread. :func:`encode_body`,
+:func:`decode_body` and :func:`content_fingerprint` are the shared code for
+that; :class:`StreamProvider` states the rule.
 """
 
 from __future__ import annotations
 
+from temporalio.streams._body import (
+    CONTENT_HASH_KEY,
+    content_fingerprint,
+    content_hash,
+    decode_body,
+    encode_body,
+)
 from temporalio.streams._errors import (
+    StreamClosedError,
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
@@ -93,6 +124,7 @@ from temporalio.streams._record import (
     StreamRecord,
     Supersession,
 )
+from temporalio.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.streams._topic import (
     DEFAULT_TOPIC,
     StreamTopic,
@@ -102,24 +134,32 @@ from temporalio.streams._topic import (
 
 __all__ = [
     "BEGINNING",
+    "CONTENT_HASH_KEY",
     "DEFAULT_TOPIC",
     "END",
     "Cursor",
     "ReadSource",
     "RecordKind",
+    "StreamClosedError",
     "StreamCursorError",
     "StreamError",
     "StreamHandle",
     "StreamNotFoundError",
+    "StreamOwnerKind",
     "StreamProducer",
     "StreamProducerError",
     "StreamProvider",
     "StreamRecord",
+    "StreamRef",
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
     "WorkflowStreamProvider",
     "WriteSink",
+    "content_fingerprint",
+    "content_hash",
+    "decode_body",
+    "encode_body",
     "resolve_topic",
     "topic",
 ]

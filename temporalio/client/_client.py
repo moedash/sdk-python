@@ -40,6 +40,7 @@ from temporalio.service import (
     ServiceClient,
     TLSConfig,
 )
+from temporalio.streams._ref import open_ref
 
 from ..common import HeaderCodecBehavior
 from ..types import (
@@ -898,22 +899,29 @@ class Client:
 
     def get_stream_handle(
         self,
-        workflow_id: str | None = None,
+        workflow_id: str | temporalio.streams.StreamRef | None = None,
         *,
         run_id: str | None = None,
         activity_id: str | None = None,
+        stream_id: str | None = None,
     ) -> temporalio.streams.StreamHandle:
-        """Get a handle on a workflow's or an activity's stream from the provider registered on this client.
+        """Get a handle on a stream from the provider registered on this client.
 
         Mirrors :py:meth:`get_workflow_handle`: without ``run_id`` the handle
         follows the workflow's execution chain across continue-as-new, with
         one it is pinned to that run. With ``activity_id`` the handle is on
         the streams that activity owns: a standalone activity's when
         ``workflow_id`` is left out, and ``run_id`` then pins the activity's
-        run, or an activity that ``workflow_id`` scheduled. The provider is
-        the one registered with ``plugins=[provider]`` at :py:meth:`connect`,
-        or passed as ``stream_provider``. The handle's ``read``, ``latest``
-        and ``producer`` take a topic, and without one address the owner's
+        run, or an activity that ``workflow_id`` scheduled. With
+        ``stream_id`` it is on a standalone stream, one with an id of its own
+        and no owner, which :py:meth:`create_stream` made; it takes no other
+        argument. A :py:class:`temporalio.streams.StreamRef` in place of
+        ``workflow_id`` opens the stream the ref names, whatever owns it, and
+        takes no other argument either: the handle's calls that name no topic
+        then address the ref's topic. The provider is the one registered
+        with ``plugins=[provider]`` at :py:meth:`connect`, or passed as
+        ``stream_provider``. The handle's ``read``, ``latest`` and
+        ``producer`` take a topic, and without one address the owner's
         default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`. A
         ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
         :py:data:`temporalio.streams.END` or at the last ``N`` records with
@@ -921,19 +929,22 @@ class Client:
         :py:mod:`temporalio.streams`.
 
         Args:
-            workflow_id: Workflow ID whose stream to get a handle to, or the
-                workflow that scheduled ``activity_id``.
+            workflow_id: Workflow ID whose stream to get a handle to, the
+                workflow that scheduled ``activity_id``, or a
+                :py:class:`temporalio.streams.StreamRef` naming the stream.
             run_id: Run ID to pin the handle to.
             activity_id: Activity ID whose own streams to get a handle to.
+            stream_id: ID of the standalone stream to get a handle to.
 
         Returns:
             The stream handle.
 
         Raises:
-            ValueError: Neither ``workflow_id`` nor ``activity_id`` was given.
+            ValueError: No owner was named, or a ref or ``stream_id`` was
+                given together with another argument.
             temporalio.streams.StreamUnsupportedError: No stream provider is
                 registered on this client, or it cannot hold a stream an
-                activity owns.
+                activity owns or a stream without an owner.
         """
         provider = self._config.get("stream_provider")
         if provider is None:
@@ -941,13 +952,83 @@ class Client:
                 "no stream provider is registered on this client; connect with "
                 "plugins=[provider]"
             )
+        if isinstance(workflow_id, temporalio.streams.StreamRef):
+            if run_id is not None or activity_id is not None or stream_id is not None:
+                raise ValueError(
+                    "a StreamRef names the stream in full, so it takes no run_id, "
+                    "activity_id or stream_id"
+                )
+            return open_ref(provider, self, workflow_id)
+        if stream_id is not None:
+            if workflow_id is not None or run_id is not None or activity_id is not None:
+                raise ValueError(
+                    "stream_id names a standalone stream, which has no workflow_id, "
+                    "run_id or activity_id"
+                )
+            return provider.get_standalone_stream_handle(self, stream_id)
         if activity_id is not None:
             return provider.get_activity_stream_handle(
                 self, activity_id, workflow_id=workflow_id, run_id=run_id
             )
         if workflow_id is None:
-            raise ValueError("name the workflow_id or the activity_id to address")
+            raise ValueError(
+                "name the workflow_id, the activity_id or the stream_id to address"
+            )
         return provider.get_stream_handle(self, workflow_id, run_id=run_id)
+
+    async def create_stream(
+        self,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> temporalio.streams.StreamHandle:
+        """Create a standalone stream and get a handle on it.
+
+        A standalone stream has an id of its own and no owner, so it is
+        created here on purpose rather than by its first write, and it is
+        sealed on purpose with the handle's ``close()``, after which appends
+        are refused and the retained records stay readable. The three policy
+        arguments bound what it retains: records older than ``retention``,
+        beyond the newest ``max_records`` or past ``max_bytes`` of stored
+        records are dropped, and ``None`` leaves a bound to the provider's
+        default. Creating a stream that exists with the same policy returns a
+        handle on it, so a retried create is harmless. Another process
+        reaches the stream with ``get_stream_handle(stream_id=...)`` or with
+        the handle's ``ref()``.
+
+        Args:
+            stream_id: ID of the stream to create.
+            retention: How long a record is kept.
+            max_records: How many of the newest records are kept.
+            max_bytes: How many bytes of records are kept.
+
+        Returns:
+            A handle on the new or existing stream.
+
+        Raises:
+            ValueError: ``stream_id`` is empty, a bound is not positive, or
+                the stream exists with a different policy.
+            temporalio.streams.StreamUnsupportedError: No stream provider is
+                registered on this client, or it cannot hold a stream without
+                an owner.
+        """
+        provider = self._config.get("stream_provider")
+        if provider is None:
+            raise temporalio.streams.StreamUnsupportedError(
+                "no stream provider is registered on this client; connect with "
+                "plugins=[provider]"
+            )
+        if not stream_id:
+            raise ValueError("stream_id must not be empty")
+        return await provider.create_standalone_stream(
+            self,
+            stream_id,
+            retention=retention,
+            max_records=max_records,
+            max_bytes=max_bytes,
+        )
 
     def get_workflow_handle_for(
         self,
