@@ -87,13 +87,11 @@ class Replayer:
           service and hands the records to the replay, so the workflow sees
           what it saw the first time. A range the stream no longer holds fails
           that replay with :py:class:`temporalio.streams.StreamNotFoundError`.
-          Only the client's target host and namespace are read: the stream
-          service is reached on a channel of its own, opened without TLS or
-          an API key, so a client connected to Temporal Cloud names the right
-          address and still cannot authenticate. That is a prototype limit of
-          :py:mod:`temporalio.client_stream`, which is where it will be
-          lifted. The replayer closes the channel it opened when the replay
-          is finished.
+          The stream service is reached on a channel of its own, opened with
+          the client's connection settings (target, TLS, API key, headers,
+          retries), as :py:class:`temporalio.client_stream.Connection`
+          describes. The replayer closes the channel it opened when the
+          replay is finished.
         * The history carries none and there is no client: replaying it fails
           and the message names both remedies.
 
@@ -491,14 +489,9 @@ class Replayer:
             # the replayer's to close: nothing else in the process asked for
             # it, and leaving it open outlives the replay it served.
             if stream_client is not None:
-                from temporalio.client_stream import close_shared_clients
+                from temporalio.client_stream import close_shared_clients, shared_key
 
-                await close_shared_clients(
-                    (
-                        stream_client.service_client.config.target_host,
-                        stream_client.namespace,
-                    )
-                )
+                await close_shared_clients(shared_key(stream_client))
             # Close the pusher
             if pusher is not None:
                 pusher.close()
@@ -601,7 +594,7 @@ async def _stream_slices(
     # without a stream client never touches.
     from temporalio.client_stream import shared_client
 
-    streams = shared_client(client.service_client.config.target_host, client.namespace)
+    streams = shared_client(client)
     # The handle that served each run's stream, so later ranges of the same
     # stream go straight to it.
     served_by: dict[tuple[str, str], Any] = {}
@@ -696,8 +689,11 @@ async def _read_range(
             if not records:
                 return None, ""
             raise
+        except temporalio.streams.StreamCursorError as error:
+            # Below the truncation floor: the records a task consumed are gone.
+            raise temporalio.streams.StreamNotFoundError(gone) from error
         except temporalio.service.RPCError as error:
-            # Below the truncation floor or past the head: the server refuses
+            # Past the head, or a refusal the server does not type: it refuses
             # the offset rather than answering short.
             if error.status in (
                 temporalio.service.RPCStatusCode.FAILED_PRECONDITION,
