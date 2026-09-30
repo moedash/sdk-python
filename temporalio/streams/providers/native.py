@@ -962,8 +962,14 @@ class NativeStreams(ProviderPlugin):
         try:
             await streams.create(stream_id, retention=retention, max_items=max_records)
         except RPCError as error:
-            # The server answers a create of an id that exists with a generic
-            # failure rather than ALREADY_EXISTS; describe tells the two apart.
+            # The server says ALREADY_EXISTS for an id that exists with this
+            # policy, and a policy that differs arrives typed as ValueError. An
+            # older server answers both with a generic failure, and describe
+            # tells the two apart.
+            if error.status == RPCStatusCode.ALREADY_EXISTS:
+                return NativeStandaloneStreamHandle(
+                    client, stream_id, opened=self._opened
+                )
             try:
                 held = (await streams.get(stream_id).describe()).lifecycle
             except StreamNotFoundError:

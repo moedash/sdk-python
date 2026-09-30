@@ -114,6 +114,9 @@ _REASONS: dict[str, type[Exception]] = {
     "STREAM_PRODUCER_STALE_SEQUENCE": StreamProducerError,
     "STREAM_CURSOR_BELOW_FLOOR": StreamCursorError,
     "STREAM_CLOSED": StreamClosedError,
+    # A create of an id that exists with another policy is the caller's
+    # mistake, which the interface contract spells as ValueError.
+    "STREAM_POLICY_MISMATCH": ValueError,
 }
 # The phrases a server built before the tokens existed sends for the same
 # refusals, so a reader of either server gets the typed error. The sealed
