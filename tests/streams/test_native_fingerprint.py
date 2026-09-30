@@ -20,7 +20,11 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.stream.v1 import StreamRecord
 from temporalio.client_stream import Appended
-from temporalio.converter import PayloadCodec
+from temporalio.converter import (
+    DataConverter,
+    PayloadCodec,
+    StorageDriverWorkflowInfo,
+)
 from temporalio.streams.providers import native
 from temporalio.streams.providers.native import CONTENT_HASH_KEY, NativeProducer
 
@@ -62,12 +66,15 @@ def _plaintext_hash(value: Any) -> bytes:
     return hashlib.sha256(payload.SerializeToString()).hexdigest().encode()
 
 
+def _target(_run_id: str) -> StorageDriverWorkflowInfo:
+    return StorageDriverWorkflowInfo(namespace="ns", id="wf")
+
+
 async def test_an_outside_append_is_stamped_before_the_codec() -> None:
     handle: Any = _Handle()
-    codec = _NonceCodec()
-    converter = temporalio.converter.default().payload_converter
+    converter = DataConverter(payload_codec=_NonceCodec())
     producer: NativeProducer[Any] = NativeProducer(
-        handle, None, codec, converter, "t", "p", 1
+        handle, None, converter, _target, "t", "p", 1
     )
 
     await producer.append({"n": 1})
@@ -83,9 +90,8 @@ async def test_an_outside_append_is_stamped_before_the_codec() -> None:
 
 async def test_a_finish_record_carries_no_stamp() -> None:
     handle: Any = _Handle()
-    converter = temporalio.converter.default().payload_converter
     producer: NativeProducer[Any] = NativeProducer(
-        handle, None, None, converter, "t", "p", 1
+        handle, None, DataConverter.default, _target, "t", "p", 1
     )
     await producer.finish()
     (record,) = handle.appended

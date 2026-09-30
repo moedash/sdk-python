@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, Generic, TypeVar
 
 from temporalio import workflow
@@ -49,7 +49,11 @@ from temporalio.client_stream import (
     shared_client,
     shared_key,
 )
-from temporalio.converter import PayloadCodec, PayloadConverter
+from temporalio.converter import (
+    DataConverter,
+    StorageDriverStoreContext,
+    StorageDriverWorkflowInfo,
+)
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, WriteSink
@@ -132,21 +136,24 @@ def _fingerprint(record: WireRecord) -> WireRecord:
     return record
 
 
-async def _encode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
-    # The worker's payload visitor runs a codec over the bodies a workflow
-    # publishes and receives; the outside half has no such pass, so it applies
-    # the client's codec here or the two sides would not agree.
-    if codec is None or not record.HasField("body"):
+async def _encode_body(converter: DataConverter, record: WireRecord) -> WireRecord:
+    # The worker's payload pass runs the codec and then the external store over
+    # the bodies a workflow publishes and receives; the outside half has no such
+    # pass, so it applies the client's data converter here in the same order,
+    # or the two sides would not agree.
+    if not record.HasField("body"):
         return record
-    encoded = await codec.encode([record.body])
-    record.body.CopyFrom(encoded[0])
+    encoded = await converter._encode_payload_sequence([record.body])
+    stored = await converter._external_store_payload_sequence(encoded)
+    record.body.CopyFrom(stored[0])
     return record
 
 
-async def _decode_body(codec: PayloadCodec | None, record: WireRecord) -> WireRecord:
-    if codec is None or not record.HasField("body"):
+async def _decode_body(converter: DataConverter, record: WireRecord) -> WireRecord:
+    if not record.HasField("body"):
         return record
-    decoded = await codec.decode([record.body])
+    retrieved = await converter._external_retrieve_payload_sequence([record.body])
+    decoded = await converter._decode_payload_sequence(retrieved)
     record.body.CopyFrom(decoded[0])
     return record
 
@@ -249,17 +256,24 @@ class NativeProducer(Generic[T]):
         self,
         handle: WorkflowStreamHandle,
         pin: Any,
-        codec: PayloadCodec | None,
-        converter: PayloadConverter,
+        converter: DataConverter,
+        store_target: Callable[[str], StorageDriverWorkflowInfo],
         topic: str,
         producer_id: str,
         attempt: int,
     ) -> None:
-        """Bind this producer to ``topic`` on the stream ``handle`` names."""
+        """Bind this producer to ``topic`` on the stream ``handle`` names.
+
+        ``converter`` is the client's data converter, applied to every body
+        as the worker applies it to a workflow's own records. ``store_target``
+        names the execution an offloaded body is stored under, given the run
+        the producer pinned.
+        """
         self._handle = handle
         self._pin = pin
-        self._codec = codec
         self._converter = converter
+        self._store_target = store_target
+        self._bound: DataConverter | None = None
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
@@ -301,7 +315,7 @@ class NativeProducer(Generic[T]):
         return await self._write(
             [
                 to_wire(
-                    self._converter,
+                    self._converter.payload_converter,
                     topic=self._topic,
                     kind=RecordKind.DATA,
                     value=value,
@@ -318,7 +332,7 @@ class NativeProducer(Generic[T]):
         await self._write(
             [
                 to_wire(
-                    self._converter,
+                    self._converter.payload_converter,
                     topic=self._topic,
                     kind=RecordKind.FINISH,
                     producer_id=self._producer_id,
@@ -333,8 +347,16 @@ class NativeProducer(Generic[T]):
         # out names the run its records landed in.
         if not self._handle.owner_run_id:
             self._handle.pin(await self._pin())
+        if self._bound is None:
+            # An offloaded body is stored under the execution that owns the
+            # stream, as the worker stores a workflow's own.
+            self._bound = self._converter._with_store_context(
+                StorageDriverStoreContext(
+                    target=self._store_target(self._handle.owner_run_id)
+                )
+            )
         for record in records:
-            await _encode_body(self._codec, _fingerprint(record))
+            await _encode_body(self._bound, _fingerprint(record))
         appended = await self._handle.append(
             *records, producer_id=self._writer, sequence=self._sequence
         )
@@ -363,8 +385,8 @@ class NativeStreamHandle:
         self._workflow_id = workflow_id
         self._run_id = run_id
         self._opened = set() if opened is None else opened
+        self._data_converter = client.data_converter
         self._converter = client.data_converter.payload_converter
-        self._codec = client.data_converter.payload_codec
         self._streams: StreamClient | None = None
 
     def _service(self) -> StreamClient:
@@ -443,7 +465,7 @@ class NativeStreamHandle:
                     )
                 start = None
                 for entry in page.entries:
-                    record = await _decode_body(self._codec, entry.record)
+                    record = await _decode_body(self._data_converter, entry.record)
                     for out in decoder.decode(_cursor(run_id, entry.offset), record):
                         yield out
                 offset = page.next_offset
@@ -507,11 +529,17 @@ class NativeStreamHandle:
         return NativeProducer(
             self._stream(topic, self._run_id or ""),
             self._current_run,
-            self._codec,
-            self._converter,
+            self._data_converter,
+            self._store_target,
             topic,
             producer_id,
             attempt,
+        )
+
+    def _store_target(self, run_id: str) -> StorageDriverWorkflowInfo:
+        """The execution an offloaded body of this owner's stream is stored under."""
+        return StorageDriverWorkflowInfo(
+            namespace=self._client.namespace, id=self._workflow_id, run_id=run_id
         )
 
     async def _current_run(self) -> str:
@@ -596,6 +624,13 @@ class NativeActivityStreamHandle(NativeStreamHandle):
         return self._service().activity_stream(
             self._activity_id, topic, workflow_id=self._workflow_id, run_id=run_id
         )
+
+    def _store_target(self, run_id: str) -> StorageDriverWorkflowInfo:
+        # A workflow's activity stores under that workflow, as the worker does
+        # for its activities; a standalone activity has no workflow to name.
+        if self._workflow_id:
+            return super()._store_target(run_id)
+        return StorageDriverWorkflowInfo(namespace=self._client.namespace)
 
     async def _current_run(self) -> str:
         if self._workflow_id:

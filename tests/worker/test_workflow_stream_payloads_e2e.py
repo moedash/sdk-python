@@ -20,13 +20,20 @@ import pytest
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
+from temporalio.api.sdk.v1.external_storage_pb2 import ExternalStorageReference
 from temporalio.client import Client
 from temporalio.client_stream import StreamClient
-from temporalio.converter import DataConverter, PayloadCodec
+from temporalio.converter import (
+    DataConverter,
+    ExternalStorage,
+    JSONProtoPayloadConverter,
+    PayloadCodec,
+)
 from temporalio.streams import RecordKind
 from temporalio.streams.providers.native import CONTENT_HASH_KEY, NativeStreams
 from temporalio.worker import Worker
 from tests.streams.test_streams_conformance import take
+from tests.test_extstore import InMemoryTestDriver
 
 TARGET = os.environ.get("TEMPORAL_STREAM_TARGET")
 
@@ -179,6 +186,67 @@ async def test_a_workflow_publish_carries_the_plaintext_hash() -> None:
         finish = [e.record for e in page.entries if not e.record.HasField("body")]
         assert CONTENT_HASH_KEY not in finish[0].metadata
         assert RecordKind.FINISH in {RecordKind(k) for k in kinds}
+    finally:
+        await raw.close()
+        await provider.close()
+
+
+async def test_external_storage_applies_on_both_halves() -> None:
+    """A ``StorageDriver`` on the client offloads stream bodies on both paths.
+
+    Every body is over the threshold. The outside producer's append is stored
+    through the driver before it reaches the server; the workflow retrieves it
+    on its task, publishes, and the worker's payload pass offloads that too, off
+    the workflow thread, so the outside reader retrieves it. Read raw, the
+    server holds references on both topics and no plaintext.
+    """
+    driver = InMemoryTestDriver()
+    converter = DataConverter(
+        external_storage=ExternalStorage(drivers=[driver], payload_size_threshold=0)
+    )
+    provider = NativeStreams()
+    client = await _connect(converter, provider)
+    raw = StreamClient.connect(TARGET or "")
+    task_queue = "offload-tq-" + uuid.uuid4().hex[:8]
+    workflow_id = "offload-wf-" + uuid.uuid4().hex[:8]
+    try:
+        async with Worker(client, task_queue=task_queue, workflows=[Echo]):
+            handle = await client.start_workflow(
+                Echo.run, 1, id=workflow_id, task_queue=task_queue
+            )
+            stream = client.get_stream_handle(workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+            await producer.append({"n": "plaintext-marker"})
+            stores_after_append = driver._store_calls
+            assert stores_after_append >= 1, "the outside append offloaded"
+
+            echoed = await take(stream.read(topic=DECISIONS, result_type=dict), 1)
+            assert [r.value for r in echoed] == [{"echo": {"n": "plaintext-marker"}}]
+            await handle.signal(Echo.stop)
+            assert await asyncio.wait_for(handle.result(), 60) == [
+                {"n": "plaintext-marker"}
+            ]
+
+        run_id = (await handle.describe()).run_id
+        assert run_id is not None
+        for topic in (INPUTS, DECISIONS):
+            page = await raw.workflow_stream(
+                workflow_id, topic, owner_run_id=run_id
+            ).poll(from_offset=0, wait=False)
+            bodies = [e.record.body for e in page.entries if e.record.HasField("body")]
+            assert len(bodies) == 1, topic
+            assert b"plaintext-marker" not in bodies[0].data, topic
+            reference = JSONProtoPayloadConverter().from_payload(
+                bodies[0], ExternalStorageReference
+            )
+            assert reference.driver_name == driver.name(), topic
+        # The workflow's publish was offloaded by the worker, after the append.
+        assert driver._store_calls > stores_after_append
+        # Both halves retrieved: the worker on its task and the outside reader.
+        assert driver._retrieve_calls >= 2
+        # The outside append was stored under the workflow that owns the stream.
+        targets = [ctx.target for ctx in driver._store_contexts if ctx.target]
+        assert any(t.id == workflow_id and t.run_id == run_id for t in targets)
     finally:
         await raw.close()
         await provider.close()
