@@ -23,21 +23,19 @@ from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
     BEGINNING,
-    END,
     Cursor,
     StreamCursorError,
     StreamError,
-    StreamUnsupportedError,
 )
 from temporalio.streams.providers import redis as redis_provider
 from temporalio.streams.providers.redis import (
+    DEFAULT_RETENTION,
     RedisProducer,
     RedisStreams,
     _ActivityOwner,
     _drive,
-    _outside_position,
-    _RedisWorkflowProvider,
-    _workflow_position,
+    _position,
+    _StandaloneOwner,
 )
 
 
@@ -145,10 +143,23 @@ async def test_a_wake_refused_by_a_finished_chain_is_the_ordinary_ending(
 
 
 @pytest.mark.usefixtures("quick_wake_retries")
-async def test_a_wake_refused_for_the_whole_window_is_raised():
+async def test_a_wake_refused_as_closing_for_the_whole_window_is_dropped():
+    # The run is inside a Workflow Task that tried to close it while the wake
+    # sat buffered. The record is in the log, so if the run stays open its
+    # next park rechecks the log and finds it; the producer is not failed.
     client = _ChainClient(WorkflowExecutionStatus.RUNNING)
     wakes = _RefusingInput(refusals=99)
-    with pytest.raises(WakeNotAcknowledgedError, match="closing"):
+    await _waking_producer(client, wakes)._wake()
+    assert wakes.calls > 1
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_for_another_reason_for_the_whole_window_is_raised():
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(
+        refusals=99, error=WakeNotAcknowledgedError("signal rate limited", pending=[])
+    )
+    with pytest.raises(WakeNotAcknowledgedError, match="rate limited"):
         await _waking_producer(client, wakes)._wake()
     assert wakes.calls > 1
 
@@ -169,18 +180,25 @@ class _NoRedis:
 
 
 def test_activity_keys_encode_their_ids_and_never_meet_chain_keys():
+    # The run is part of the key: a workflow's activity is keyed by the
+    # workflow's run and a standalone one by its own, so an id started again
+    # in a new run starts a new stream.
     assert (
-        _ActivityOwner("ns", "wf", "act", None).key("p", "t")
-        == "p:ns:activity/wf/act:t"
+        _ActivityOwner("ns", "wf", "act", "run").key("p", "t")
+        == "p:ns:activity/wf/run/act:t"
     )
     assert (
-        _ActivityOwner("ns", None, "act", None).key("p", "t") == "p:ns:activity//act:t"
+        _ActivityOwner("ns", None, "act", "run").key("p", "t")
+        == "p:ns:activity//run/act:t"
     )
     # An id holding a separator is encoded, so it cannot move a boundary.
     assert (
-        _ActivityOwner("n:s", "w/f", "a:c", None).key("p", "t/u")
-        == "p:n%3As:activity/w%2Ff/a%3Ac:t%2Fu"
+        _ActivityOwner("n:s", "w/f", "a:c", "r/1").key("p", "t/u")
+        == "p:n%3As:activity/w%2Ff/r%2F1/a%3Ac:t%2Fu"
     )
+    # A key needs the run; a handle opened without one resolves it first.
+    with pytest.raises(RuntimeError, match="not resolved"):
+        _ActivityOwner("ns", "wf", "act", None).key("p", "t")
     # A chain key percent-encodes every id, so none of its components holds a
     # "/" however the ids are chosen, and the owner component here always does.
     backend = RedisStreamBackend(client=_NoRedis(), key_prefix="p")
@@ -192,7 +210,7 @@ def test_activity_keys_encode_their_ids_and_never_meet_chain_keys():
         direction=StreamDirection.OUTPUT,
     )
     assert "/" not in backend.stream_key(forged)
-    assert backend.stream_key(forged) != _ActivityOwner("ns", "wf", "act", None).key(
+    assert backend.stream_key(forged) != _ActivityOwner("ns", "wf", "act", "t").key(
         "p", "t"
     )
 
@@ -205,18 +223,21 @@ def test_an_activity_owner_names_itself_for_messages():
     )
 
 
-def test_outside_cursors_name_output_positions():
-    assert _outside_position(BEGINNING) is None
-    position = _outside_position(Cursor("redis:1700000000000-3"))
+def test_cursors_name_entries_of_the_topics_one_log():
+    assert _position(BEGINNING) is None
+    position = _position(Cursor("redis:1700000000000-3"))
     assert position is not None and position.token == "1700000000000-3"
-    # A workflow-side cursor names the input log, which outside code cannot
-    # read from, and a token another provider minted is refused the same way.
+    # A workflow reader and an outside reader name the same log, so either
+    # side's cursor seeds the other. The form the two-key layout minted for
+    # workflow readers named an entry of the input key, which is the log now.
+    legacy = _position(Cursor("redis:in:1700000000000-3"))
+    assert legacy is not None and legacy.token == "1700000000000-3"
     with pytest.raises(StreamCursorError):
-        _outside_position(Cursor("redis:in:1700000000000-3"))
+        _position(Cursor("memory:3"))
     with pytest.raises(StreamCursorError):
-        _outside_position(Cursor("memory:3"))
+        _position(Cursor("redis:not-an-id"))
     with pytest.raises(StreamCursorError):
-        _outside_position(Cursor("redis:not-an-id"))
+        _position(Cursor("redis:in:not-an-id"))
 
 
 def test_a_publish_that_completes_at_once_is_driven_to_the_end():
@@ -240,37 +261,54 @@ def test_a_publish_that_would_wait_fails_loudly():
     asyncio.run(run())
 
 
-def test_workflow_cursors_name_input_positions():
-    assert _workflow_position(BEGINNING) is None
-    position = _workflow_position(Cursor("redis:in:1700000000000-3"))
-    assert position is not None and position.token == "1700000000000-3"
-    # An outside cursor names the output stream, whose entry ids are not the
-    # input stream's, so it cannot seed a workflow reader.
-    with pytest.raises(StreamCursorError, match="output stream"):
-        _workflow_position(Cursor("redis:1700000000000-3"))
-    with pytest.raises(StreamCursorError):
-        _workflow_position(Cursor("memory:3"))
-    with pytest.raises(StreamCursorError):
-        _workflow_position(Cursor("redis:in:not-an-id"))
-
-
 def test_retention_options_are_checked_at_construction():
     with pytest.raises(ValueError, match="retention"):
         RedisStreams(retention=timedelta(0))
     with pytest.raises(ValueError, match="max_len"):
         RedisStreams(max_len=0)
-    # A backend the caller owns is the caller's to trim.
-    with pytest.raises(ValueError, match="trimmed by its owner"):
-        RedisStreams(backend=object(), max_len=10)
     RedisStreams(retention=timedelta(hours=1), max_len=10)
 
 
-def test_a_workflow_reader_cannot_start_at_end_or_the_last_records():
-    # The transport records where a subscription starts, and finding the tail
-    # is a store read the workflow thread cannot make, so both are refused
-    # before anything is subscribed.
-    workflow_half = _RedisWorkflowProvider(timedelta(seconds=1))
-    with pytest.raises(StreamUnsupportedError, match="END or at the last records"):
-        workflow_half.open_reader("inputs", after=END)
-    with pytest.raises(StreamUnsupportedError, match="END or at the last records"):
-        workflow_half.open_reader("inputs", after=BEGINNING, last=2)
+async def test_a_client_the_caller_opened_gets_the_providers_layout_and_stays_open():
+    # The layout and the trims are the provider's whichever connection it
+    # runs on, and closing the provider does not close a caller's client.
+    client = _NoRedis()
+    provider = RedisStreams(client=client, max_len=10)
+    backend = provider._require_backend()
+    assert backend._client is client
+    assert backend.describe_window() == f"retention={DEFAULT_RETENTION}, max_len=10"
+    await provider.close()
+    assert provider._require_backend() is not backend
+    assert provider._require_backend()._client is client
+
+
+async def test_the_default_window_is_an_age_and_can_be_turned_off():
+    # Nothing is trimmed on a topic nobody appends to, so the default has to
+    # be a window that every append applies; a count cap would refuse a task
+    # whose batch does not fit under it, so that one stays off.
+    provider = RedisStreams()
+    try:
+        backend = provider._require_backend()
+        assert backend._retention == DEFAULT_RETENTION == timedelta(days=7)
+        assert backend._max_len is None
+        assert backend.describe_window() == f"retention={DEFAULT_RETENTION}"
+    finally:
+        await provider.close()
+    unbounded = RedisStreams(retention=None)
+    try:
+        assert unbounded._require_backend().describe_window() == "no retention"
+    finally:
+        await unbounded.close()
+
+
+def test_standalone_keys_have_their_own_owner_component():
+    owner = _StandaloneOwner("ns", "shared")
+    assert owner.meta("p") == "p:ns:standalone/shared"
+    assert owner.key("p", "t") == "p:ns:standalone/shared:t"
+    # A topic log always has one more component than the hash, and every id and
+    # topic is encoded, so no name can land on the hash or on another topic.
+    assert owner.key("p", "meta") != owner.meta("p")
+    tricky = _StandaloneOwner("n:s", "a/b:c")
+    assert tricky.meta("p") == "p:n%3As:standalone/a%2Fb%3Ac"
+    assert tricky.key("p", "t/u") == "p:n%3As:standalone/a%2Fb%3Ac:t%2Fu"
+    assert str(owner) == "standalone stream 'shared'"

@@ -430,7 +430,20 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
                 )
 
         yield ProviderCase(
-            "redis", provider, client, host=host, task_queue=worker.task_queue
+            "redis",
+            provider,
+            client,
+            host=host,
+            task_queue=worker.task_queue,
+            # The refusal of a trimmed cursor lands on the first step on this
+            # provider, where the case wants it at the call; its own live module
+            # covers the trimmed floor.
+            truncate=None,
+            # A standalone stream's append script keeps a byte total per topic
+            # and trims by age on every append, so both bounds hold while the
+            # stream is open.
+            bounds_standalone_bytes=True,
+            trims_open_stream_by_age=True,
         )
         for handle in hosts.values():
             await handle.terminate()

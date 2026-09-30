@@ -36,6 +36,7 @@ from temporalio.contrib.external_workflow_streams._output_backend import (
 from temporalio.converter import WorkflowSerializationContext
 from temporalio.streams import (
     BEGINNING,
+    END,
     Cursor,
     RecordKind,
     StreamCursorError,
@@ -225,28 +226,29 @@ async def test_query_after_completion_replays_the_final_task(
         assert values == [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}]
 
 
-async def _key_lengths(
+async def _log_length(
     streams: RedisStreams, client: Client, workflow_id: str, topic: str
-) -> tuple[int, int]:
-    """How many entries the topic's input and output keys hold."""
+) -> int:
+    """How many entries the topic's log holds.
+
+    Both of the transport's keys for the topic render onto the log, which is
+    what makes it one; asked through both so a test would notice if they came
+    apart.
+    """
     import redis.asyncio
 
     backend = streams._require_backend()
     chain = await _chain(client, workflow_id)
     store = redis.asyncio.from_url(redis_url())
     try:
-        return (
-            await store.xlen(
-                backend.stream_key(
-                    chain.stream_key(topic, direction=StreamDirection.INPUT)
-                )
-            ),
-            await store.xlen(
-                backend.stream_key(
-                    chain.stream_key(topic, direction=StreamDirection.OUTPUT)
-                )
-            ),
+        by_input = backend.stream_key(
+            chain.stream_key(topic, direction=StreamDirection.INPUT)
         )
+        by_output = backend.stream_key(
+            chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+        )
+        assert by_input == by_output
+        return await store.xlen(by_input)
     finally:
         await store.aclose()
 
@@ -297,10 +299,7 @@ async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Clie
             assert len(await handle.result()) == 4
             before = await take(stream.read(topic=INPUTS), 4, 60)
         history = await handle.fetch_history()
-        assert await _key_lengths(streams, live_client, workflow_id, INPUTS.name) == (
-            4,
-            4,
-        )
+        assert await _log_length(streams, live_client, workflow_id, INPUTS.name) == 4
 
         # Inside the window the recorded ranges read back and the replay passes.
         await Replayer(workflows=[ContractLoop], plugins=[streams]).replay_workflow(
@@ -309,10 +308,7 @@ async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Clie
 
         late = stream.producer(topic=INPUTS, producer_id="late", attempt=1)
         cursors = [await late.append({"n": n}) for n in range(10, 16)]
-        assert await _key_lengths(streams, live_client, workflow_id, INPUTS.name) == (
-            6,
-            6,
-        )
+        assert await _log_length(streams, live_client, workflow_id, INPUTS.name) == 6
 
         # The recorded input ranges are gone, and the replay says so rather
         # than delivering fewer records.
@@ -324,7 +320,8 @@ async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Clie
         # external storage cause, and a message that names the window.
         message = str(failure.value)
         assert "StreamIntegrityError" in message and "ExternalStorageFailure" in message
-        assert "past the redis provider's retention (max_len=6)" in message
+        assert "past the redis provider's retention (" in message
+        assert "max_len=6)" in message
 
         # An outside cursor below the trim is refused, not resumed from the
         # first retained record.
@@ -363,11 +360,8 @@ async def test_retention_by_age_trims_older_entries(live_client: Client):
             await asyncio.sleep(0.6)
             # The append that crosses the window is what trims the two before it.
             third = await producer.append({"n": 3})
-            assert await _key_lengths(
-                streams, live_client, workflow_id, INPUTS.name
-            ) == (
-                1,
-                1,
+            assert (
+                await _log_length(streams, live_client, workflow_id, INPUTS.name) == 1
             )
             assert await stream.latest(topic=INPUTS) == third
             with pytest.raises(StreamCursorError, match="retention has trimmed"):
@@ -732,13 +726,12 @@ async def test_a_batch_the_window_cannot_hold_is_refused_at_the_stage(
         await streams.close()
 
 
-async def test_a_producer_record_lands_on_both_keys_or_on_neither(
+async def test_a_producer_record_lands_once_however_often_it_is_sent(
     live_client: Client, provider: RedisStreams
 ):
-    # The workflow reads the input key and outside readers read the output key.
-    # Written one at a time, a crash between them leaves a record the workflow
-    # acts on that no outside reader can ever see.
-    workflow_id = f"streams-redis-pair-{uuid.uuid4().hex}"
+    # One log per topic: an outside record is written once, where the
+    # workflow's subscription and outside readers both find it.
+    workflow_id = f"streams-redis-once-{uuid.uuid4().hex}"
     async with Worker(
         live_client,
         task_queue=f"tq-{workflow_id}",
@@ -752,10 +745,7 @@ async def test_a_producer_record_lands_on_both_keys_or_on_neither(
             topic=INPUTS, producer_id="model", attempt=1
         )
         await producer.append({"n": 1}, {"n": 2}, {"n": 3})
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            3,
-            3,
-        )
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 3
 
         # A producer that comes back with a fresh sequence re-appends the same
         # identities, which the script reuses rather than doubling.
@@ -763,16 +753,13 @@ async def test_a_producer_record_lands_on_both_keys_or_on_neither(
             topic=INPUTS, producer_id="model", attempt=1
         )
         await again.append({"n": 1}, {"n": 2}, {"n": 3})
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            3,
-            3,
-        )
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 3
 
         await handle.signal(StreamHost.release)
         await handle.result()
 
 
-async def test_a_repeat_under_one_identity_with_other_bytes_writes_neither_key(
+async def test_a_repeat_under_one_identity_with_other_bytes_writes_nothing(
     live_client: Client, provider: RedisStreams
 ):
     workflow_id = f"streams-redis-conflict-{uuid.uuid4().hex}"
@@ -792,22 +779,18 @@ async def test_a_repeat_under_one_identity_with_other_bytes_writes_neither_key(
         other = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
         with pytest.raises(StreamProducerError, match="sequence 1"):
             await other.append({"n": 99})
-        # The refusal wrote nothing on either key.
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            1,
-            1,
-        )
+        # The refusal wrote nothing.
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 1
         await handle.signal(StreamHost.release)
         await handle.result()
 
 
-async def test_a_refused_output_half_leaves_the_input_key_untouched(
+async def test_an_identity_claimed_with_other_bytes_refuses_the_first_append(
     live_client: Client, provider: RedisStreams
 ):
-    # The two keys are one write. Written one at a time, the input half lands
-    # before the output half is refused, and the workflow then consumes a record
-    # no outside reader can ever see.
-    workflow_id = f"streams-redis-atomic-{uuid.uuid4().hex}"
+    # The idempotency hash is read before the log is touched, so a claim that
+    # disagrees with the record refuses it without writing.
+    workflow_id = f"streams-redis-claimed-{uuid.uuid4().hex}"
     async with Worker(
         live_client,
         task_queue=f"tq-{workflow_id}",
@@ -819,11 +802,9 @@ async def test_a_refused_output_half_leaves_the_input_key_untouched(
         )
         backend = provider._require_backend()
         chain = await _chain(live_client, workflow_id)
-        output_key = chain.stream_key(INPUTS.name, direction=StreamDirection.OUTPUT)
-        # Claim the output half's first identity with other bytes, which is what a
-        # refusal of that half looks like from the producer's side.
+        key = chain.stream_key(INPUTS.name, direction=StreamDirection.OUTPUT)
         await backend._client.hset(
-            backend._idempotency_key(output_key), "model#1/1", "1-0|" + "0" * 64
+            backend._idempotency_key(key), "model#1/1", "1-0|" + "0" * 64
         )
 
         producer = provider.get_stream_handle(live_client, workflow_id).producer(
@@ -832,9 +813,349 @@ async def test_a_refused_output_half_leaves_the_input_key_untouched(
         with pytest.raises(StreamProducerError, match="sequence 1"):
             await producer.append({"n": 1})
 
-        assert await _key_lengths(provider, live_client, workflow_id, INPUTS.name) == (
-            0,
-            0,
-        )
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 0
         await handle.signal(StreamHost.release)
         await handle.result()
+
+
+@workflow.defn
+class NudgedLoop:
+    """The contract loop with a signal that does nothing but complete a task."""
+
+    def __init__(self) -> None:
+        self._nudges = 0
+
+    @workflow.signal
+    def nudge(self) -> None:
+        self._nudges += 1
+
+    @workflow.run
+    async def run(self) -> list[int]:
+        decisions = workflow.stream_writer(DECISIONS)
+        seen: list[int] = []
+        async for record in workflow.stream_reader(INPUTS):
+            if record.kind is RecordKind.FINISH:
+                break
+            if record.kind is not RecordKind.DATA:
+                continue
+            assert record.value is not None
+            decisions.publish({"decided": record.value["n"]})
+            seen.append(record.value["n"])
+        decisions.finish()
+        return seen
+
+
+async def _completed_tasks(client: Client, workflow_id: str, run_id: str) -> list[int]:
+    return [
+        event.event_id
+        async for event in client.get_workflow_handle(
+            workflow_id, run_id=run_id
+        ).fetch_history_events()
+        if event.HasField("workflow_task_completed_event_attributes")
+    ]
+
+
+async def _reset_at(client: Client, workflow_id: str, run_id: str, *, task: int) -> str:
+    """Reset ``run_id`` at its ``task``-th completed Workflow Task; the new run id.
+
+    The server keeps History up to that task's completion and runs the task
+    again, so the tasks before it are inherited and the task itself is not.
+    """
+    from temporalio.api.common.v1 import WorkflowExecution
+    from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
+
+    completed = await _completed_tasks(client, workflow_id, run_id)
+    response = await client.workflow_service.reset_workflow_execution(
+        ResetWorkflowExecutionRequest(
+            namespace=client.namespace,
+            workflow_execution=WorkflowExecution(
+                workflow_id=workflow_id, run_id=run_id
+            ),
+            reason="streams: reset mid-stream",
+            workflow_task_finish_event_id=completed[task],
+            request_id=uuid.uuid4().hex,
+        )
+    )
+    return response.run_id
+
+
+async def _consume_two_then_nudge(
+    live_client: Client, provider: RedisStreams, workflow_id: str, task_queue: str
+) -> tuple[str, Any, Any]:
+    """Two records in two tasks, then a task that consumes nothing; the base run."""
+    handle = await live_client.start_workflow(
+        NudgedLoop.run, id=workflow_id, task_queue=task_queue
+    )
+    base_run = handle.result_run_id
+    assert base_run is not None
+    stream = provider.get_stream_handle(live_client, workflow_id)
+    producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+    await producer.append({"n": 1})
+    await take(stream.read(topic=DECISIONS), 1, 60)
+    await producer.append({"n": 2})
+    await take(stream.read(topic=DECISIONS), 2, 60)
+    before = len(await _completed_tasks(live_client, workflow_id, base_run))
+    await handle.signal(NudgedLoop.nudge)
+    for _ in range(300):
+        if len(await _completed_tasks(live_client, workflow_id, base_run)) > before:
+            break
+        await asyncio.sleep(0.1)
+    return base_run, stream, producer
+
+
+async def test_a_reset_run_replays_the_inherited_ranges_and_continues(
+    live_client: Client, provider: RedisStreams
+):
+    # Reset at the completion of the task the nudge woke, which consumed and
+    # published nothing: both consuming tasks are inherited. Their ranges are
+    # re-read from the log and replayed against the inherited markers, so
+    # their decisions are not published again, and reading continues from the
+    # last inherited boundary.
+    workflow_id = f"streams-redis-reset-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[NudgedLoop],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        base_run, stream, producer = await _consume_two_then_nudge(
+            live_client, provider, workflow_id, f"tq-{workflow_id}"
+        )
+        reset_run = await _reset_at(live_client, workflow_id, base_run, task=-1)
+        assert reset_run != base_run
+
+        await producer.append({"n": 3})
+        await producer.finish()
+        continued = live_client.get_workflow_handle(workflow_id, run_id=reset_run)
+        assert await asyncio.wait_for(continued.result(), 90) == [1, 2, 3]
+        decisions = [r async for r in stream.read(topic=DECISIONS)]
+        assert [(r.kind, r.value) for r in decisions] == [
+            (RecordKind.DATA, {"decided": 1}),
+            (RecordKind.DATA, {"decided": 2}),
+            (RecordKind.DATA, {"decided": 3}),
+            (RecordKind.FINISH, None),
+        ]
+
+    # Offline, the reset run's History reads the inherited ranges from the log.
+    await Replayer(workflows=[NudgedLoop], plugins=[provider]).replay_workflow(
+        await continued.fetch_history()
+    )
+
+
+async def test_a_reset_point_task_is_run_again_from_the_log(
+    live_client: Client, provider: RedisStreams
+):
+    # Reset at the second consuming task's completion: the first task is
+    # inherited and the second is run again. The record it consumed is still
+    # in the log, so the reset run reads it again and publishes again, and an
+    # outside reader sees that decision from both runs.
+    workflow_id = f"streams-redis-reset-rerun-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[NudgedLoop],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        base_run, stream, producer = await _consume_two_then_nudge(
+            live_client, provider, workflow_id, f"tq-{workflow_id}"
+        )
+        reset_run = await _reset_at(live_client, workflow_id, base_run, task=1)
+
+        await producer.append({"n": 3})
+        await producer.finish()
+        continued = live_client.get_workflow_handle(workflow_id, run_id=reset_run)
+        assert await asyncio.wait_for(continued.result(), 90) == [1, 2, 3]
+        decisions = [r.value async for r in stream.read(topic=DECISIONS)]
+        assert decisions == [
+            {"decided": 1},
+            {"decided": 2},
+            {"decided": 2},
+            {"decided": 3},
+            None,
+        ]
+
+    await Replayer(workflows=[NudgedLoop], plugins=[provider]).replay_workflow(
+        await continued.fetch_history()
+    )
+
+
+@workflow.defn
+class EchoOnOneTopic:
+    """Reads ``inputs`` and answers each value on the same topic.
+
+    Its own records land in the log it reads, so what it returns says whether
+    it read them back.
+    """
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        seen: list[Any] = []
+        out = workflow.stream_writer(INPUTS)
+        async for record in workflow.stream_reader(INPUTS):
+            if record.kind is RecordKind.FINISH:
+                break
+            if record.kind is not RecordKind.DATA:
+                continue
+            seen.append(record.value)
+            out.publish({"echo": record.value})
+        out.finish()
+        return seen
+
+    @workflow.query
+    def probe(self) -> int:
+        return 1
+
+
+async def test_a_workflow_does_not_read_its_own_records_from_the_shared_log(
+    live_client: Client, provider: RedisStreams
+):
+    workflow_id = f"streams-redis-echo-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[EchoOnOneTopic],
+        plugins=[provider],
+    ) as worker:
+        handle = await live_client.start_workflow(
+            EchoOnOneTopic.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+        await producer.append({"n": 1}, {"n": 2})
+        # The echoes are promoted into the same log the producer wrote to.
+        first_four = await take(stream.read(topic=INPUTS), 4, 60)
+        assert sorted(
+            ((r.producer_id, r.value) for r in first_four), key=str
+        ) == sorted(
+            [
+                ("model", {"n": 1}),
+                ("model", {"n": 2}),
+                ("", {"echo": {"n": 1}}),
+                ("", {"echo": {"n": 2}}),
+            ],
+            key=str,
+        )
+        await producer.finish()
+        # The workflow saw the producer's records and none of its echoes.
+        assert await asyncio.wait_for(handle.result(), 60) == [{"n": 1}, {"n": 2}]
+        assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 6
+
+        # A cold query replays the run against the log with its own entries
+        # in every recorded range; the read filters them the way the live one did.
+        assert await handle.query(EchoOnOneTopic.probe) == 1
+        everything = [r async for r in stream.read(topic=INPUTS)]
+        assert [(r.producer_id, r.kind) for r in everything if r.producer_id == ""] == [
+            ("", RecordKind.DATA),
+            ("", RecordKind.DATA),
+            ("", RecordKind.FINISH),
+        ]
+
+    await Replayer(workflows=[EchoOnOneTopic], plugins=[provider]).replay_workflow(
+        await handle.fetch_history()
+    )
+
+
+@workflow.defn
+class NewestTwoOnGo:
+    """Opens ``inputs`` at its newest two records once told to, and returns them."""
+
+    def __init__(self) -> None:
+        self._go = False
+
+    @workflow.signal
+    def go(self) -> None:
+        self._go = True
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        await workflow.wait_condition(lambda: self._go)
+        reader = workflow.stream_reader(INPUTS, last=2)
+        values: list[Any] = []
+        async for value in reader.values():
+            values.append(value["n"])
+            if len(values) == 2:
+                reader.close()
+        return values
+
+
+@workflow.defn
+class FromNowOnGo:
+    """Opens ``inputs`` at its end once told to, and returns the first value."""
+
+    def __init__(self) -> None:
+        self._go = False
+
+    @workflow.signal
+    def go(self) -> None:
+        self._go = True
+
+    @workflow.run
+    async def run(self) -> Any:
+        await workflow.wait_condition(lambda: self._go)
+        reader = workflow.stream_reader(INPUTS, after=END)
+        async for value in reader.values():
+            reader.close()
+            return value["n"]
+        return None
+
+
+async def test_a_workflow_reader_starts_at_the_last_n_records_and_replays_there(
+    live_client: Client, provider: RedisStreams
+):
+    # The worker positions the subscription against the log after the task that
+    # opened it and records the entry with it; replay takes the entry from
+    # History, so what lands in the log later does not move the start. The
+    # producer needs the run to exist, so the reader opens on a signal.
+    workflow_id = f"streams-redis-last-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[NewestTwoOnGo],
+        plugins=[provider],
+    ):
+        handle = await live_client.start_workflow(
+            NewestTwoOnGo.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+        await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+        await handle.signal(NewestTwoOnGo.go)
+        assert await asyncio.wait_for(handle.result(), 60) == [3, 4]
+        history = await handle.fetch_history()
+        await producer.append({"n": 5}, {"n": 6})
+    # Offline, with two more records in the log than the run ever saw.
+    await Replayer(workflows=[NewestTwoOnGo], plugins=[provider]).replay_workflow(
+        history
+    )
+
+
+async def test_a_workflow_reader_at_end_skips_what_was_there_and_replays(
+    live_client: Client, provider: RedisStreams
+):
+    workflow_id = f"streams-redis-end-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[FromNowOnGo],
+        plugins=[provider],
+    ):
+        handle = await live_client.start_workflow(
+            FromNowOnGo.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+        await producer.append({"n": "old"})
+        await handle.signal(FromNowOnGo.go)
+        result = asyncio.ensure_future(handle.result())
+        # The subscription is positioned when the worker gets to it, which the
+        # test does not observe, so appends keep coming until the run takes one.
+        for _ in range(150):
+            await producer.append({"n": "new"})
+            done, _ = await asyncio.wait({result}, timeout=0.2)
+            if done:
+                break
+        assert await asyncio.wait_for(result, 60) == "new"
+        history = await handle.fetch_history()
+    await Replayer(workflows=[FromNowOnGo], plugins=[provider]).replay_workflow(history)
