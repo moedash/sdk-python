@@ -569,6 +569,16 @@ async def test_a_read_start_names_one_place(case: ProviderCase):
         stream.read(topic=OUT, after=END, last=1)
 
 
+
+
+async def test_an_owned_stream_cannot_be_closed_by_a_handle(case: ProviderCase):
+    # A workflow's stream ends with the workflow; close() is for a stream
+    # that stands alone.
+    stream = await case.open(new_workflow_id())
+    with pytest.raises(ValueError, match="standalone"):
+        await stream.close()
+
+
 async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
     case: ProviderCase, client: Client
 ):

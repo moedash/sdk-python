@@ -54,6 +54,15 @@ talks to two stores. This module keeps the shared types, the errors and the
 protocols a provider implements; nothing here that workflow code imports does
 I/O.
 
+
+A stream can also stand alone, with an id of its own and no owner.
+``client.create_stream(stream_id, retention=...)`` creates it with a retention
+policy and returns its handle, ``client.get_stream_handle(stream_id=...)``
+reaches an existing one, and the handle's ``close()`` seals it, after which
+appends are refused with :class:`StreamClosedError` and the retained records
+stay readable. A provider whose store cannot hold an ownerless stream raises
+:class:`StreamUnsupportedError` for both.
+
 What the contract does not promise: that a :attr:`RecordKind.FINISH` record
 means the writing activity succeeded, that a superseded attempt's records can
 be withdrawn, or that a stream outlives the retention its provider is
@@ -83,6 +92,7 @@ from temporalio.streams._body import (
     encode_body,
 )
 from temporalio.streams._errors import (
+    StreamClosedError,
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
@@ -120,6 +130,7 @@ __all__ = [
     "Cursor",
     "ReadSource",
     "RecordKind",
+    "StreamClosedError",
     "StreamCursorError",
     "StreamError",
     "StreamHandle",
