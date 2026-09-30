@@ -18,7 +18,12 @@ The mapping, in one place:
   started. Both keys are written by one script, so a record is on both or on
   neither: split across two calls, a crash between them leaves a record the
   workflow consumes and no outside reader can ever see. The cost is one more
-  append per record and one wake per batch.
+  append per record and one wake per batch. A wake the server refuses because
+  the consuming run is closing is sent again after a short wait: a run that
+  continues as new hands the stream to its successor, the records are already
+  where the successor reads them, and only the wake has to follow. The
+  retries stop when the chain's current run takes the wake or the chain
+  proves terminal.
 - A record rides as the transport's payload: the serialized ``StreamRecord``
   proto as a ``binary/plain`` value, which the worker's codec encodes and
   decodes like any other payload.
@@ -163,6 +168,12 @@ _PROVIDER = "redis"
 _INPUT_PREFIX = "in:"
 _REDIS_ID = re.compile(r"\d+-\d+")
 _READ_BATCH = 256
+
+#: How long a wake the server refused is sent again before it is given up, and
+#: the pause between attempts. The pause is there because in the instant between
+#: two runs of a chain the successor is not yet the run a Signal resolves to.
+_WAKE_RETRY_WINDOW: Final = timedelta(seconds=5)
+_WAKE_RETRY_BACKOFF: Final = timedelta(milliseconds=200)
 
 # The transport's per-task batch limits are a backpressure point that awaits
 # inside the workflow, and a synchronous publish has nowhere to await. Lifted
@@ -864,41 +875,49 @@ class RedisProducer(Generic[T]):
         return last
 
     async def _wake(self) -> None:
-        try:
-            await self._input.wake()
-        except WakeNotAcknowledgedError:
-            # The records are appended; what failed is telling a consumer that
-            # is no longer there to be told. A terminal record most often races
-            # the consumer acting on it, so an absent consumer is the ordinary
-            # ending rather than an error.
-            if not await self._consumer_has_gone():
-                raise
-        except TransportStreamError as error:
-            raise _storage_error(error, "the wake could not be sent") from error
+        """Wake the consuming workflow, following the chain past a closing run.
 
-    async def _consumer_has_gone(self) -> bool:
-        """Whether the consuming execution is closing or closed.
+        The records are appended before this is called; what can fail is
+        telling the consumer. The server refuses a Signal while the run it
+        resolves to is closing, and a consumer that reads a terminal record
+        straight from the store and continues as new on it closes in exactly
+        that way, ahead of the wake for that record. The streams are keyed by
+        the chain, so the records are already where the successor reads them
+        and only the wake has to follow: it is sent again, addressed to the
+        workflow id as every wake is, until the chain's current run takes it.
+        A chain that has ended instead is the ordinary ending of a terminal
+        record racing the consumer acting on it, not an error.
+        """
+        deadline = time.monotonic() + _WAKE_RETRY_WINDOW.total_seconds()
+        while True:
+            try:
+                await self._input.wake()
+                return
+            except WakeNotAcknowledgedError:
+                if await self._chain_is_terminal():
+                    return
+                if time.monotonic() >= deadline:
+                    raise
+            except TransportStreamError as error:
+                raise _storage_error(error, "the wake could not be sent") from error
+            await asyncio.sleep(_WAKE_RETRY_BACKOFF.total_seconds())
 
-        Asked for a few seconds rather than once: the server refuses the wake
-        while the execution is closing, and at that moment its status is
-        still the running one. A run that continued as new has not gone: the
-        streams are keyed by the chain, so its successor is the consumer now.
+    async def _chain_is_terminal(self) -> bool:
+        """Whether the chain has ended for good, rather than handing over.
+
+        A run that continued as new is not the end: its successor is the
+        consumer now, and a closing run still describes as running. A chain
+        whose History is gone has ended.
         """
         assert self._workflow_id is not None
         handle = self._client.get_workflow_handle(self._workflow_id)
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                status = (await handle.describe()).status
-            except RPCError as error:
-                if error.status == RPCStatusCode.NOT_FOUND:
-                    return True
-                raise
-            if status is not None and status not in _STILL_CONSUMING:
+        try:
+            status = (await handle.describe()).status
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
                 return True
-            if time.monotonic() >= deadline:
-                return False
-            await asyncio.sleep(0.1)
+            raise
+        return status is not None and status not in _STILL_CONSUMING
 
 
 class RedisStreamHandle:

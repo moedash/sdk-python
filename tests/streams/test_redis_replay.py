@@ -448,6 +448,77 @@ async def test_a_workflow_reader_started_from_a_cursor_skips_the_earlier_records
     await replayer.replay_workflow(await handle.fetch_history())
 
 
+@workflow.defn
+class BatchConsumer:
+    """Applies one batch of ``inputs`` per run, handing over at the sender's FINISH."""
+
+    @workflow.run
+    async def run(self, applied: list[str]) -> list[str]:
+        stop = False
+        async for record in workflow.stream_reader(INPUTS):
+            if record.kind is RecordKind.FINISH:
+                break
+            if record.kind is not RecordKind.DATA:
+                continue
+            assert record.value is not None
+            if record.value["op"] == "stop":
+                stop = True
+                continue
+            applied.append(record.value["op"])
+        if stop:
+            return applied
+        workflow.continue_as_new(applied)
+
+
+async def _current_open_run(
+    client: Client, workflow_id: str, previous: str | None
+) -> str:
+    """Wait until the chain's newest run is a new one and still open."""
+    while True:
+        description = await client.get_workflow_handle(workflow_id).describe()
+        assert description.run_id is not None
+        if description.run_id != previous and description.close_time is None:
+            return description.run_id
+        await asyncio.sleep(0.1)
+
+
+async def test_a_wake_refused_by_a_run_continuing_as_new_reaches_its_successor(
+    live_client: Client, provider: RedisStreams
+):
+    # The consumer reads the sender's FINISH straight from the store while it
+    # holds its task open and continues as new on it, so the wake Signal for
+    # that record resolves to a run that is closing and the server refuses it.
+    # The records are keyed by the chain and already where the successor reads
+    # them; the wake has to follow, and finish() must not fail the sender.
+    workflow_id = f"streams-redis-batches-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[BatchConsumer],
+        plugins=[provider],
+        max_cached_workflows=100,
+    ):
+        handle = await live_client.start_workflow(
+            BatchConsumer.run, [], id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        run_id: str | None = None
+        for number, batch in enumerate([["a", "b"], ["c"], ["d", "stop"]], start=1):
+            run_id = await asyncio.wait_for(
+                _current_open_run(live_client, workflow_id, run_id), 30
+            )
+            # A sender per batch: the stream spans the chain, so one identity
+            # numbering its records from the start again would collide with
+            # the batch before.
+            sender = stream.producer(
+                topic=INPUTS, producer_id=f"console-{number}", attempt=1
+            )
+            for op in batch:
+                await sender.append({"op": op})
+            await sender.finish()
+        assert await asyncio.wait_for(handle.result(), 30) == ["a", "b", "c", "d"]
+
+
 async def _stage_one(
     streams: RedisStreams,
     client: Client,
