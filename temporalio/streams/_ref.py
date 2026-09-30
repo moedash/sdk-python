@@ -27,7 +27,7 @@ if TYPE_CHECKING:
         StreamProvider,
     )
 
-__all__ = ["StreamOwnerKind", "StreamRef", "open_ref"]
+__all__ = ["RefHandle", "StreamOwnerKind", "StreamRef", "open_ref"]
 
 StreamOwnerKind = Literal["workflow", "activity", "standalone"]
 """What owns a stream: a workflow, an activity, or the stream itself."""
@@ -152,7 +152,7 @@ def _name(topic: str | StreamTopic[Any] | None) -> str | None:
     return name
 
 
-def open_ref(provider: StreamProvider, client: Client, ref: StreamRef) -> StreamHandle:
+def open_ref(provider: StreamProvider, client: Client, ref: StreamRef) -> RefHandle:
     """The handle ``ref`` names, on ``provider``.
 
     The ref's kind picks the provider call that opens the owner. A topic the
@@ -173,11 +173,16 @@ def open_ref(provider: StreamProvider, client: Client, ref: StreamRef) -> Stream
     else:
         assert ref.stream_id is not None
         handle = provider.get_standalone_stream_handle(client, ref.stream_id)
-    return _RefHandle(handle, ref)
+    return RefHandle(handle, ref)
 
 
-class _RefHandle:
+class RefHandle:
     """A provider's handle whose default topic is the one a ref names.
+
+    The handle :func:`open_ref`, :meth:`temporalio.client.Client.get_stream_handle`
+    and :func:`temporalio.activity.stream_handle` return for a
+    :class:`StreamRef`. It is a :class:`temporalio.streams.StreamHandle` whose
+    ``read``, ``latest`` and ``producer`` may leave the topic out.
 
     Every call passes through unchanged when it names a topic; one that
     names none gets the ref's, and is refused when the ref names none

@@ -10,3 +10,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "truncates: the case needs a way to drop a topic's oldest records",
     )
+    config.addinivalue_line(
+        "markers",
+        "hosts_standalone_streams: the case needs a stream with an id of its own and "
+        "no owner",
+    )

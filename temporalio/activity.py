@@ -302,6 +302,24 @@ def client() -> Client:
     return client
 
 
+@overload
+def stream_handle(
+    workflow_id: temporalio.streams.StreamRef,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.RefHandle: ...
+
+
+@overload
+def stream_handle(
+    workflow_id: str | None = None,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.StreamHandle: ...
+
+
 def stream_handle(
     workflow_id: str | temporalio.streams.StreamRef | None = None,
     *,

@@ -908,6 +908,26 @@ class Client:
             result_type=result_type,
         )
 
+    @overload
+    def get_stream_handle(
+        self,
+        workflow_id: temporalio.streams.StreamRef,
+        *,
+        run_id: str | None = None,
+        activity_id: str | None = None,
+        stream_id: str | None = None,
+    ) -> temporalio.streams.RefHandle: ...
+
+    @overload
+    def get_stream_handle(
+        self,
+        workflow_id: str | None = None,
+        *,
+        run_id: str | None = None,
+        activity_id: str | None = None,
+        stream_id: str | None = None,
+    ) -> temporalio.streams.StreamHandle: ...
+
     def get_stream_handle(
         self,
         workflow_id: str | temporalio.streams.StreamRef | None = None,

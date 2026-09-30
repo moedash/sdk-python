@@ -120,7 +120,7 @@ from temporalio.streams._record import (
     StreamRecord,
     Supersession,
 )
-from temporalio.streams._ref import StreamOwnerKind, StreamRef
+from temporalio.streams._ref import RefHandle, StreamOwnerKind, StreamRef
 from temporalio.streams._topic import StreamTopic, resolve_topic, topic
 
 __all__ = [
@@ -130,6 +130,7 @@ __all__ = [
     "Cursor",
     "ReadSource",
     "RecordKind",
+    "RefHandle",
     "StreamClosedError",
     "StreamCursorError",
     "StreamError",
