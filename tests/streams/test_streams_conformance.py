@@ -166,15 +166,12 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
                 TruncatingStreamHost.truncate, args=[topic, keep]
             )
 
+        # A publish is an Update, so the workflow answers with the position
+        # and refuses a divergent repeat: both capabilities hold here.
         yield ProviderCase(
             "workflow_streams",
             provider,
             client,
-            reports_positions=False,
-            # A publish is a Signal, so the dedupe decision is taken in the
-            # workflow with nowhere to report it. See the module docstring of
-            # the provider.
-            detects_divergent_retries=False,
             host=host,
             task_queue=worker.task_queue,
             truncate=truncate,

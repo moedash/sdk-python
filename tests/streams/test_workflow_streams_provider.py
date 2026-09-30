@@ -1,11 +1,12 @@
 """Conformance for the workflow_streams provider on the test environment's server.
 
 Runs the interface loop over the shipped Option 0 transport: an outside
-producer appends through the publish Signal, the workflow reads and
-republishes through its own state, and an outside reader follows the poll
-Update while the run is open and the tail Query once it has closed. The
-outside-surface cases shared by every provider run from
-``test_streams_conformance``; this file covers what the transport adds.
+producer appends through the publish Update, or the shipped publish Signal
+where a workflow has no Update, the workflow reads and republishes through
+its own state, and an outside reader follows the poll Update while the run is
+open and the tail Query once it has closed. The outside-surface cases shared
+by every provider run from ``test_streams_conformance``; this file covers
+what the transport adds.
 """
 
 from __future__ import annotations
@@ -26,17 +27,21 @@ from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowQueryFailedError,
+    WorkflowUpdateFailedError,
 )
 from temporalio.contrib.workflow_streams import PublishInput, WorkflowStream
 from temporalio.converter import DataConverter
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
     BEGINNING,
     END,
+    Cursor,
     RecordKind,
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
+    StreamProducerError,
     StreamUnsupportedError,
     Supersession,
 )
@@ -47,6 +52,7 @@ from temporalio.streams.providers.workflow_streams import (
     WorkflowStreamsProducer,
     WorkflowStreamsProvider,
     _InstanceStream,
+    _PublishResult,
 )
 from temporalio.worker._workflow_instance import QUERY_HANDLER_NOT_FOUND
 from tests.helpers import new_worker
@@ -150,20 +156,31 @@ async def test_retried_producer_dedupes_and_new_attempt_supersedes(
         stream = provider.get_stream_handle(client, workflow_id)
 
         first = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
-        # Positions are learnt at read time on this transport.
-        assert await first.append({"n": 1}) is None
-        # The retry of the same attempt re-sends its first batch.
+        # The publish Update answers with where the batch landed.
+        landed = await first.append({"n": 1})
+        assert landed is not None
+        # The retry of the same attempt re-sends its first batch and is
+        # answered with the same position.
         retry = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
-        await retry.append({"n": 1})
+        assert await retry.append({"n": 1}) == landed
         second = stream.producer(topic=INPUTS, producer_id="model", attempt=2)
         await second.append({"n": 2})
 
         records = await take(stream.read(topic=INPUTS, result_type=dict), 3)
         assert records[0].kind is RecordKind.DATA and records[0].attempt == 1
+        assert records[0].cursor == landed
         assert records[1].kind is RecordKind.SUPERSEDED
         assert records[1].supersession == Supersession("model", 1, 2)
         assert records[2].kind is RecordKind.DATA and records[2].attempt == 2
         assert all(r.topic == INPUTS for r in records)
+
+        # A sequence behind the producer's most recent one is stale, and a
+        # refusal is typed rather than a silent drop.
+        await second.append({"n": 3})
+        stale = stream.producer(topic=INPUTS, producer_id="model", attempt=2)
+        with pytest.raises(StreamProducerError, match="most recent"):
+            await stale.append({"n": "other"})
+        assert stale.transport == "update"
 
         await second.finish()
         await handle.signal(EchoLoop.release)
@@ -668,6 +685,48 @@ async def test_a_live_read_without_a_run_id_follows_a_reset(
         ]
 
 
+@workflow.defn
+class ShippedOnly:
+    """Holds the shipped stream object alone, as a workflow on a worker without the provider."""
+
+    def __init__(self) -> None:
+        self._stream = WorkflowStream()
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._released)
+
+
+async def test_a_workflow_without_the_publish_update_is_appended_to_by_signal(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    # The worker has no provider, so the workflow serves the shipped Signal
+    # and nothing else. The producer learns that from two rejections and
+    # falls back, and the batches land in the shipped log all the same.
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(client, ShippedOnly) as worker:
+        handle = await client.start_workflow(
+            ShippedOnly.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        producer = provider.get_stream_handle(client, workflow_id).producer(
+            topic=INPUTS, producer_id="model", attempt=1
+        )
+        assert await producer.append({"n": 1}) is None
+        assert producer.transport == "signal"
+        await producer.append({"n": 2}, {"n": 3})
+        assert (
+            await handle.query("__temporal_workflow_stream_offset", result_type=int)
+            == 3
+        )
+        await handle.signal(ShippedOnly.release)
+        await handle.result()
+
+
 async def test_a_running_workflow_without_the_provider_fails_the_read_clearly(
     client: Client, provider: WorkflowStreamsProvider
 ):
@@ -735,18 +794,25 @@ def _sequences(sent: list[PublishInput]) -> list[tuple[int, list[int]]]:
     ]
 
 
-def _producer(handle: _FlakyHandle) -> WorkflowStreamsProducer:
+def _producer(handle: Any, transport: Any = "signal") -> WorkflowStreamsProducer:
     return WorkflowStreamsProducer(
-        handle, DataConverter.default.payload_converter, INPUTS, "model", 1
+        handle,
+        DataConverter.default.payload_converter,
+        INPUTS,
+        "model",
+        1,
+        transport=transport,
+        retry_cooldown=timedelta(0),
     )
 
 
 async def test_a_retried_append_after_an_ambiguous_failure_writes_once():
+    # The Signal transport: what a producer that fell back to it does.
     handle = _FlakyHandle()
     producer = _producer(handle)
     with pytest.raises(ConnectionResetError):
         await producer.append({"n": 1})
-    await producer.append({"n": 1})
+    assert await producer.append({"n": 1}) is None
     await producer.append({"n": 2})
     # The retry carries the same signal sequence and the same record
     # sequence as the failed send, so the shipped dedupe drops the copy; the
@@ -764,6 +830,99 @@ async def test_a_batch_whose_signal_failed_goes_out_before_the_next_one():
     await producer.finish()
     assert _sequences(handle.sent) == [(2, [1]), (2, [1]), (4, [2, 3]), (5, [4])]
     assert _wires(handle.sent[-1])[0].kind == int(RecordKind.FINISH)
+
+
+class _UpdateHandle:
+    """A workflow handle serving the publish Update as the server and workflow would.
+
+    Answers a repeated update id from the first outcome, the way the server
+    does, positions each new batch at the head of a log, the way the
+    workflow does, and loses the reply of the first call when told to.
+    Without a handler it rejects every Update the way a workflow whose
+    worker predates it does, and takes Signals.
+    """
+
+    id = "update"
+
+    def __init__(self, *, lose_first_reply: bool = False, handler: bool = True):
+        self.sent: list[tuple[str, PublishInput]] = []
+        self.signalled: list[PublishInput] = []
+        self._outcomes: dict[str, _PublishResult] = {}
+        self._head = 0
+        self._lose = lose_first_reply
+        self._handler = handler
+
+    async def execute_update(
+        self, name: str, arg: PublishInput, *, id: str, result_type: Any
+    ) -> _PublishResult:
+        del name, result_type
+        self.sent.append((id, arg))
+        if not self._handler:
+            raise WorkflowUpdateFailedError(
+                ApplicationError(
+                    f"Update handler for 'x' {QUERY_HANDLER_NOT_FOUND}, known updates: []"
+                )
+            )
+        answer = self._outcomes.get(id)
+        if answer is None:
+            answer = _PublishResult("run", self._head + len(arg.items) - 1)
+            self._head += len(arg.items)
+            self._outcomes[id] = answer
+        if self._lose:
+            self._lose = False
+            raise ConnectionResetError("the server took the update, the reply was lost")
+        return answer
+
+    async def signal(self, name: str, arg: PublishInput) -> None:
+        del name
+        self.signalled.append(arg)
+
+
+def _at(offset: int) -> Cursor:
+    return Cursor(f"workflow_streams:run:{offset}")
+
+
+async def test_a_retried_update_after_a_lost_reply_is_answered_from_its_id():
+    handle = _UpdateHandle(lose_first_reply=True)
+    producer = _producer(handle, "update")
+    assert await producer.append() is None
+    with pytest.raises(ConnectionResetError):
+        await producer.append({"n": 1})
+    # The retry is the same Update: same producer, sequence and content make
+    # the same id, so the server answers with the outcome it already holds
+    # and the log takes the batch once. The batch after it is a new one.
+    assert await producer.append({"n": 1}) == _at(0)
+    assert await producer.append({"n": 2}) == _at(1)
+    assert await producer.append() == _at(1)
+    ids = [id for id, _ in handle.sent]
+    assert ids[0] == ids[1] != ids[2]
+    assert _sequences([arg for _, arg in handle.sent]) == [(2, [1]), (2, [1]), (3, [2])]
+
+
+async def test_a_batch_whose_update_failed_goes_out_before_the_next_one():
+    handle = _UpdateHandle(lose_first_reply=True)
+    producer = _producer(handle, "update")
+    with pytest.raises(ConnectionResetError):
+        await producer.append({"n": 1})
+    # The pending batch lands first, at offset 0, so the new one follows it.
+    assert await producer.append({"n": 2}, {"n": 3}) == _at(2)
+    await producer.finish()
+    sent = [arg for _, arg in handle.sent]
+    assert _sequences(sent) == [(2, [1]), (2, [1]), (4, [2, 3]), (5, [4])]
+    assert _wires(sent[-1])[0].kind == int(RecordKind.FINISH)
+
+
+async def test_a_producer_falls_back_to_the_signal_without_a_publish_update():
+    handle = _UpdateHandle(handler=False)
+    producer = _producer(handle, "update")
+    # Rejected twice across a task boundary means the workflow's worker
+    # predates the Update; the batch goes by Signal, and so does every later
+    # one, without asking again.
+    assert await producer.append({"n": 1}) is None
+    assert producer.transport == "signal"
+    assert await producer.append({"n": 2}) is None
+    assert len(handle.sent) == 2
+    assert _sequences(handle.signalled) == [(2, [1]), (3, [2])]
 
 
 class _Description:
@@ -955,7 +1114,14 @@ async def test_a_workflow_reader_starts_at_end_or_the_newest_records(
             result = asyncio.ensure_future(handle.result())
             if start == "end":
                 for _ in range(150):
-                    await producer.append({"n": "new"})
+                    try:
+                        await producer.append({"n": "new"})
+                    except StreamNotFoundError:
+                        # The Update returns once the workflow took the
+                        # batch, and reading it is what closes the workflow,
+                        # so the next append can find it gone before the
+                        # result has been noticed.
+                        break
                     done, _ = await asyncio.wait({result}, timeout=0.2)
                     if done:
                         break

@@ -56,7 +56,11 @@ to include examples, links to docs, or any other relevant information.
   worker plugin, so a workflow reads and publishes through
   `temporalio.contrib.workflow_streams` without naming it. Records are the
   `StreamRecord` proto inside the shipped item payload, and a handle without a
-  run id follows continue-as-new run by run.
+  run id follows continue-as-new run by run and a reset into the run reset to.
+  An outside publish is an Update that answers with the batch's position and
+  refuses a conflicting repeat, falling back to the shipped Signal on a
+  workflow whose worker predates it. A workflow's activity keeps its own
+  streams in the workflow's log under `activity/<id>/<name>`.
 
 ### Changed
 
