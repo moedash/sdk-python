@@ -191,6 +191,7 @@ class RefHandle:
     """
 
     def __init__(self, inner: StreamHandle, ref: StreamRef) -> None:
+        """Wrap ``inner``, the provider's handle on the owner ``ref`` names."""
         self._inner = inner
         self._ref = ref
 
@@ -212,6 +213,7 @@ class RefHandle:
         last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
+        """Read ``topic``, or the ref's topic without one; see :meth:`StreamHandle.read`."""
         # The protocol's overloads each take one shape of topic and
         # result_type; a passthrough hands over whatever it was given.
         inner: Any = self._inner
@@ -220,6 +222,7 @@ class RefHandle:
         )
 
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
+        """The newest cursor on ``topic``, or on the ref's topic without one."""
         return await self._inner.latest(topic=self._topic(topic))
 
     def producer(
@@ -229,15 +232,18 @@ class RefHandle:
         producer_id: str = "",
         attempt: int = 0,
     ) -> StreamProducer[Any]:
+        """A producer on ``topic``, or on the ref's topic without one."""
         inner: Any = self._inner
         return inner.producer(
             topic=self._topic(topic), producer_id=producer_id, attempt=attempt
         )
 
     def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """The ref this handle was opened from, or one to ``topic`` of the same owner."""
         if topic is None:
             return self._ref
         return self._inner.ref(topic=topic)
 
     async def close(self) -> None:
+        """Seal the stream, as :meth:`StreamHandle.close` does."""
         await self._inner.close()

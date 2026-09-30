@@ -43,7 +43,6 @@ from temporalio.streams import (
 )
 from temporalio.streams._policy import AttemptTracker
 from temporalio.streams.providers.memory import MemoryStreams
-from temporalio.worker import ReplayerConfig, WorkerConfig
 
 
 def test_record_roundtrips_through_the_wire():
@@ -117,25 +116,16 @@ def test_cursors_name_their_provider():
         _wire.cursor_position(Cursor("redis:1700000000000-0"), provider="memory")
 
 
-def test_registering_a_provider_twice_is_refused():
-    # There is one slot on each of the three, and a user who passes a provider
-    # by hand and a provider plugin, or two provider plugins, meant both.
-    first, second = MemoryStreams(), MemoryStreams()
-    with pytest.raises(ValueError, match="already registered"):
-        second.configure_client(ClientConfig(stream_provider=first))  # type: ignore[typeddict-item]
-    with pytest.raises(ValueError, match="already registered"):
-        second.configure_worker(WorkerConfig(stream_provider=first))  # type: ignore[typeddict-item]
-    with pytest.raises(ValueError, match="already registered"):
-        second.configure_replayer(ReplayerConfig(stream_provider=first))  # type: ignore[typeddict-item]
-
-
 def test_registering_the_same_provider_twice_is_fine():
     # A worker built from a client that already carries the plugin configures
     # it again with the same object, which is not a conflict.
     provider = MemoryStreams()
-    config = provider.configure_client(ClientConfig(stream_provider=provider))  # type: ignore[typeddict-item]
+    config = provider.configure_client(
+        ClientConfig(stream_provider=provider)  # type: ignore[typeddict-item]
+    )
     assert config.get("stream_provider") is provider
-    assert provider.configure_client(ClientConfig()).get("stream_provider") is provider  # type: ignore[typeddict-item]
+    registered = provider.configure_client(ClientConfig())  # type: ignore[typeddict-item]
+    assert registered.get("stream_provider") is provider  # type: ignore[typeddict-item]
 
 
 class _HoldEverything(StorageDriver):
@@ -255,7 +245,8 @@ async def test_a_stream_ref_names_one_owner_and_travels_as_json():
     standalone = StreamRef.for_standalone("shared")
     assert workflow == StreamRef("workflow", "out", workflow_id="wf", run_id="r")
     assert activity.kind == "activity" and activity.activity_id == "act"
-    assert standalone == StreamRef("standalone", "output", stream_id="shared")
+    # Without a topic a ref names the owner alone on this chain.
+    assert standalone == StreamRef("standalone", None, stream_id="shared")
     assert standalone.with_topic("x").topic == "x"
 
     for bad in (

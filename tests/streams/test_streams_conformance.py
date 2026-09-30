@@ -84,6 +84,8 @@ class ProviderCase:
     client: Client | None = None
     reports_positions: bool = True
     """``append()`` returns where the records landed."""
+    detects_divergent_retries: bool = True
+    """``append()`` compares a repeat's content with what it already holds."""
     host: Callable[[str], Awaitable[None]] | None = None
     """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
     truncate: Callable[[str, str, int], Awaitable[None]] | None = None
@@ -231,6 +233,7 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
+    "detects_divergent_retries": lambda case: case.detects_divergent_retries,
     "truncates": lambda case: case.truncate is not None,
     "hosts_standalone_streams": lambda case: case.hosts_standalone_streams,
 }
