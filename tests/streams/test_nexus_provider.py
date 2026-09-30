@@ -968,8 +968,10 @@ async def test_a_handle_names_its_stream_as_a_ref_that_opens_on_the_front(
     carried = converter.from_payloads([converter.to_payloads([ref])[0]], [StreamRef])
     assert carried == [ref]
     # Opened on the front, the ref reaches the same stream and its topic is
-    # the handle's default; the client accessor goes through open_ref.
-    opened = open_ref(front, cast(Client, None), ref)
+    # the handle's default; the client accessor goes through open_ref. The
+    # in-process endpoint is reached by id, so no client is needed to resolve it.
+    no_client: Any = None
+    opened = open_ref(front, no_client, ref)
     await opened.producer(producer_id="model", attempt=1).append({"n": 1})
     records = await take(handle.read(topic=INPUTS, result_type=dict), 1, timeout=30)
     assert records[0].value == {"n": 1}
