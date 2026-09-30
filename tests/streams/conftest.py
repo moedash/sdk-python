@@ -25,3 +25,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "standalone_activities: the case needs the streams of an activity outside "
         "any workflow",
     )
+    config.addinivalue_line(
+        "markers",
+        "hosts_standalone_streams: the case needs a stream with an id of its own and "
+        "no owner",
+    )
