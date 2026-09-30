@@ -78,6 +78,11 @@ to include examples, links to docs, or any other relevant information.
   which the handler maps onto the store's accessor for that owner. Configure
   the front with `data_converter=` to run a payload codec on the caller side,
   so records are encoded before they leave the process.
+  run id follows continue-as-new run by run and a reset into the run reset to.
+  An outside publish is an Update that answers with the batch's position and
+  refuses a conflicting repeat, falling back to the shipped Signal on a
+  workflow whose worker predates it. A workflow's activity keeps its own
+  streams in the workflow's log under `activity/<id>/<name>`.
 
 ### Changed
 

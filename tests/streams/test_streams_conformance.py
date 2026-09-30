@@ -93,6 +93,9 @@ class ProviderCase:
     """``append()`` returns where the records landed."""
     detects_divergent_retries: bool = True
     """``append()`` compares a repeat's content with what it already holds."""
+    encodes_bodies: bool = True
+    """The outside path runs each body through the client's data converter, so a
+    client with a converter of its own reads and writes another's records."""
     host: Callable[[str], Awaitable[None]] | None = None
     """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
     task_queue: str | None = None
@@ -253,15 +256,17 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
                 TruncatingStreamHost.truncate, args=[topic, keep]
             )
 
+        # A publish is an Update, so the workflow answers with the position
+        # and refuses a divergent repeat: both capabilities hold here. Bodies
+        # meet the codec and external storage at the transport's envelope,
+        # which the worker's converter has to match, so a case whose client
+        # carries a converter of its own is skipped; see the provider's
+        # module docstring.
         yield ProviderCase(
             "workflow_streams",
             provider,
             client,
-            reports_positions=False,
-            # A publish is a Signal, so the dedupe decision is taken in the
-            # workflow with nowhere to report it. See the module docstring of
-            # the provider.
-            detects_divergent_retries=False,
+            encodes_bodies=False,
             host=host,
             task_queue=worker.task_queue,
             truncate=truncate,
@@ -278,6 +283,7 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
     "detects_divergent_retries": lambda case: case.detects_divergent_retries,
+    "encodes_bodies": lambda case: case.encodes_bodies,
     "truncates": lambda case: case.truncate is not None,
 }
 
@@ -730,6 +736,7 @@ async def test_an_owned_stream_cannot_be_closed_by_a_handle(case: ProviderCase):
         await stream.close()
 
 
+@pytest.mark.encodes_bodies
 async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
     case: ProviderCase, client: Client
 ):
@@ -755,6 +762,7 @@ async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
 
 
 @pytest.mark.detects_divergent_retries
+@pytest.mark.encodes_bodies
 async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     case: ProviderCase, client: Client
 ):
