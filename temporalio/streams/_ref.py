@@ -12,12 +12,22 @@ a deployment runs.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
+from temporalio.streams._record import BEGINNING, Cursor, StreamRecord
 from temporalio.streams._topic import DEFAULT_TOPIC, StreamTopic, resolve_topic
 
-__all__ = ["StreamOwnerKind", "StreamRef"]
+if TYPE_CHECKING:
+    from temporalio.client import Client
+    from temporalio.streams._provider import (
+        StreamHandle,
+        StreamProducer,
+        StreamProvider,
+    )
+
+__all__ = ["StreamOwnerKind", "StreamRef", "open_ref"]
 
 StreamOwnerKind = Literal["workflow", "activity", "standalone"]
 """What owns a stream: a workflow, an activity, or the stream itself."""
@@ -140,3 +150,80 @@ class StreamRef:
         """
         name, _ = resolve_topic(topic)
         return dataclasses.replace(self, topic=name)
+
+
+def open_ref(provider: StreamProvider, client: Client, ref: StreamRef) -> StreamHandle:
+    """The handle ``ref`` names, on ``provider``.
+
+    The ref's kind picks the provider call that opens the owner, and its
+    topic becomes the handle's default, so a call that names none addresses
+    the stream the ref names. A provider that cannot host that owner kind
+    raises :class:`temporalio.streams.StreamUnsupportedError` from the call
+    that would have opened it.
+    """
+    if ref.kind == "workflow":
+        assert ref.workflow_id is not None
+        handle = provider.get_stream_handle(client, ref.workflow_id, run_id=ref.run_id)
+    elif ref.kind == "activity":
+        assert ref.activity_id is not None
+        handle = provider.get_activity_stream_handle(
+            client, ref.activity_id, workflow_id=ref.workflow_id, run_id=ref.run_id
+        )
+    else:
+        assert ref.stream_id is not None
+        handle = provider.get_standalone_stream_handle(client, ref.stream_id)
+    return _RefHandle(handle, ref)
+
+
+class _RefHandle:
+    """A provider's handle whose default topic is the one a ref names.
+
+    Every call passes through unchanged when it names a topic; one that
+    names none gets the ref's. The wrapper exists so a ref can address a
+    stream without every provider learning about refs.
+    """
+
+    def __init__(self, inner: StreamHandle, ref: StreamRef) -> None:
+        self._inner = inner
+        self._ref = ref
+
+    def _topic(self, topic: str | StreamTopic[Any] | None) -> str | StreamTopic[Any]:
+        return self._ref.topic if topic is None else topic
+
+    def read(
+        self,
+        *,
+        topic: str | StreamTopic[Any] | None = None,
+        after: Cursor = BEGINNING,
+        last: int | None = None,
+        result_type: type | None = None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        # The protocol's overloads each take one shape of topic and
+        # result_type; a passthrough hands over whatever it was given.
+        inner: Any = self._inner
+        return inner.read(
+            topic=self._topic(topic), after=after, last=last, result_type=result_type
+        )
+
+    async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
+        return await self._inner.latest(topic=self._topic(topic))
+
+    def producer(
+        self,
+        *,
+        topic: str | StreamTopic[Any] | None = None,
+        producer_id: str = "",
+        attempt: int = 0,
+    ) -> StreamProducer[Any]:
+        inner: Any = self._inner
+        return inner.producer(
+            topic=self._topic(topic), producer_id=producer_id, attempt=attempt
+        )
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        if topic is None:
+            return self._ref
+        return self._inner.ref(topic=topic)
+
+    async def close(self) -> None:
+        await self._inner.close()
