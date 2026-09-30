@@ -23,6 +23,11 @@ so nobody mistakes it for evidence:
   waits for the workflow.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the
   oldest ones, which stands in for a store's retention in tests.
+- The outside path encodes and decodes bodies through the client's data
+  converter, codec and external storage included, and fingerprints a retry
+  over the converted bytes first. The workflow half has no client, so a
+  workflow's own publish is stored as the payload converter produced it and
+  a workflow-side read hands records over as stored.
 
 The outside surface (producer identity, retry deduplication, positions,
 supersession, cursors) is faithful, which is what the conformance tests lean
@@ -44,7 +49,12 @@ import temporalio.converter
 from temporalio import workflow
 from temporalio.client import ActivityExecutionStatus, Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.streams._errors import StreamCursorError
+from temporalio.streams._body import content_fingerprint, decode_body, encode_body
+from temporalio.streams._errors import (
+    StreamCursorError,
+    StreamProducerError,
+    StreamUnsupportedError,
+)
 from temporalio.streams._ids import topic_key
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import (
@@ -105,15 +115,34 @@ class _Topic:
         *,
         writer: str | None = None,
         sequence: int = 0,
+        content: bytes | None = None,
     ) -> tuple[int, int]:
         """Store ``wires`` and return where they landed as ``(first offset, count)``.
 
-        With a ``writer``, a repeat of ``(writer, sequence)`` stores nothing
-        and returns where the original landed.
+        With a ``writer``, a repeat of ``(writer, sequence)`` carrying the same
+        content stores nothing and returns where the original landed.
+        ``content`` is the fingerprint the repeat is matched by; a producer
+        takes it over the records before their bodies are encoded, and
+        without one it is taken over ``wires`` as they are.
+
+        Raises:
+            StreamProducerError: ``(writer, sequence)`` is held with different
+                content.
         """
         key = (writer or "", sequence)
-        if writer is not None and key in self.seen:
-            return self.seen[key]
+        bodies = [wire.SerializeToString(deterministic=True) for wire in wires]
+        if content is None:
+            content = content_fingerprint(wires)
+        if writer is not None:
+            held = self.seen.get(key)
+            if held is not None:
+                first, count, seen_content = held
+                if seen_content != content:
+                    raise StreamProducerError(
+                        f"producer sequence {sequence} already used with different "
+                        f"content by {writer!r}"
+                    )
+                return first, count
         first = self.head
         self.records.extend(wire.SerializeToString() for wire in wires)
         if writer is not None:
@@ -237,7 +266,7 @@ class MemoryProducer(Generic[T]):
     def __init__(
         self,
         store: _Topic,
-        converter: temporalio.converter.PayloadConverter,
+        converter: temporalio.converter.DataConverter,
         topic: str,
         producer_id: str,
         attempt: int,
@@ -277,10 +306,10 @@ class MemoryProducer(Generic[T]):
         """
         if not values:
             return self._last
-        return self._write(
+        return await self._write(
             [
                 to_wire(
-                    self._converter,
+                    self._converter.payload_converter,
                     topic=self._topic,
                     kind=RecordKind.DATA,
                     value=value,
@@ -294,10 +323,10 @@ class MemoryProducer(Generic[T]):
 
     async def finish(self) -> None:
         """Write ``FINISH`` for this producer on this topic."""
-        self._write(
+        await self._write(
             [
                 to_wire(
-                    self._converter,
+                    self._converter.payload_converter,
                     topic=self._topic,
                     kind=RecordKind.FINISH,
                     producer_id=self._producer_id,
@@ -307,9 +336,14 @@ class MemoryProducer(Generic[T]):
             ]
         )
 
-    def _write(self, wires: list[WireRecord]) -> Cursor:
+    async def _write(self, wires: list[WireRecord]) -> Cursor:
+        # The fingerprint comes first, over the converted records, so a codec
+        # that encrypts with a fresh nonce cannot make a retry look divergent.
+        content = content_fingerprint(wires)
+        for wire in wires:
+            await encode_body(self._converter, wire)
         first, count = self._store.append(
-            wires, writer=self._writer, sequence=self._sequence
+            wires, writer=self._writer, sequence=self._sequence, content=content
         )
         self._sequence += len(wires)
         self._last = mint_cursor(_PROVIDER, str(first + count - 1))
@@ -340,9 +374,9 @@ class MemoryStreamHandle:
         self._activity_id = activity_id
         self._seen_pending = False
         self._converter = (
-            client.data_converter.payload_converter
+            client.data_converter
             if client is not None
-            else temporalio.converter.DataConverter.default.payload_converter
+            else temporalio.converter.DataConverter.default
         )
 
     def read(
@@ -377,7 +411,10 @@ class MemoryStreamHandle:
         result_type: type | None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         decoder = RecordDecoder(
-            self._converter, result_type, after=after, warn=logger.warning
+            self._converter.payload_converter,
+            result_type,
+            after=after,
+            warn=logger.warning,
         )
         closed = False
         while True:
@@ -392,6 +429,7 @@ class MemoryStreamHandle:
                 offset += 1
                 if wire is None:
                     continue
+                await decode_body(self._converter, wire)
                 for record in decoder.decode(cursor, wire):
                     yield record
             if closed:

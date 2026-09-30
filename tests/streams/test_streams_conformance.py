@@ -21,8 +21,10 @@ workflow-side handles and the two rules about Workflow Tasks live in
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,7 +33,15 @@ import pytest
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.common import RawValue
-from temporalio.converter import DataConverter
+from temporalio.converter import (
+    DataConverter,
+    ExternalStorage,
+    PayloadCodec,
+    StorageDriver,
+    StorageDriverClaim,
+    StorageDriverRetrieveContext,
+    StorageDriverStoreContext,
+)
 from temporalio.streams import (
     BEGINNING,
     END,
@@ -73,10 +83,18 @@ class ProviderCase:
     for retention, or ``None`` when the provider offers no way to."""
 
     async def open(
-        self, workflow_id: str, *, run_id: str | None = None
+        self,
+        workflow_id: str,
+        *,
+        run_id: str | None = None,
+        client: Client | None = None,
     ) -> StreamHandle:
         if self.host is not None:
             await self.host(workflow_id)
+        if client is not None:
+            # The explicit form, for a case that needs the handle to encode
+            # bodies through this client's data converter.
+            return self.provider.get_stream_handle(client, workflow_id, run_id=run_id)
         if self.client is not None:
             # A storage provider's setup registers the provider on the client,
             # so the cases go through the accessor an application uses.
@@ -87,6 +105,65 @@ class ProviderCase:
             workflow_id,
             run_id=run_id,
         )
+
+
+class RecordingDriver(StorageDriver):
+    """An in-memory external storage driver that counts what it was asked to hold."""
+
+    def __init__(self) -> None:
+        self.held: dict[str, bytes] = {}
+        self.stored = 0
+        self.retrieved = 0
+
+    def name(self) -> str:
+        return "recording"
+
+    async def store(
+        self, context: StorageDriverStoreContext, payloads: Sequence[Payload]
+    ) -> list[StorageDriverClaim]:
+        claims: list[StorageDriverClaim] = []
+        for payload in payloads:
+            key = f"payload-{len(self.held)}"
+            self.held[key] = payload.SerializeToString()
+            self.stored += 1
+            claims.append(StorageDriverClaim(claim_data={"key": key}))
+        return claims
+
+    async def retrieve(
+        self,
+        context: StorageDriverRetrieveContext,
+        claims: Sequence[StorageDriverClaim],
+    ) -> list[Payload]:
+        self.retrieved += len(claims)
+        return [Payload.FromString(self.held[c.claim_data["key"]]) for c in claims]
+
+
+class NonceCodec(PayloadCodec):
+    """A codec whose output differs on every call, as one that encrypts with a fresh nonce does."""
+
+    def __init__(self) -> None:
+        self.encoded = 0
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        self.encoded += len(payloads)
+        return [
+            Payload(
+                metadata={"encoding": b"binary/nonce"},
+                data=os.urandom(16) + p.SerializeToString(),
+            )
+            for p in payloads
+        ]
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return [Payload.FromString(p.data[16:]) for p in payloads]
+
+
+def _client_with(client: Client, converter: DataConverter) -> Client:
+    # The same connection, carrying the converter the case wants bodies to
+    # pass through.
+    config = client.config()
+    config["data_converter"] = converter
+    return Client(**config)
 
 
 async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
@@ -530,3 +607,56 @@ async def test_a_read_start_names_one_place(case: ProviderCase):
             stream.read(topic=OUT, after=appended, last=1)
     with pytest.raises(ValueError, match="either after= or last="):
         stream.read(topic=OUT, after=END, last=1)
+
+
+async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
+    case: ProviderCase, client: Client
+):
+    driver = RecordingDriver()
+    converter = dataclasses.replace(
+        DataConverter.default,
+        external_storage=ExternalStorage(drivers=[driver], payload_size_threshold=256),
+    )
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id, client=_client_with(client, converter))
+    producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    small = {"n": 1}
+    large = {"blob": "x" * 1024}
+    await producer.append(small)
+    await producer.append(large)
+    # Only the body over the threshold left the record; the small one stayed
+    # inline, as it would on any other payload the SDK sends.
+    assert driver.stored == 1
+
+    records = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in records] == [small, large]
+    assert driver.retrieved == 1
+
+
+@pytest.mark.detects_divergent_retries
+async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
+    case: ProviderCase, client: Client
+):
+    codec = NonceCodec()
+    converter = dataclasses.replace(DataConverter.default, payload_codec=codec)
+    workflow_id = new_workflow_id()
+    stream = await case.open(workflow_id, client=_client_with(client, converter))
+    first = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    landed = await first.append({"id": "r1"})
+    assert codec.encoded == 1
+
+    # The codec produced different bytes for the retry. The provider matched
+    # it by the plaintext it converted, so it is the same append: stored
+    # once, answered with the original position.
+    retry = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    again = await retry.append({"id": "r1"})
+    if landed is not None:
+        assert again == landed
+    # And a retry that really does differ is still told apart.
+    divergent = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    with pytest.raises(StreamProducerError):
+        await divergent.append({"id": "other"})
+
+    await first.append({"id": "r2"})
+    records = await take(stream.read(topic=OUT), 2)
+    assert [r.value for r in records] == [{"id": "r1"}, {"id": "r2"}]

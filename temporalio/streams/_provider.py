@@ -11,7 +11,10 @@ workflow code is bundled separately name the two halves in two packages.
 A provider only moves ``temporal.api.stream.v1.StreamRecord`` protos. The
 handles around it convert values, synthesize supersession and mint cursors,
 and turn a :class:`temporalio.streams.StreamTopic` into the plain name the
-provider sees, through :func:`temporalio.streams.resolve_topic`.
+provider sees, through :func:`temporalio.streams.resolve_topic`. What it owes
+a record's body on the way to and from its store, :class:`StreamProvider`
+lists and :func:`temporalio.streams.encode_body` and
+:func:`temporalio.streams.decode_body` do.
 """
 
 from __future__ import annotations
@@ -294,6 +297,25 @@ class StreamProvider(Protocol):
     ``Worker(plugins=[provider])`` and ``Replayer(plugins=[provider])`` for a
     worker alone, and open handles from it anywhere else. Nothing is global:
     two workers in one process may hold two providers.
+
+    **What a provider owes a record's body.** The handles convert a value
+    into the body with the payload converter and no more; what the SDK does
+    to every other payload it sends, the codec and external storage, the
+    provider owes the body too, through the client's data converter, so the
+    :class:`temporalio.converter.ExternalStorage` drivers an application
+    configured apply to stream bodies as well. It does that in one order.
+    First it takes the retry fingerprint, the identity a repeated append is
+    matched by, over the converted bytes, before the codec and before any
+    offload, so a codec that encrypts with a fresh nonce cannot turn a retry
+    into a divergent write; the plaintext hash also rides the record under
+    :data:`temporalio.streams.CONTENT_HASH_KEY`, where the store can read it.
+    Then it encodes the body and offloads it, and on a read it does the
+    reverse before the record reaches a reader. A workflow's own publish is
+    converted on the workflow thread and no further: the codec and the offload
+    run when the provider commits the task's batch, off that thread.
+    :func:`temporalio.streams.encode_body`,
+    :func:`temporalio.streams.decode_body` and
+    :func:`temporalio.streams.content_fingerprint` are that rule in code.
     """
 
     def workflow_provider(self) -> WorkflowStreamProvider:
