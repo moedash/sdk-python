@@ -11,12 +11,16 @@ workflow code is bundled separately name the two halves in two packages.
 A provider only moves ``temporal.api.stream.v1.StreamRecord`` protos. The
 handles around it convert values, synthesize supersession and mint cursors,
 and turn a :class:`temporalio.streams.StreamTopic` into the plain name the
-provider sees, through :func:`temporalio.streams.resolve_topic`.
+provider sees, through :func:`temporalio.streams.resolve_topic`. What it owes
+a record's body on the way to and from its store, :class:`StreamProvider`
+lists and :func:`temporalio.streams.encode_body` and
+:func:`temporalio.streams.decode_body` do.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload
 
 from temporalio.api.stream.v1 import StreamRecord as WireRecord
@@ -25,6 +29,7 @@ from temporalio.streams._topic import StreamTopic
 
 if TYPE_CHECKING:
     from temporalio.client import Client
+    from temporalio.streams._ref import StreamRef
 
 __all__ = [
     "ReadSource",
@@ -91,15 +96,23 @@ class StreamProducer(Protocol[T_contra]):
 
 
 class StreamHandle(Protocol):
-    """One workflow's stream, addressed by topic, from outside workflow code.
+    """One owner's stream, addressed by topic, from outside workflow code.
 
-    A handle follows the workflow's execution chain unless it was opened with
-    a ``run_id``, in which case it is pinned to that run. A topic is a
-    :class:`temporalio.streams.StreamTopic` definition, which carries the
-    record type, or a plain string with ``result_type=`` for a name decided
-    at runtime. A transport failure surfaces as
-    :class:`temporalio.service.RPCError`, never as the transport's own
-    exception type.
+    The owner is a workflow, an activity, or a standalone stream that has an
+    id of its own and no owner. A handle on a workflow follows its execution
+    chain unless it was opened with a ``run_id``, in which case it is pinned
+    to that run. A topic is a :class:`temporalio.streams.StreamTopic`
+    definition, which carries the record type, or a plain string with
+    ``result_type=`` for a name decided at runtime. A transport failure
+    surfaces as :class:`temporalio.service.RPCError`, never as the
+    transport's own exception type.
+
+    A handle is bound to its client and provider. To hand a stream to another
+    process, :meth:`ref` names it as a :class:`temporalio.streams.StreamRef`,
+    which is plain data; the receiver opens it with
+    :meth:`temporalio.client.Client.get_stream_handle` or
+    :func:`temporalio.activity.stream_handle`, and calls that name no topic
+    on that handle address the ref's topic.
     """
 
     @overload
@@ -213,6 +226,33 @@ class StreamHandle(Protocol):
         """
         ...
 
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A :class:`temporalio.streams.StreamRef` to ``topic`` of this owner.
+
+        Without ``topic`` it names :data:`temporalio.streams.DEFAULT_TOPIC`,
+        or the topic this handle was opened from a ref with. The ref carries
+        the owner exactly as this handle addresses it, a ``run_id`` included
+        when the handle is pinned, and no cursor or provider name, so it can
+        travel as a workflow argument, an activity result or a Nexus
+        operation input or result and be opened wherever a client is.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Seal the standalone stream this handle is on.
+
+        A sealed stream takes no more records: a later ``append`` raises
+        :class:`temporalio.streams.StreamClosedError`, while everything it
+        retains stays readable and a read on it ends once that tail has been
+        delivered. Idempotent. Only a standalone stream can be closed here,
+        because an owned stream ends with its owner.
+
+        Raises:
+            ValueError: This handle is on a workflow's or an activity's
+                stream.
+        """
+        ...
+
 
 class ReadSource(Protocol):
     """One subscription, as a provider supplies it to the workflow thread."""
@@ -306,6 +346,34 @@ class StreamProvider(Protocol):
     ``Worker(plugins=[provider])`` and ``Replayer(plugins=[provider])`` for a
     worker alone, and open handles from it anywhere else. Nothing is global:
     two workers in one process may hold two providers.
+
+    **What a provider owes a record's body.** The handles convert a value
+    into the body with the payload converter and no more; what the SDK does
+    to every other payload it sends, the codec and external storage, the
+    provider owes the body too, through the client's data converter, so the
+    :class:`temporalio.converter.ExternalStorage` drivers an application
+    configured apply to stream bodies as well. It does that in one order.
+    First it takes the retry fingerprint, the identity a repeated append is
+    matched by, over the converted bytes, before the codec and before any
+    offload, so a codec that encrypts with a fresh nonce cannot turn a retry
+    into a divergent write; the plaintext hash also rides the record under
+    :data:`temporalio.streams.CONTENT_HASH_KEY`, where the store can read it.
+    Then it encodes the body and offloads it, and on a read it does the
+    reverse before the record reaches a reader. A workflow's own publish is
+    converted on the workflow thread and no further: the codec and the offload
+    run when the provider commits the task's batch, off that thread.
+    :func:`temporalio.streams.encode_body`,
+    :func:`temporalio.streams.decode_body` and
+    :func:`temporalio.streams.content_fingerprint` are that rule in code.
+
+    **Standalone streams.** A stream can have an id of its own and no owner.
+    It is created on purpose, with :meth:`create_standalone_stream` and a
+    retention policy, and sealed on purpose, with the handle's ``close``. It
+    is addressed by topic like an owner's streams; how a provider lays its
+    topics out in the store is its own. A provider whose store cannot hold a
+    stream without an owner raises
+    :class:`temporalio.streams.StreamUnsupportedError` from both standalone
+    calls.
     """
 
     def workflow_provider(self) -> WorkflowStreamProvider:
@@ -319,6 +387,49 @@ class StreamProvider(Protocol):
 
         Without ``run_id`` it follows the execution chain, so a consumer keeps
         reading across continue-as-new; with one it is pinned to that run.
+        """
+        ...
+
+    async def create_standalone_stream(
+        self,
+        client: Client,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> StreamHandle:
+        """Create the standalone stream ``stream_id`` and return a handle on it.
+
+        The three policy arguments bound what the stream retains: records
+        older than ``retention``, beyond the newest ``max_records``, or past
+        ``max_bytes`` of stored records are dropped, and ``None`` leaves that
+        bound to the provider's default. Creating a stream that exists with
+        the same policy returns a handle on it, so a retried create is
+        harmless.
+
+        Raises:
+            ValueError: ``stream_id`` is empty, a bound is not positive, or
+                the stream exists with a different policy.
+            StreamUnsupportedError: The provider's store cannot hold a stream
+                without an owner.
+        """
+        ...
+
+    def get_standalone_stream_handle(
+        self, client: Client, stream_id: str
+    ) -> StreamHandle:
+        """A handle on the standalone stream ``stream_id``, which must exist.
+
+        Nothing here creates the stream: the first ``read``, ``latest`` or
+        ``producer`` on a stream that does not exist raises
+        :class:`temporalio.streams.StreamNotFoundError`, unless the provider
+        can wait for the stream to be created, in which case a ``read`` parks
+        until the first write and says so in its own documentation.
+
+        Raises:
+            StreamUnsupportedError: The provider's store cannot hold a stream
+                without an owner.
         """
         ...
 

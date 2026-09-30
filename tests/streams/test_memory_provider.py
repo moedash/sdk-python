@@ -12,7 +12,8 @@ import asyncio
 
 import pytest
 
-from temporalio.streams import StreamProducerError, topic
+from temporalio.api.stream.v1 import StreamRecord
+from temporalio.streams import CONTENT_HASH_KEY, StreamProducerError, topic
 from temporalio.streams.providers.memory import MemoryStreams
 
 OUT = topic("out", dict)
@@ -55,3 +56,14 @@ async def test_a_divergent_retry_leaves_the_store_alone():
     ):
         await retry.append({"n": 2})
     assert len(store.records) == 1
+
+
+async def test_a_stored_record_carries_the_plaintext_hash():
+    provider = MemoryStreams()
+    stream = provider.get_stream_handle(None, "wf-hash")  # type: ignore[arg-type]
+    await stream.producer(topic=OUT, producer_id="model", attempt=1).append({"n": 1})
+    stored = StreamRecord.FromString(provider._topic("wf-hash", OUT.name).records[0])
+    # What the store holds is the record after encode_body: the hash the
+    # server-side dedupe reads is on it, under the shared key.
+    assert stored.metadata[CONTENT_HASH_KEY].data.decode().isalnum()
+    assert len(stored.metadata[CONTENT_HASH_KEY].data) == 64
