@@ -13,7 +13,7 @@ reaches into private SDK code or adds a feature.
 | Client starts and consume stream: standalone alt 1, 2, 3 | `s2_standalone_streams.py` | alt 2 implemented; alts 1 and 3 open | Native only. Shows `StreamNotFoundError` for alt 1; wait-for-creation reads and start-committed stream arguments are open questions on the blueprint |
 | Workflow as Producer: as named handle | `s3_workflow_producer.py` | implemented | His turn loop with continue-as-new; the client follows the chain live |
 | Workflow as Producer: as return type | `s4_workflow_as_generator.py` | emulated | Default-topic publishes plus `FINISH`, result from the workflow; the generator signature is sugar not built |
-| Activity as Producer: as named handle | `s5_activity_producers.py` | implemented | Workflow topic (Path B), `scope="activity"`, standalone activity; the last two on native and memory only |
+| Activity as Producer: as named handle | `s5_activity_producers.py` | implemented | Workflow topic (Path B), `scope="activity"`, standalone activity; the last two on native, memory and Redis |
 | Activity as Producer: as return type | `s6_activity_as_generator.py` | emulated | Appends plus a heartbeat checkpoint; the retry resumes and readers see `SUPERSEDED` |
 | Workflow as Consumer | `s7_workflow_consumer.py` | implemented; foreign stream unsupported | Own inbound topic across continue-as-new, carrying a checkpoint because a run's topic is its own; reading a foreign stream from a workflow is rule 5 |
 | Client as Consumer over Standalone Nexus | `s8_nexus_consumers.py` (a) | implemented | Activity reads through the `NexusStreams` front and resumes from a heartbeat cursor |
@@ -29,6 +29,7 @@ examples one directory up do. `run.py` runs them all in order:
 python -m examples.streams.june_scenarios.run native --address 127.0.0.1:7333
 python -m examples.streams.june_scenarios.run workflow_streams --address 127.0.0.1:7333
 python -m examples.streams.june_scenarios.run memory --address 127.0.0.1:7333
+python -m examples.streams.june_scenarios.run redis --address 127.0.0.1:7333 --redis redis://127.0.0.1:6379
 python -m examples.streams.june_scenarios.s5_activity_producers native --address 127.0.0.1:7333
 ```
 
@@ -39,10 +40,15 @@ streams, and `s8` needs the server's Nexus HTTP ingress (`--http`, default
 commands above point every provider at it. `s8` creates and deletes its own
 Nexus endpoint. `memory` is offered here, not in the parent examples,
 because it is not replay-safe; these scenarios keep a warm cache. `redis`
-is accepted too, with `--redis`, but was not part of the runs behind this
-directory.
+runs with `--redis` naming a local Redis: `s1` apart from (d), `s3` to `s6`
+with all three parts of `s5`, and `s8` ran green against the stream server,
+and `s2` refuses as on every provider but `native`. `s7` fails on `redis`:
+the sender's `finish()` lands while the consumer run is continuing as new,
+the closing run refuses the provider's wake, and the producer raises
+`WakeNotAcknowledgedError` instead of waking the successor. That is open on
+the Redis provider, so `run.py redis` stops there.
 
 A scenario a provider cannot serve says so in its output and moves on:
-`s2` on anything but `native`, `s5` (b) and (c) on `workflow_streams` and
-`redis`, `s1` (d) on anything but `memory`, and `s7` on `memory`, which
-keeps one topic across a chain rather than one per run.
+`s2` on anything but `native`, `s5` (b) and (c) on `workflow_streams`,
+`s1` (d) on anything but `memory`, and `s7` on `memory`, which keeps one
+topic across a chain rather than one per run.
