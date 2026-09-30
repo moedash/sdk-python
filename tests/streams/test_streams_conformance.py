@@ -283,11 +283,6 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             # provider, where the case wants it at the call; its own live module
             # covers the trimmed floor.
             truncate=None,
-            # Matched by encoded bytes for now, so a retry through a codec that
-            # differs on every call is not recognized; standalone streams are
-            # not hosted yet.
-            detects_divergent_retries=False,
-            hosts_standalone_streams=False,
         )
         for handle in hosts.values():
             await handle.terminate()
