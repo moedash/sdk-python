@@ -48,7 +48,13 @@ to include examples, links to docs, or any other relevant information.
   code; a plain string names a topic decided at runtime, and a call that names
   no topic addresses the default topic, `streams.DEFAULT_TOPIC` (`"output"`,
   the server's default stream name). The record on the wire
-  is `temporal.api.stream.v1.StreamRecord` on every provider.
+  is `temporal.api.stream.v1.StreamRecord` on every provider. A stream is
+  handed to another process as a `streams.StreamRef`, plain data naming the
+  owner and the topic, which `client.get_stream_handle(ref)` and
+  `activity.stream_handle(ref)` open; `client.create_stream(stream_id, ...)`
+  creates a standalone stream with a retention policy, and its handle's
+  `close()` seals it. A provider runs record bodies through the client's data
+  converter, so a payload codec and external storage apply to them.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against.
 - **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
