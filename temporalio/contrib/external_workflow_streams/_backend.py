@@ -273,6 +273,23 @@ class StreamBackend(abc.ABC):
         inside a validation loop.
         """
 
+    async def tail_cursor(self, key: StreamKey, *, before_last: int = 0) -> Cursor:
+        """The boundary the newest ``before_last`` records begin after.
+
+        With ``before_last=0`` it is the boundary after the newest record, so a
+        read from it sees only what is appended after this call. ``BEGINNING``
+        when the stream holds fewer records than asked for. Resolved on the
+        Worker, never on the Workflow thread, and recorded with the
+        subscription so replay reads it from the marker instead of asking
+        again. A provider that cannot answer leaves this as it is, and a
+        subscription that asks for a tail start fails when the Worker resolves
+        it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot resolve a start {before_last} records "
+            f"before the tail of {key}; subscribe with a cursor instead"
+        )
+
     # --- parking (P2b) ------------------------------------------------------
 
     supports_leased_claims: ClassVar[bool] = False

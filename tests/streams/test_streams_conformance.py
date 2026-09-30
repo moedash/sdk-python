@@ -274,7 +274,21 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
                     StreamHost.run, id=workflow_id, task_queue=worker.task_queue
                 )
 
-        yield ProviderCase("redis", provider, client, host=host)
+        yield ProviderCase(
+            "redis",
+            provider,
+            client,
+            host=host,
+            # The refusal of a trimmed cursor lands on the first step on this
+            # provider, where the case wants it at the call; its own live module
+            # covers the trimmed floor.
+            truncate=None,
+            # Matched by encoded bytes for now, so a retry through a codec that
+            # differs on every call is not recognized; standalone streams are
+            # not hosted yet.
+            detects_divergent_retries=False,
+            hosts_standalone_streams=False,
+        )
         for handle in hosts.values():
             await handle.terminate()
     await provider.close()

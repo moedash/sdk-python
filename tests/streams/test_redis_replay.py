@@ -36,6 +36,7 @@ from temporalio.contrib.external_workflow_streams._output_backend import (
 from temporalio.converter import WorkflowSerializationContext
 from temporalio.streams import (
     BEGINNING,
+    END,
     Cursor,
     RecordKind,
     StreamCursorError,
@@ -1054,3 +1055,107 @@ async def test_a_workflow_does_not_read_its_own_records_from_the_shared_log(
     await Replayer(workflows=[EchoOnOneTopic], plugins=[provider]).replay_workflow(
         await handle.fetch_history()
     )
+
+
+@workflow.defn
+class NewestTwoOnGo:
+    """Opens ``inputs`` at its newest two records once told to, and returns them."""
+
+    def __init__(self) -> None:
+        self._go = False
+
+    @workflow.signal
+    def go(self) -> None:
+        self._go = True
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        await workflow.wait_condition(lambda: self._go)
+        reader = workflow.stream_reader(INPUTS, last=2)
+        values: list[Any] = []
+        async for value in reader.values():
+            values.append(value["n"])
+            if len(values) == 2:
+                reader.close()
+        return values
+
+
+@workflow.defn
+class FromNowOnGo:
+    """Opens ``inputs`` at its end once told to, and returns the first value."""
+
+    def __init__(self) -> None:
+        self._go = False
+
+    @workflow.signal
+    def go(self) -> None:
+        self._go = True
+
+    @workflow.run
+    async def run(self) -> Any:
+        await workflow.wait_condition(lambda: self._go)
+        reader = workflow.stream_reader(INPUTS, after=END)
+        async for value in reader.values():
+            reader.close()
+            return value["n"]
+        return None
+
+
+async def test_a_workflow_reader_starts_at_the_last_n_records_and_replays_there(
+    live_client: Client, provider: RedisStreams
+):
+    # The worker positions the subscription against the log after the task that
+    # opened it and records the entry with it; replay takes the entry from
+    # History, so what lands in the log later does not move the start. The
+    # producer needs the run to exist, so the reader opens on a signal.
+    workflow_id = f"streams-redis-last-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[NewestTwoOnGo],
+        plugins=[provider],
+    ):
+        handle = await live_client.start_workflow(
+            NewestTwoOnGo.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+        await producer.append({"n": 1}, {"n": 2}, {"n": 3}, {"n": 4})
+        await handle.signal(NewestTwoOnGo.go)
+        assert await asyncio.wait_for(handle.result(), 60) == [3, 4]
+        history = await handle.fetch_history()
+        await producer.append({"n": 5}, {"n": 6})
+    # Offline, with two more records in the log than the run ever saw.
+    await Replayer(workflows=[NewestTwoOnGo], plugins=[provider]).replay_workflow(
+        history
+    )
+
+
+async def test_a_workflow_reader_at_end_skips_what_was_there_and_replays(
+    live_client: Client, provider: RedisStreams
+):
+    workflow_id = f"streams-redis-end-{uuid.uuid4().hex}"
+    async with Worker(
+        live_client,
+        task_queue=f"tq-{workflow_id}",
+        workflows=[FromNowOnGo],
+        plugins=[provider],
+    ):
+        handle = await live_client.start_workflow(
+            FromNowOnGo.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+        )
+        stream = provider.get_stream_handle(live_client, workflow_id)
+        producer = stream.producer(topic=INPUTS, producer_id="tool", attempt=1)
+        await producer.append({"n": "old"})
+        await handle.signal(FromNowOnGo.go)
+        result = asyncio.ensure_future(handle.result())
+        # The subscription is positioned when the worker gets to it, which the
+        # test does not observe, so appends keep coming until the run takes one.
+        for _ in range(150):
+            await producer.append({"n": "new"})
+            done, _ = await asyncio.wait({result}, timeout=0.2)
+            if done:
+                break
+        assert await asyncio.wait_for(result, 60) == "new"
+        history = await handle.fetch_history()
+    await Replayer(workflows=[FromNowOnGo], plugins=[provider]).replay_workflow(history)

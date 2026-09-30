@@ -47,7 +47,13 @@ The mapping, in one place:
 - Cursors are ``redis:<ms>-<seq>`` and name an entry of the topic's log, so a
   cursor a workflow reader returned seeds an outside read and the other way
   round. A reader opened without a cursor starts where the chain's
-  predecessor run committed, which is the transport's own rule.
+  predecessor run committed, which is the transport's own rule. ``END`` and
+  ``last=N`` are positioned against the log when the read starts: outside,
+  on the first step of the generator, since the call itself cannot reach the
+  store; inside a workflow, by the worker right after the Workflow Task that
+  opened the subscription, which records the entry it resolved in the marker
+  beside the subscription, so replay and a cold start read it from History
+  and never ask the log again.
 - A workflow's streams are keyed by the chain's first run, so a handle
   follows continue-as-new by construction and ``run_id`` only decides whose
   close ends a read.
@@ -105,7 +111,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Final, Generic, TypeVar
@@ -122,6 +128,7 @@ from temporalio.contrib.external_workflow_streams import (
     ChainKeyMismatchError,
     ExternalStreamProducer,
     Offset,
+    StartAtTail,
     StreamDirection,
     WakeNotAcknowledgedError,
     WorkflowChainKey,
@@ -152,6 +159,7 @@ from temporalio.contrib.external_workflow_streams._output_backend import (
     OutputStageManifest,
     OutputStageNotFoundError,
     OutputStageResolutionError,
+    OutputStageStatus,
     StagedOutputRecord,
 )
 from temporalio.contrib.external_workflow_streams._output_client import (
@@ -176,9 +184,18 @@ from temporalio.streams._errors import (
     StreamError,
     StreamNotFoundError,
     StreamProducerError,
+    StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
-from temporalio.streams._record import BEGINNING, Cursor, RecordKind, StreamRecord
+from temporalio.streams._record import (
+    BEGINNING,
+    END,
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    check_read_start,
+)
+from temporalio.streams._ref import StreamRef
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -257,6 +274,45 @@ def _entry_id(token: str | bytes) -> tuple[int, int]:
     text = token.decode() if isinstance(token, bytes) else token
     ms, _, seq = text.partition("-")
     return int(ms), int(seq or 0)
+
+
+#: Given one page of log entries, newest first, the ids of the ones that are
+#: not records to the reader asking.
+_SkipIn = Callable[[list[Any]], Awaitable[set[str]]]
+
+
+async def _tail_after(
+    store: Any, name: str, before_last: int, *, skip_in: _SkipIn | None = None
+) -> Offset | None:
+    """The entry the newest ``before_last`` records of the log ``name`` come after.
+
+    ``None`` when the log holds no more than ``before_last`` records, which
+    means a read from the beginning. With ``before_last=0`` it is the newest
+    record itself, the boundary a read at ``END`` starts after. Walks the log
+    from its newest entry, leaving out what ``skip_in`` names.
+    """
+    needed = before_last + 1
+    end = "+"
+    seen = 0
+    while True:
+        page: Any = await store.xrevrange(name, end, "-", count=max(needed - seen, 16))
+        if not page:
+            return None
+        skipped = await skip_in(page) if skip_in is not None else set()
+        for entry_id, _fields in page:
+            token = _text(entry_id)
+            if token in skipped:
+                continue
+            seen += 1
+            if seen == needed:
+                return Offset(token)
+        ms, seq = _entry_id(page[-1][0])
+        if seq:
+            end = f"{ms}-{seq - 1}"
+        elif ms:
+            end = f"{ms - 1}-18446744073709551615"
+        else:
+            return None
 
 
 def _trim_floor(backend: Any) -> str:
@@ -586,6 +642,52 @@ class _TopicLogBackend(RedisStreamBackend):
             if key.direction is StreamDirection.OUTPUT or not _is_staged(fields)
         ]
 
+    async def tail_cursor(self, key: StreamKey, *, before_last: int = 0) -> Any:
+        """The boundary the newest ``before_last`` records begin after.
+
+        Through an input key the workflow's own staged entries are not
+        records, as on every read the transport makes; through an output key
+        only an aborted batch's entries are left out, since a pending one may
+        still commit.
+        """
+        name = self.stream_key(key)
+        skip_in = (
+            self._staged_in
+            if key.direction is StreamDirection.INPUT
+            else self._aborted_in(key)
+        )
+        after = await _tail_after(self._client, name, before_last, skip_in=skip_in)
+        return TRANSPORT_BEGINNING if after is None else AFTER(after)
+
+    @staticmethod
+    async def _staged_in(page: list[Any]) -> set[str]:
+        return {_text(entry_id) for entry_id, fields in page if _is_staged(fields)}
+
+    def _aborted_in(self, key: StreamKey) -> _SkipIn:
+        async def aborted(page: list[Any]) -> set[str]:
+            staged = {
+                _text(entry_id): _text(fields[_STAGE_FIELD])
+                for entry_id, fields in page
+                if _is_staged(fields)
+            }
+            if not staged:
+                return set()
+            stage_ids = sorted(set(staged.values()))
+            statuses = dict(
+                zip(
+                    stage_ids,
+                    await self._client.hmget(self._output_status_key(key), stage_ids),
+                )
+            )
+            return {
+                entry_id
+                for entry_id, stage_id in staged.items()
+                if _text(statuses.get(stage_id) or "")
+                == OutputStageStatus.ABORTED.value
+            }
+
+        return aborted
+
     async def retains(self, key: StreamKey, offset: Offset) -> bool:
         """Whether the record at ``offset`` survived trimming."""
         return await _retained(self._client, self.stream_key(key), offset)
@@ -669,16 +771,23 @@ class _RedisWorkflowProvider:
     def __init__(self, idle_timeout: timedelta) -> None:
         self._input = external_stream.with_options(idle_timeout=idle_timeout)
 
-    def open_reader(self, topic: str, *, after: Cursor) -> ReadSource:
+    def open_reader(
+        self, topic: str, *, after: Cursor, last: int | None = None
+    ) -> ReadSource:
         _require_topic(topic)
+        check_read_start(after, last)
+        subscribe = self._input.topic(topic, type=bytes).subscribe
+        if last is not None or after == END:
+            # The tail is where the log is when the worker looks, which the
+            # workflow thread cannot see: the transport has the worker resolve
+            # it after this task and record the entry with the subscription.
+            return _RedisReadSource(subscribe(start_at_tail=StartAtTail(last or 0)))
         position = _position(after)
         # Without a position the transport resumes where the chain's
         # predecessor run committed; with one, that is where the wait starts
         # and what the marker's header records.
         start = None if position is None else AFTER(position)
-        return _RedisReadSource(
-            self._input.topic(topic, type=bytes).subscribe(start_cursor=start)
-        )
+        return _RedisReadSource(subscribe(start_cursor=start))
 
     def open_writer(self, topic: str) -> WriteSink:
         _require_topic(topic)
@@ -1026,13 +1135,15 @@ class RedisStreamHandle:
         *,
         topic: str | StreamTopic[Any],
         after: Cursor = BEGINNING,
+        last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` after ``after`` until the owner closes.
+        """Yield records on ``topic`` from where the read starts until the owner closes.
 
         For a workflow that is the chain, or the pinned run; for an activity it is
         the activity reaching a terminal status, learned as the module docstring
-        says.
+        says. ``END`` and ``last=`` are positioned against the log on the first
+        step of the generator, since this call cannot reach the store.
 
         Two refusals and they do not land together. A cursor another provider minted,
         or one that is not a Redis entry id, is refused by this call: reading the
@@ -1042,16 +1153,21 @@ class RedisStreamHandle:
         first.
 
         Raises:
+            ValueError: ``last`` is not positive or came with a cursor.
             StreamCursorError: The cursor is another provider's, or does not name
                 a Redis entry.
         """
+        check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
-        # Parsed here so a foreign cursor fails this call, not the first
-        # iteration of the generator.
-        position = _position(after)
+        # A tail start is resolved in the generator; a cursor is parsed here so
+        # a foreign one fails this call, not the first iteration.
+        tail = last if last is not None else (0 if after == END else None)
+        position = None if tail is not None else _position(after)
         if self._owner is not None:
-            return self._read_owned(self._owner, topic, position, after, result_type)
-        return self._read(topic, position, after, result_type)
+            return self._read_owned(
+                self._owner, topic, position, after, result_type, tail=tail
+            )
+        return self._read(topic, position, after, result_type, tail=tail)
 
     async def _read_owned(
         self,
@@ -1060,16 +1176,25 @@ class RedisStreamHandle:
         position: Offset | None,
         after: Cursor,
         result_type: type | None,
+        *,
+        tail: int | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        decoder = RecordDecoder(
-            self._converter, result_type, after=after, warn=logger.warning
-        )
         backend = self._streams._require_backend()
         # Described on every read, so a handle without a run reads the run that
         # is current when the read starts, and ends with it.
         owner = await _resolve_owner(self._client, owner)
         store = backend._client
         name = owner.key(_prefix(backend), topic)
+        if tail is not None:
+            position = await _tail_after(store, name, tail)
+            after = (
+                BEGINNING
+                if position is None
+                else mint_cursor(_PROVIDER, position.token)
+            )
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
         if (
             position is not None
             and isinstance(backend, _TopicLogBackend)
@@ -1154,14 +1279,24 @@ class RedisStreamHandle:
         position: Offset | None,
         after: Cursor,
         result_type: type | None,
+        *,
+        tail: int | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        decoder = RecordDecoder(
-            self._converter, result_type, after=after, warn=logger.warning
-        )
         backend = self._streams._require_backend()
         assert self._workflow_id is not None
         chain = await _chain(self._client, self._workflow_id)
         key = chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+        if tail is not None:
+            resolved = await backend.tail_cursor(key, before_last=tail)
+            position = None if resolved.is_beginning else resolved.offset
+            after = (
+                BEGINNING
+                if position is None
+                else mint_cursor(_PROVIDER, position.token)
+            )
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
         if (
             position is not None
             and isinstance(backend, _TopicLogBackend)
@@ -1290,6 +1425,27 @@ class RedisStreamHandle:
             return BEGINNING
         assert tail.offset is not None
         return mint_cursor(_PROVIDER, tail.offset.token)
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A ref to ``topic`` of this owner's stream, pinned as this handle is."""
+        if self._owner is not None:
+            return StreamRef.for_activity(
+                self._owner.activity_id,
+                workflow_id=self._owner.workflow_id,
+                run_id=self._owner.run_id,
+                topic=topic,
+            )
+        assert self._workflow_id is not None
+        return StreamRef.for_workflow(
+            self._workflow_id, run_id=self._run_id, topic=topic
+        )
+
+    async def close(self) -> None:
+        """Refuse: an owned stream ends with its owner, not by a caller."""
+        raise ValueError(
+            "only a standalone stream can be closed; this handle is on an owned "
+            "stream, which ends when its workflow or activity does"
+        )
 
     def producer(
         self,
@@ -1444,6 +1600,36 @@ class RedisStreams(ProviderPlugin):
         a late attempt still lands, and a read that has ended does not see it.
         """
         return RedisStreamHandle(self, client, workflow_id, run_id, activity_id)
+
+    async def create_standalone_stream(
+        self,
+        client: Client,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> RedisStreamHandle:
+        """Refuse: this provider keeps no stream without an owner.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the redis provider does not host standalone streams"
+        )
+
+    def get_standalone_stream_handle(
+        self, client: Client, stream_id: str
+    ) -> RedisStreamHandle:
+        """Refuse: this provider keeps no stream without an owner.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the redis provider does not host standalone streams"
+        )
 
     async def close(self) -> None:
         """Release the Redis connection this provider opened; a caller's stays open."""
