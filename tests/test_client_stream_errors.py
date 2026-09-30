@@ -15,6 +15,7 @@ import pytest
 from temporalio.client_stream import translate_error
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import (
+    StreamClosedError,
     StreamCursorError,
     StreamNotFoundError,
     StreamProducerError,
@@ -55,6 +56,16 @@ def test_a_read_below_the_floor_is_a_cursor_error(details: str) -> None:
     assert str(error) == details
 
 
+@pytest.mark.parametrize(
+    "details",
+    ["STREAM_CLOSED: stream is closed", "stream is closed"],
+)
+def test_an_append_on_a_sealed_stream_is_a_closed_error(details: str) -> None:
+    error = translate_error(grpc.StatusCode.FAILED_PRECONDITION, details)
+    assert isinstance(error, StreamClosedError)
+    assert str(error) == details
+
+
 def test_not_found_is_a_not_found_error() -> None:
     error = translate_error(grpc.StatusCode.NOT_FOUND, "no stream with id 's'")
     assert isinstance(error, StreamNotFoundError)
@@ -67,11 +78,11 @@ def test_an_unrelated_message_keeps_its_code() -> None:
         (grpc.StatusCode.FAILED_PRECONDITION, RPCStatusCode.FAILED_PRECONDITION),
         (grpc.StatusCode.UNAVAILABLE, RPCStatusCode.UNAVAILABLE),
     ]:
-        error = translate_error(code, "stream is closed", b"raw")
+        error = translate_error(code, "no records to append", b"raw")
         assert type(error) is RPCError
         assert error.status == expected
         assert error.raw_grpc_status == b"raw"
-        assert str(error) == "stream is closed"
+        assert str(error) == "no records to append"
 
 
 def test_a_token_needs_its_code_and_its_separator() -> None:
