@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from temporalio import workflow
+from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import (
     Client,
@@ -41,6 +41,7 @@ from temporalio.streams import (
 )
 from temporalio.streams._wire import WireRecord
 from temporalio.streams.providers.workflow_streams import (
+    WorkflowStreamsActivityHandle,
     WorkflowStreamsHandle,
     WorkflowStreamsProducer,
     WorkflowStreamsProvider,
@@ -847,13 +848,101 @@ async def test_a_workflow_reader_starts_at_end_or_the_newest_records(
             assert await asyncio.wait_for(result, 30) == expected
 
 
-async def test_a_stream_an_activity_owns_is_refused(
+async def test_a_standalone_activity_stream_is_refused(
     client: Client, provider: WorkflowStreamsProvider
 ):
-    # The log lives inside a running workflow, so an activity has no place to
-    # put a stream of its own here. The refusal is the documented error, not
-    # an AttributeError or a stream silently put somewhere else.
-    with pytest.raises(StreamUnsupportedError, match="activity"):
+    # The log lives inside a running workflow, so an activity outside any
+    # workflow has no place to put a stream of its own here. The refusal is
+    # the documented error, not an AttributeError or a stream silently put
+    # somewhere else. An activity a workflow scheduled is served.
+    with pytest.raises(StreamUnsupportedError, match="standalone"):
         provider.get_activity_stream_handle(client, "act")
-    with pytest.raises(StreamUnsupportedError, match="activity"):
-        provider.get_activity_stream_handle(client, "act", workflow_id="wf")
+    assert isinstance(
+        provider.get_activity_stream_handle(client, "act", workflow_id="wf"),
+        WorkflowStreamsActivityHandle,
+    )
+
+
+TOKENS = "tokens"
+
+
+@activity.defn
+async def stream_then_finish(count: int) -> None:
+    producer = activity.stream_handle(scope="activity").producer(topic=TOKENS)
+    for n in range(count):
+        await producer.append({"n": n})
+    # Long enough for a reader polling every few milliseconds to see this
+    # activity pending before it finishes.
+    await asyncio.sleep(1)
+    await producer.finish()
+
+
+@workflow.defn
+class RunsAnActivityThenLingers:
+    """Runs the streaming activity by a fixed id, then waits to be released."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self, count: int) -> None:
+        await workflow.execute_activity(
+            stream_then_finish,
+            count,
+            activity_id="streamer",
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        await workflow.wait_condition(lambda: self._released)
+
+
+async def test_an_activity_read_ends_with_the_activity_while_the_workflow_runs(
+    client: Client, provider: WorkflowStreamsProvider
+):
+    workflow_id = f"streams-ws-{uuid.uuid4().hex}"
+    async with new_worker(
+        client,
+        RunsAnActivityThenLingers,
+        activities=[stream_then_finish],
+        plugins=[provider],
+    ) as worker:
+        handle = await client.start_workflow(
+            RunsAnActivityThenLingers.run,
+            2,
+            id=workflow_id,
+            task_queue=worker.task_queue,
+        )
+        own = provider.get_activity_stream_handle(
+            client, "streamer", workflow_id=workflow_id
+        )
+
+        async def read_everything() -> list[Any]:
+            return [r async for r in own.read(topic=TOKENS, result_type=dict)]
+
+        records = await asyncio.wait_for(read_everything(), 30)
+        assert [(r.kind, r.value) for r in records] == [
+            (RecordKind.DATA, {"n": 0}),
+            (RecordKind.DATA, {"n": 1}),
+            (RecordKind.FINISH, None),
+        ]
+        # The producer is the activity, and the record carries the plain
+        # topic name; the reserved name is the log's business.
+        assert all(r.producer_id == "streamer" and r.attempt == 1 for r in records)
+        assert all(r.topic == TOKENS for r in records)
+        # The activity's end ended the read: the workflow is still running.
+        assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+
+        # The workflow's topic of the same name is another stream, and the
+        # reserved name cannot be reached as a workflow topic.
+        workflow_stream = provider.get_stream_handle(client, workflow_id)
+        assert await workflow_stream.latest(topic=TOKENS) == BEGINNING
+        with pytest.raises(ValueError, match="reserved"):
+            workflow_stream.read(topic="activity/streamer/tokens")
+        with pytest.raises(ValueError, match="reserved"):
+            workflow_stream.producer(topic="activity/x", producer_id="p", attempt=1)
+
+        await handle.signal(RunsAnActivityThenLingers.release)
+        await handle.result()

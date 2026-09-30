@@ -40,6 +40,13 @@ The mapping, in one place:
   through the handler the shipped class registers on it. An evicted and
   rebuilt workflow gets its own, so a task that failed leaks nothing into
   the next attempt's log and a replayed run does not see records twice.
+- An activity a workflow scheduled keeps its own streams inside that
+  workflow's log, under the reserved topic ``activity/<activity id>/<name>``
+  with ``%`` and ``/`` in the id percent-encoded, the way the native
+  provider reserves ``activity/`` in the owner's map. The record itself
+  carries the plain name. A standalone activity has no workflow to host a
+  log, so its streams are refused, and a workflow's own topic may not start
+  with the reserved prefix.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ import base64
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any, Generic, NoReturn, TypeVar
+from typing import Any, Generic, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -106,6 +113,7 @@ from temporalio.streams.providers import ProviderPlugin
 from temporalio.worker._workflow_instance import QUERY_HANDLER_NOT_FOUND
 
 __all__ = [
+    "WorkflowStreamsActivityHandle",
     "WorkflowStreamsHandle",
     "WorkflowStreamsProducer",
     "WorkflowStreamsProvider",
@@ -118,6 +126,9 @@ _TAIL_QUERY = "__temporal_streams_tail"
 _LATEST_QUERY = "__temporal_streams_latest"
 _START_QUERY = "__temporal_streams_start"
 _ENCODING = b"binary/plain"
+# The topics an activity owns live in its workflow's log under this prefix,
+# so no workflow topic may start with it.
+_ACTIVITY_PREFIX = "activity/"
 # The same cap the shipped poll path answers under, because both are one
 # response through the same server.
 _MAX_TAIL_RESPONSE_BYTES = 1_000_000
@@ -134,6 +145,21 @@ logger = logging.getLogger(__name__)
 def _require_topic(topic: str) -> None:
     if not topic:
         raise ValueError("topic must not be empty")
+    if topic.startswith(_ACTIVITY_PREFIX):
+        raise ValueError(
+            f"topic {topic!r} is reserved: names under {_ACTIVITY_PREFIX!r} hold the "
+            "streams of the workflow's activities on the workflow_streams provider"
+        )
+
+
+def _activity_topic(activity_id: str, topic: str) -> str:
+    """The reserved name ``topic`` of ``activity_id``'s streams takes in the log.
+
+    The id is percent-encoded so an id holding ``/`` cannot be read as two
+    components; the name comes last, so it may hold anything.
+    """
+    escaped = activity_id.replace("%", "%25").replace("/", "%2F")
+    return f"{_ACTIVITY_PREFIX}{escaped}/{topic}"
 
 
 def _cursor(run_id: str, offset: int) -> Cursor:
@@ -207,7 +233,8 @@ class _InstanceStream:
         size = 0
         next_offset = self.stream.next_offset
         more_ready = False
-        for offset, item_topic, payload in self.stream.items_from(from_offset):
+        held = self.stream.items_from(from_offset)
+        for offset, item_topic, payload in held:
             if item_topic != topic:
                 continue
             data = base64.b64encode(payload.SerializeToString()).decode("ascii")
@@ -220,6 +247,9 @@ class _InstanceStream:
             "items": items,
             "next_offset": next_offset,
             "more_ready": more_ready,
+            # Where the retained log starts at or past ``from_offset``: a
+            # reader whose position is below it has fallen behind truncation.
+            "base_offset": held[0][0] if held else next_offset,
         }
 
     def _latest(self, topic: str) -> int:
@@ -420,11 +450,19 @@ class WorkflowStreamsProducer(Generic[T]):
         topic: str,
         producer_id: str,
         attempt: int,
+        *,
+        item_topic: str | None = None,
     ) -> None:
-        """Bind this producer to ``topic`` on the workflow behind ``handle``."""
+        """Bind this producer to ``topic`` on the workflow behind ``handle``.
+
+        ``item_topic`` is the name the log files the records under when it
+        differs from the name the records carry, as an activity's reserved
+        topics do.
+        """
         self._handle = handle
         self._converter = converter
         self._topic = topic
+        self._item_topic = topic if item_topic is None else item_topic
         self._producer_id = producer_id
         self._attempt = attempt
         # One-based, because zero on the wire says the producer does not
@@ -483,7 +521,7 @@ class WorkflowStreamsProducer(Generic[T]):
             )
             sequence += 1
             entries.append(
-                PublishEntry(topic=self._topic, data=_entry_data(_wrap(wire)))
+                PublishEntry(topic=self._item_topic, data=_entry_data(_wrap(wire)))
             )
         return entries, sequence
 
@@ -559,6 +597,7 @@ class WorkflowStreamsHandle:
         """
         check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
+        wire_topic = self._wire_topic(topic)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         named = None if after == END else _position(after)
@@ -566,7 +605,12 @@ class WorkflowStreamsHandle:
             raise StreamCursorError(
                 f"cursor {after.token!r} names another run than this handle is pinned to"
             )
-        return self._read(topic, named, after, last, result_type)
+        return self._read(wire_topic, named, after, last, result_type)
+
+    def _wire_topic(self, topic: str) -> str:
+        """The name the log files ``topic`` under: the topic itself for a workflow's."""
+        _require_topic(topic)
+        return topic
 
     async def _read(
         self,
@@ -810,6 +854,13 @@ class WorkflowStreamsHandle:
                 raise
             # The History is gone; nothing is left to serve.
             return [], from_offset, False
+        if from_offset and wire.get("base_offset", from_offset) > from_offset:
+            # Restarting from the base would hand the caller records it
+            # already handled, and only the caller can decide to do that.
+            raise StreamCursorError(
+                f"offset {from_offset} of workflow {self._workflow_id!r} run "
+                f"{handle.run_id!r} is no longer retained"
+            )
         items = [
             (item["offset"], Payload.FromString(base64.b64decode(item["data"])))
             for item in wire["items"]
@@ -860,12 +911,13 @@ class WorkflowStreamsHandle:
         topic's record.
         """
         topic, _ = resolve_topic(topic)
+        wire_topic = self._wire_topic(topic)
         handle = self._handle(self._run_id)
         description = await self._describe(handle)
         if description is None:
             raise StreamNotFoundError(f"workflow {self._workflow_id!r} was not found")
         try:
-            head = await handle.query(_LATEST_QUERY, topic, result_type=int)
+            head = await handle.query(_LATEST_QUERY, wire_topic, result_type=int)
         except WorkflowQueryFailedError as error:
             if QUERY_HANDLER_NOT_FOUND not in str(error):
                 raise StreamError(
@@ -901,10 +953,108 @@ class WorkflowStreamsHandle:
     ) -> WorkflowStreamsProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
         topic, _ = resolve_topic(topic)
+        wire_topic = self._wire_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return WorkflowStreamsProducer(
-            self._handle(self._run_id), self._converter, topic, producer_id, attempt
+            self._handle(self._run_id),
+            self._converter,
+            topic,
+            producer_id,
+            attempt,
+            item_topic=wire_topic,
         )
+
+
+class WorkflowStreamsActivityHandle(WorkflowStreamsHandle):
+    """The streams one activity of a workflow owns, kept in that workflow's log.
+
+    Each topic is the reserved topic ``activity/<activity id>/<name>`` of the
+    workflow's log, so an activity's ``tokens`` and its workflow's ``tokens``
+    are two streams. The activity belongs to one run, so the handle pins the
+    run on first use and never follows a successor. A read ends when the
+    workflow closes, or once the activity has been seen pending, is pending
+    no longer and the read delivered a record: a stream the activity never
+    wrote has nothing to close, so a read on it waits for the workflow.
+
+    A read here polls the tail Query and describes the workflow between
+    polls, every ``poll_cooldown``, rather than parking on the poll Update:
+    an Update parked in the workflow returns only when the log grows, so it
+    could not notice the activity ending, and each abandoned one would stay
+    parked against the run's Update caps.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        workflow_id: str,
+        run_id: str | None,
+        activity_id: str,
+        poll_cooldown: timedelta,
+    ) -> None:
+        """Address ``activity_id``'s streams inside ``workflow_id``'s log."""
+        super().__init__(client, workflow_id, run_id, poll_cooldown)
+        self._activity_id = activity_id
+
+    def _wire_topic(self, topic: str) -> str:
+        return _activity_topic(self._activity_id, topic)
+
+    async def _read(
+        self,
+        topic: str,
+        named: tuple[str, int] | None,
+        after: Cursor,
+        last: int | None,
+        result_type: type | None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        if named is not None:
+            run_id, offset = named[0], named[1] + 1
+        elif last is not None or after == END:
+            run_id, offset = await self._start_on_current_run(topic, last or 0)
+            after = _cursor(run_id, offset - 1)
+        else:
+            run_id, offset = await self._current_run(), 0
+        handle = self._handle(run_id)
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
+        cooldown = self._poll_cooldown.total_seconds()
+        seen_pending = False
+        delivered = False
+        ended = False
+        while True:
+            more = True
+            while more:
+                page, offset, more = await self._tail(handle, topic, offset)
+                for offset_, payload in page:
+                    for record in self._records(decoder, run_id, offset_, payload):
+                        delivered = True
+                        yield record
+            if ended:
+                return
+            description = await self._describe(handle)
+            if description is None:
+                raise StreamNotFoundError(
+                    f"workflow {self._workflow_id!r} run {run_id!r} was not found"
+                )
+            pending = any(
+                info.activity_id == self._activity_id
+                for info in description.raw_description.pending_activities
+            )
+            seen_pending = seen_pending or pending
+            # One more pass after learning the stream ended, so a record that
+            # landed between the tail and the describe is not lost.
+            ended = description.status != WorkflowExecutionStatus.RUNNING or (
+                seen_pending and not pending and delivered
+            )
+            if not ended:
+                await asyncio.sleep(cooldown)
+
+    async def _current_run(self) -> str:
+        description = await self._describe(self._handle(self._run_id))
+        if description is None:
+            raise StreamNotFoundError(f"workflow {self._workflow_id!r} was not found")
+        assert description.run_id is not None
+        return description.run_id
 
 
 class WorkflowStreamsProvider(ProviderPlugin):
@@ -938,20 +1088,26 @@ class WorkflowStreamsProvider(ProviderPlugin):
         *,
         workflow_id: str | None = None,
         run_id: str | None = None,
-    ) -> NoReturn:
-        """Refused: this provider cannot hold a stream an activity owns.
+    ) -> WorkflowStreamsActivityHandle:
+        """A handle on the streams an activity of ``workflow_id`` owns.
 
-        The log lives inside a running workflow and is served by its handlers,
-        and a standalone activity has no workflow to host one. An activity
-        writes to its workflow's topics instead, through
-        ``activity.stream_handle()`` without a scope.
+        They live in the workflow's log under the reserved topics
+        ``activity/<activity id>/<name>``, and ``run_id`` pins the workflow's
+        run. Without ``workflow_id`` the activity is a standalone one, which
+        has no workflow to host a log, so this provider refuses it; such an
+        activity addresses a workflow's stream by ``workflow_id`` instead.
 
         Raises:
-            StreamUnsupportedError: Always.
+            StreamUnsupportedError: ``workflow_id`` was not given.
         """
-        raise StreamUnsupportedError(
-            "the workflow streams provider cannot hold a stream an activity owns: its "
-            "log lives inside a running workflow"
+        if workflow_id is None:
+            raise StreamUnsupportedError(
+                "the workflow_streams provider cannot hold a stream a standalone "
+                "activity owns: its log lives inside a running workflow, and no "
+                "workflow hosts this activity's"
+            )
+        return WorkflowStreamsActivityHandle(
+            client, workflow_id, run_id, activity_id, self._poll_cooldown
         )
 
     async def close(self) -> None:
