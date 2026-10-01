@@ -44,7 +44,9 @@ $defs:
       A stream, named by its owner and a topic: what an operation returns to
       hand a stream to its caller, and what read and append take in place of
       an owner spelled out. It names no cursor and no store, so the same
-      reference is good behind any endpoint that serves the owner.
+      reference is good behind any endpoint that serves the owner. A member
+      the owner kind does not use is absent or null; null is how the SDK
+      writes an unset member of its own StreamRef.
     properties:
       kind:
         type: string
@@ -56,20 +58,20 @@ $defs:
           A standalone stream has its own stream_id and no execution behind
           it.
       workflow_id:
-        type: string
+        oneOf: [{ type: string }, { type: "null" }]
         description: >-
           The owning workflow, or the workflow that scheduled the owning
           activity. Required for a workflow owner.
       run_id:
-        type: string
+        oneOf: [{ type: string }, { type: "null" }]
         description: >-
           Pin the owner to this run. Absent follows the execution chain
           across continue-as-new, which is what a producer normally wants.
       activity_id:
-        type: string
+        oneOf: [{ type: string }, { type: "null" }]
         description: "The owning activity. Required for an activity owner."
       stream_id:
-        type: string
+        oneOf: [{ type: string }, { type: "null" }]
         description: "The stream's own id. Required for a standalone owner."
       topic:
         type: string
