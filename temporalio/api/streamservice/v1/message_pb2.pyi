@@ -10,6 +10,7 @@ import sys
 import google.protobuf.descriptor
 import google.protobuf.internal.containers
 import google.protobuf.message
+import google.protobuf.timestamp_pb2
 
 import temporalio.api.common.v1.message_pb2
 import temporalio.api.stream.v1.message_pb2
@@ -134,26 +135,40 @@ global___StreamRecord = StreamRecord
 
 class StreamRecordBatch(google.protobuf.message.Message):
     """One append is one batch, and one batch is one data node. The server stores
-    this serialized and opaque; it decodes only to trim a partial first page or
-    to apply a topic filter.
+    this serialized and opaque; it decodes only to trim a partial first page, to
+    apply a topic filter, or to learn the batch's age.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     RECORDS_FIELD_NUMBER: builtins.int
+    APPENDED_AT_FIELD_NUMBER: builtins.int
     @property
     def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
         global___StreamRecord
     ]: ...
+    @property
+    def appended_at(self) -> google.protobuf.timestamp_pb2.Timestamp:
+        """When the batch was appended, for the lifecycle's retention age. Kept here
+        rather than in the stream's state so the state stays free of a per-batch
+        index; the age check reads the oldest batches to find it.
+        """
     def __init__(
         self,
         *,
         records: collections.abc.Iterable[global___StreamRecord] | None = ...,
+        appended_at: google.protobuf.timestamp_pb2.Timestamp | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["appended_at", b"appended_at"]
+    ) -> builtins.bool: ...
     def ClearField(
-        self, field_name: typing_extensions.Literal["records", b"records"]
+        self,
+        field_name: typing_extensions.Literal[
+            "appended_at", b"appended_at", "records", b"records"
+        ],
     ) -> None: ...
 
 global___StreamRecordBatch = StreamRecordBatch
