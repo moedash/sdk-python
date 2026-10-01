@@ -110,8 +110,8 @@ class StreamHandle(Protocol):
     A handle is bound to its client and provider. To hand a stream to another
     process, :meth:`ref` names it as a :class:`temporalio.streams.StreamRef`,
     which is plain data; the receiver opens it with
-    :meth:`temporalio.client.Client.get_stream_handle` or
-    :func:`temporalio.activity.stream_handle`, and calls that name no topic
+    ``temporalio.client.Client.get_stream_handle`` or
+    ``temporalio.activity.stream_handle``, and calls that name no topic
     on that handle address the ref's topic.
     """
 

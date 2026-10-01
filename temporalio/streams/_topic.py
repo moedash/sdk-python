@@ -40,8 +40,8 @@ not reserve it: refusing it would make one stream reachable under two rules.
 class StreamTopic(Generic[T]):
     """A topic of a workflow's stream, with the type its records decode to.
 
-    Made with :func:`topic`. Hand it to :func:`temporalio.workflow.stream_reader`,
-    :func:`temporalio.workflow.stream_writer`, and to a handle's ``read``,
+    Made with :func:`topic`. Hand it to ``temporalio.workflow.stream_reader``,
+    ``temporalio.workflow.stream_writer``, and to a handle's ``read``,
     ``latest`` and ``producer``, and the record and value types follow from
     it; ``result_type=`` is not passed alongside a definition.
     """
