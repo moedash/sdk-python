@@ -2103,7 +2103,10 @@ async def test_a_segment_replays_in_its_recorded_cross_stream_order(
 
     runtime = make_runtime(manager, backend)
     instance = FakeInstance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: instance,
+    )
     _install_runtime(instance, runtime)
 
     runtime.begin_replay(plan.annotation.header.streams)

@@ -148,7 +148,10 @@ class FakeInstance:
 @pytest.fixture
 def workflow_instance(monkeypatch: pytest.MonkeyPatch) -> FakeInstance:
     instance = FakeInstance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: instance,
+    )
     return instance
 
 
@@ -242,7 +245,10 @@ def test_wait_ids_reproduce_across_two_runs_of_the_same_code(
 
     def run_once() -> list[int]:
         instance = FakeInstance()
-        monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+        monkeypatch.setattr(
+            "temporalio.contrib.external_workflow_streams._api._run_holder",
+            lambda: instance,
+        )
         _install_runtime(instance, FakeRuntime())
         return [
             external_stream.topic(name).subscribe().wait_id
@@ -276,12 +282,18 @@ def test_a_second_run_restarts_the_counter(monkeypatch: pytest.MonkeyPatch) -> N
     A module global would outlive the Run and hand its wait ids to the next one.
     """
     first_instance = FakeInstance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: first_instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: first_instance,
+    )
     _install_runtime(first_instance, FakeRuntime())
     external_stream.topic("tokens").subscribe()
 
     second_instance = FakeInstance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: second_instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: second_instance,
+    )
     _install_runtime(second_instance, FakeRuntime())
 
     assert external_stream.topic("tokens").subscribe().wait_id == 1
