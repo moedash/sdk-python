@@ -86,6 +86,8 @@ class StreamState(google.protobuf.message.Message):
     BUDGET_FIELD_NUMBER: builtins.int
     APPENDED_BYTES_FIELD_NUMBER: builtins.int
     NOTIFY_PENDING_FIELD_NUMBER: builtins.int
+    HELD_BYTES_FIELD_NUMBER: builtins.int
+    AGE_TASK_PENDING_FIELD_NUMBER: builtins.int
     head_offset: builtins.int
     """Visibility frontier. Readers never observe an offset at or past this."""
     base_offset: builtins.int
@@ -132,6 +134,17 @@ class StreamState(google.protobuf.message.Message):
     schedule none of their own; the task reads the head when it runs, so it
     carries every append that landed before it.
     """
+    held_bytes: builtins.int
+    """Bytes of the batches the stream still holds, from the floor to the head.
+    Kept for the lifecycle's byte cap, which the appended total cannot serve
+    once truncation has reclaimed behind the floor. A batch straddling the
+    floor counts whole, since it is held whole.
+    """
+    age_task_pending: builtins.bool
+    """An age check is scheduled and has not run yet. Appends while it is set
+    schedule none of their own; the check re-arms itself while the stream
+    holds records and lowers the flag when it holds none.
+    """
     def __init__(
         self,
         *,
@@ -149,6 +162,8 @@ class StreamState(google.protobuf.message.Message):
         budget: global___StreamBudget | None = ...,
         appended_bytes: builtins.int = ...,
         notify_pending: builtins.bool = ...,
+        held_bytes: builtins.int = ...,
+        age_task_pending: builtins.bool = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -166,6 +181,8 @@ class StreamState(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "age_task_pending",
+            b"age_task_pending",
             "appended_bytes",
             b"appended_bytes",
             "base_offset",
@@ -182,6 +199,8 @@ class StreamState(google.protobuf.message.Message):
             b"consumers",
             "head_offset",
             b"head_offset",
+            "held_bytes",
+            b"held_bytes",
             "lifecycle",
             b"lifecycle",
             "notify_pending",
@@ -411,9 +430,14 @@ class StreamLifecycle(google.protobuf.message.Message):
 
     RETENTION_FIELD_NUMBER: builtins.int
     MAX_ITEMS_FIELD_NUMBER: builtins.int
+    MAX_BYTES_FIELD_NUMBER: builtins.int
     @property
     def retention(self) -> google.protobuf.duration_pb2.Duration:
-        """How long a closed stream stays readable before it is deleted."""
+        """How long a record stays readable, and how long a closed stream stays
+        readable before it is deleted. On an open stream batches older than this
+        are reclaimed behind the floor, never past an active consumer's floor; on
+        a closed one it is the time to deletion.
+        """
     max_items: builtins.int
     """Cap on readable messages. Whole batches are reclaimed once the floor
     passes them, so a capped stream has bounded storage.
@@ -424,11 +448,18 @@ class StreamLifecycle(google.protobuf.message.Message):
     behaves as a lifetime quota measured from that subscription and appends
     past it are refused rather than reclaiming behind the consumer.
     """
+    max_bytes: builtins.int
+    """Cap on held bytes. Unlike max_items it reclaims nothing: an append that
+    would take the held bytes past it is refused, and room comes back only as
+    the record cap, an explicit truncation or the retention age reclaims
+    batches behind the floor.
+    """
     def __init__(
         self,
         *,
         retention: google.protobuf.duration_pb2.Duration | None = ...,
         max_items: builtins.int = ...,
+        max_bytes: builtins.int = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["retention", b"retention"]
@@ -436,7 +467,12 @@ class StreamLifecycle(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "max_items", b"max_items", "retention", b"retention"
+            "max_bytes",
+            b"max_bytes",
+            "max_items",
+            b"max_items",
+            "retention",
+            b"retention",
         ],
     ) -> None: ...
 
