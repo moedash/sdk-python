@@ -143,6 +143,11 @@ class WorkflowServiceStub(object):
             request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionRequest.SerializeToString,
             response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionResponse.FromString,
         )
+        self.WakeWorkflowExecution = channel.unary_unary(
+            "/temporal.api.workflowservice.v1.WorkflowService/WakeWorkflowExecution",
+            request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.WakeWorkflowExecutionRequest.SerializeToString,
+            response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.WakeWorkflowExecutionResponse.FromString,
+        )
         self.SignalWithStartWorkflowExecution = channel.unary_unary(
             "/temporal.api.workflowservice.v1.WorkflowService/SignalWithStartWorkflowExecution",
             request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWithStartWorkflowExecutionRequest.SerializeToString,
@@ -932,6 +937,17 @@ class WorkflowServiceServicer(object):
 
         This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
         task being created for the execution.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def WakeWorkflowExecution(self, request, context):
+        """WakeWorkflowExecution asks a running Workflow Execution to run a Workflow
+        Task because a source it consumes has moved. Unlike a Signal it records
+        no event, carries no payload, and folds with other wakes for the same
+        source, so a burst of writes costs one task. The Workflow learns the
+        source and its position from the task and reads the source itself.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -2037,6 +2053,11 @@ def add_WorkflowServiceServicer_to_server(servicer, server):
             servicer.SignalWorkflowExecution,
             request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionRequest.FromString,
             response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionResponse.SerializeToString,
+        ),
+        "WakeWorkflowExecution": grpc.unary_unary_rpc_method_handler(
+            servicer.WakeWorkflowExecution,
+            request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.WakeWorkflowExecutionRequest.FromString,
+            response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.WakeWorkflowExecutionResponse.SerializeToString,
         ),
         "SignalWithStartWorkflowExecution": grpc.unary_unary_rpc_method_handler(
             servicer.SignalWithStartWorkflowExecution,
@@ -3217,6 +3238,35 @@ class WorkflowService(object):
             "/temporal.api.workflowservice.v1.WorkflowService/SignalWorkflowExecution",
             temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionRequest.SerializeToString,
             temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def WakeWorkflowExecution(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/temporal.api.workflowservice.v1.WorkflowService/WakeWorkflowExecution",
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.WakeWorkflowExecutionRequest.SerializeToString,
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.WakeWorkflowExecutionResponse.FromString,
             options,
             channel_credentials,
             insecure,
