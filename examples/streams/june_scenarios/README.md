@@ -10,14 +10,14 @@ reaches into private SDK code or adds a feature.
 | Roey's scenario | File | Status | Note |
 |---|---|---|---|
 | Client starts and consume stream: primary and named | `s1_client_consumes.py` | implemented | Default topic with no name, a typed topic, `last=N`, `after=END`, `BEGINNING` on a moved floor (memory only) |
-| Client starts and consume stream: standalone alt 1, 2, 3 | `s2_standalone_streams.py` | alt 2 implemented; alts 1 and 3 open | Native only. Shows `StreamNotFoundError` for alt 1; wait-for-creation reads and start-committed stream arguments are open questions on the blueprint |
+| Client starts and consume stream: standalone alt 1, 2, 3 | `s2_standalone_streams.py` | alts 1, 2 and 3 implemented | Alt 1 as a read that parks until `create_stream` and an append land (native; memory and Redis answer `StreamNotFoundError`); alt 2 as `client.create_stream`, a policy floor, `close()` and `StreamClosedError`; alt 3 as a stream created first and passed into the workflow start as a `StreamRef`, opened in the activity with `activity.stream_handle(ref)`. A start that commits the stream with the workflow remains the design question. Workflow Streams declines |
 | Workflow as Producer: as named handle | `s3_workflow_producer.py` | implemented | His turn loop with continue-as-new; the client follows the chain live |
 | Workflow as Producer: as return type | `s4_workflow_as_generator.py` | emulated | Default-topic publishes plus `FINISH`, result from the workflow; the generator signature is sugar not built |
-| Activity as Producer: as named handle | `s5_activity_producers.py` | implemented | Workflow topic (Path B), `scope="activity"`, standalone activity; the last two on native, memory and Redis |
+| Activity as Producer: as named handle | `s5_activity_producers.py` | implemented | Workflow topic (Path B), `scope="activity"`, standalone activity; all three on native, memory and Redis, the last two skipped on Workflow Streams |
 | Activity as Producer: as return type | `s6_activity_as_generator.py` | emulated | Appends plus a heartbeat checkpoint; the retry resumes and readers see `SUPERSEDED` |
 | Workflow as Consumer | `s7_workflow_consumer.py` | implemented; foreign stream unsupported | Own inbound topic across continue-as-new, handing over per batch with one producer per batch and carrying a checkpoint; runs on native, Workflow Streams and Redis, memory skips by design; reading a foreign stream from a workflow is rule 5 |
 | Client as Consumer over Standalone Nexus | `s8_nexus_consumers.py` (a) | implemented | Activity reads through the `NexusStreams` front and resumes from a heartbeat cursor |
-| Nexus operation handler | `s8_nexus_consumers.py` (b) | emulated | The operation returns a `StreamRef` that the client reads through the front; streams as operation results are the nexgen IDL follow-on |
+| Nexus operation handler | `s8_nexus_consumers.py` (b) | implemented | The operation returns `temporalio.streams.StreamRef`, taken from the producing workflow's handle, and the client opens it with `get_stream_handle(ref)` on a client whose provider is the front; a stream type of its own in the operation IDL is the nexgen follow-on |
 | Workflow as Consumer over Nexus | `s8_nexus_consumers.py` docstring | unsupported by design | A workflow's reads ride its Workflow Task and never cross Nexus |
 
 ## Running
@@ -26,26 +26,28 @@ Each file runs on its own and takes the provider's name, the same way the
 examples one directory up do. `run.py` runs them all in order:
 
 ```sh
-python -m examples.streams.june_scenarios.run native --address 127.0.0.1:7333
-python -m examples.streams.june_scenarios.run workflow_streams --address 127.0.0.1:7333
-python -m examples.streams.june_scenarios.run memory --address 127.0.0.1:7333
-python -m examples.streams.june_scenarios.run redis --address 127.0.0.1:7333 --redis redis://127.0.0.1:6379
-python -m examples.streams.june_scenarios.s5_activity_producers native --address 127.0.0.1:7333
+python -m examples.streams.june_scenarios.run native --address 127.0.0.1:7433 --http http://127.0.0.1:7343
+python -m examples.streams.june_scenarios.run workflow_streams --address 127.0.0.1:7433 --http http://127.0.0.1:7343
+python -m examples.streams.june_scenarios.run memory --address 127.0.0.1:7433 --http http://127.0.0.1:7343
+python -m examples.streams.june_scenarios.run redis --address 127.0.0.1:7433 --http http://127.0.0.1:7343 --redis redis://127.0.0.1:6379
+python -m examples.streams.june_scenarios.s2_standalone_streams native --address 127.0.0.1:7433
 ```
 
-`native` needs a server built from the stream-carrying branch. `s5` (b)
-and (c) need a server with standalone activities and activity-owned
-streams, and `s8` needs the server's Nexus HTTP ingress (`--http`, default
-`http://127.0.0.1:7243`); the stream-carrying server has all three, so the
-commands above point every provider at it. `s8` creates and deletes its own
-Nexus endpoint. `memory` is offered here, not in the parent examples,
-because it is not replay-safe; these scenarios keep a warm cache. `redis`
-runs with `--redis` naming a local Redis: `s1` apart from (d) and `s3` to
-`s8`, with all three parts of `s5` and `s7` handing over per batch, ran
-green against the stream server, and `s2` refuses as on every provider but
-`native`.
+`native` needs a server built from the stream-carrying branch, and `s2`
+alt 1's read that parks until the stream is created needs one built from
+its current head. `s5` (b) and (c) need a server with standalone activities
+and activity-owned streams, and `s8` needs the server's Nexus HTTP ingress
+(`--http`, default `http://127.0.0.1:7243`, `7343` on the server above);
+the stream-carrying server has all of them, so the commands above point
+every provider at it. `s8` creates and deletes its own Nexus endpoint.
+`memory` is offered here, not in the parent examples, because it is not
+replay-safe; these scenarios keep a warm cache. `memory`, `native` and
+`redis` hold standalone streams, so `s2` runs on all three; `redis` runs
+with `--redis` naming a local Redis. Every scenario ran green on all four
+providers against that server, apart from the refusals below.
 
 A scenario a provider cannot serve says so in its output and moves on:
-`s2` on anything but `native`, `s5` (b) and (c) on `workflow_streams`,
-`s1` (d) on anything but `memory`, and `s7` on `memory`, which keeps one
-topic across a chain rather than one per run.
+`s2` on `workflow_streams`, which keeps a stream inside a workflow's log,
+`s5` (b) and (c) on `workflow_streams`, `s1` (d) on anything but `memory`,
+and `s7` on `memory`, which keeps one topic across a chain rather than one
+per run.

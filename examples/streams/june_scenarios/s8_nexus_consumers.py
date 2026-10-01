@@ -1,16 +1,17 @@
 r"""Scenarios over Nexus: client consumer, operation handler, workflow consumer.
 
-Status: "Client as Consumer over Standalone Nexus" is implemented; "Nexus
-operation handler" returning a stream is emulated; "Workflow as Consumer
-over Nexus" is unsupported by design.
+Status: "Client as Consumer over Standalone Nexus" and "Nexus operation
+handler" returning a stream are implemented; "Workflow as Consumer over
+Nexus" is unsupported by design.
 
 Why: the ``NexusStreams`` front serves outside reads through one endpoint,
 so a client consumes over Nexus today, while a workflow's reads ride its
 Workflow Task and never cross Nexus.
 
-    python -m examples.streams.june_scenarios.s8_nexus_consumers native --address 127.0.0.1:7333
-    python -m examples.streams.june_scenarios.s8_nexus_consumers \
-        workflow_streams --address 127.0.0.1:7333
+    python -m examples.streams.june_scenarios.s8_nexus_consumers native \
+        --address 127.0.0.1:7433 --http http://127.0.0.1:7343
+    python -m examples.streams.june_scenarios.s8_nexus_consumers workflow_streams \
+        --address 127.0.0.1:7433 --http http://127.0.0.1:7343
 
 The run creates its own Nexus endpoint through the operator service, routed
 to its worker's task queue, and deletes it at the end. ``--http`` is the
@@ -25,10 +26,12 @@ operation, so the cursor alone is the resume point. The first attempt dies
 after two records and the retry picks up after the second.
 
 (b) His handler returns ``Stream[ProgressUpdate]``. Ours returns a
-``StreamRef``, a plain dataclass naming the producing workflow and the
-topic; the calling workflow passes it on as its result and the client reads
-it through the front. Streams as first-class operation inputs and results
-are the nexgen IDL follow-on.
+``temporalio.streams.StreamRef``, the SDK's name for one stream, taken from
+the producing workflow's handle with ``ref(topic=SCORES)``; the calling
+workflow passes it on as its result and the client opens it with
+``get_stream_handle(ref)`` on a client whose provider is the front, so the
+read goes over Nexus. The ref is plain data to the operation's IDL; a stream
+type of its own there is the nexgen follow-on.
 
 Not shown, by design: a workflow consuming over Nexus. The workflow half of
 a provider records its reads on the Workflow Task, which cannot cross an
@@ -55,8 +58,9 @@ from temporalio.api.operatorservice.v1 import (
     CreateNexusEndpointRequest,
     DeleteNexusEndpointRequest,
 )
+from temporalio.client import Client
 from temporalio.common import RetryPolicy, WorkflowIDConflictPolicy
-from temporalio.streams import BEGINNING, Cursor, RecordKind
+from temporalio.streams import BEGINNING, Cursor, RecordKind, StreamRef
 from temporalio.streams.providers.nexus import NexusStreams, TemporalStreamsHandler
 from temporalio.worker import Worker
 
@@ -83,14 +87,6 @@ class GameRequest:
     """Which game the operation should start."""
 
     game_id: str
-
-
-@dataclass
-class StreamRef:
-    """A reference to a stream: the owning workflow and the topic name."""
-
-    workflow_id: str
-    topic: str
 
 
 @dataclass
@@ -166,17 +162,18 @@ class ScoresHandler:
     async def start_game(
         self, _ctx: nexusrpc.handler.StartOperationContext, input: GameRequest
     ) -> StreamRef:
-        """His "pre-create and start" handler, returning a reference instead of a stream."""
+        """His "pre-create and start" handler, returning a ref to the stream."""
         # Reusing a running workflow makes a retried start of this sync
-        # operation hand back the same reference.
-        await nexus.client().start_workflow(
+        # operation hand back the same ref.
+        client = nexus.client()
+        await client.start_workflow(
             ScoresProducer.run,
             3,
             id=input.game_id,
             task_queue=self._task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
         )
-        return StreamRef(workflow_id=input.game_id, topic=SCORES.name)
+        return client.get_stream_handle(input.game_id).ref(topic=SCORES)
 
 
 @workflow.defn
@@ -246,7 +243,9 @@ async def run(args: argparse.Namespace) -> None:
             print(f"    and read {consumed.scores}")
             await producer.result()
 
-            print("  (b) an operation returns a stream reference; the client reads it")
+            print(
+                "  (b) an operation returns a StreamRef; the client opens it on the front"
+            )
             ref = await client.execute_workflow(
                 Caller.run,
                 CallerInput(endpoint_name, f"{workflow_id}-b"),
@@ -254,8 +253,13 @@ async def run(args: argparse.Namespace) -> None:
                 task_queue=task_queue,
             )
             print(f"    operation returned {ref}")
-            async for record in front.get_stream_handle(client, ref.workflow_id).read(
-                topic=ref.topic, result_type=ScoreUpdate
+            # The ref is opened on whatever provider the client carries; this
+            # one carries the front, so the read goes over Nexus.
+            config = client.config()
+            config["plugins"] = [front]
+            fronted = Client(**config)
+            async for record in fronted.get_stream_handle(ref).read(
+                result_type=ScoreUpdate
             ):
                 print(f"    {record.kind.name:6} {record.value}")
     finally:
