@@ -36,8 +36,8 @@ accessor for that owner and refuses an owner the store cannot host with
 :class:`temporalio.streams.StreamUnsupportedError`, so a reference is good
 behind any endpoint that serves the owner. The same reference is what an
 operation of the application's own returns to hand a stream to its caller;
-:meth:`NexusStreamHandle.ref` makes one and :meth:`NexusStreams.open` opens
-it.
+:meth:`NexusStreamHandle.ref` makes one and ``client.get_stream_handle(ref)``
+opens it.
 
 The handler keeps one parked read per stream reference and serves
 consecutive calls from it, so an idle caller does not leave one abandoned
