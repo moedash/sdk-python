@@ -41,8 +41,8 @@ class StreamRef:
     when only the ids are at hand. The default data converter carries it as
     JSON, so it can be a workflow argument, an activity result, or a Nexus
     operation input or result, and
-    :meth:`temporalio.client.Client.get_stream_handle` and
-    :func:`temporalio.activity.stream_handle` open one directly.
+    ``temporalio.client.Client.get_stream_handle`` and
+    ``temporalio.activity.stream_handle`` open one directly.
     """
 
     kind: StreamOwnerKind
