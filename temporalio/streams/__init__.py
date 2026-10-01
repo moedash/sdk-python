@@ -8,12 +8,12 @@
 The contract, in five statements:
 
 1. **A workflow publishes only to topics of its own stream, and it publishes
-   transactionally.** :meth:`temporalio.workflow.StreamWriter.publish`
+   transactionally.** ``temporalio.workflow.StreamWriter.publish``
    returns at once. The record is visible when the Workflow Task is accepted,
    and never if the task fails, so no reader can see a decision the workflow
    did not commit.
 2. **Reading is an observation, and the SDK records it.** What
-   :class:`temporalio.workflow.StreamReader` handed to workflow code,
+   ``temporalio.workflow.StreamReader`` handed to workflow code,
    including the boundary where it found nothing, is committed with the
    commands that reading produced. Recovery re-supplies the same records in
    the same order.
@@ -43,11 +43,11 @@ A provider is an object, registered once as a plugin:
 ``Client.connect(plugins=[provider])``; workers built from that client inherit
 it, and ``Worker(plugins=[provider])`` or ``Replayer(plugins=[provider])``
 registers it on a worker alone. Each context then asks for its stream the
-same way. Workflow code uses :func:`temporalio.workflow.stream_reader` and
-:func:`temporalio.workflow.stream_writer`. An activity uses
-:func:`temporalio.activity.stream_handle`, which is its own workflow pinned
+same way. Workflow code uses ``temporalio.workflow.stream_reader`` and
+``temporalio.workflow.stream_writer``. An activity uses
+``temporalio.activity.stream_handle``, which is its own workflow pinned
 to its run unless told otherwise. Any process holding a client uses
-:meth:`temporalio.client.Client.get_stream_handle`, which mirrors
+``temporalio.client.Client.get_stream_handle``, which mirrors
 ``get_workflow_handle``. The explicit form,
 ``provider.get_stream_handle(client, workflow_id)``, stays for a process that
 talks to two stores. This module keeps the shared types, the errors and the
