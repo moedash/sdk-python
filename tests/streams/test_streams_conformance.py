@@ -243,6 +243,7 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
         provider,
         truncate=truncate,
         bounds_standalone_bytes=True,
+        refuses_appends_past_byte_cap=False,
         trims_open_stream_by_age=True,
     )
     provider.reset()
