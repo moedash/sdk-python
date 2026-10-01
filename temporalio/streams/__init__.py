@@ -8,12 +8,12 @@
 The contract, in five statements:
 
 1. **A workflow publishes only to topics of its own stream, and it publishes
-   transactionally.** :meth:`temporalio.workflow.StreamWriter.publish`
+   transactionally.** ``temporalio.workflow.StreamWriter.publish``
    returns at once. The record is visible when the Workflow Task is accepted,
    and never if the task fails, so no reader can see a decision the workflow
    did not commit.
 2. **Reading is an observation, and the SDK records it.** What
-   :class:`temporalio.workflow.StreamReader` handed to workflow code,
+   ``temporalio.workflow.StreamReader`` handed to workflow code,
    including the boundary where it found nothing, is committed with the
    commands that reading produced. Recovery re-supplies the same records in
    the same order.
