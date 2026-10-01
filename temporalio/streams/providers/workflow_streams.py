@@ -52,6 +52,11 @@ The mapping, in one place:
   through the handler the shipped class registers on it. An evicted and
   rebuilt workflow gets its own, so a task that failed leaks nothing into
   the next attempt's log and a replayed run does not see records twice.
+  The provider's handlers are registered as the instance is initialised,
+  before the first task's Signals and Updates are applied, so a publish or
+  poll that arrives with that task finds them; the stream object is bound
+  on first use, adopting one the workflow built in its ``__init__`` or
+  constructing the provider's own.
 - An activity a workflow scheduled keeps its own streams inside that
   workflow's log, under the reserved topic ``activity/<activity id>/<name>``
   with ``%`` and ``/`` in the id percent-encoded, the way the native
@@ -322,15 +327,28 @@ class _Held:
     last_offset: int
 
 
-class _InstanceStream:
-    """A view over the shipped stream object of the running workflow instance.
+class _Shipped:
+    """Constructs the shipped stream object, which insists on a caller named ``__init__``."""
 
-    A separate class because ``WorkflowStream`` insists on being constructed
-    from a method named ``__init__``.
+    def __init__(self) -> None:
+        self.stream = WorkflowStream()
+
+
+class _InstanceStream:
+    """The provider's handlers on one workflow instance, over the shipped stream object.
+
+    Built when the instance is initialised, before the workflow's own
+    ``__init__`` and before any Signal or Update of the first task is
+    applied, so the handlers are found by whatever arrives with that task.
+    The shipped stream object is bound on first use rather than here: a
+    workflow migrating from the contrib feature constructs its own in
+    ``__init__``, which the shipped class refuses to do twice, so this
+    adopts that one when it exists and constructs the provider's own when
+    nothing has, from a handler that may write or from the workflow half.
     """
 
-    def __init__(self, stream: WorkflowStream | None = None) -> None:
-        self.stream = WorkflowStream() if stream is None else stream
+    def __init__(self) -> None:
+        self._stream: WorkflowStream | None = None
         # Per producer and topic, the most recent batch taken by the publish
         # Update, so a repeat is answered and a divergent one refused. A
         # producer's identity is one per stream, as on every provider, so
@@ -351,6 +369,38 @@ class _InstanceStream:
             workflow.set_update_handler(
                 _PUBLISH_UPDATE, self._publish, validator=self._validate_publish
             )
+        if workflow.get_update_handler(POLL_UPDATE_NAME) is None:
+            # Stands in for the shipped poll handler until a stream object is
+            # bound, whose constructor then registers the real one over it.
+            workflow.set_update_handler(
+                POLL_UPDATE_NAME, self._poll, validator=self._validate_poll
+            )
+
+    @property
+    def held(self) -> WorkflowStream | None:
+        """The shipped stream object, if the workflow or a handler has bound one.
+
+        Looks one up and never constructs, so a Query may ask.
+        """
+        if self._stream is None:
+            self._stream = _registered_stream()
+        return self._stream
+
+    @property
+    def stream(self) -> WorkflowStream:
+        """The shipped stream object, adopting the workflow's own or constructing the provider's."""
+        held = self.held
+        if held is None:
+            held = self._stream = _Shipped().stream
+        return held
+
+    def _validate_poll(self, payload: PollInput) -> None:
+        held = self.held
+        if held is not None:
+            held._validate_poll(payload)  # pyright: ignore[reportPrivateUsage]
+
+    async def _poll(self, payload: PollInput) -> PollResult:
+        return await self.stream._on_poll(payload)  # pyright: ignore[reportPrivateUsage]
 
     def _validate_publish(self, publish: PublishInput) -> None:
         """Refuse a conflicting batch before the Update is accepted.
@@ -394,9 +444,10 @@ class _InstanceStream:
         held = self._producers.get(key)
         if held is not None and publish.sequence == held.sequence:
             return _PublishResult(run_id=run_id, last_offset=held.last_offset)
+        stream = self.stream
         for entry in publish.items:
-            self.stream.topic(entry.topic).publish(_decode_payload(entry.data))
-        last = self.stream.next_offset - 1
+            stream.topic(entry.topic).publish(_decode_payload(entry.data))
+        last = stream.next_offset - 1
         self._producers[key] = _Held(publish.sequence, _content(publish), last)
         return _PublishResult(run_id=run_id, last_offset=last)
 
@@ -407,11 +458,20 @@ class _InstanceStream:
         response has to fit the server's blob limit and a log the reader only
         wants one topic of can be much larger than that.
         """
+        stream = self.held
+        if stream is None:
+            # Nothing has been bound, so nothing has been published.
+            return {
+                "items": [],
+                "next_offset": 0,
+                "more_ready": False,
+                "base_offset": 0,
+            }
         items: list[dict[str, Any]] = []
         size = 0
-        next_offset = self.stream.next_offset
+        next_offset = stream.next_offset
         more_ready = False
-        held = self.stream.items_from(from_offset)
+        held = stream.items_from(from_offset)
         for offset, item_topic, payload in held:
             if item_topic != topic:
                 continue
@@ -437,7 +497,10 @@ class _InstanceStream:
         answer about one topic. Scanning here costs one Query rather than
         shipping the log to the caller to find the same thing.
         """
-        for offset, item_topic, _ in reversed(self.stream.items_from(0)):
+        stream = self.held
+        if stream is None:
+            return -1
+        for offset, item_topic, _ in reversed(stream.items_from(0)):
             if item_topic == topic:
                 return offset
         return -1
@@ -447,7 +510,8 @@ class _InstanceStream:
 
         Zero ``last_n`` asks for the head, which is where ``END`` starts.
         """
-        return start_offset(self.stream, topic, last_n)
+        stream = self.held
+        return 0 if stream is None else start_offset(stream, topic, last_n)
 
 
 def start_offset(stream: WorkflowStream, topic: str, last_n: int) -> int:
@@ -493,8 +557,7 @@ def _instance() -> _InstanceStream:
     registered = getattr(handler, "__self__", None)
     if isinstance(registered, _InstanceStream):
         return registered
-    stream = _registered_stream()
-    return _InstanceStream() if stream is None else _InstanceStream(stream)
+    return _InstanceStream()
 
 
 class _WSReadSource:
@@ -594,19 +657,23 @@ class _WSWorkflowProvider:
         return _WSWriteSink(self._own_stream(), topic)
 
     def on_workflow_start(self) -> None:
-        # Registered on the first task, because an outside reader can poll
-        # before workflow code has opened anything, and an Update with no
-        # handler yet is rejected rather than held. A poll that arrives in
-        # that first task still runs ahead of this hook; the reader retries it.
-        self._own_stream()
+        # Called as the instance is initialised, so the handlers exist before
+        # the first task's Updates are evaluated: an outside publish or poll
+        # that arrives with that task is served rather than rejected. The
+        # stream object itself is bound later, once the workflow's own
+        # __init__ has had its chance to construct one.
+        _instance()
 
     async def on_workflow_finish(self) -> None:
         # An Option 0 stream dies with its run, and a parked long-poll Update
         # would otherwise hold completion open. Same recipe the shipped
-        # feature documents before a return or a continue-as-new.
-        if self._stream is None:
+        # feature documents before a return or a continue-as-new. Asked of
+        # the instance rather than this object's cache, because a poll can
+        # bind the stream before workflow code touches it.
+        held = _instance().held
+        if held is None:
             return
-        self._stream.detach_pollers()
+        held.detach_pollers()
         await workflow.wait_condition(workflow.all_handlers_finished)
 
 
