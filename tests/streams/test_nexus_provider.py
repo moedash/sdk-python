@@ -986,6 +986,39 @@ async def test_a_handle_names_its_stream_as_a_ref_that_opens_on_the_front(
     await handler.close()
 
 
+def test_an_sdk_stream_ref_crosses_the_wire_model_with_its_nulls():
+    # The SDK's default converter writes null for every member a ref does not
+    # use. The wire model declares those members nullable, so a ref an
+    # operation returned as plain data parses into the same wire reference
+    # the front builds, and the wire form of that reference reads back as
+    # the SDK type with nothing lost.
+    converter = temporalio.converter.DataConverter.default.payload_converter
+    contract = (
+        temporalio.converter.DataConverter.default._get_internal_payload_converter()
+    )
+    for ref in (
+        StreamRef.for_workflow("wf", topic=INPUTS),
+        StreamRef.for_workflow("wf", run_id="r1", topic=INPUTS),
+        StreamRef.for_activity("act", workflow_id="wf", topic=INPUTS),
+        StreamRef.for_standalone("s-1", topic=INPUTS),
+    ):
+        as_sdk = converter.to_payloads([ref])[0]
+        assert b"null" in as_sdk.data, as_sdk.data
+        wire = contract.from_payloads([as_sdk], [WireStreamRef])[0]
+        assert wire == WireStreamRef(
+            kind=ref.kind,
+            topic=ref.topic,
+            workflow_id=ref.workflow_id,
+            run_id=ref.run_id,
+            activity_id=ref.activity_id,
+            stream_id=ref.stream_id,
+        )
+        back = converter.from_payloads([contract.to_payloads([wire])[0]], [StreamRef])[
+            0
+        ]
+        assert back == ref
+
+
 async def test_the_front_refuses_what_the_contract_cannot_carry():
     # No create and no seal operation: an owned stream cannot be closed by
     # anyone, and a standalone stream is created and sealed on the store.
