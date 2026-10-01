@@ -1199,6 +1199,8 @@ async def test_a_publish_from_the_constructor_is_delivered(
             PublishFromConstructor.run, id=workflow_id, task_queue=worker.task_queue
         )
         await asyncio.wait_for(handle.result(), 30)
-    stream = case.provider.get_stream_handle(worker_client, workflow_id)
-    records = await take(stream.read(topic=OUT), 2, 30)
+        # Read while the worker still polls: the workflow_streams provider
+        # answers reads from the workflow itself.
+        stream = case.provider.get_stream_handle(worker_client, workflow_id)
+        records = await take(stream.read(topic=OUT), 2, 30)
     assert [r.value for r in records] == [{"from": "init"}, {"from": "run"}]
