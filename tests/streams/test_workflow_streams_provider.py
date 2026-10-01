@@ -373,7 +373,7 @@ async def test_the_tail_query_pages_instead_of_answering_in_one_blob():
             return [item for item in items if item[0] >= offset]
 
     instance = _InstanceStream.__new__(_InstanceStream)
-    instance.stream = _Log()  # type: ignore[assignment]
+    instance._stream = _Log()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
 
     seen: list[int] = []
     offset, more = 0, True
@@ -590,17 +590,24 @@ async def _reset_at_last_completed_task(
         if event.HasField("workflow_task_completed_event_attributes"):
             completion_id = event.event_id
     assert completion_id
-    answer = await client.workflow_service.reset_workflow_execution(
-        ResetWorkflowExecutionRequest(
-            namespace=client.namespace,
-            workflow_execution=WorkflowExecution(
-                workflow_id=workflow_id, run_id=run_id
-            ),
-            reason="re-run from the last completed task",
-            workflow_task_finish_event_id=completion_id,
-            request_id=uuid.uuid4().hex,
+    try:
+        answer = await client.workflow_service.reset_workflow_execution(
+            ResetWorkflowExecutionRequest(
+                namespace=client.namespace,
+                workflow_execution=WorkflowExecution(
+                    workflow_id=workflow_id, run_id=run_id
+                ),
+                reason="re-run from the last completed task",
+                workflow_task_finish_event_id=completion_id,
+                request_id=uuid.uuid4().hex,
+            )
         )
-    )
+    except RPCError as error:
+        if error.status != RPCStatusCode.UNIMPLEMENTED:
+            raise
+        # The Java time-skipping test server has no reset; the real server
+        # does, and this never skips there.
+        pytest.skip("this test server does not implement ResetWorkflowExecution")
     return answer.run_id
 
 

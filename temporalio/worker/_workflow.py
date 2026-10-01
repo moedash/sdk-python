@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import timezone
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
@@ -43,6 +43,7 @@ from ._interceptor import (
     Interceptor,
     WorkflowInboundInterceptor,
     WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
 )
 from ._stream_ranges import fill_short_stream_ranges
 from ._workflow_instance import (
@@ -69,9 +70,14 @@ class _StreamHooksInterceptor(WorkflowInboundInterceptor):
     """Brackets the workflow function with the stream provider's lifecycle hooks.
 
     Installed by the worker when it has a stream provider, so no workflow
-    code has to call anything before it runs or before it returns. The finish
-    hook runs when the function returns, raises or continues as new, because
-    a provider that parked a reader against the run has to let go either way.
+    code has to call anything before it runs or before it returns. The start
+    hook runs when the instance's loop first turns, after the workflow's own
+    ``__init__`` and before the first task's Signals and Updates are handled,
+    because the SDK handles those ahead of the workflow function and a handler
+    registered any later would be missed by an Update that arrives with that
+    task. The finish hook runs when the function returns, raises or continues as new,
+    because a provider that parked a reader against the run has to let go
+    either way.
     It does not run when the run is being evicted from the cache or when the
     abandoned coroutine is collected: neither is the workflow ending, the
     instance's state is not to be touched during eviction, and at collection
@@ -79,10 +85,22 @@ class _StreamHooksInterceptor(WorkflowInboundInterceptor):
     be running, so the hook would act on that one.
     """
 
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(outbound)
+        # The hook has to run after the workflow's own __init__, which may
+        # register handlers the provider adopts, and before the first task's
+        # Signals and Updates are handled, which the SDK does ahead of the
+        # workflow function. The instance is its own event loop and nothing
+        # is queued on it yet, so a callback queued now runs first when that
+        # loop first turns, which is after every job of the activation has
+        # been applied and before any task they created takes a step.
+        runtime = temporalio.workflow._Runtime.current()
+        loop = cast(asyncio.AbstractEventLoop, cast(object, runtime))
+        loop.call_soon(lambda: runtime.workflow_streams().provider.on_workflow_start())
+
     async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
         runtime = temporalio.workflow._Runtime.current()
         provider = runtime.workflow_streams().provider
-        provider.on_workflow_start()
         try:
             result = await self.next.execute_workflow(input)
         except GeneratorExit:
