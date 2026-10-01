@@ -279,6 +279,16 @@ class WorkflowServiceStub:
     This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
     task being created for the execution.
     """
+    WakeWorkflowExecution: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionResponse,
+    ]
+    """WakeWorkflowExecution asks a running Workflow Execution to run a Workflow
+    Task because a source it consumes has moved. Unlike a Signal it records
+    no event, carries no payload, and folds with other wakes for the same
+    source, so a burst of writes costs one task. The Workflow learns the
+    source and its position from the task and reads the source itself.
+    """
     SignalWithStartWorkflowExecution: grpc.UnaryUnaryMultiCallable[
         temporalio.api.workflowservice.v1.request_response_pb2.SignalWithStartWorkflowExecutionRequest,
         temporalio.api.workflowservice.v1.request_response_pb2.SignalWithStartWorkflowExecutionResponse,
@@ -1480,6 +1490,18 @@ class WorkflowServiceServicer(metaclass=abc.ABCMeta):
 
         This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
         task being created for the execution.
+        """
+    @abc.abstractmethod
+    def WakeWorkflowExecution(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionResponse:
+        """WakeWorkflowExecution asks a running Workflow Execution to run a Workflow
+        Task because a source it consumes has moved. Unlike a Signal it records
+        no event, carries no payload, and folds with other wakes for the same
+        source, so a burst of writes costs one task. The Workflow learns the
+        source and its position from the task and reads the source itself.
         """
     @abc.abstractmethod
     def SignalWithStartWorkflowExecution(

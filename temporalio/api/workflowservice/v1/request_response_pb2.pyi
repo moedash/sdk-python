@@ -1281,6 +1281,7 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
     POLLER_GROUP_INFOS_FIELD_NUMBER: builtins.int
     POLLER_GROUPS_INFO_FIELD_NUMBER: builtins.int
     STREAM_SLICES_FIELD_NUMBER: builtins.int
+    WAKES_FIELD_NUMBER: builtins.int
     task_token: builtins.bytes
     """A unique identifier for this task"""
     @property
@@ -1404,6 +1405,17 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         """Stream data attached to this task. Delivered out of band so the payloads
         never enter History; only the offset ranges are recorded there.
         """
+    @property
+    def wakes(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.workflow.v1.message_pb2.Wake
+    ]:
+        """Wakes pending for this execution when the task started, folded by
+        source. Not recorded in History and never re-supplied on replay: the
+        Workflow treats one as a reason to read its source now and records what
+        it read itself.
+        """
     def __init__(
         self,
         *,
@@ -1442,6 +1454,8 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         stream_slices: collections.abc.Iterable[
             temporalio.api.stream.v1.message_pb2.StreamSlice
         ]
+        | None = ...,
+        wakes: collections.abc.Iterable[temporalio.api.workflow.v1.message_pb2.Wake]
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -1504,6 +1518,8 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
             b"stream_slices",
             "task_token",
             b"task_token",
+            "wakes",
+            b"wakes",
             "workflow_execution",
             b"workflow_execution",
             "workflow_execution_task_queue",
@@ -3332,6 +3348,84 @@ class SignalWorkflowExecutionResponse(google.protobuf.message.Message):
     ) -> None: ...
 
 global___SignalWorkflowExecutionResponse = SignalWorkflowExecutionResponse
+
+class WakeWorkflowExecutionRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
+    WAKE_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def workflow_execution(
+        self,
+    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """The Workflow to wake. `run_id` is optional. When set, the wake goes to
+        the current run of the chain that run belongs to, so a sender that
+        learned a run id before a continue-as-new still reaches the consumer,
+        and it is refused with NotFound once that chain has ended. When unset,
+        the wake goes to the current run under the Workflow Id, whichever chain.
+        """
+    @property
+    def wake(self) -> temporalio.api.workflow.v1.message_pb2.Wake: ...
+    identity: builtins.str
+    """The identity of the sender, for metrics and logs."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
+        | None = ...,
+        wake: temporalio.api.workflow.v1.message_pb2.Wake | None = ...,
+        identity: builtins.str = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "wake", b"wake", "workflow_execution", b"workflow_execution"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "wake",
+            b"wake",
+            "workflow_execution",
+            b"workflow_execution",
+        ],
+    ) -> None: ...
+
+global___WakeWorkflowExecutionRequest = WakeWorkflowExecutionRequest
+
+class WakeWorkflowExecutionResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    RUN_ID_FIELD_NUMBER: builtins.int
+    FOLDED_FIELD_NUMBER: builtins.int
+    run_id: builtins.str
+    """The run the wake was stored on."""
+    folded: builtins.bool
+    """True when a wake for the source was already pending and no task had
+    received it yet, so this one changed nothing but possibly the position
+    and no new task results from it.
+    """
+    def __init__(
+        self,
+        *,
+        run_id: builtins.str = ...,
+        folded: builtins.bool = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal["folded", b"folded", "run_id", b"run_id"],
+    ) -> None: ...
+
+global___WakeWorkflowExecutionResponse = WakeWorkflowExecutionResponse
 
 class SignalWithStartWorkflowExecutionRequest(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
