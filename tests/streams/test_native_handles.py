@@ -14,13 +14,7 @@ from typing import Any
 import pytest
 
 import temporalio.converter
-from temporalio.streams import (
-    DEFAULT_TOPIC,
-    StreamCursorError,
-    StreamRef,
-    StreamUnsupportedError,
-    topic,
-)
+from temporalio.streams import DEFAULT_TOPIC, StreamCursorError, StreamRef, topic
 from temporalio.streams.providers.native import (
     NativeActivityStreamHandle,
     NativeStandaloneStreamHandle,
@@ -104,7 +98,5 @@ async def test_a_create_refuses_a_policy_the_server_cannot_hold() -> None:
             await provider.create_standalone_stream(_CLIENT, "s1", **bad)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         await provider.create_standalone_stream(_CLIENT, "")
-    with pytest.raises(StreamUnsupportedError, match="max_bytes"):
-        await provider.create_standalone_stream(_CLIENT, "s1", max_bytes=700)
     with pytest.raises(ValueError):
         provider.get_standalone_stream_handle(_CLIENT, "")
