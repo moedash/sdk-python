@@ -68,6 +68,7 @@ from temporalio.streams import (
 from temporalio.streams._ref import RefHandle, open_ref
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.redis import RedisStreams
+from temporalio.testing import WorkflowEnvironment
 from tests.helpers import new_worker
 
 # Defined once and shared by every case, the way an application shares them
@@ -893,3 +894,38 @@ async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCas
     await producer.append({"n": "new"})
     kept = await take(by_age.read(topic=OUT), 1)
     assert [r.value for r in kept] == [{"n": "new"}]
+
+
+@workflow.defn
+class PublishFromConstructor:
+    """Publishes once from its ``@workflow.init`` constructor and once from ``run``."""
+
+    @workflow.init
+    def __init__(self) -> None:
+        workflow.stream_writer(OUT).publish({"from": "init"})
+
+    @workflow.run
+    async def run(self) -> None:
+        workflow.stream_writer(OUT).publish({"from": "run"})
+
+
+async def test_a_publish_from_the_constructor_is_delivered(
+    case: ProviderCase, client: Client, env: WorkflowEnvironment
+):
+    if env.supports_time_skipping and case.client is None:
+        pytest.skip("the memory provider polls on a timer, which time skipping spins")
+    # A storage provider's setup registers it on its client, which a worker
+    # inherits; the memory provider is handed to the worker directly.
+    worker_client = case.client or client
+    plugins = [] if case.client is not None else [case.provider]
+    workflow_id = new_workflow_id()
+    async with new_worker(
+        worker_client, PublishFromConstructor, plugins=plugins
+    ) as worker:
+        handle = await worker_client.start_workflow(
+            PublishFromConstructor.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        await asyncio.wait_for(handle.result(), 30)
+    stream = case.provider.get_stream_handle(worker_client, workflow_id)
+    records = await take(stream.read(topic=OUT), 2, 30)
+    assert [r.value for r in records] == [{"from": "init"}, {"from": "run"}]
