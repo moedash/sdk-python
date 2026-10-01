@@ -42,6 +42,7 @@ from temporalio.contrib.external_workflow_streams._record import (
     Offset,
     StreamRecord,
 )
+from temporalio.contrib.external_workflow_streams._wake import WakeTransport
 
 __all__ = [
     "AppendConflictError",
@@ -272,6 +273,28 @@ class StreamBackend(abc.ABC):
         of a range, and an ordering that needed I/O would put backend latency
         inside a validation loop.
         """
+
+    # --- waking -------------------------------------------------------------
+
+    wake_transport: WakeTransport = "auto"
+    """How wakes for this backend's streams reach the server.
+
+    Held on the backend because it is the one object both the producer and the
+    consuming Worker are configured with. A provider may set it per instance.
+    """
+
+    def wake_counter_for(self, offset: Offset) -> int:
+        """The order of ``offset`` as a positive integer, or 0 when unknown.
+
+        While a wake for a stream is pending, the server folds later wakes into
+        it and keeps the highest counter's position, so the receiving task sees
+        the latest one. A counter derived from the store's own order ranks
+        positions the same way for producers and Workers, where a clock-derived
+        one does not. Implement it when offsets map to integers that increase
+        with the provider's order.
+        """
+        del offset
+        return 0
 
     # --- parking (P2b) ------------------------------------------------------
 

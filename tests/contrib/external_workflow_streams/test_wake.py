@@ -22,8 +22,10 @@ from datetime import timedelta
 import pytest
 
 import temporalio.api.common.v1
+import temporalio.api.workflowservice.v1
 import temporalio.bridge
 import temporalio.converter
+import temporalio.service
 from temporalio import workflow
 from temporalio.bridge.proto.external_stream.external_stream_pb2 import WakeSignal
 from temporalio.client import Client
@@ -39,6 +41,7 @@ from temporalio.contrib.external_workflow_streams._producer import (
     WorkflowChainKey,
 )
 from temporalio.contrib.external_workflow_streams._record import (
+    AFTER,
     BEGINNING,
     Offset,
     RecordKind,
@@ -52,6 +55,7 @@ from temporalio.contrib.external_workflow_streams._wake import (
     WAKE_SIGNAL_NAME,
     WakeRequest,
     build_signal_request,
+    send_wake,
     send_wake_signal,
     wake_request_id,
 )
@@ -1813,3 +1817,240 @@ async def test_one_senders_retry_stays_a_single_wake(client: Client) -> None:
             assert await _settled_signal_count(handle, 1) == 1
         finally:
             await handle.terminate()
+
+
+# --- the wake transport -------------------------------------------------------
+
+
+def _rpc_error(status: temporalio.service.RPCStatusCode) -> temporalio.service.RPCError:
+    return temporalio.service.RPCError(status.name, status, b"")
+
+
+class WakeServiceClient(RecordingClient):
+    """A client whose service answers the wake call, or refuses it with ``refuse``."""
+
+    def __init__(self, refuse: temporalio.service.RPCStatusCode | None = None) -> None:
+        super().__init__()
+        self.refuse = refuse
+        self.wakes: list = []
+
+    async def wake_workflow_execution(self, request):  # type: ignore[no-untyped-def]
+        self.wakes.append(request)
+        if self.refuse is not None:
+            raise _rpc_error(self.refuse)
+        return temporalio.api.workflowservice.v1.WakeWorkflowExecutionResponse(
+            run_id="current-run"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_wake_call_names_the_chain_the_stream_and_its_position() -> None:
+    client = WakeServiceClient()
+
+    sent = await send_wake(
+        client,  # type: ignore[arg-type]
+        request(position=b"1700000000000-3", position_counter=42),
+        transport="wake",
+    )
+
+    assert sent == "current-run"
+    assert client.sent == []
+    [wake] = client.wakes
+    assert wake.namespace == "ns"
+    assert wake.workflow_execution.workflow_id == "wf-1"
+    # The first run, so the server follows the chain and refuses a later chain
+    # that reused the Workflow ID.
+    assert wake.workflow_execution.run_id == "first-run-1"
+    assert wake.wake.source == "tokens"
+    assert wake.wake.position == b"1700000000000-3"
+    assert wake.wake.counter == 42
+    assert wake.identity == "producer-identity"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_counter_falls_back_to_the_clock() -> None:
+    import time
+
+    client = WakeServiceClient()
+    before = time.time_ns()
+    await send_wake(client, request(), transport="wake")  # type: ignore[arg-type]
+    after = time.time_ns()
+
+    assert before <= client.wakes[0].wake.counter <= after
+
+
+@pytest.mark.asyncio
+async def test_auto_falls_back_to_the_signal_once_and_remembers_the_client() -> None:
+    client = WakeServiceClient(refuse=temporalio.service.RPCStatusCode.UNIMPLEMENTED)
+
+    first = await send_wake(client, request())  # type: ignore[arg-type]
+    second = await send_wake(client, request())  # type: ignore[arg-type]
+
+    assert len(client.wakes) == 1, "the refusal was not remembered for the client"
+    assert [signal.request_id for signal in client.sent] == [first, second]
+    assert first == wake_request_id(request())
+
+
+@pytest.mark.asyncio
+async def test_the_remembered_fallback_is_per_client() -> None:
+    old = WakeServiceClient(refuse=temporalio.service.RPCStatusCode.UNIMPLEMENTED)
+    new = WakeServiceClient()
+
+    await send_wake(old, request())  # type: ignore[arg-type]
+    await send_wake(new, request())  # type: ignore[arg-type]
+
+    assert len(new.wakes) == 1
+    assert new.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_wake_transport_propagates_unimplemented() -> None:
+    client = WakeServiceClient(refuse=temporalio.service.RPCStatusCode.UNIMPLEMENTED)
+
+    with pytest.raises(temporalio.service.RPCError) as raised:
+        await send_wake(client, request(), transport="wake")  # type: ignore[arg-type]
+
+    assert raised.value.status == temporalio.service.RPCStatusCode.UNIMPLEMENTED
+    assert client.sent == []
+    # Asked for explicitly, so nothing is learned from it either.
+    client.refuse = None
+    await send_wake(client, request())  # type: ignore[arg-type]
+    assert len(client.wakes) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_signal_transport_never_tries_the_wake_call() -> None:
+    client = WakeServiceClient()
+
+    await send_wake(client, request(), transport="signal")  # type: ignore[arg-type]
+
+    assert client.wakes == []
+    assert len(client.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_ended_chain_raises_what_a_signal_to_it_raises() -> None:
+    """``NOT_FOUND`` is the chain being over, under both transports.
+
+    Not a reason to fall back: a Signal addressed by Workflow ID could reach a
+    later chain that reused the ID, which is the wake the server just refused.
+    """
+    client = WakeServiceClient(refuse=temporalio.service.RPCStatusCode.NOT_FOUND)
+
+    with pytest.raises(temporalio.service.RPCError) as raised:
+        await send_wake(client, request())  # type: ignore[arg-type]
+
+    assert raised.value.status == temporalio.service.RPCStatusCode.NOT_FOUND
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_producer_reports_an_ended_chain_as_the_cause_of_its_wake_failure() -> (
+    None
+):
+    backend = MemoryStreamBackend()
+    client = WakeServiceClient(refuse=temporalio.service.RPCStatusCode.NOT_FOUND)
+    topic = make_producer(backend, client).topic("tokens")
+
+    with pytest.raises(WakeNotAcknowledgedError) as raised:
+        await topic.publish("hello")
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, temporalio.service.RPCError)
+    assert cause.status == temporalio.service.RPCStatusCode.NOT_FOUND
+
+
+class CountingBackend(MemoryStreamBackend):
+    """Orders offsets the way the Redis provider does, and asks for the wake call."""
+
+    wake_transport = "wake"
+
+    def wake_counter_for(self, offset: Offset) -> int:
+        ms, seq = offset.token.split("-")
+        return int(ms) * 2**20 + int(seq)
+
+
+@pytest.mark.asyncio
+async def test_a_producer_wakes_with_the_position_it_appended() -> None:
+    backend = CountingBackend()
+    client = WakeServiceClient()
+    topic = make_producer(backend, client).topic("tokens")
+
+    offset = await topic.publish("hello")
+
+    [wake] = client.wakes
+    assert wake.wake.position == offset.token.encode()
+    assert wake.wake.counter == backend.wake_counter_for(offset)
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_bare_wake_after_a_batch_reports_where_the_batch_ended() -> None:
+    """Without it the bare wake falls back to the clock and folds behind the store."""
+    backend = CountingBackend()
+    client = WakeServiceClient()
+    topic = make_producer(backend, client).topic("tokens")
+
+    await topic.publish("a", wake=False)
+    last = await topic.publish("b", wake=False)
+    await topic.wake()
+
+    [wake] = client.wakes
+    assert wake.wake.position == last.token.encode()
+    assert wake.wake.counter == backend.wake_counter_for(last)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_wake_carries_its_original_position() -> None:
+    backend = CountingBackend()
+    client = WakeServiceClient(refuse=temporalio.service.RPCStatusCode.UNAVAILABLE)
+    topic = make_producer(backend, client).topic("tokens")
+
+    with pytest.raises(WakeNotAcknowledgedError) as raised:
+        await topic.publish("hello")
+    client.refuse = None
+    await topic.retry_wake(raised.value.pending)
+
+    first, retried = client.wakes
+    assert retried.wake.position == first.wake.position
+    assert retried.wake.counter == first.wake.counter
+
+
+class _ReadSubscription(_StubSubscription):
+    def __init__(self, backend, cursor) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.backend = backend
+        self.prefetch_cursor = cursor
+
+
+@pytest.mark.asyncio
+async def test_a_worker_wakes_with_the_position_it_read() -> None:
+    class _Backend(CountingBackend):
+        async def current_park_generation(self, stream_key, wait_id):  # type: ignore[no-untyped-def]
+            return None
+
+    backend = _Backend()
+    client = WakeServiceClient()
+    worker = _worker_sending_wakes("client")
+    worker._client = client
+    read = Offset("1700000000000-5")
+
+    await worker._send_external_stream_wake(_ReadSubscription(backend, AFTER(read)))
+
+    [wake] = client.wakes
+    assert wake.wake.position == read.token.encode()
+    assert wake.wake.counter == backend.wake_counter_for(read)
+
+
+@pytest.mark.asyncio
+async def test_a_wake_reports_a_position_appended_outside_the_producer() -> None:
+    backend = CountingBackend()
+    client = WakeServiceClient()
+    topic = make_producer(backend, client).topic("tokens")
+    outside = Offset("1700000000000-9")
+
+    await topic.wake(position=outside)
+
+    [wake] = client.wakes
+    assert wake.wake.position == outside.token.encode()
+    assert wake.wake.counter == backend.wake_counter_for(outside)

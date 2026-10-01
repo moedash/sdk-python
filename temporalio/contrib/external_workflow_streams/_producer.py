@@ -50,8 +50,10 @@ from temporalio.contrib.external_workflow_streams._record import (
 )
 from temporalio.contrib.external_workflow_streams._wake import (
     WakeRequest,
-    send_wake_signal,
+    send_wake,
+    wake_position,
     wake_request_for,
+    wake_transport_of,
 )
 from temporalio.types import AnyType
 
@@ -488,6 +490,10 @@ class ExternalStreamProducer:
         #: no defined order between them to preserve, so ordering their appends
         #: would serialize a batch for nothing.
         self._appends: dict[StreamKey, list[_StreamOperation]] = {}
+        #: Per stream, the furthest offset this producer has seen acknowledged.
+        #: A wake reports it so its counter follows the store's order, and a
+        #: batch closed by a bare `wake()` still reports where it ended.
+        self._last_offsets: dict[StreamKey, Offset] = {}
 
     @staticmethod
     async def connect(
@@ -850,7 +856,15 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
             ) from err
         assert placed.offset is not None
         self._forget(record)
+        self._note_offset(placed.offset)
         return placed
+
+    def _note_offset(self, offset: Offset) -> None:
+        """Keeps the furthest acknowledged offset; a repeat append can be older."""
+        offsets = self._producer._last_offsets
+        held = offsets.get(self._stream_key)
+        if held is None or self._producer._backend.compare_offsets(held, offset) < 0:
+            offsets[self._stream_key] = offset
 
     async def _wake_for(
         self, placed: StreamRecord, *, wake: bool, lease: timedelta
@@ -1160,6 +1174,7 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
         self,
         *,
         lease: timedelta = DEFAULT_WAKE_CLAIM_LEASE,
+        position: Offset | None = None,
     ) -> list[str]:
         """Step 2 and 3 of the send sequence: observe or claim, then Signal.
 
@@ -1199,9 +1214,16 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
         either case loses the record until something else happens to wake the
         Workflow.
 
+        Args:
+            lease: How long a granted claim on a parked generation holds.
+            position: An offset this stream holds that was appended outside
+                this producer. The wake reports the furthest of it and this
+                producer's own appends, so its counter follows the store.
+
         Returns:
-            The request ID of each Signal sent -- one per parked subscription,
-            or a single unparked wake when nothing on this stream is parked.
+            What :func:`send_wake` returned for each wake sent -- one per parked
+            subscription, or a single unparked wake when nothing on this stream
+            is parked.
 
         Raises:
             WakeNotAcknowledgedError: The wake did not complete. The record is
@@ -1225,6 +1247,8 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
             )
 
         backend = producer._backend
+        if position is not None:
+            self._note_offset(position)
         # The coordination steps are inside the same guarantee as the Signal, and
         # every caller reaches here *after* a durable append. A provider outage in
         # any of them used to escape as whatever the provider raised -- a bare
@@ -1249,6 +1273,9 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
             if not targets:
                 targets = [(0, None)]
 
+            reported, reported_counter = wake_position(
+                backend, producer._last_offsets.get(self._stream_key)
+            )
             requests: list[WakeRequest] = []
             for wait_id, generation in targets:
                 if generation is not None:
@@ -1274,6 +1301,8 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
                         wake_counter=(
                             producer._next_wake_counter() if generation is None else 0
                         ),
+                        position=reported,
+                        position_counter=reported_counter,
                     )
                 )
         except WakeNotAcknowledgedError:
@@ -1305,10 +1334,11 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
         for index, request in enumerate(requests):
             try:
                 sent.append(
-                    await send_wake_signal(
+                    await send_wake(
                         producer._client,
                         request,
                         producer_session_id=producer.session_id,
+                        transport=wake_transport_of(producer._backend),
                     )
                 )
             except (Exception, asyncio.CancelledError) as err:
@@ -1352,10 +1382,11 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
         for index, request in enumerate(pending):
             try:
                 sent.append(
-                    await send_wake_signal(
+                    await send_wake(
                         producer._client,
                         request,
                         producer_session_id=producer.session_id,
+                        transport=wake_transport_of(producer._backend),
                     )
                 )
             except (Exception, asyncio.CancelledError) as err:
