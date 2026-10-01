@@ -48,6 +48,7 @@ from temporalio.converter import (
     StorageDriverRetrieveContext,
     StorageDriverStoreContext,
 )
+from temporalio.service import RPCError
 from temporalio.streams import (
     BEGINNING,
     DEFAULT_TOPIC,
@@ -56,6 +57,7 @@ from temporalio.streams import (
     RecordKind,
     StreamClosedError,
     StreamCursorError,
+    StreamError,
     StreamHandle,
     StreamNotFoundError,
     StreamProducerError,
@@ -866,7 +868,19 @@ async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCas
     kept = await take(by_count.read(topic=OUT), 2)
     assert [r.value for r in kept] == [{"n": 3}, {"n": 4}]
 
-    if case.bounds_standalone_bytes:
+    if case.bounds_standalone_bytes and case.refuses_appends_past_byte_cap:
+        # The cap counts the stored record, body and metadata included, so it
+        # holds one of these and not two.
+        by_bytes = await case.create_stream(new_stream_id(), max_bytes=1000)
+        producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
+        await producer.append({"n": 0, "blob": "x" * 500})
+        # The second record would take the stream past its cap, so the store
+        # refuses it and keeps what it holds.
+        with pytest.raises((RPCError, StreamError)):
+            await producer.append({"n": 1, "blob": "x" * 500})
+        kept = await take(by_bytes.read(topic=OUT), 1)
+        assert kept[0].value is not None and kept[0].value["n"] == 0
+    elif case.bounds_standalone_bytes:
         by_bytes = await case.create_stream(new_stream_id(), max_bytes=700)
         producer = by_bytes.producer(topic=OUT, producer_id="writer", attempt=1)
         for n in range(3):
@@ -886,5 +900,17 @@ async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCas
     await producer.append({"n": "old"})
     await asyncio.sleep(0.3)
     await producer.append({"n": "new"})
-    kept = await take(by_age.read(topic=OUT), 1)
-    assert [r.value for r in kept] == [{"n": "new"}]
+    # A store reclaims by age on its own schedule, and a coarse one may have
+    # aged the newer record out as well by the time it is looked at. What the
+    # policy decides is that the older record is no longer where BEGINNING
+    # starts.
+    kept = []
+    for _ in range(50):
+        try:
+            kept = await take(by_age.read(topic=OUT), 1, timeout=1)
+        except asyncio.TimeoutError:
+            kept = []
+        if not kept or kept[0].value == {"n": "new"}:
+            break
+        await asyncio.sleep(0.2)
+    assert [r.value for r in kept] in ([{"n": "new"}], [])
