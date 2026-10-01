@@ -14,42 +14,83 @@ The mapping, in one place:
   ``StreamRecord`` proto and its encoding is ``binary/plain``. The shipped
   code stores and returns that ``Payload`` untouched, so the body's own
   encoding never meets the transport.
-- Producer identity dedupes through the shipped publisher state: the
-  publisher id is ``producer#attempt`` and every publish Signal carries the
-  sequence its records end at, so a retried batch drops and a new attempt
-  passes.
+- An outside publish is an Update, ``__temporal_streams_publish``, carrying
+  the shipped publish Signal's input. Producer identity dedupes through the
+  shipped publisher state, the publisher id being ``producer#attempt`` and
+  the sequence where the batch's records end, and the Update adds what a
+  Signal has no room for: a response. The workflow answers with the run and
+  offset the batch landed at, so ``append()`` returns a cursor, and it
+  refuses a repeat that carries *different* content at a sequence it holds,
+  or one behind its most recent, before accepting the Update, so the caller
+  gets :class:`temporalio.streams.StreamProducerError` and the log takes
+  nothing. Content is compared by a hash the workflow keeps per producer.
+  The Update's id is derived from producer, sequence and content, so a
+  retry after a lost reply is answered by the server from the first
+  outcome. The Action cost is unchanged: one Update per append batch in
+  place of one Signal.
 
-  What this transport cannot keep is the rest of that rule. A publish is a
-  Signal, which has no response, so the dedupe decision is taken in the
-  workflow and there is nowhere to report it. A repeat that carries
-  *different* content at a sequence the log already holds is therefore
-  dropped rather than refused with
-  :class:`temporalio.streams.StreamProducerError`, the way the memory and
-  native providers refuse it. Raising in the Signal handler is not an
-  alternative: it would fail the Workflow Task on every replay and the
-  caller would still learn nothing. A caller that needs a divergent retry to
-  be caught wants a provider whose append is a request and a response.
-- ``append()`` returns ``None``. The Signal transport learns positions at
-  read time, so a caller that wants to follow from now asks ``latest()``.
+  The Signal stays as the transport a worker that predates the Update
+  serves. A producer that is told twice, across a task boundary, that the
+  workflow has no publish Update falls back to it for the rest of its life
+  and returns ``None`` from ``append()``, since a Signal learns positions at
+  read time; ``publish_transport="signal"`` on the provider picks it from
+  the start. Records land in the same log either way, so a log written by
+  Signals reads the same. The shipped Signal handler's dedupe is one table
+  per publisher across topics, so on that transport one identity writing
+  two topics at the same sequence has its second batch dropped; the Update
+  keeps one per producer and topic, as the other providers do.
 - A log belongs to one run and is not carried across continue-as-new, so a
   cursor names the run as well as the offset. A handle without a run id
   reads run after run: each log through the poll Update while its run is
   open and through the tail Query once it has closed, then the successor's
-  from its first record.
+  from its first record. A run that was reset is followed too, into the run
+  describe names, at the position the read had reached: the reset run
+  rebuilt the base run's log up to the reset point by replay, so the items
+  before it sit at the same offsets. The reset itself is not reported to
+  the reader as a record; that is a wire change for a later round.
 - The workflow-side stream object belongs to the workflow instance, found
   through the handler the shipped class registers on it. An evicted and
   rebuilt workflow gets its own, so a task that failed leaks nothing into
   the next attempt's log and a replayed run does not see records twice.
+- An activity a workflow scheduled keeps its own streams inside that
+  workflow's log, under the reserved topic ``activity/<activity id>/<name>``
+  with ``%`` and ``/`` in the id percent-encoded, the way the native
+  provider reserves ``activity/`` in the owner's map. The record itself
+  carries the plain name. A standalone activity has no workflow to host a
+  log, so its streams are refused, and a workflow's own topic may not start
+  with the reserved prefix. A standalone stream, one with no owner at all,
+  is refused too: there is no workflow whose state could hold it. A housing
+  workflow per stream id is the design option for that, not built here.
+- A record's body meets the client's data converter at the transport's
+  envelope rather than one record at a time. A batch travels as a Signal or
+  Update argument and comes back as an Update or Query result, and the SDK
+  runs the payload codec and external storage over those the way it does
+  over every payload it sends, off the workflow thread, so a batch above the
+  storage threshold is offloaded as a claim and a codec protects it in
+  History. The bodies inside are left as the payload converter produced
+  them, because the workflow thread reads them straight out of its state
+  and could not decode a codec's output or redeem a claim there. So the
+  worker's converter has to match the clients', as it does for every other
+  payload, and a client with a converter of its own cannot read another's
+  records. What each record does carry is the plaintext hash of its body
+  under ``temporal.io/content-hash``, stamped by the producer before the
+  envelope is encoded, and the workflow matches a repeated batch by those
+  hashes rather than by the bytes.
+- A handle names its stream as a :class:`temporalio.streams.StreamRef` with
+  ``ref()``, a workflow's or an activity's, and ``close()`` refuses, since
+  an owned stream ends with its owner.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Generic, NoReturn, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from google.protobuf.message import DecodeError
 
@@ -77,11 +118,14 @@ from temporalio.contrib.workflow_streams import (
     WorkflowStream,
 )
 from temporalio.converter import PayloadConverter
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams._body import CONTENT_HASH_KEY, content_hash
 from temporalio.streams._errors import (
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
+    StreamProducerError,
     StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
@@ -93,6 +137,7 @@ from temporalio.streams._record import (
     StreamRecord,
     check_read_start,
 )
+from temporalio.streams._ref import StreamRef
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import (
     RecordDecoder,
@@ -106,6 +151,9 @@ from temporalio.streams.providers import ProviderPlugin
 from temporalio.worker._workflow_instance import QUERY_HANDLER_NOT_FOUND
 
 __all__ = [
+    "PRODUCER_CONFLICT_ERROR_TYPE",
+    "PublishTransport",
+    "WorkflowStreamsActivityHandle",
     "WorkflowStreamsHandle",
     "WorkflowStreamsProducer",
     "WorkflowStreamsProvider",
@@ -113,11 +161,25 @@ __all__ = [
 
 T = TypeVar("T")
 
+PublishTransport = Literal["update", "signal"]
+"""How an outside producer's batches reach the workflow."""
+
+PRODUCER_CONFLICT_ERROR_TYPE = "StreamProducerConflict"
+"""The ``ApplicationError.type`` the publish Update refuses a producer conflict with.
+
+Public so a caller driving the Update itself can tell the refusal from any
+other failure.
+"""
+
 _PROVIDER = "workflow_streams"
+_PUBLISH_UPDATE = "__temporal_streams_publish"
 _TAIL_QUERY = "__temporal_streams_tail"
 _LATEST_QUERY = "__temporal_streams_latest"
 _START_QUERY = "__temporal_streams_start"
 _ENCODING = b"binary/plain"
+# The topics an activity owns live in its workflow's log under this prefix,
+# so no workflow topic may start with it.
+_ACTIVITY_PREFIX = "activity/"
 # The same cap the shipped poll path answers under, because both are one
 # response through the same server.
 _MAX_TAIL_RESPONSE_BYTES = 1_000_000
@@ -131,9 +193,35 @@ _HANDLER_NOT_FOUND = QUERY_HANDLER_NOT_FOUND
 logger = logging.getLogger(__name__)
 
 
+def _run_is_closing(error: RPCError) -> bool:
+    """Whether the server refused an Update because the run is completing.
+
+    The window between a run deciding to close, or continue as new, and its
+    close being recorded; the next attempt learns how it closed.
+    """
+    return (
+        error.status == RPCStatusCode.FAILED_PRECONDITION and "closing" in error.message
+    )
+
+
 def _require_topic(topic: str) -> None:
     if not topic:
         raise ValueError("topic must not be empty")
+    if topic.startswith(_ACTIVITY_PREFIX):
+        raise ValueError(
+            f"topic {topic!r} is reserved: names under {_ACTIVITY_PREFIX!r} hold the "
+            "streams of the workflow's activities on the workflow_streams provider"
+        )
+
+
+def _activity_topic(activity_id: str, topic: str) -> str:
+    """The reserved name ``topic`` of ``activity_id``'s streams takes in the log.
+
+    The id is percent-encoded so an id holding ``/`` cannot be read as two
+    components; the name comes last, so it may hold anything.
+    """
+    escaped = activity_id.replace("%", "%25").replace("/", "%2F")
+    return f"{_ACTIVITY_PREFIX}{escaped}/{topic}"
 
 
 def _cursor(run_id: str, offset: int) -> Cursor:
@@ -176,6 +264,64 @@ def _entry_data(payload: Payload) -> str:
     return base64.b64encode(payload.SerializeToString()).decode("ascii")
 
 
+def _content(publish: PublishInput) -> str:
+    """A digest of one batch's content, length-delimited so a resplit cannot collide.
+
+    Each record counts by the plaintext hash stamped on it under
+    ``CONTENT_HASH_KEY``, so a body's encoding never enters the identity a
+    repeat is matched by; a record without a body, such as ``FINISH``, counts
+    by its bytes.
+    """
+    digest = hashlib.sha256()
+    for entry in publish.items:
+        record = WireRecord.FromString(_decode_payload(entry.data).data)
+        stamped = record.metadata.get(CONTENT_HASH_KEY)
+        identity = (
+            stamped.data
+            if stamped is not None
+            else record.SerializeToString(deterministic=True)
+        )
+        for part in (entry.topic.encode(), identity):
+            digest.update(len(part).to_bytes(8, "big"))
+            digest.update(part)
+    return digest.hexdigest()
+
+
+def _producer_key(publish: PublishInput) -> tuple[str, str]:
+    # A batch is one topic's, so its first entry names the stream.
+    topic = publish.items[0].topic if publish.items else ""
+    return publish.publisher_id, topic
+
+
+def _decode_payload(data: str) -> Payload:
+    return Payload.FromString(base64.b64decode(data))
+
+
+def _publish_id(publish: PublishInput, content: str) -> str:
+    # One id per (producer, sequence, content): a retry after a lost reply
+    # is answered from the first outcome without reaching the workflow, and a
+    # divergent repeat is a new Update the workflow gets to refuse.
+    key = f"{publish.publisher_id}\0{publish.sequence}\0{content}".encode()
+    return f"streams-publish-{hashlib.sha256(key).hexdigest()[:32]}"
+
+
+@dataclass
+class _PublishResult:
+    """The publish Update's answer: where the batch's last record sits."""
+
+    run_id: str
+    last_offset: int
+
+
+@dataclass
+class _Held:
+    """What the workflow keeps of a producer's most recent accepted batch."""
+
+    sequence: int
+    content: str
+    last_offset: int
+
+
 class _InstanceStream:
     """A view over the shipped stream object of the running workflow instance.
 
@@ -185,6 +331,12 @@ class _InstanceStream:
 
     def __init__(self, stream: WorkflowStream | None = None) -> None:
         self.stream = WorkflowStream() if stream is None else stream
+        # Per producer and topic, the most recent batch taken by the publish
+        # Update, so a repeat is answered and a divergent one refused. A
+        # producer's identity is one per stream, as on every provider, so
+        # the same identity on two topics is two producers. Workflow state,
+        # rebuilt on replay like the log itself.
+        self._producers: dict[tuple[str, str], _Held] = {}
         if workflow.get_query_handler(_TAIL_QUERY) is None:
             # The poll Update stops answering once the workflow is closing,
             # and a reader between polls at that moment would lose what the
@@ -195,6 +347,58 @@ class _InstanceStream:
             workflow.set_query_handler(_LATEST_QUERY, self._latest)
         if workflow.get_query_handler(_START_QUERY) is None:
             workflow.set_query_handler(_START_QUERY, self._start)
+        if workflow.get_update_handler(_PUBLISH_UPDATE) is None:
+            workflow.set_update_handler(
+                _PUBLISH_UPDATE, self._publish, validator=self._validate_publish
+            )
+
+    def _validate_publish(self, publish: PublishInput) -> None:
+        """Refuse a conflicting batch before the Update is accepted.
+
+        Refused here rather than in the handler so the refusal writes no
+        event: the caller learns of it and the log is untouched.
+
+        Raises:
+            ApplicationError: Typed ``PRODUCER_CONFLICT_ERROR_TYPE``. The
+                batch repeats this producer's most recent sequence with
+                other content, or names a sequence behind it.
+        """
+        held = self._producers.get(_producer_key(publish))
+        if held is None:
+            return
+        if publish.sequence < held.sequence:
+            raise ApplicationError(
+                f"producer {publish.publisher_id!r} already wrote past sequence "
+                f"{publish.sequence}; only its most recent append can be repeated",
+                type=PRODUCER_CONFLICT_ERROR_TYPE,
+            )
+        if publish.sequence == held.sequence and _content(publish) != held.content:
+            raise ApplicationError(
+                f"producer {publish.publisher_id!r} repeated sequence "
+                f"{publish.sequence} with different content",
+                type=PRODUCER_CONFLICT_ERROR_TYPE,
+            )
+
+    def _publish(self, publish: PublishInput) -> _PublishResult:
+        """Take one outside batch into the log and answer where it landed.
+
+        A repeat of the producer's most recent batch, which the validator
+        let through because its content matches, is answered with the
+        original position and writes nothing. The Update keeps its own
+        table rather than the shipped Signal handler's, which is one per
+        publisher across topics; a producer stays on one transport for its
+        life, so the two never judge the same batch.
+        """
+        run_id = workflow.info().run_id
+        key = _producer_key(publish)
+        held = self._producers.get(key)
+        if held is not None and publish.sequence == held.sequence:
+            return _PublishResult(run_id=run_id, last_offset=held.last_offset)
+        for entry in publish.items:
+            self.stream.topic(entry.topic).publish(_decode_payload(entry.data))
+        last = self.stream.next_offset - 1
+        self._producers[key] = _Held(publish.sequence, _content(publish), last)
+        return _PublishResult(run_id=run_id, last_offset=last)
 
     def _tail(self, from_offset: int, topic: str) -> dict[str, Any]:
         """One page of ``topic``'s items at or past ``from_offset``.
@@ -207,7 +411,8 @@ class _InstanceStream:
         size = 0
         next_offset = self.stream.next_offset
         more_ready = False
-        for offset, item_topic, payload in self.stream.items_from(from_offset):
+        held = self.stream.items_from(from_offset)
+        for offset, item_topic, payload in held:
             if item_topic != topic:
                 continue
             data = base64.b64encode(payload.SerializeToString()).decode("ascii")
@@ -220,6 +425,9 @@ class _InstanceStream:
             "items": items,
             "next_offset": next_offset,
             "more_ready": more_ready,
+            # Where the retained log starts at or past ``from_offset``: a
+            # reader whose position is below it has fallen behind truncation.
+            "base_offset": held[0][0] if held else next_offset,
         }
 
     def _latest(self, topic: str) -> int:
@@ -281,6 +489,10 @@ def _instance() -> _InstanceStream:
     # id: the SDK rebuilds an evicted workflow from history as a new object,
     # and a map would hand that object the stale log with its unregistered
     # handlers and the records of a task that failed.
+    handler = workflow.get_update_handler(_PUBLISH_UPDATE)
+    registered = getattr(handler, "__self__", None)
+    if isinstance(registered, _InstanceStream):
+        return registered
     stream = _registered_stream()
     return _InstanceStream() if stream is None else _InstanceStream(stream)
 
@@ -399,18 +611,19 @@ class _WSWorkflowProvider:
 
 
 class WorkflowStreamsProducer(Generic[T]):
-    """Appends by sending the shipped publish Signal directly.
+    """Appends through the publish Update, or the shipped publish Signal.
 
     Direct rather than through ``WorkflowStreamClient`` because the interface
     owns the publisher identity: it must be ``producer#attempt`` for the
     shipped dedupe to drop a retry and pass a new generation, and the client
     would use its own random id.
 
-    Sequences are committed only after the server accepted the Signal. A
-    batch whose Signal raised stays pending and goes out again under the
-    same signal sequence, either when the caller retries the same values or
-    ahead of whatever the caller sends next, so an ambiguous failure writes
-    the batch once and loses nothing.
+    Sequences are committed only after the server accepted the batch. A
+    batch whose send raised stays pending and goes out again under the same
+    sequence, either when the caller retries the same values or ahead of
+    whatever the caller sends next, so an ambiguous failure writes the batch
+    once and loses nothing. A batch the workflow refused is dropped from the
+    pending slot: the refusal is the answer.
     """
 
     def __init__(
@@ -420,17 +633,37 @@ class WorkflowStreamsProducer(Generic[T]):
         topic: str,
         producer_id: str,
         attempt: int,
+        *,
+        item_topic: str | None = None,
+        transport: PublishTransport = "update",
+        retry_cooldown: timedelta = timedelta(milliseconds=100),
     ) -> None:
-        """Bind this producer to ``topic`` on the workflow behind ``handle``."""
+        """Bind this producer to ``topic`` on the workflow behind ``handle``.
+
+        ``item_topic`` is the name the log files the records under when it
+        differs from the name the records carry, as an activity's reserved
+        topics do. ``transport`` is how batches travel; ``"update"`` falls
+        back to ``"signal"`` on a workflow that has no publish Update, after
+        one retry ``retry_cooldown`` later.
+        """
         self._handle = handle
         self._converter = converter
         self._topic = topic
+        self._item_topic = topic if item_topic is None else item_topic
         self._producer_id = producer_id
         self._attempt = attempt
+        self._transport: PublishTransport = transport
+        self._retry_cooldown = retry_cooldown
         # One-based, because zero on the wire says the producer does not
         # number its records and this one does.
         self._sequence = 1
         self._pending: tuple[list[PublishEntry], int] | None = None
+        self._last: Cursor | None = None
+
+    @property
+    def transport(self) -> PublishTransport:
+        """How this producer's batches travel now: the Signal once it fell back."""
+        return self._transport
 
     @property
     def producer_id(self) -> str:
@@ -451,16 +684,23 @@ class WorkflowStreamsProducer(Generic[T]):
         )
 
     async def append(self, *values: T) -> Cursor | None:
-        """Append ``values`` through the shipped publish Signal.
+        """Append ``values`` and return the cursor of the batch's last record.
 
-        Always ``None``: this transport learns positions at read time, so a
-        caller that wants to follow from now asks
-        :meth:`WorkflowStreamsHandle.latest`.
+        A repeat of this producer's most recent append with the same content
+        is answered with the position the original landed at; an empty call
+        returns the position of the last record this producer wrote, or
+        ``None`` before its first. ``None`` is also the answer on the Signal
+        transport, which learns positions at read time, so a caller that
+        wants to follow from now asks :meth:`WorkflowStreamsHandle.latest`.
+
+        Raises:
+            StreamProducerError: The workflow holds this sequence with other
+                content, or the producer already wrote past it.
+            StreamNotFoundError: The workflow does not exist or has closed.
         """
         if not values:
-            return None
-        await self._send([(RecordKind.DATA, value) for value in values])
-        return None
+            return self._last
+        return await self._send([(RecordKind.DATA, value) for value in values])
 
     async def finish(self) -> None:
         """Write ``FINISH`` for this producer on this topic."""
@@ -482,38 +722,119 @@ class WorkflowStreamsProducer(Generic[T]):
                 sequence=sequence,
             )
             sequence += 1
+            if wire.HasField("body"):
+                # The plaintext hash the workflow matches a repeat by, taken
+                # as the converter produced the body, before the transport's
+                # codec meets the envelope.
+                wire.metadata[CONTENT_HASH_KEY].CopyFrom(
+                    Payload(
+                        metadata={"encoding": _ENCODING},
+                        data=content_hash(wire.body).encode(),
+                    )
+                )
             entries.append(
-                PublishEntry(topic=self._topic, data=_entry_data(_wrap(wire)))
+                PublishEntry(topic=self._item_topic, data=_entry_data(_wrap(wire)))
             )
         return entries, sequence
 
-    async def _send(self, batch: list[tuple[RecordKind, Any]]) -> None:
+    async def _send(self, batch: list[tuple[RecordKind, Any]]) -> Cursor | None:
         entries, next_sequence = self._entries(batch)
         if self._pending is not None and self._pending[0] != entries:
-            # The caller moved on from a batch whose Signal raised. It goes
-            # first, under the signal sequence it already had, so a copy the
-            # server did accept is dropped and one it never saw lands. The
-            # new batch is then renumbered behind it.
-            await self._signal(*self._pending)
+            # The caller moved on from a batch whose send raised. It goes
+            # first, under the sequence it already had, so a copy the server
+            # did accept is answered or dropped and one it never saw lands.
+            # The new batch is then renumbered behind it.
+            await self._deliver(*self._pending)
             entries, next_sequence = self._entries(batch)
-        await self._signal(entries, next_sequence)
+        return await self._deliver(entries, next_sequence)
 
-    async def _signal(self, entries: list[PublishEntry], next_sequence: int) -> None:
+    async def _deliver(
+        self, entries: list[PublishEntry], next_sequence: int
+    ) -> Cursor | None:
         # The dedupe sequence is where this producer's records end, not how
-        # many signals it has sent. The two differ once a retry batches its
+        # many batches it has sent. The two differ once a retry batches its
         # records differently from the send it is repeating, and a counter of
-        # signals then either drops a batch of new records or lets records
+        # batches then either drops a batch of new records or lets records
         # that are already there through a second time.
         self._pending = (entries, next_sequence)
+        publish = PublishInput(
+            items=entries, publisher_id=self._publisher_id, sequence=next_sequence
+        )
+        if self._transport == "signal":
+            landed = await self._signal(publish)
+        else:
+            landed = await self._update(publish)
+        self._sequence = next_sequence
+        self._pending = None
+        if landed is not None:
+            self._last = landed
+        return landed
+
+    async def _update(self, publish: PublishInput) -> Cursor | None:
+        content = _content(publish)
+        retried = False
+        while True:
+            try:
+                answer = await self._handle.execute_update(
+                    _PUBLISH_UPDATE,
+                    publish,
+                    id=_publish_id(publish, content),
+                    result_type=_PublishResult,
+                )
+            except WorkflowUpdateFailedError as error:
+                cause = error.cause
+                cause_type = getattr(cause, "type", None)
+                if cause_type == PRODUCER_CONFLICT_ERROR_TYPE:
+                    # Final for this batch: there is nothing to send again.
+                    self._pending = None
+                    raise StreamProducerError(str(cause)) from error
+                if cause_type == _UPDATE_OUTLIVED_RUN:
+                    # Accepted, then the run closed before the handler ran:
+                    # the same answer a Signal to a closed run gets.
+                    raise StreamNotFoundError(
+                        f"workflow {self._handle.id!r} closed before taking the "
+                        "batch, so its stream cannot be appended to"
+                    ) from error
+                if _HANDLER_NOT_FOUND not in str(cause):
+                    raise StreamError(
+                        f"the publish update on workflow {self._handle.id!r} "
+                        f"failed: {error}"
+                    ) from error
+                if not retried:
+                    # A rejection comes back with the completion of the task
+                    # that made it, so a retry reaches a later task, and the
+                    # start hook registers the handler on the first one.
+                    retried = True
+                    await asyncio.sleep(self._retry_cooldown.total_seconds())
+                    continue
+                # Rejected across a task boundary: the workflow's worker
+                # predates the publish Update. Its Signal takes the batch,
+                # and every later one from this producer.
+                logger.info(
+                    "workflow %r has no publish update; appending by Signal",
+                    self._handle.id,
+                )
+                self._transport = "signal"
+                return await self._signal(publish)
+            except RPCError as error:
+                if _run_is_closing(error):
+                    # Where a Signal would be carried to the successor, the
+                    # Update is refused; the retry reaches the run that
+                    # takes over, since the handle follows the chain.
+                    await asyncio.sleep(self._retry_cooldown.total_seconds())
+                    continue
+                if error.status == RPCStatusCode.NOT_FOUND:
+                    raise StreamNotFoundError(
+                        f"workflow {self._handle.id!r} was not found, so its stream "
+                        "cannot be appended to"
+                    ) from error
+                raise
+            return _cursor(answer.run_id, answer.last_offset)
+
+    async def _signal(self, publish: PublishInput) -> Cursor | None:
+        # Always None: a Signal has no response to carry the position.
         try:
-            await self._handle.signal(
-                PUBLISH_SIGNAL_NAME,
-                PublishInput(
-                    items=entries,
-                    publisher_id=self._publisher_id,
-                    sequence=next_sequence,
-                ),
-            )
+            await self._handle.signal(PUBLISH_SIGNAL_NAME, publish)
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
                 raise StreamNotFoundError(
@@ -521,8 +842,7 @@ class WorkflowStreamsProducer(Generic[T]):
                     "cannot be appended to"
                 ) from error
             raise
-        self._sequence = next_sequence
-        self._pending = None
+        return None
 
 
 class WorkflowStreamsHandle:
@@ -534,12 +854,14 @@ class WorkflowStreamsHandle:
         workflow_id: str,
         run_id: str | None,
         poll_cooldown: timedelta,
+        publish_transport: PublishTransport = "update",
     ) -> None:
         """Address ``workflow_id``'s log, pinned to ``run_id`` when one is given."""
         self._client = client
         self._workflow_id = workflow_id
         self._run_id = run_id
         self._poll_cooldown = poll_cooldown
+        self._publish_transport: PublishTransport = publish_transport
         self._converter = client.data_converter.payload_converter
 
     def read(
@@ -556,9 +878,15 @@ class WorkflowStreamsHandle:
         holds: the poll Update reads offset zero as the log's base. ``END``
         and ``last=`` start on the current run, or the pinned one, at an
         offset its workflow answers by Query when the read starts.
+
+        The chain is followed across continue-as-new, into the successor's
+        log from its first record, and across a reset, into the run describe
+        names at the position the read had reached. A handle pinned to a run
+        ends with that run either way.
         """
         check_read_start(after, last)
         topic, result_type = resolve_topic(topic, result_type)
+        wire_topic = self._wire_topic(topic)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         named = None if after == END else _position(after)
@@ -566,7 +894,12 @@ class WorkflowStreamsHandle:
             raise StreamCursorError(
                 f"cursor {after.token!r} names another run than this handle is pinned to"
             )
-        return self._read(topic, named, after, last, result_type)
+        return self._read(wire_topic, named, after, last, result_type)
+
+    def _wire_topic(self, topic: str) -> str:
+        """The name the log files ``topic`` under: the topic itself for a workflow's."""
+        _require_topic(topic)
+        return topic
 
     async def _read(
         self,
@@ -618,15 +951,44 @@ class WorkflowStreamsHandle:
                         yield record
                 if not more:
                     break
-            if (
-                self._run_id is not None
-                or status != WorkflowExecutionStatus.CONTINUED_AS_NEW
-            ):
+            if self._run_id is not None:
                 return
+            following = await self._following(handle, status, tail_offset)
+            if following is None:
+                return
+            run_id, offset = following
+
+    async def _following(
+        self,
+        handle: WorkflowHandle[Any, Any],
+        status: WorkflowExecutionStatus,
+        position: int,
+    ) -> tuple[str, int] | None:
+        """The run that carries on after ``handle``'s, and where to read it from.
+
+        A continue-as-new names its successor in the close event, and the
+        successor's log starts over at zero. A reset does not: the base run is
+        closed with no word of it in its own History, and only describe names
+        the run reset from it. That run rebuilt its log by replaying the base
+        run's History up to the reset point, so the items before that point
+        sit at the same offsets in both logs, and the read carries on at the
+        position it reached. Past the reset point the two logs differ, and a
+        reader already there is not told: reporting the reset to consumers as
+        a record is a wire change for a later round.
+        """
+        if status == WorkflowExecutionStatus.CONTINUED_AS_NEW:
             successor = await self._successor(handle)
-            if successor is None:
-                return
-            run_id, offset = successor, 0
+            return None if successor is None else (successor, 0)
+        reset_run = await self._reset_run(handle)
+        return None if reset_run is None else (reset_run, position)
+
+    async def _reset_run(self, handle: WorkflowHandle[Any, Any]) -> str | None:
+        """The run ``handle``'s run was reset into, which only describe reports."""
+        description = await self._describe(handle)
+        if description is None:
+            return None
+        extended = description.raw_description.workflow_extended_info
+        return extended.reset_run_id or None
 
     async def _poll(
         self, handle: WorkflowHandle[Any, Any], topic: str, offset: int
@@ -700,6 +1062,11 @@ class WorkflowStreamsHandle:
                     f"the poll update on workflow {self._workflow_id!r} failed: {error}"
                 ) from error
             except RPCError as error:
+                if _run_is_closing(error):
+                    # Continuing as new, or completing: the next attempt
+                    # learns how it closed, the way a draining poll does.
+                    await asyncio.sleep(cooldown)
+                    continue
                 # The run closed and its poll Update went with it, or the
                 # workflow does not exist; the caller describes to tell which.
                 if error.status != RPCStatusCode.NOT_FOUND:
@@ -760,7 +1127,13 @@ class WorkflowStreamsHandle:
         try:
             async for event in self._handle(run_id).fetch_history_events(page_size=1):
                 attributes = event.workflow_execution_started_event_attributes
-                return attributes.continued_execution_run_id or None
+                if attributes.continued_execution_run_id:
+                    return attributes.continued_execution_run_id
+                # A reset run's start event is the base run's, copied, and the
+                # original run id it carries is kept across resets, so it names
+                # the run the chain of resets began from.
+                original = attributes.original_execution_run_id
+                return original if original and original != run_id else None
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise
@@ -810,6 +1183,13 @@ class WorkflowStreamsHandle:
                 raise
             # The History is gone; nothing is left to serve.
             return [], from_offset, False
+        if from_offset and wire.get("base_offset", from_offset) > from_offset:
+            # Restarting from the base would hand the caller records it
+            # already handled, and only the caller can decide to do that.
+            raise StreamCursorError(
+                f"offset {from_offset} of workflow {self._workflow_id!r} run "
+                f"{handle.run_id!r} is no longer retained"
+            )
         items = [
             (item["offset"], Payload.FromString(base64.b64decode(item["data"])))
             for item in wire["items"]
@@ -860,12 +1240,13 @@ class WorkflowStreamsHandle:
         topic's record.
         """
         topic, _ = resolve_topic(topic)
+        wire_topic = self._wire_topic(topic)
         handle = self._handle(self._run_id)
         description = await self._describe(handle)
         if description is None:
             raise StreamNotFoundError(f"workflow {self._workflow_id!r} was not found")
         try:
-            head = await handle.query(_LATEST_QUERY, topic, result_type=int)
+            head = await handle.query(_LATEST_QUERY, wire_topic, result_type=int)
         except WorkflowQueryFailedError as error:
             if QUERY_HANDLER_NOT_FOUND not in str(error):
                 raise StreamError(
@@ -901,25 +1282,161 @@ class WorkflowStreamsHandle:
     ) -> WorkflowStreamsProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
         topic, _ = resolve_topic(topic)
+        wire_topic = self._wire_topic(topic)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return WorkflowStreamsProducer(
-            self._handle(self._run_id), self._converter, topic, producer_id, attempt
+            self._handle(self._run_id),
+            self._converter,
+            topic,
+            producer_id,
+            attempt,
+            item_topic=wire_topic,
+            transport=self._publish_transport,
+            retry_cooldown=self._poll_cooldown,
         )
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A ref to ``topic`` of this workflow's stream, pinned as this handle is."""
+        return StreamRef.for_workflow(
+            self._workflow_id, run_id=self._run_id, topic=topic
+        )
+
+    async def close(self) -> None:
+        """Refuse: an owned stream ends with its owner, not by a caller."""
+        raise ValueError(
+            "only a standalone stream can be closed; this handle is on an owned "
+            "stream, which ends when its workflow or activity does"
+        )
+
+
+class WorkflowStreamsActivityHandle(WorkflowStreamsHandle):
+    """The streams one activity of a workflow owns, kept in that workflow's log.
+
+    Each topic is the reserved topic ``activity/<activity id>/<name>`` of the
+    workflow's log, so an activity's ``tokens`` and its workflow's ``tokens``
+    are two streams. The activity belongs to one run, so the handle pins the
+    run on first use and never follows a successor. A read ends when the
+    workflow closes, or once the activity has been seen pending, is pending
+    no longer and the read delivered a record: a stream the activity never
+    wrote has nothing to close, so a read on it waits for the workflow.
+
+    A read here polls the tail Query and describes the workflow between
+    polls, every ``poll_cooldown``, rather than parking on the poll Update:
+    an Update parked in the workflow returns only when the log grows, so it
+    could not notice the activity ending, and each abandoned one would stay
+    parked against the run's Update caps.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        workflow_id: str,
+        run_id: str | None,
+        activity_id: str,
+        poll_cooldown: timedelta,
+        publish_transport: PublishTransport = "update",
+    ) -> None:
+        """Address ``activity_id``'s streams inside ``workflow_id``'s log."""
+        super().__init__(client, workflow_id, run_id, poll_cooldown, publish_transport)
+        self._activity_id = activity_id
+
+    def _wire_topic(self, topic: str) -> str:
+        return _activity_topic(self._activity_id, topic)
+
+    def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
+        """A ref to ``topic`` of this activity's streams, through its workflow."""
+        return StreamRef.for_activity(
+            self._activity_id,
+            workflow_id=self._workflow_id,
+            run_id=self._run_id,
+            topic=topic,
+        )
+
+    async def _read(
+        self,
+        topic: str,
+        named: tuple[str, int] | None,
+        after: Cursor,
+        last: int | None,
+        result_type: type | None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        if named is not None:
+            run_id, offset = named[0], named[1] + 1
+        elif last is not None or after == END:
+            run_id, offset = await self._start_on_current_run(topic, last or 0)
+            after = _cursor(run_id, offset - 1)
+        else:
+            run_id, offset = await self._current_run(), 0
+        handle = self._handle(run_id)
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
+        cooldown = self._poll_cooldown.total_seconds()
+        seen_pending = False
+        delivered = False
+        ended = False
+        while True:
+            more = True
+            while more:
+                page, offset, more = await self._tail(handle, topic, offset)
+                for offset_, payload in page:
+                    for record in self._records(decoder, run_id, offset_, payload):
+                        delivered = True
+                        yield record
+            if ended:
+                return
+            description = await self._describe(handle)
+            if description is None:
+                raise StreamNotFoundError(
+                    f"workflow {self._workflow_id!r} run {run_id!r} was not found"
+                )
+            pending = any(
+                info.activity_id == self._activity_id
+                for info in description.raw_description.pending_activities
+            )
+            seen_pending = seen_pending or pending
+            # One more pass after learning the stream ended, so a record that
+            # landed between the tail and the describe is not lost.
+            ended = description.status != WorkflowExecutionStatus.RUNNING or (
+                seen_pending and not pending and delivered
+            )
+            if not ended:
+                await asyncio.sleep(cooldown)
+
+    async def _current_run(self) -> str:
+        description = await self._describe(self._handle(self._run_id))
+        if description is None:
+            raise StreamNotFoundError(f"workflow {self._workflow_id!r} was not found")
+        assert description.run_id is not None
+        return description.run_id
 
 
 class WorkflowStreamsProvider(ProviderPlugin):
     """The provider over the shipped Workflow Streams transport."""
 
     def __init__(
-        self, *, poll_cooldown: timedelta = timedelta(milliseconds=100)
+        self,
+        *,
+        poll_cooldown: timedelta = timedelta(milliseconds=100),
+        publish_transport: PublishTransport = "update",
     ) -> None:
         """Create the provider.
 
         Args:
             poll_cooldown: How long an outside reader that is caught up waits
-                between polls. Backlogs drain at full speed regardless.
+                between polls. Backlogs drain at full speed regardless. Also
+                how long a producer waits before retrying a publish Update
+                the workflow's first task rejected.
+            publish_transport: How an outside producer's batches reach the
+                workflow. ``"update"``, the default, answers each batch with
+                its position and refuses a conflicting repeat; on a workflow
+                whose worker predates the publish Update the producer falls
+                back to the Signal by itself. ``"signal"`` is the transport
+                of the first release and skips the detection. Both cost one
+                Action per batch.
         """
         self._poll_cooldown = poll_cooldown
+        self._publish_transport: PublishTransport = publish_transport
 
     def workflow_provider(self) -> _WSWorkflowProvider:
         """The workflow half, over the running instance's shipped stream object."""
@@ -929,7 +1446,9 @@ class WorkflowStreamsProvider(ProviderPlugin):
         self, client: Client, workflow_id: str, *, run_id: str | None = None
     ) -> WorkflowStreamsHandle:
         """A handle on ``workflow_id``'s log; without ``run_id`` it follows the chain."""
-        return WorkflowStreamsHandle(client, workflow_id, run_id, self._poll_cooldown)
+        return WorkflowStreamsHandle(
+            client, workflow_id, run_id, self._poll_cooldown, self._publish_transport
+        )
 
     def get_activity_stream_handle(
         self,
@@ -938,20 +1457,74 @@ class WorkflowStreamsProvider(ProviderPlugin):
         *,
         workflow_id: str | None = None,
         run_id: str | None = None,
-    ) -> NoReturn:
-        """Refused: this provider cannot hold a stream an activity owns.
+    ) -> WorkflowStreamsActivityHandle:
+        """A handle on the streams an activity of ``workflow_id`` owns.
 
-        The log lives inside a running workflow and is served by its handlers,
-        and a standalone activity has no workflow to host one. An activity
-        writes to its workflow's topics instead, through
-        ``activity.stream_handle()`` without a scope.
+        They live in the workflow's log under the reserved topics
+        ``activity/<activity id>/<name>``, and ``run_id`` pins the workflow's
+        run. Without ``workflow_id`` the activity is a standalone one, which
+        has no workflow to host a log, so this provider refuses it; such an
+        activity addresses a workflow's stream by ``workflow_id`` instead.
+
+        Raises:
+            StreamUnsupportedError: ``workflow_id`` was not given.
+        """
+        if workflow_id is None:
+            raise StreamUnsupportedError(
+                "the workflow_streams provider cannot hold a stream a standalone "
+                "activity owns: its log lives inside a running workflow, and no "
+                "workflow hosts this activity's"
+            )
+        return WorkflowStreamsActivityHandle(
+            client,
+            workflow_id,
+            run_id,
+            activity_id,
+            self._poll_cooldown,
+            self._publish_transport,
+        )
+
+    async def create_standalone_stream(
+        self,
+        client: Client,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> WorkflowStreamsHandle:
+        """Refused: this provider has no store for a stream without an owner.
+
+        Every log here is a running workflow's state, served by that
+        workflow's handlers, and a standalone stream has no workflow. A
+        housing workflow started for the stream id, with the retention policy
+        as its state and ``close()`` as a Signal, would be one way to offer
+        it on this transport; it is a design option for a later round, not
+        built here.
 
         Raises:
             StreamUnsupportedError: Always.
         """
         raise StreamUnsupportedError(
-            "the workflow streams provider cannot hold a stream an activity owns: its "
-            "log lives inside a running workflow"
+            "the workflow_streams provider does not host standalone streams: every "
+            "log is a running workflow's state, and a stream without an owner has "
+            "no workflow"
+        )
+
+    def get_standalone_stream_handle(
+        self, client: Client, stream_id: str
+    ) -> WorkflowStreamsHandle:
+        """Refused: this provider has no store for a stream without an owner.
+
+        See :meth:`create_standalone_stream`.
+
+        Raises:
+            StreamUnsupportedError: Always.
+        """
+        raise StreamUnsupportedError(
+            "the workflow_streams provider does not host standalone streams: every "
+            "log is a running workflow's state, and a stream without an owner has "
+            "no workflow"
         )
 
     async def close(self) -> None:

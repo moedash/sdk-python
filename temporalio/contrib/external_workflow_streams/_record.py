@@ -11,7 +11,29 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
+
+@dataclass(frozen=True)
+class StartAtTail:
+    """A subscription start the Worker resolves against the store: the tail.
+
+    ``last`` is how many of the newest records the read begins with; zero
+    means the boundary after the newest record, so the read sees only what
+    is appended after it was opened. The Workflow thread cannot ask the store
+    where the tail is, so the runtime records the request and the Worker
+    resolves it before the watcher starts, writing the boundary into the
+    marker beside the subscription as it does a cursor the Workflow named.
+    """
+
+    last: int = 0
+
+    def __post_init__(self) -> None:
+        """Refuse a negative count."""
+        if self.last < 0:
+            raise ValueError(f"last must not be negative, got {self.last}")
+
+
 __all__ = [
+    "StartAtTail",
     "AFTER",
     "BEGINNING",
     "Cursor",

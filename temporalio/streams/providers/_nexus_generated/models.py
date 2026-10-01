@@ -16,6 +16,7 @@ from ._definitions import (
     _format_base64,
     _parse_base64,
     _parse_spec_integer,
+    _quote,
     _transfer_type_convertible,
 )
 
@@ -42,42 +43,17 @@ class _AppendInputTransferTypeConverter(
             )
         raw = typing.cast("dict[str, typing.Any]", value)
 
-        workflow_id_value: str = typing.cast("typing.Any", None)
-        if "workflow_id" not in raw or raw["workflow_id"] is None:
-            violations.append(Violation(path="workflow_id", reason="required"))
+        stream_value: StreamRef = typing.cast("typing.Any", None)
+        if "stream" not in raw or raw["stream"] is None:
+            violations.append(Violation(path="stream", reason="required"))
         else:
-            workflow_id_value_raw = raw["workflow_id"]
-            if not isinstance(workflow_id_value_raw, str):
-                violations.append(
-                    Violation(path="workflow_id", reason="expected string")
+            stream_value_raw = raw["stream"]
+            try:
+                stream_value = _StreamRefTransferTypeConverter().from_transfer_type(
+                    stream_value_raw, StreamRef
                 )
-            else:
-                workflow_id_value = workflow_id_value_raw
-
-        run_id_value: str | None = None
-        if "run_id" in raw:
-            run_id_value_raw = raw["run_id"]
-            if run_id_value_raw is None:
-                violations.append(
-                    Violation(path="run_id", reason="explicit null not allowed")
-                )
-            else:
-                if not isinstance(run_id_value_raw, str):
-                    violations.append(
-                        Violation(path="run_id", reason="expected string")
-                    )
-                else:
-                    run_id_value = run_id_value_raw
-
-        topic_value: str = typing.cast("typing.Any", None)
-        if "topic" not in raw or raw["topic"] is None:
-            violations.append(Violation(path="topic", reason="required"))
-        else:
-            topic_value_raw = raw["topic"]
-            if not isinstance(topic_value_raw, str):
-                violations.append(Violation(path="topic", reason="expected string"))
-            else:
-                topic_value = topic_value_raw
+            except temporalio.exceptions.ApplicationError as error:
+                _collect(violations, "stream", error)
 
         producer_id_value: str = typing.cast("typing.Any", None)
         if "producer_id" not in raw or raw["producer_id"] is None:
@@ -194,9 +170,7 @@ class _AppendInputTransferTypeConverter(
 
         for key in raw:
             if (
-                key != "workflow_id"
-                and key != "run_id"
-                and key != "topic"
+                key != "stream"
                 and key != "producer_id"
                 and key != "attempt"
                 and key != "sequence"
@@ -208,9 +182,7 @@ class _AppendInputTransferTypeConverter(
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return AppendInput(
-            workflow_id=workflow_id_value,
-            run_id=run_id_value,
-            topic=topic_value,
+            stream=stream_value,
             producer_id=producer_id_value,
             attempt=attempt_value,
             sequence=sequence_value,
@@ -223,10 +195,12 @@ class _AppendInputTransferTypeConverter(
     def to_transfer_type(self, value: "AppendInput") -> typing.Any:
         violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
-        out["workflow_id"] = value.workflow_id
-        if value.run_id is not None:
-            out["run_id"] = value.run_id
-        out["topic"] = value.topic
+        try:
+            out["stream"] = _StreamRefTransferTypeConverter().to_transfer_type(
+                value.stream
+            )
+        except temporalio.exceptions.ApplicationError as error:
+            _collect(violations, "stream", error)
         out["producer_id"] = value.producer_id
         if abs(value.attempt) > 9007199254740991:
             violations.append(
@@ -267,16 +241,7 @@ class _AppendInputTransferTypeConverter(
 class AppendInput:
     """One append call: who is writing, where, and what."""
 
-    workflow_id: str
-    """The workflow whose stream is being written."""
-
-    run_id: str | None = None
-    """The run to address. Empty addresses the workflow's execution chain, which is what a
-    producer normally wants.
-    """
-
-    topic: str
-    """The topic of the workflow's stream to append to."""
+    stream: StreamRef
 
     producer_id: str
     """Identifies the writer across its retries, so its attempts can be ordered. Never
@@ -402,42 +367,17 @@ class _ReadInputTransferTypeConverter(
             )
         raw = typing.cast("dict[str, typing.Any]", value)
 
-        workflow_id_value: str = typing.cast("typing.Any", None)
-        if "workflow_id" not in raw or raw["workflow_id"] is None:
-            violations.append(Violation(path="workflow_id", reason="required"))
+        stream_value: StreamRef = typing.cast("typing.Any", None)
+        if "stream" not in raw or raw["stream"] is None:
+            violations.append(Violation(path="stream", reason="required"))
         else:
-            workflow_id_value_raw = raw["workflow_id"]
-            if not isinstance(workflow_id_value_raw, str):
-                violations.append(
-                    Violation(path="workflow_id", reason="expected string")
+            stream_value_raw = raw["stream"]
+            try:
+                stream_value = _StreamRefTransferTypeConverter().from_transfer_type(
+                    stream_value_raw, StreamRef
                 )
-            else:
-                workflow_id_value = workflow_id_value_raw
-
-        run_id_value: str | None = None
-        if "run_id" in raw:
-            run_id_value_raw = raw["run_id"]
-            if run_id_value_raw is None:
-                violations.append(
-                    Violation(path="run_id", reason="explicit null not allowed")
-                )
-            else:
-                if not isinstance(run_id_value_raw, str):
-                    violations.append(
-                        Violation(path="run_id", reason="expected string")
-                    )
-                else:
-                    run_id_value = run_id_value_raw
-
-        topic_value: str = typing.cast("typing.Any", None)
-        if "topic" not in raw or raw["topic"] is None:
-            violations.append(Violation(path="topic", reason="required"))
-        else:
-            topic_value_raw = raw["topic"]
-            if not isinstance(topic_value_raw, str):
-                violations.append(Violation(path="topic", reason="expected string"))
-            else:
-                topic_value = topic_value_raw
+            except temporalio.exceptions.ApplicationError as error:
+                _collect(violations, "stream", error)
 
         after_token_value: str | None = None
         if "after_token" in raw:
@@ -548,9 +488,7 @@ class _ReadInputTransferTypeConverter(
 
         for key in raw:
             if (
-                key != "workflow_id"
-                and key != "run_id"
-                and key != "topic"
+                key != "stream"
                 and key != "after_token"
                 and key != "max_records"
                 and key != "wait_ms"
@@ -561,9 +499,7 @@ class _ReadInputTransferTypeConverter(
         if violations:
             raise temporalio.converter.create_payload_validation_error(violations)
         return ReadInput(
-            workflow_id=workflow_id_value,
-            run_id=run_id_value,
-            topic=topic_value,
+            stream=stream_value,
             after_token=after_token_value,
             max_records=max_records_value,
             wait_ms=wait_ms_value,
@@ -575,10 +511,12 @@ class _ReadInputTransferTypeConverter(
     def to_transfer_type(self, value: "ReadInput") -> typing.Any:
         violations: list[Violation] = []
         out: dict[str, typing.Any] = {}
-        out["workflow_id"] = value.workflow_id
-        if value.run_id is not None:
-            out["run_id"] = value.run_id
-        out["topic"] = value.topic
+        try:
+            out["stream"] = _StreamRefTransferTypeConverter().to_transfer_type(
+                value.stream
+            )
+        except temporalio.exceptions.ApplicationError as error:
+            _collect(violations, "stream", error)
         if value.after_token is not None:
             out["after_token"] = value.after_token
         if value.max_records is not None:
@@ -643,16 +581,7 @@ class _ReadInputTransferTypeConverter(
 class ReadInput:
     """One read call: where to resume from and how long to wait."""
 
-    workflow_id: str
-    """The workflow whose stream is being read."""
-
-    run_id: str | None = None
-    """Pin the read to this run. Empty follows the workflow's execution chain across
-    continue-as-new.
-    """
-
-    topic: str
-    """The topic of the workflow's stream to read."""
+    stream: StreamRef
 
     after_token: str | None = None
     """Opaque cursor from an earlier record or append. The read resumes strictly after the
@@ -915,3 +844,193 @@ class RecordWire:
     additional_properties: dict[str, typing.Any] = dataclasses.field(
         default_factory=dict
     )
+
+
+class _StreamRefTransferTypeConverter(
+    temporalio.converter.TransferTypeConverter["StreamRef", typing.Any]
+):
+    @typing_extensions.override
+    def from_transfer_type(
+        self, value: typing.Any, type_hint: type["StreamRef"]
+    ) -> "StreamRef":
+        violations: list[Violation] = []
+        if not isinstance(value, dict):
+            raise temporalio.converter.create_payload_validation_error(
+                [Violation(path="", reason="expected object")]
+            )
+        raw = typing.cast("dict[str, typing.Any]", value)
+
+        kind_value: typing.Literal["workflow", "activity", "standalone"] = typing.cast(
+            "typing.Any", None
+        )
+        if "kind" not in raw or raw["kind"] is None:
+            violations.append(Violation(path="kind", reason="required"))
+        else:
+            kind_value_raw = raw["kind"]
+            if not isinstance(kind_value_raw, str):
+                violations.append(Violation(path="kind", reason="expected string"))
+            elif kind_value_raw not in ("workflow", "activity", "standalone"):
+                violations.append(
+                    Violation(
+                        path="kind",
+                        reason=f'must be one of ["workflow", "activity", "standalone"], got {_quote(kind_value_raw)}',
+                    )
+                )
+            else:
+                kind_value = kind_value_raw
+
+        workflow_id_value: str | None = None
+        if "workflow_id" in raw:
+            workflow_id_value_raw = raw["workflow_id"]
+            if workflow_id_value_raw is None:
+                violations.append(
+                    Violation(path="workflow_id", reason="explicit null not allowed")
+                )
+            else:
+                if not isinstance(workflow_id_value_raw, str):
+                    violations.append(
+                        Violation(path="workflow_id", reason="expected string")
+                    )
+                else:
+                    workflow_id_value = workflow_id_value_raw
+
+        run_id_value: str | None = None
+        if "run_id" in raw:
+            run_id_value_raw = raw["run_id"]
+            if run_id_value_raw is None:
+                violations.append(
+                    Violation(path="run_id", reason="explicit null not allowed")
+                )
+            else:
+                if not isinstance(run_id_value_raw, str):
+                    violations.append(
+                        Violation(path="run_id", reason="expected string")
+                    )
+                else:
+                    run_id_value = run_id_value_raw
+
+        activity_id_value: str | None = None
+        if "activity_id" in raw:
+            activity_id_value_raw = raw["activity_id"]
+            if activity_id_value_raw is None:
+                violations.append(
+                    Violation(path="activity_id", reason="explicit null not allowed")
+                )
+            else:
+                if not isinstance(activity_id_value_raw, str):
+                    violations.append(
+                        Violation(path="activity_id", reason="expected string")
+                    )
+                else:
+                    activity_id_value = activity_id_value_raw
+
+        stream_id_value: str | None = None
+        if "stream_id" in raw:
+            stream_id_value_raw = raw["stream_id"]
+            if stream_id_value_raw is None:
+                violations.append(
+                    Violation(path="stream_id", reason="explicit null not allowed")
+                )
+            else:
+                if not isinstance(stream_id_value_raw, str):
+                    violations.append(
+                        Violation(path="stream_id", reason="expected string")
+                    )
+                else:
+                    stream_id_value = stream_id_value_raw
+
+        topic_value: str = typing.cast("typing.Any", None)
+        if "topic" not in raw or raw["topic"] is None:
+            violations.append(Violation(path="topic", reason="required"))
+        else:
+            topic_value_raw = raw["topic"]
+            if not isinstance(topic_value_raw, str):
+                violations.append(Violation(path="topic", reason="expected string"))
+            else:
+                topic_value = topic_value_raw
+
+        for key in raw:
+            if (
+                key != "kind"
+                and key != "workflow_id"
+                and key != "run_id"
+                and key != "activity_id"
+                and key != "stream_id"
+                and key != "topic"
+            ):
+                violations.append(Violation(path=key, reason="unknown field"))
+        if violations:
+            raise temporalio.converter.create_payload_validation_error(violations)
+        return StreamRef(
+            kind=kind_value,
+            workflow_id=workflow_id_value,
+            run_id=run_id_value,
+            activity_id=activity_id_value,
+            stream_id=stream_id_value,
+            topic=topic_value,
+        )
+
+    @typing_extensions.override
+    def to_transfer_type(self, value: "StreamRef") -> typing.Any:
+        violations: list[Violation] = []
+        out: dict[str, typing.Any] = {}
+        if typing.cast("object", value.kind) not in (
+            "workflow",
+            "activity",
+            "standalone",
+        ):
+            violations.append(
+                Violation(
+                    path="kind",
+                    reason=f'must be one of ["workflow", "activity", "standalone"], got {_quote(value.kind)}',
+                )
+            )
+        out["kind"] = value.kind
+        if value.workflow_id is not None:
+            out["workflow_id"] = value.workflow_id
+        if value.run_id is not None:
+            out["run_id"] = value.run_id
+        if value.activity_id is not None:
+            out["activity_id"] = value.activity_id
+        if value.stream_id is not None:
+            out["stream_id"] = value.stream_id
+        out["topic"] = value.topic
+        if violations:
+            raise temporalio.converter.create_payload_validation_error(violations)
+        return out
+
+
+@_transfer_type_convertible(_StreamRefTransferTypeConverter)
+@dataclasses.dataclass(slots=True, kw_only=True)
+class StreamRef:
+    """A stream, named by its owner and a topic: what an operation returns to hand a stream
+    to its caller, and what read and append take in place of an owner spelled out. It
+    names no cursor and no store, so the same reference is good behind any endpoint that
+    serves the owner.
+    """
+
+    kind: typing.Literal["workflow", "activity", "standalone"]
+    """What owns the stream. A workflow's streams are keyed by workflow_id and, when
+    pinned, run_id. An activity's own streams are keyed by activity_id and, when a
+    workflow scheduled it, that workflow's ids. A standalone stream has its own
+    stream_id and no execution behind it.
+    """
+
+    workflow_id: str | None = None
+    """The owning workflow, or the workflow that scheduled the owning activity. Required
+    for a workflow owner.
+    """
+
+    run_id: str | None = None
+    """Pin the owner to this run. Absent follows the execution chain across
+    continue-as-new, which is what a producer normally wants.
+    """
+
+    activity_id: str | None = None
+    """The owning activity. Required for an activity owner."""
+
+    stream_id: str | None = None
+    """The stream's own id. Required for a standalone owner."""
+
+    topic: str
+    """The topic on the owner's stream."""

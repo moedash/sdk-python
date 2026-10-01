@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import timezone
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
@@ -44,6 +44,7 @@ from ._interceptor import (
     WorkflowInboundInterceptor,
     WorkflowInterceptorClassInput,
 )
+from ._stream_ranges import fill_short_stream_ranges
 from ._workflow_instance import (
     _DEFAULT_ENABLED_WORKFLOW_LOGIC_FLAGS,
     PatchActivationInput,
@@ -54,6 +55,9 @@ from ._workflow_instance import (
     _WorkflowExternFunctions,
     _WorkflowLogicFlag,
 )
+
+if TYPE_CHECKING:
+    import temporalio.client
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +197,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         external_stream_backend: Any | None = None,
         client: Any = None,
         stream_provider: temporalio.streams.StreamProvider | None = None,
+        stream_client: temporalio.client.Client | None = None,
     ) -> None:
         # Debug mode is enabled if specified or if the TEMPORAL_DEBUG env var is truthy
         debug_mode = debug_mode or bool(os.environ.get("TEMPORAL_DEBUG"))
@@ -256,6 +261,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             # Innermost, so the lifecycle hooks bracket the workflow function
             # itself, after every user interceptor has done its own setup.
             self._interceptor_classes.append(_StreamHooksInterceptor)
+        # For the records a task's re-supplied ranges leave out, which the
+        # stream service still holds.
+        self._stream_client = stream_client
 
         # External Workflow Streams. The manager is per-Worker and owns the
         # backend connection and watcher tasks; it is created lazily on the
@@ -542,6 +550,11 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                         "Cache already exists for activation with initialize job"
                     )
 
+            # Before the bodies are decoded, so what is fetched is decoded with
+            # the rest, and before the workflow runs on the range.
+            if self._stream_client is not None:
+                await fill_short_stream_ranges(act, workflow_id, self._stream_client)
+
             workflow_context = temporalio.converter.WorkflowSerializationContext(
                 namespace=self._namespace,
                 workflow_id=workflow_id,
@@ -632,6 +645,11 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     raise deadlock_exc from None
 
             output_runtime = self._external_stream_runtimes.get(act.run_id)
+            if output_runtime is not None and completion.HasField("successful"):
+                # A subscription opened at a stream's tail is positioned here,
+                # off the Workflow thread and before the completion goes out, so
+                # the marker records the boundary the watcher starts from.
+                await output_runtime.resolve_pending_starts()
             if (
                 output_runtime is not None
                 and completion.HasField("successful")

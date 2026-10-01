@@ -7,10 +7,13 @@ workflow scheduled its own streams. An activity's own streams are one per
 activity execution, so a retry writes to the same stream and a reader sees
 the attempt change as ``SUPERSEDED``.
 
-The memory provider always runs. A storage provider adds itself to
-``SETUPS`` behind its own ``STREAMS_LIVE`` gate: its setup receives the
-environment's client and hands back the provider and a client with it
-registered, which the workers and the reads in these cases share.
+The memory provider always runs, and so does Workflow Streams, whose store is
+the workflow's own History. A storage provider adds itself to ``SETUPS``
+behind its own ``STREAMS_LIVE`` gate: its setup receives the environment's
+client and hands back the provider and a client with it registered, which the
+workers and the reads in these cases share, and says whether it holds the
+streams of a standalone activity, so the cases marked
+``standalone_activities`` are skipped with a reason where it does not.
 """
 
 from __future__ import annotations
@@ -32,12 +35,10 @@ from temporalio.streams import (
     BEGINNING,
     RecordKind,
     StreamProvider,
-    StreamUnsupportedError,
     topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
 from temporalio.streams.providers.native import NativeStreams
-from temporalio.streams.providers.nexus import NexusStreams
 from temporalio.streams.providers.redis import RedisStreams
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.testing import WorkflowEnvironment
@@ -53,6 +54,8 @@ class ActivitySetup:
     name: str
     provider: StreamProvider
     client: Client
+    standalone_activities: bool = True
+    """The provider holds the streams of an activity outside any workflow."""
 
 
 async def _memory_setup(client: Client) -> AsyncIterator[ActivitySetup]:
@@ -99,8 +102,20 @@ async def _redis_setup(client: Client) -> AsyncIterator[ActivitySetup]:
     await provider.close()
 
 
+async def _workflow_streams_setup(client: Client) -> AsyncIterator[ActivitySetup]:
+    provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
+    config = client.config()
+    config["plugins"] = [provider]
+    # An activity's streams live in its workflow's log, so a standalone
+    # activity has nowhere to put them. See the provider's module docstring.
+    yield ActivitySetup(
+        "workflow_streams", provider, Client(**config), standalone_activities=False
+    )
+
+
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ActivitySetup]]] = {
-    "memory": _memory_setup
+    "memory": _memory_setup,
+    "workflow_streams": _workflow_streams_setup,
 }
 if os.environ.get("STREAMS_LIVE") == "native":
     SETUPS["native"] = _native_setup
@@ -115,6 +130,13 @@ async def setup(
     if env.supports_time_skipping:
         pytest.skip("the time-skipping test server has no standalone activities")
     async for found in SETUPS[request.param](client):
+        if (
+            request.node.get_closest_marker("standalone_activities")
+            and not found.standalone_activities
+        ):
+            pytest.skip(
+                f"the {found.name} provider does not hold a standalone activity's streams"
+            )
         yield found
 
 
@@ -213,6 +235,7 @@ async def test_scope_activity_gives_a_workflow_activity_its_own_streams(
         assert await workflow_stream.latest(topic=TOKENS) == BEGINNING
 
 
+@pytest.mark.standalone_activities
 async def test_standalone_activity_defaults_to_its_own_stream(setup: ActivitySetup):
     client = setup.client
     activity_id = f"streams-saa-{uuid.uuid4().hex}"
@@ -245,6 +268,7 @@ async def fail_once_after_writing() -> None:
     await producer.finish()
 
 
+@pytest.mark.standalone_activities
 async def test_a_retry_inherits_the_stream_and_supersedes(setup: ActivitySetup):
     client = setup.client
     activity_id = f"streams-saa-retry-{uuid.uuid4().hex}"
@@ -303,26 +327,7 @@ async def test_a_standalone_activity_has_no_workflow_to_address(setup: ActivityS
 
 
 async def test_get_stream_handle_needs_an_owner(setup: ActivitySetup):
-    with pytest.raises(ValueError, match="workflow_id or the activity_id"):
+    with pytest.raises(
+        ValueError, match="workflow_id, the activity_id or the stream_id"
+    ):
         setup.client.get_stream_handle()
-
-
-@pytest.mark.parametrize(
-    "make",
-    [
-        lambda: WorkflowStreamsProvider(),
-        lambda: NexusStreams(endpoint="unused"),
-    ],
-    ids=["workflow_streams", "nexus"],
-)
-async def test_a_provider_without_activity_owners_says_so(
-    client: Client, make: Callable[[], StreamProvider]
-):
-    # Whether a store can hold an activity's stream is the provider's
-    # capability, so the refusal is the documented error, never an
-    # AttributeError or a stream silently put somewhere else.
-    provider = make()
-    with pytest.raises(StreamUnsupportedError, match="activity"):
-        provider.get_activity_stream_handle(client, "act")
-    with pytest.raises(StreamUnsupportedError, match="activity"):
-        provider.get_activity_stream_handle(client, "act", workflow_id="wf")

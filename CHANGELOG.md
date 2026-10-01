@@ -50,7 +50,13 @@ to include examples, links to docs, or any other relevant information.
   code; a plain string names a topic decided at runtime, and a call that names
   no topic addresses the default topic, `streams.DEFAULT_TOPIC` (`"output"`,
   the server's default stream name). The record on the wire
-  is `temporal.api.stream.v1.StreamRecord` on every provider.
+  is `temporal.api.stream.v1.StreamRecord` on every provider. A stream is
+  handed to another process as a `streams.StreamRef`, plain data naming the
+  owner and the topic, which `client.get_stream_handle(ref)` and
+  `activity.stream_handle(ref)` open; `client.create_stream(stream_id, ...)`
+  creates a standalone stream with a retention policy, and its handle's
+  `close()` seals it. A provider runs record bodies through the client's data
+  converter, so a payload codec and external storage apply to them.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against.
 - **Experimental**: `temporalio.streams.providers.redis.RedisStreams` serves the
@@ -127,6 +133,16 @@ to include examples, links to docs, or any other relevant information.
 - `ExternalStreamSubscription.records()` yields each value with the provider
   offset it was read from, for a reader that has to name where it got to.
 - Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
+  `StreamRecord` proto, and both operations address a stream by a `StreamRef`
+  naming its owner (a workflow, an activity or a standalone stream) and topic,
+  which the handler maps onto the store's accessor for that owner. Configure
+  the front with `data_converter=` to run a payload codec on the caller side,
+  so records are encoded before they leave the process.
+  run id follows continue-as-new run by run and a reset into the run reset to.
+  An outside publish is an Update that answers with the batch's position and
+  refuses a conflicting repeat, falling back to the shipped Signal on a
+  workflow whose worker predates it. A workflow's activity keeps its own
+  streams in the workflow's log under `activity/<id>/<name>`.
 
 ### Changed
 
@@ -178,6 +194,28 @@ to include examples, links to docs, or any other relevant information.
 ### Added
 
 #### Standalone Activity operator commands
+- **Experimental**: `temporalio.streams` defines one stream interface a workflow
+  can read, decide on, and write. A provider is registered once as a plugin,
+  `Client.connect(plugins=[provider])`, and workers built from that client
+  inherit it; each context then asks for its stream the same way:
+  `workflow.stream_reader()` and `workflow.stream_writer()` in workflow code,
+  `activity.stream_handle()` in an activity, and `client.get_stream_handle()`
+  anywhere a client is held. A topic is a typed definition,
+  `streams.topic("inputs", Token)`, shared by workflow, activity and client
+  code; a plain string names a topic decided at runtime. The record on the wire
+  is `temporal.api.stream.v1.StreamRecord` on every provider. A stream is
+  handed to another process as a `streams.StreamRef`, plain data naming the
+  owner and, when it has one, the topic, which `client.get_stream_handle(ref)`
+  and `activity.stream_handle(ref)` open; `client.create_stream(stream_id, ...)`
+  creates a standalone stream with a retention policy, and its handle's
+  `close()` seals it. A provider runs record bodies through the client's data
+  converter, so a payload codec and external storage apply to them.
+  `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
+  reference provider the conformance tests run against, and
+  `temporalio.streams.providers.redis.RedisStreams` serves the same interface
+  over External Workflow Streams, one topic as an input and an output stream.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
 
 - `ActivityHandle` now supports operator commands for standalone activities: `pause`,
   `unpause`, `update_options` and `restore_original_options`.

@@ -20,13 +20,13 @@ import temporalio.bridge.worker
 import temporalio.client
 import temporalio.converter
 import temporalio.runtime
-import temporalio.service
 import temporalio.streams
 import temporalio.worker
 import temporalio.workflow
 
 from ..common import HeaderCodecBehavior
 from ._interceptor import Interceptor
+from ._stream_ranges import fetch_range
 from ._worker import load_default_build_id
 from ._workflow import _WorkflowWorker
 from ._workflow_instance import (
@@ -88,13 +88,11 @@ class Replayer:
           service and hands the records to the replay, so the workflow sees
           what it saw the first time. A range the stream no longer holds fails
           that replay with :py:class:`temporalio.streams.StreamNotFoundError`.
-          Only the client's target host and namespace are read: the stream
-          service is reached on a channel of its own, opened without TLS or
-          an API key, so a client connected to Temporal Cloud names the right
-          address and still cannot authenticate. That is a prototype limit of
-          :py:mod:`temporalio.client_stream`, which is where it will be
-          lifted. The replayer closes the channel it opened when the replay
-          is finished.
+          The stream service is reached on a channel of its own, opened with
+          the client's connection settings (target, TLS, API key, headers,
+          retries), as :py:class:`temporalio.client_stream.Connection`
+          describes. The replayer closes the channel it opened when the
+          replay is finished.
         * The history carries none and there is no client: replaying it fails
           and the message names both remedies.
 
@@ -501,14 +499,9 @@ class Replayer:
             # the replayer's to close: nothing else in the process asked for
             # it, and leaving it open outlives the replay it served.
             if stream_client is not None:
-                from temporalio.client_stream import close_shared_clients
+                from temporalio.client_stream import close_shared_clients, shared_key
 
-                await close_shared_clients(
-                    (
-                        stream_client.service_client.config.target_host,
-                        stream_client.namespace,
-                    )
-                )
+                await close_shared_clients(shared_key(stream_client))
             # Close the pusher
             if pusher is not None:
                 pusher.close()
@@ -611,7 +604,7 @@ async def _stream_slices(
     # without a stream client never touches.
     from temporalio.client_stream import shared_client
 
-    streams = shared_client(client.service_client.config.target_host, client.namespace)
+    streams = shared_client(client)
     # The handle that served each run's stream, so later ranges of the same
     # stream go straight to it.
     served_by: dict[tuple[str, str], Any] = {}
@@ -626,7 +619,7 @@ async def _stream_slices(
                 workflow_task_completed_event_id=event_id,
             )
             if consumed.to_offset > consumed.from_offset:
-                handle, records, owner_run_id = await _fetch_range(
+                handle, records, owner_run_id = await fetch_range(
                     streams,
                     history.workflow_id,
                     run_id,
@@ -638,98 +631,6 @@ async def _stream_slices(
                 stream_slice.records.extend(records)
             slices.append(stream_slice)
     return slices
-
-
-async def _fetch_range(
-    streams: Any,
-    workflow_id: str,
-    run_id: str,
-    consumed: temporalio.api.stream.v1.StreamRange,
-    known: Any,
-) -> tuple[Any, list[temporalio.api.stream.v1.StreamRecord], str]:
-    """The records at exactly the recorded range, with the handle that served them.
-
-    A subscribed name is resolved as the server resolves it: a stream the
-    workflow owns by that name first, else a standalone stream by that id. The
-    owned stream cannot be asked whether it exists, since a name nobody wrote
-    reads as empty, so the owned stream is probed for the range's first record
-    and the standalone one is tried when it has nothing there.
-    """
-    gone = (
-        f"stream {consumed.stream_id!r} no longer holds offsets "
-        f"[{consumed.from_offset}, {consumed.to_offset}) that a completed task of "
-        f"workflow {workflow_id!r} run {run_id!r} consumed; its records cannot be "
-        "replayed"
-    )
-    candidates = (
-        [known]
-        if known is not None
-        else [
-            streams.workflow_stream(
-                workflow_id, consumed.stream_id, owner_run_id=run_id
-            ),
-            streams.get(consumed.stream_id),
-        ]
-    )
-    last: Exception | None = None
-    for handle in candidates:
-        try:
-            records, owner_run_id = await _read_range(handle, consumed, gone)
-        except temporalio.streams.StreamNotFoundError as error:
-            last = error
-            continue
-        if records is not None:
-            return handle, records, owner_run_id
-    raise temporalio.streams.StreamNotFoundError(gone) from last
-
-
-async def _read_range(
-    handle: Any, consumed: temporalio.api.stream.v1.StreamRange, gone: str
-) -> tuple[list[temporalio.api.stream.v1.StreamRecord] | None, str]:
-    """Read ``[from_offset, to_offset)`` from one stream.
-
-    ``None`` when the stream has nothing at the range's first offset, which is
-    how a name that is not this stream's reads; a stream that has the start but
-    not the rest, or refuses the offset as truncated or past its head, raises.
-    """
-    records: list[temporalio.api.stream.v1.StreamRecord] = []
-    owner_run_id = ""
-    offset = consumed.from_offset
-    while offset < consumed.to_offset:
-        try:
-            page = await handle.poll(
-                from_offset=offset,
-                max_records=consumed.to_offset - offset,
-                wait=False,
-            )
-        except temporalio.streams.StreamNotFoundError:
-            if not records:
-                return None, ""
-            raise
-        except temporalio.service.RPCError as error:
-            # Below the truncation floor or past the head: the server refuses
-            # the offset rather than answering short.
-            if error.status in (
-                temporalio.service.RPCStatusCode.FAILED_PRECONDITION,
-                temporalio.service.RPCStatusCode.INVALID_ARGUMENT,
-                temporalio.service.RPCStatusCode.OUT_OF_RANGE,
-            ):
-                raise temporalio.streams.StreamNotFoundError(gone) from error
-            raise
-        owner_run_id = page.run_id or owner_run_id
-        if not page.entries:
-            if not records:
-                return None, ""
-            raise temporalio.streams.StreamNotFoundError(gone)
-        for entry in page.entries:
-            if entry.offset != offset or offset >= consumed.to_offset:
-                raise temporalio.streams.StreamNotFoundError(
-                    f"{gone}: the stream answered offset {entry.offset} where "
-                    f"{offset} was due"
-                )
-            records.append(entry.record)
-            offset += 1
-    return records, owner_run_id
 
 
 class ReplayerConfig(TypedDict, total=False):
