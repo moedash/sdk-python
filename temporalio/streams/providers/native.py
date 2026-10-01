@@ -69,11 +69,7 @@ from temporalio.streams._body import (
     decode_body,
     encode_body,
 )
-from temporalio.streams._errors import (
-    StreamCursorError,
-    StreamNotFoundError,
-    StreamUnsupportedError,
-)
+from temporalio.streams._errors import StreamCursorError, StreamNotFoundError
 from temporalio.streams._provider import ReadSource, StreamHandle, WriteSink
 from temporalio.streams._record import (
     BEGINNING,
@@ -789,10 +785,11 @@ class NativeStandaloneStreamHandle:
     stream appears, so a reader can attach before the producer's first write.
     ``latest`` and a producer's append on such an id raise
     :class:`temporalio.streams.StreamNotFoundError`: they have nothing to wait
-    on. The server keeps a policy's ``retention`` for the stream's records
-    after it is closed rather than trimming an open stream by age, and it has
-    no byte bound on a standalone stream's lifecycle, so the provider refuses
-    ``max_bytes``.
+    on. The policy is the server's lifecycle: ``retention`` is the age past
+    which an open stream's records are reclaimed and how long a closed one
+    stays readable, ``max_records`` drops the oldest records as new ones land,
+    and ``max_bytes`` refuses an append that would take the held bytes past it
+    rather than reclaiming anything.
     """
 
     def __init__(
@@ -998,12 +995,12 @@ class NativeStreams(ProviderPlugin):
     ) -> NativeStandaloneStreamHandle:
         """Create the standalone stream ``stream_id`` on the server and return a handle on it.
 
-        ``max_records`` keeps the newest records and drops the oldest as they
-        are appended. ``retention`` is how long the records stay readable
-        after the stream is closed; the server does not trim an open stream
-        by age. ``max_bytes`` is refused: the server's lifecycle has no byte
-        bound. A create of an id that exists with the same policy returns a
-        handle on it; with another policy it is a ``ValueError``.
+        The three bounds are the server's lifecycle: ``retention`` reclaims
+        records older than it on an open stream and times a closed one's
+        deletion, ``max_records`` drops the oldest records as new ones land,
+        and ``max_bytes`` refuses an append that would take the held bytes past
+        it. A create of an id that exists with the same policy returns a handle
+        on it; with another policy the server refuses it as a ``ValueError``.
         """
         if not stream_id:
             raise ValueError("stream_id must not be empty")
@@ -1011,40 +1008,22 @@ class NativeStreams(ProviderPlugin):
             raise ValueError("retention must be positive")
         if max_records is not None and max_records <= 0:
             raise ValueError("max_records must be positive")
-        if max_bytes is not None:
-            if max_bytes <= 0:
-                raise ValueError("max_bytes must be positive")
-            raise StreamUnsupportedError(
-                "the native provider bounds a standalone stream by records and, "
-                "after it closes, by age; max_bytes is not on the server's lifecycle"
-            )
+        if max_bytes is not None and max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
         streams = shared_client(client)
         self._opened.add(shared_key(client))
         try:
-            await streams.create(stream_id, retention=retention, max_items=max_records)
+            await streams.create(
+                stream_id,
+                retention=retention,
+                max_items=max_records,
+                max_bytes=max_bytes,
+            )
         except RPCError as error:
-            # The server says ALREADY_EXISTS for an id that exists with this
-            # policy, and a policy that differs arrives typed as ValueError. An
-            # older server answers both with a generic failure, and describe
-            # tells the two apart.
-            if error.status == RPCStatusCode.ALREADY_EXISTS:
-                return NativeStandaloneStreamHandle(
-                    client, stream_id, opened=self._opened
-                )
-            try:
-                held = (await streams.get(stream_id).describe()).lifecycle
-            except StreamNotFoundError:
-                raise error from None
-            # A bound left to the server's default is not a disagreement with
-            # whatever default the server filled in.
-            if (max_records is not None and held.max_items != max_records) or (
-                retention is not None and held.retention.ToTimedelta() != retention
-            ):
-                raise ValueError(
-                    f"stream {stream_id!r} exists with another policy: it keeps "
-                    f"{held.max_items or 'all'} records for "
-                    f"{held.retention.ToTimedelta()} after it closes"
-                ) from None
+            # The id exists with this policy; a policy that differs arrives
+            # typed, as the ValueError the contract names.
+            if error.status != RPCStatusCode.ALREADY_EXISTS:
+                raise
         return NativeStandaloneStreamHandle(client, stream_id, opened=self._opened)
 
     def get_standalone_stream_handle(

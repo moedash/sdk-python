@@ -14,6 +14,8 @@ from google.protobuf import symbol_database as _symbol_database
 _sym_db = _symbol_database.Default()
 
 
+from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
+
 from temporalio.api.common.v1 import (
     message_pb2 as temporal_dot_api_dot_common_dot_v1_dot_message__pb2,
 )
@@ -22,7 +24,7 @@ from temporalio.api.stream.v1 import (
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n&temporalio/api/stream/v1/message.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a$temporal/api/common/v1/message.proto\x1a$temporal/api/stream/v1/message.proto"\xf7\x02\n\x0cStreamRecord\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12W\n\x08metadata\x18\x02 \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamRecord.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x10\n\x08sequence\x18\x04 \x01(\x03\x12\x36\n\x04kind\x18\x05 \x01(\x0e\x32(.temporal.api.stream.v1.StreamRecordKind\x12\x0e\n\x06offset\x18\x06 \x01(\x03\x12\x13\n\x0bproducer_id\x18\x07 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x08 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"]\n\x11StreamRecordBatch\x12H\n\x07records\x18\x01 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecordB>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
+    b'\n&temporalio/api/stream/v1/message.proto\x12)temporal.server.chasm.lib.stream.proto.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a$temporal/api/common/v1/message.proto\x1a$temporal/api/stream/v1/message.proto"\xf7\x02\n\x0cStreamRecord\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12W\n\x08metadata\x18\x02 \x03(\x0b\x32\x45.temporal.server.chasm.lib.stream.proto.v1.StreamRecord.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x10\n\x08sequence\x18\x04 \x01(\x03\x12\x36\n\x04kind\x18\x05 \x01(\x0e\x32(.temporal.api.stream.v1.StreamRecordKind\x12\x0e\n\x06offset\x18\x06 \x01(\x03\x12\x13\n\x0bproducer_id\x18\x07 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x08 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\x8e\x01\n\x11StreamRecordBatch\x12H\n\x07records\x18\x01 \x03(\x0b\x32\x37.temporal.server.chasm.lib.stream.proto.v1.StreamRecord\x12/\n\x0b\x61ppended_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.TimestampB>Z<go.temporal.io/server/chasm/lib/stream/gen/streampb;streampbb\x06proto3'
 )
 
 
@@ -68,10 +70,10 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     )
     _STREAMRECORD_METADATAENTRY._options = None
     _STREAMRECORD_METADATAENTRY._serialized_options = b"8\001"
-    _STREAMRECORD._serialized_start = 162
-    _STREAMRECORD._serialized_end = 537
-    _STREAMRECORD_METADATAENTRY._serialized_start = 457
-    _STREAMRECORD_METADATAENTRY._serialized_end = 537
-    _STREAMRECORDBATCH._serialized_start = 539
-    _STREAMRECORDBATCH._serialized_end = 632
+    _STREAMRECORD._serialized_start = 195
+    _STREAMRECORD._serialized_end = 570
+    _STREAMRECORD_METADATAENTRY._serialized_start = 490
+    _STREAMRECORD_METADATAENTRY._serialized_end = 570
+    _STREAMRECORDBATCH._serialized_start = 573
+    _STREAMRECORDBATCH._serialized_end = 715
 # @@protoc_insertion_point(module_scope)
