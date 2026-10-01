@@ -1492,9 +1492,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         )
 
     async def _send_external_stream_wake(self, subscription: Any) -> None:
-        """Sends the reserved wake Signal for a subscription that owes one.
+        """Sends the wake a subscription owes, over the backend's wake transport.
 
-        Addressed to the Workflow ID with no Run ID, so it lands on the current
+        Addressed to the chain rather than to a Run, so it lands on the current
         Run of the chain -- which may already be a successor by the time this
         runs.
 
@@ -1523,7 +1523,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         """
         from temporalio.contrib.external_workflow_streams._wake import (
             WakeRequest,
-            send_wake_signal,
+            send_wake,
+            wake_position,
+            wake_transport_of,
         )
 
         if self._client is None:
@@ -1548,8 +1550,15 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         generation = (
             await self._stream_manager().wake_park_generation(subscription) or 0
         )
+        # The furthest record this Worker has read, which is the record the
+        # Run has not consumed yet. A cleanup wake has no subscription left to
+        # have read anything.
+        read = getattr(subscription, "prefetch_cursor", None)
+        position, position_counter = wake_position(
+            subscription.backend, read.offset if read is not None else None
+        )
         try:
-            await send_wake_signal(
+            await send_wake(
                 self._client,
                 WakeRequest(
                     namespace=key.namespace,
@@ -1567,7 +1576,10 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     # completed one. The manager coalesces reports until Core
                     # accepts that cycle's successful task completion.
                     wake_counter=subscription.wake_counter,
+                    position=position,
+                    position_counter=position_counter,
                 ),
+                transport=wake_transport_of(subscription.backend),
             )
         except Exception:
             logger.exception(

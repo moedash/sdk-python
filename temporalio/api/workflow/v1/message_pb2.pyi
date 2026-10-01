@@ -2428,3 +2428,52 @@ class WorkflowExecutionPauseInfo(google.protobuf.message.Message):
     ) -> None: ...
 
 global___WorkflowExecutionPauseInfo = WorkflowExecutionPauseInfo
+
+class Wake(google.protobuf.message.Message):
+    """A wake tells a running Workflow Execution that something it consumes has
+    moved, so it should run a Workflow Task and read from its own cursor. It is
+    a reason to run, not data: nothing is recorded in History and no record
+    travels with it. A store Temporal does not host sends one after the store
+    has acknowledged a write. Wakes for the same source fold while one is
+    pending and no task has received it yet, so a burst of writes costs one
+    task. Once a task has been handed the wake, a new wake for the source is
+    accepted again, because only the receiver knows what it read.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    SOURCE_FIELD_NUMBER: builtins.int
+    POSITION_FIELD_NUMBER: builtins.int
+    COUNTER_FIELD_NUMBER: builtins.int
+    source: builtins.str
+    """What moved, as the sender names it. The server folds wakes by this value
+    and never interprets it. For a stream, the provider formats the stream's
+    identity, owner and topic, into it.
+    """
+    position: builtins.bytes
+    """Where the source stands after the write that caused this wake, in the
+    store's own terms. Opaque to the server and handed to the Workflow as
+    received. Among wakes folded together, the position with the highest
+    counter is the one delivered.
+    """
+    counter: builtins.int
+    """Orders wakes from one source, so that folding keeps the latest position.
+    Only the source's store can order its positions, so the sender derives
+    this from the position. It is not a durable identity: a wake sent after
+    a task received an equal counter is accepted again.
+    """
+    def __init__(
+        self,
+        *,
+        source: builtins.str = ...,
+        position: builtins.bytes = ...,
+        counter: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "counter", b"counter", "position", b"position", "source", b"source"
+        ],
+    ) -> None: ...
+
+global___Wake = Wake
