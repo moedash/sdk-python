@@ -245,6 +245,8 @@ from .request_response_pb2 import (
     UpdateWorkflowExecutionResponse,
     ValidateWorkerDeploymentVersionComputeConfigRequest,
     ValidateWorkerDeploymentVersionComputeConfigResponse,
+    WakeWorkflowExecutionRequest,
+    WakeWorkflowExecutionResponse,
 )
 
 __all__ = [
@@ -494,6 +496,8 @@ __all__ = [
     "UpdateWorkflowExecutionResponse",
     "ValidateWorkerDeploymentVersionComputeConfigRequest",
     "ValidateWorkerDeploymentVersionComputeConfigResponse",
+    "WakeWorkflowExecutionRequest",
+    "WakeWorkflowExecutionResponse",
 ]
 
 # gRPC is optional
