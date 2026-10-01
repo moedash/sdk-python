@@ -100,6 +100,9 @@ class ProviderCase:
     the first write instead of raising ``StreamNotFoundError``."""
     bounds_standalone_bytes: bool = True
     """A standalone stream's policy can bound the bytes it keeps."""
+    refuses_appends_past_byte_cap: bool = False
+    """The byte bound refuses an append that would cross it, instead of
+    dropping the oldest records to make room."""
     trims_open_stream_by_age: bool = True
     """A standalone stream drops records older than ``retention`` while it is
     open, rather than keeping them that long after it closes."""
@@ -235,6 +238,7 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
         provider,
         truncate=truncate,
         bounds_standalone_bytes=True,
+        refuses_appends_past_byte_cap=False,
         trims_open_stream_by_age=True,
     )
     provider.reset()
