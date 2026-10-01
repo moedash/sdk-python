@@ -963,7 +963,7 @@ async def test_a_standalone_stream_honors_its_retention_policy(case: ProviderCas
     # aged the newer record out as well by the time it is looked at. What the
     # policy decides is that the older record is no longer where BEGINNING
     # starts.
-    kept: list = []
+    kept = []
     for _ in range(50):
         try:
             kept = await take(by_age.read(topic=OUT), 1, timeout=1)
