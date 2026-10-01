@@ -332,6 +332,7 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             hosts_standalone_streams=False,
             bounds_standalone_bytes=False,
             trims_open_stream_by_age=False,
+            refuses_appends_past_byte_cap=False,
         )
         for handle in hosts.values():
             await handle.terminate()
