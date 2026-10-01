@@ -180,6 +180,7 @@ from temporalio.contrib.external_workflow_streams._output_backend import (
     OutputStageNotFoundError,
     OutputStageResolutionError,
     OutputStageStatus,
+    OutputStreamRecord,
     StagedOutputRecord,
 )
 from temporalio.contrib.external_workflow_streams._output_client import (
@@ -843,6 +844,50 @@ class _TopicLogBackend(RedisStreamBackend):
         stage = await super().stage_output(manifest, records)
         await self._trim(manifest.stream_key)
         return stage
+
+    async def abort_output(self, manifest: OutputStageManifest) -> OutputStage:
+        """Resolve the stage as aborted and take its entries out of the log.
+
+        A batch whose task was not accepted yields nothing to any reader, and
+        on this provider the workflow's own entries share the log with the
+        producers' records, so leaving them would count them against every
+        window and bound the log holds. The stage's hashes stay, status and
+        offsets included, so a reader that captured the barrier settles it the
+        same way.
+        """
+        stage = await super().abort_output(manifest)
+        if stage.records:
+            await self._client.xdel(
+                self.stream_key(manifest.stream_key),
+                *(record.offset.serialize() for record in stage.records),
+            )
+        return stage
+
+    async def _output_stage_from_offsets(
+        self,
+        manifest: OutputStageManifest,
+        status: OutputStageStatus,
+        encoded_offsets: str,
+    ) -> OutputStage:
+        # An aborted stage's entries are gone from the log here, so they are
+        # stood in for by their positions: the stage still names what it held.
+        if status is not OutputStageStatus.ABORTED:
+            return await super()._output_stage_from_offsets(
+                manifest, status, encoded_offsets
+            )
+        offsets = [Offset(value) for value in encoded_offsets.split(",") if value]
+        if len(offsets) != manifest.record_count:
+            raise StreamIntegrityError(
+                "an output stage's stored offsets do not match its manifest"
+            )
+        return OutputStage(
+            manifest,
+            tuple(
+                OutputStreamRecord(TransportRecordKind.DATA, b"", offset)
+                for offset in offsets
+            ),
+            status,
+        )
 
     async def read_range(
         self, key: StreamKey, first: Offset, last: Offset
