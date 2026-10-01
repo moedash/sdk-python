@@ -931,17 +931,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             # skips the instance's eviction job entirely, and a Run whose
             # watchers outlived it would keep a backend connection open forever.
             self._external_stream_runtimes.pop(act.run_id, None)
-            # A Run evicted because its completion was not accepted may have
-            # staged a batch that no marker will ever name. History already
-            # says so when the task was failed or timed out, so the stage is
-            # settled here instead of waiting for a reader to find the barrier;
-            # an undecided one stays pending for the reader, as before.
-            pending = self._pending_external_output_stages.get(act.run_id)
-            if pending:
-                await self._promote_external_output(
-                    run_id=act.run_id,
-                    workflow_id=pending[0].stream_key.workflow_id,
-                )
+            await self._abort_dead_external_output(run_id=act.run_id)
             self._pending_external_output_stages.pop(act.run_id, None)
             if self._external_stream_manager is not None:
                 await self._external_stream_manager.evict_run(act.run_id)
@@ -1332,6 +1322,56 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             self._pending_external_output_stages[run_id] = unresolved
         else:
             self._pending_external_output_stages.pop(run_id, None)
+
+    async def _abort_dead_external_output(self, *, run_id: str) -> None:
+        """Abort the staged batches of an evicted Run that History has rejected.
+
+        A Run evicted because its completion was not accepted may have staged
+        a batch that no marker will ever name. History already says so when
+        the task was failed or timed out, so such a stage is aborted here
+        instead of waiting for a reader to find the barrier. A stage whose
+        marker is authoritative is never re-promoted from here: promotion is
+        attempted once after the completion, and a stage it left pending is
+        owed to a cold client's repair, as the contract tests pin down.
+        """
+        backend = self._external_stream_backend
+        client = self._client
+        pending = self._pending_external_output_stages.get(run_id)
+        if backend is None or client is None or not pending:
+            return
+
+        from temporalio.contrib.external_workflow_streams._output_client import (
+            _apply_output_stage_decision,
+            _history_decision,
+            _HistoryDecision,
+        )
+
+        for manifest in pending:
+            workflow_id = manifest.stream_key.workflow_id
+            try:
+                decision = await _history_decision(
+                    client=client,
+                    workflow_id=workflow_id,
+                    manifest=manifest,
+                )
+                if decision is not _HistoryDecision.ABORT:
+                    continue
+                await _apply_output_stage_decision(
+                    backend=backend,
+                    manifest=manifest,
+                    decision=decision,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._stream_metrics.record(err)
+                logger.warning(
+                    "Could not abort the dead external output stage %s for "
+                    "Workflow %s at eviction; it remains pending for a client",
+                    manifest.stage_token,
+                    workflow_id,
+                    exc_info=True,
+                )
 
     def _replay_stream_converters(
         self, plan: Any
