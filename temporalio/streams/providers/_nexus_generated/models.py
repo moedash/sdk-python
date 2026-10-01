@@ -883,9 +883,7 @@ class _StreamRefTransferTypeConverter(
         if "workflow_id" in raw:
             workflow_id_value_raw = raw["workflow_id"]
             if workflow_id_value_raw is None:
-                violations.append(
-                    Violation(path="workflow_id", reason="explicit null not allowed")
-                )
+                workflow_id_value = None
             else:
                 if not isinstance(workflow_id_value_raw, str):
                     violations.append(
@@ -898,9 +896,7 @@ class _StreamRefTransferTypeConverter(
         if "run_id" in raw:
             run_id_value_raw = raw["run_id"]
             if run_id_value_raw is None:
-                violations.append(
-                    Violation(path="run_id", reason="explicit null not allowed")
-                )
+                run_id_value = None
             else:
                 if not isinstance(run_id_value_raw, str):
                     violations.append(
@@ -913,9 +909,7 @@ class _StreamRefTransferTypeConverter(
         if "activity_id" in raw:
             activity_id_value_raw = raw["activity_id"]
             if activity_id_value_raw is None:
-                violations.append(
-                    Violation(path="activity_id", reason="explicit null not allowed")
-                )
+                activity_id_value = None
             else:
                 if not isinstance(activity_id_value_raw, str):
                     violations.append(
@@ -928,9 +922,7 @@ class _StreamRefTransferTypeConverter(
         if "stream_id" in raw:
             stream_id_value_raw = raw["stream_id"]
             if stream_id_value_raw is None:
-                violations.append(
-                    Violation(path="stream_id", reason="explicit null not allowed")
-                )
+                stream_id_value = None
             else:
                 if not isinstance(stream_id_value_raw, str):
                     violations.append(
@@ -1006,7 +998,8 @@ class StreamRef:
     """A stream, named by its owner and a topic: what an operation returns to hand a stream
     to its caller, and what read and append take in place of an owner spelled out. It
     names no cursor and no store, so the same reference is good behind any endpoint that
-    serves the owner.
+    serves the owner. A member the owner kind does not use is absent or null; null is
+    how the SDK writes an unset member of its own StreamRef.
     """
 
     kind: typing.Literal["workflow", "activity", "standalone"]
