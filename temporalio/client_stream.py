@@ -628,13 +628,16 @@ class StreamClient:
         *,
         retention: float | timedelta | None = None,
         max_items: int | None = None,
+        max_bytes: int | None = None,
     ) -> StreamHandle:
         """Create a stream and return a handle to it.
 
-        ``retention`` is how long a closed stream stays readable, in seconds
-        or as a ``timedelta``. ``max_items`` caps how many records remain
+        ``retention`` is the age past which an open stream's records are
+        reclaimed and how long a closed stream stays readable, in seconds or
+        as a ``timedelta``. ``max_items`` caps how many records remain
         readable, dropping the oldest, which bounds storage for a stream
-        nobody truncates.
+        nobody truncates. ``max_bytes`` caps the bytes held; an append that
+        would cross it is refused rather than reclaiming anything.
         """
         lifecycle = stream.StreamLifecycle()
         if retention is not None:
@@ -643,6 +646,8 @@ class StreamClient:
             lifecycle.retention.FromTimedelta(retention)
         if max_items is not None:
             lifecycle.max_items = max_items
+        if max_bytes is not None:
+            lifecycle.max_bytes = max_bytes
 
         # A create that landed but was not answered would be refused as a
         # repeat, so it goes again only on a refusal.
