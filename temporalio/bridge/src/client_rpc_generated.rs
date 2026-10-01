@@ -1127,6 +1127,15 @@ impl ClientRef {
                         validate_worker_deployment_version_compute_config
                     )
                 }
+                "wake_workflow_execution" => {
+                    rpc_call!(
+                        connection,
+                        call,
+                        WorkflowService,
+                        workflow_service,
+                        wake_workflow_execution
+                    )
+                }
                 _ => {
                     return Err(PyValueError::new_err(format!(
                         "Unknown RPC call {}",
