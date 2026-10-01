@@ -10,7 +10,7 @@ acted on whichever workflow was running on the thread.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -58,12 +58,20 @@ class _FakeRuntime:
     def workflow_is_evicting(self) -> bool:
         return self._evicting
 
+    def call_soon(self, callback: Any) -> None:
+        # The real runtime is the workflow's event loop; here the test's loop
+        # stands in for it.
+        asyncio.get_running_loop().call_soon(callback)
+
 
 class _Body(WorkflowInboundInterceptor):
     """The workflow function's stand-in: returns, raises or parks forever."""
 
     def __init__(self, outcome: Any) -> None:  # type: ignore[reportMissingSuperCall]
         self._outcome = outcome
+
+    def init(self, outbound: Any) -> None:
+        del outbound
 
     async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
         del input
@@ -84,6 +92,18 @@ async def _unused_run_fn() -> None:
 _INPUT = ExecuteWorkflowInput(type=object, run_fn=_unused_run_fn, args=(), headers={})
 
 
+async def _hooked(body: _Body) -> _StreamHooksInterceptor:
+    """The interceptor over ``body``, initialised the way the instance does it.
+
+    ``init`` queues the start hook for the loop's first turn, so one turn
+    runs it, as the instance's loop does before any task takes a step.
+    """
+    interceptor = _StreamHooksInterceptor(body)
+    interceptor.init(cast(Any, None))
+    await asyncio.sleep(0)
+    return interceptor
+
+
 @pytest.fixture
 async def provider() -> Any:
     fake = _Provider()
@@ -99,40 +119,34 @@ def _evicting(fake: _Provider) -> None:
 
 
 async def test_the_finish_hook_runs_on_return(provider: _Provider):
-    assert (
-        await _StreamHooksInterceptor(_Body("done")).execute_workflow(_INPUT) == "done"
-    )
+    assert await (await _hooked(_Body("done"))).execute_workflow(_INPUT) == "done"
     assert provider.calls == ["start", "finish"]
 
 
 async def test_the_finish_hook_runs_when_the_function_raises(provider: _Provider):
     with pytest.raises(RuntimeError, match="boom"):
-        await _StreamHooksInterceptor(_Body(RuntimeError("boom"))).execute_workflow(
-            _INPUT
-        )
+        await (await _hooked(_Body(RuntimeError("boom")))).execute_workflow(_INPUT)
     assert provider.calls == ["start", "finish"]
 
 
 async def test_the_finish_hook_runs_on_continue_as_new(provider: _Provider):
     error = workflow.ContinueAsNewError.__new__(workflow.ContinueAsNewError)
     with pytest.raises(workflow.ContinueAsNewError):
-        await _StreamHooksInterceptor(_Body(error)).execute_workflow(_INPUT)
+        await (await _hooked(_Body(error))).execute_workflow(_INPUT)
     assert provider.calls == ["start", "finish"]
 
 
 async def test_the_finish_hook_runs_on_a_workflow_cancellation(provider: _Provider):
     # A cancelled primary task is the run ending, so the provider lets go.
     with pytest.raises(asyncio.CancelledError):
-        await _StreamHooksInterceptor(_Body(asyncio.CancelledError())).execute_workflow(
-            _INPUT
-        )
+        await (await _hooked(_Body(asyncio.CancelledError()))).execute_workflow(_INPUT)
     assert provider.calls == ["start", "finish"]
 
 
 async def test_the_finish_hook_does_not_run_when_the_coroutine_is_collected(
     provider: _Provider,
 ):
-    coroutine = _StreamHooksInterceptor(_Body(_PARK)).execute_workflow(_INPUT)
+    coroutine = (await _hooked(_Body(_PARK))).execute_workflow(_INPUT)
     # Run up to the park, the way a worker that shut down without evicting
     # leaves the primary task, then close it as garbage collection would.
     coroutine.send(None)
@@ -143,9 +157,7 @@ async def test_the_finish_hook_does_not_run_when_the_coroutine_is_collected(
 async def test_the_finish_hook_does_not_run_during_eviction(provider: _Provider):
     _evicting(provider)
     with pytest.raises(asyncio.CancelledError):
-        await _StreamHooksInterceptor(_Body(asyncio.CancelledError())).execute_workflow(
-            _INPUT
-        )
+        await (await _hooked(_Body(asyncio.CancelledError()))).execute_workflow(_INPUT)
     assert provider.calls == ["start"]
 
 
