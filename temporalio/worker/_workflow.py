@@ -931,6 +931,17 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             # skips the instance's eviction job entirely, and a Run whose
             # watchers outlived it would keep a backend connection open forever.
             self._external_stream_runtimes.pop(act.run_id, None)
+            # A Run evicted because its completion was not accepted may have
+            # staged a batch that no marker will ever name. History already
+            # says so when the task was failed or timed out, so the stage is
+            # settled here instead of waiting for a reader to find the barrier;
+            # an undecided one stays pending for the reader, as before.
+            pending = self._pending_external_output_stages.get(act.run_id)
+            if pending:
+                await self._promote_external_output(
+                    run_id=act.run_id,
+                    workflow_id=pending[0].stream_key.workflow_id,
+                )
             self._pending_external_output_stages.pop(act.run_id, None)
             if self._external_stream_manager is not None:
                 await self._external_stream_manager.evict_run(act.run_id)
