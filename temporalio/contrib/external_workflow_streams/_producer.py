@@ -492,7 +492,7 @@ class ExternalStreamProducer:
         self._appends: dict[StreamKey, list[_StreamOperation]] = {}
         #: Per stream, the furthest offset this producer has seen acknowledged.
         #: A wake reports it so its counter follows the store's order, and a
-        #: batch closed by a bare `wake()` still reports where it ended.
+        #: batch closed by a bare ``wake()`` still reports where it ended.
         self._last_offsets: dict[StreamKey, Offset] = {}
 
     @staticmethod
