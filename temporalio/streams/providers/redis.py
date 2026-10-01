@@ -193,6 +193,10 @@ from temporalio.contrib.external_workflow_streams._redis import (
     _text,
     _to_record,
 )
+from temporalio.contrib.external_workflow_streams._redis import (
+    _parse as _parse_entry_id,
+)
+from temporalio.contrib.external_workflow_streams._wake import WakeTransport
 from temporalio.converter import (
     ActivitySerializationContext,
     SerializationContext,
@@ -255,6 +259,26 @@ DEFAULT_RETENTION: Final = timedelta(days=7)
 #: two runs of a chain the successor is not yet the run a Signal resolves to.
 _WAKE_RETRY_WINDOW: Final = timedelta(seconds=5)
 _WAKE_RETRY_BACKOFF: Final = timedelta(milliseconds=200)
+
+#: Bits of a wake counter given to an entry id's sequence part. Redis assigns
+#: sequence numbers from 0 within one millisecond, so a million appends to one
+#: log inside the same millisecond would be needed to reach the cap.
+_WAKE_SEQUENCE_BITS: Final = 20
+
+
+def _wake_counter(offset: Offset) -> int:
+    """A wake counter from a Redis entry id ``<ms>-<seq>``.
+
+    ``ms * 2**20 + min(seq, 2**20 - 1)``, which increases with the id's own
+    order and fits the server's signed 64-bit counter for any millisecond
+    timestamp before the year 2248. Ids past the cap within one millisecond
+    share a counter, which only lets a later wake fold into a pending one that
+    reports an earlier id of that same millisecond.
+    """
+    ms, seq = _parse_entry_id(offset)
+    cap = (1 << _WAKE_SEQUENCE_BITS) - 1
+    return (ms << _WAKE_SEQUENCE_BITS) + min(seq, cap)
+
 
 # The transport's per-task batch limits are a backpressure point that awaits
 # inside the workflow, and a synchronous publish has nowhere to await. Lifted
@@ -762,10 +786,16 @@ class _TopicLogBackend(RedisStreamBackend):
         key_prefix: str,
         retention: timedelta | None,
         max_len: int | None,
+        wake_transport: WakeTransport = "auto",
     ) -> None:
         super().__init__(client=client, key_prefix=key_prefix)
         self._retention = retention
         self._max_len = max_len
+        self.wake_transport = wake_transport
+
+    def wake_counter_for(self, offset: Offset) -> int:
+        """The entry id's own order, so producers and workers rank wakes alike."""
+        return _wake_counter(offset)
 
     def stream_key(self, key: StreamKey) -> str:
         """The topic's log, whichever direction the transport asks for."""
@@ -1101,6 +1131,12 @@ _STILL_CONSUMING: Final = (
 _CLOSING_REFUSAL: Final = "workflow is closing"
 
 
+def _chain_ended(error: WakeNotAcknowledgedError) -> bool:
+    """Whether the server refused a wake because the chain has ended."""
+    cause = error.__cause__
+    return isinstance(cause, RPCError) and cause.status == RPCStatusCode.NOT_FOUND
+
+
 def _refused_as_closing(error: WakeNotAcknowledgedError) -> bool:
     """Whether the server refused a wake because the run is closing."""
     return _CLOSING_REFUSAL in str(error)
@@ -1318,10 +1354,10 @@ class RedisProducer(Generic[T]):
                     name=self._name, record=staged, digest=digest
                 )
         if self._owner is None and self._standalone is None:
-            await self._wake()
+            await self._wake(last)
         return last
 
-    async def _wake(self) -> None:
+    async def _wake(self, position: Offset | None) -> None:
         """Wake the consuming workflow, following the chain past a closing run.
 
         The records are appended before this is called; what can fail is
@@ -1343,14 +1379,19 @@ class RedisProducer(Generic[T]):
         the log and finds the record, the transport's own rule for a record
         appended before a park. Any other refusal that outlasts the window is
         raised.
+
+        ``NOT_FOUND`` answers the chain question without a describe: the wake
+        call names the chain's first run, and the server refuses it that way
+        only once the chain has ended. A Signal, which names the Workflow ID
+        alone, refuses an ended run with it too.
         """
         deadline = time.monotonic() + _WAKE_RETRY_WINDOW.total_seconds()
         while True:
             try:
-                await self._input.wake()
+                await self._input.wake(position=position)
                 return
             except WakeNotAcknowledgedError as error:
-                if await self._chain_is_terminal():
+                if _chain_ended(error) or await self._chain_is_terminal():
                     return
                 if time.monotonic() >= deadline:
                     if _refused_as_closing(error):
@@ -1876,6 +1917,7 @@ class RedisStreams(ProviderPlugin):
         poll_interval: timedelta = timedelta(milliseconds=500),
         retention: timedelta | None = DEFAULT_RETENTION,
         max_len: int | None = None,
+        wake_transport: WakeTransport = "auto",
     ) -> None:
         """Create the provider.
 
@@ -1908,7 +1950,14 @@ class RedisStreams(ProviderPlugin):
                 It must exceed the largest batch a task publishes, or a stage
                 is trimmed before its commit; a batch at or above it is
                 refused where it is staged.
+            wake_transport: How a producer and a worker wake a workflow after
+                an append. ``"wake"`` uses the server's wake call, which
+                records no History event; ``"signal"`` uses the reserved
+                Signal, which does; ``"auto"`` tries the wake call and falls
+                back to the Signal on a server without it.
         """
+        if wake_transport not in ("auto", "wake", "signal"):
+            raise ValueError(f"unknown wake transport {wake_transport!r}")
         if retention is not None and retention <= timedelta(0):
             raise ValueError("retention must be positive")
         if max_len is not None and max_len < 1:
@@ -1922,6 +1971,7 @@ class RedisStreams(ProviderPlugin):
         self._poll = poll_interval
         self._retention = retention
         self._max_len = max_len
+        self._wake_transport: WakeTransport = wake_transport
 
     def _require_backend(self) -> _TopicLogBackend:
         if self._backend is None:
@@ -1942,6 +1992,7 @@ class RedisStreams(ProviderPlugin):
                 key_prefix=self._key_prefix,
                 retention=self._retention,
                 max_len=self._max_len,
+                wake_transport=self._wake_transport,
             )
         return self._backend
 

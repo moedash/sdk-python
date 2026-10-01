@@ -138,6 +138,75 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         assert all(r.producer_id == "model" and r.attempt == 1 for r in inputs)
 
 
+async def _serves_wakes(client: Client) -> bool:
+    """Whether the server implements the wake call, probed with a wake to nobody."""
+    import temporalio.api.common.v1
+    import temporalio.api.workflow.v1
+    import temporalio.api.workflowservice.v1
+    from temporalio.service import RPCError, RPCStatusCode
+
+    try:
+        await client.workflow_service.wake_workflow_execution(
+            temporalio.api.workflowservice.v1.WakeWorkflowExecutionRequest(
+                namespace=client.namespace,
+                workflow_execution=temporalio.api.common.v1.WorkflowExecution(
+                    workflow_id=f"streams-redis-probe-{uuid.uuid4().hex}"
+                ),
+                wake=temporalio.api.workflow.v1.Wake(source="probe", counter=1),
+            )
+        )
+    except RPCError as error:
+        return error.status != RPCStatusCode.UNIMPLEMENTED
+    return True
+
+
+async def test_an_outside_producer_wakes_the_reader_without_a_signal(
+    live_client: Client,
+):
+    if not await _serves_wakes(live_client):
+        pytest.skip("the server does not implement WakeWorkflowExecution")
+    # The wake transport rather than "auto", so a fallback to the Signal fails
+    # the History check below instead of passing quietly.
+    provider = RedisStreams(
+        url=redis_url(),
+        key_prefix=f"streams-redis-{uuid.uuid4().hex}",
+        wake_transport="wake",
+    )
+    workflow_id = f"streams-redis-wake-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[ContractLoop],
+            plugins=[provider],
+            max_cached_workflows=100,
+        ):
+            handle = await live_client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+            )
+            stream = provider.get_stream_handle(live_client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+            # Spaced past the reader's idle timeout, so the reader parks between
+            # appends and only a wake from outside can move it.
+            for n in (1, 2, 3):
+                await producer.append({"n": n})
+                await asyncio.sleep(2)
+            await producer.finish()
+
+            result = await asyncio.wait_for(handle.result(), 60)
+            assert [entry.get("n") for entry in result[:3]] == [1, 2, 3]
+            assert result[3] == {"kind": "finish", "producer": "model"}
+
+            signalled = [
+                event
+                async for event in handle.fetch_history_events()
+                if event.HasField("workflow_execution_signaled_event_attributes")
+            ]
+            assert signalled == []
+    finally:
+        await provider.close()
+
+
 async def test_an_outside_producer_and_the_workflow_share_a_topic(
     live_client: Client, provider: RedisStreams
 ):

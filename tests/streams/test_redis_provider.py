@@ -18,6 +18,7 @@ from temporalio.contrib.external_workflow_streams import (
     StreamError as TransportStreamError,
 )
 from temporalio.contrib.external_workflow_streams._backend import StreamKey
+from temporalio.contrib.external_workflow_streams._record import Offset
 from temporalio.contrib.external_workflow_streams._redis import RedisStreamBackend
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
@@ -31,6 +32,7 @@ from temporalio.streams.providers.redis import (
     _drive,
     _position,
     _StandaloneOwner,
+    _wake_counter,
 )
 
 
@@ -64,9 +66,11 @@ class _RefusingInput:
         self._refusals = refusals
         self._error = error
         self.calls = 0
+        self.positions: list[Any] = []
 
-    async def wake(self) -> list[str]:
+    async def wake(self, *, position: Any = None) -> list[str]:
         self.calls += 1
+        self.positions.append(position)
         if self.calls <= self._refusals:
             raise self._error or WakeNotAcknowledgedError(
                 "workflow operation can not be applied because workflow is closing",
@@ -99,7 +103,7 @@ async def test_a_wake_refused_by_a_closing_run_is_sent_again_to_its_successor():
     # to a successor, which is where the records already are.
     client = _ChainClient(WorkflowExecutionStatus.RUNNING)
     wakes = _RefusingInput(refusals=1)
-    await _waking_producer(client, wakes)._wake()
+    await _waking_producer(client, wakes)._wake(None)
     assert (wakes.calls, client.describes) == (2, 1)
 
 
@@ -111,7 +115,7 @@ async def test_a_refused_wake_waits_for_the_successor_to_become_current():
         WorkflowExecutionStatus.CONTINUED_AS_NEW, WorkflowExecutionStatus.RUNNING
     )
     wakes = _RefusingInput(refusals=2)
-    await _waking_producer(client, wakes)._wake()
+    await _waking_producer(client, wakes)._wake(None)
     assert (wakes.calls, client.describes) == (3, 2)
 
 
@@ -133,7 +137,7 @@ async def test_a_wake_refused_by_a_finished_chain_is_the_ordinary_ending(
 ):
     client = _ChainClient(ending)
     wakes = _RefusingInput(refusals=99)
-    await _waking_producer(client, wakes)._wake()
+    await _waking_producer(client, wakes)._wake(None)
     assert wakes.calls == 1
 
 
@@ -144,7 +148,7 @@ async def test_a_wake_refused_as_closing_for_the_whole_window_is_dropped():
     # next park rechecks the log and finds it; the producer is not failed.
     client = _ChainClient(WorkflowExecutionStatus.RUNNING)
     wakes = _RefusingInput(refusals=99)
-    await _waking_producer(client, wakes)._wake()
+    await _waking_producer(client, wakes)._wake(None)
     assert wakes.calls > 1
 
 
@@ -155,15 +159,67 @@ async def test_a_wake_refused_for_another_reason_for_the_whole_window_is_raised(
         refusals=99, error=WakeNotAcknowledgedError("signal rate limited", pending=[])
     )
     with pytest.raises(WakeNotAcknowledgedError, match="rate limited"):
-        await _waking_producer(client, wakes)._wake()
+        await _waking_producer(client, wakes)._wake(None)
     assert wakes.calls > 1
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_as_not_found_ends_without_a_describe():
+    # The wake call names the chain's first run, so the server's NOT_FOUND
+    # already says the chain has ended.
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    refusal = WakeNotAcknowledgedError("gone", pending=[])
+    refusal.__cause__ = RPCError("gone", RPCStatusCode.NOT_FOUND, b"")
+    wakes = _RefusingInput(refusals=99, error=refusal)
+    await _waking_producer(client, wakes)._wake(None)
+    assert (wakes.calls, client.describes) == (1, 0)
+
+
+async def test_a_wake_reports_the_entry_it_follows():
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(refusals=0)
+    placed = Offset("1700000000000-4")
+    await _waking_producer(client, wakes)._wake(placed)
+    assert wakes.positions == [placed]
+
+
+def test_a_wake_counter_follows_the_entry_id_order():
+    ids = ["1700000000000-0", "1700000000000-1", "1700000000001-0", "1800000000000-7"]
+    counters = [_wake_counter(Offset(entry)) for entry in ids]
+    assert counters == sorted(counters)
+    assert len(set(counters)) == len(counters)
+    assert _wake_counter(Offset("1700000000000-3")) == 1700000000000 * 2**20 + 3
+
+
+def test_a_wake_counter_caps_the_sequence_inside_its_millisecond():
+    capped = _wake_counter(Offset(f"5-{2**20 + 9}"))
+    assert capped == 5 * 2**20 + 2**20 - 1
+    assert capped < _wake_counter(Offset("6-0"))
+
+
+def test_a_wake_counter_fits_the_servers_signed_64_bit_field():
+    year_2200_ms = 7258118400000
+    assert _wake_counter(Offset(f"{year_2200_ms}-{2**20}")) < 2**63
+
+
+def test_the_wake_transport_reaches_the_backend_both_sides_share():
+    streams = RedisStreams(client=_NoRedis(), wake_transport="signal")
+    backend = streams._require_backend()
+    assert backend.wake_transport == "signal"
+    assert backend.wake_counter_for(Offset("2-1")) == _wake_counter(Offset("2-1"))
+    assert RedisStreams(client=_NoRedis())._require_backend().wake_transport == "auto"
+
+
+def test_an_unknown_wake_transport_is_refused_at_construction():
+    with pytest.raises(ValueError, match="wake transport"):
+        RedisStreams(wake_transport=cast(Any, "carrier-pigeon"))
 
 
 async def test_a_wake_the_store_could_not_send_is_a_storage_error():
     client = _ChainClient(WorkflowExecutionStatus.RUNNING)
     wakes = _RefusingInput(refusals=1, error=TransportStreamError("no connection"))
     with pytest.raises(StreamError, match="could not be sent"):
-        await _waking_producer(client, wakes)._wake()
+        await _waking_producer(client, wakes)._wake(None)
     assert (wakes.calls, client.describes) == (1, 0)
 
 
