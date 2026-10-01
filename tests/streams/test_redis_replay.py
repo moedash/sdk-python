@@ -43,7 +43,8 @@ from temporalio.streams import (
     StreamProducerError,
 )
 from temporalio.streams._wire import to_wire
-from temporalio.streams.providers.redis import RedisStreams, _chain
+from temporalio.streams.providers import redis as redis_provider
+from temporalio.streams.providers.redis import RedisStreams, _chain, _TopicLogBackend
 from temporalio.worker import Replayer, Worker
 from tests.streams.test_streams_conformance import StreamHost, take
 from tests.streams.test_streams_workflow import (
@@ -1159,3 +1160,56 @@ async def test_a_workflow_reader_at_end_skips_what_was_there_and_replays(
         assert await asyncio.wait_for(result, 60) == "new"
         history = await handle.fetch_history()
     await Replayer(workflows=[FromNowOnGo], plugins=[provider]).replay_workflow(history)
+
+
+async def test_a_batch_staged_for_a_rejected_task_does_not_stay_in_the_log(
+    live_client: Client, monkeypatch: pytest.MonkeyPatch
+):
+    # The first stage takes longer than the Workflow Task timeout, so the server
+    # times the task out and the worker's completion is rejected; the run is
+    # evicted and run again, and the second attempt stages the same batch under
+    # a new token. The first stage can never be named by a marker. It is
+    # settled against History when the run is evicted and its entries leave the
+    # log, so the log holds the batch once and nothing counts the dead one.
+    class SlowFirstStage(_TopicLogBackend):
+        delayed = False
+
+        async def stage_output(self, manifest: Any, records: Any) -> Any:
+            if not SlowFirstStage.delayed:
+                SlowFirstStage.delayed = True
+                await asyncio.sleep(3)
+            return await super().stage_output(manifest, records)
+
+    monkeypatch.setattr(redis_provider, "_TopicLogBackend", SlowFirstStage)
+    provider = RedisStreams(
+        url=redis_url(), key_prefix=f"streams-redis-{uuid.uuid4().hex}"
+    )
+    workflow_id = f"streams-redis-rejected-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[OneLine],
+            plugins=[provider],
+        ):
+            handle = await live_client.start_workflow(
+                OneLine.run,
+                id=workflow_id,
+                task_queue=f"tq-{workflow_id}",
+                task_timeout=timedelta(seconds=1),
+            )
+            await asyncio.wait_for(handle.result(), 60)
+            assert SlowFirstStage.delayed
+            # Counted before any reader could settle a barrier: the worker did.
+            assert (
+                await _log_length(provider, live_client, workflow_id, DECISIONS.name)
+                == 2
+            )
+            stream = provider.get_stream_handle(live_client, workflow_id)
+            records = [r async for r in stream.read(topic=DECISIONS)]
+            assert [(r.kind, r.value) for r in records] == [
+                (RecordKind.DATA, {"from": "workflow"}),
+                (RecordKind.FINISH, None),
+            ]
+    finally:
+        await provider.close()
