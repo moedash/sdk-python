@@ -59,8 +59,6 @@ class WorkflowActivation(google.protobuf.message.Message):
     * Patches are expected to apply to the entire activation
     * Signal and update handlers should be invoked before workflow routines are iterated. That is to
      say before the users' main workflow function and anything spawned by it is allowed to continue.
-    * Channel notifications are input from outside the workflow, like signals, so they go with
-     them and ahead of the stream ranges among the other jobs.
     * Local activities resolutions go after other normal jobs because while *not* replaying, they
      will always take longer than anything else that produces an immediate job (which is
      effectively instant). When *replaying* we need to scan ahead for LA markers so that we can
@@ -510,6 +508,37 @@ class WorkflowActivationJob(google.protobuf.message.Message):
 
 global___WorkflowActivationJob = WorkflowActivationJob
 
+class NotificationsReceived(google.protobuf.message.Message):
+    """Hand a workflow the notifications the server folded for its channels.
+
+    They come from the scheduled event of the Workflow Task this activation
+    belongs to. History is the record, so a replay yields the same job with the
+    same notifications at the same point.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]: ...
+    def __init__(
+        self,
+        *,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
+    ) -> None: ...
+
+global___NotificationsReceived = NotificationsReceived
+
 class ResolveExternalStreamWaits(google.protobuf.message.Message):
     """Tells lang that one or more external stream waits may now have data.
 
@@ -772,37 +801,6 @@ class DeliverStreamRecords(google.protobuf.message.Message):
     ) -> None: ...
 
 global___DeliverStreamRecords = DeliverStreamRecords
-
-class NotificationsReceived(google.protobuf.message.Message):
-    """Hand a workflow the notifications the server folded for its channels.
-
-    They come from the scheduled event of the Workflow Task this activation
-    belongs to. History is the record, so a replay yields the same job with the
-    same notifications at the same point.
-    """
-
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    NOTIFICATIONS_FIELD_NUMBER: builtins.int
-    @property
-    def notifications(
-        self,
-    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.notification.v1.message_pb2.Notification
-    ]: ...
-    def __init__(
-        self,
-        *,
-        notifications: collections.abc.Iterable[
-            temporalio.api.notification.v1.message_pb2.Notification
-        ]
-        | None = ...,
-    ) -> None: ...
-    def ClearField(
-        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
-    ) -> None: ...
-
-global___NotificationsReceived = NotificationsReceived
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""
