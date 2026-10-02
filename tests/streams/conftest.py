@@ -2,6 +2,11 @@ import pytest
 
 _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
 
+# The Core the bridge pins decides whether a workflow's subscribe command
+# reaches the server. The protos-only pin refuses it; the delivery pin that
+# the native layers move to handles it.
+PINNED_CORE_HANDLES_CHANNEL_COMMAND = False
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
@@ -27,6 +32,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "needs_channel_server: the case needs a server that serves notification "
         "channels, named with -E host:port",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_channel_core: the case needs the pinned Core to handle the "
+        "subscribe-notification-channel command",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -35,11 +45,28 @@ def pytest_collection_modifyitems(
     # The dev server the suite starts for itself does not accept the
     # subscribe command, so the live channel cases run only against a server
     # the caller points at.
-    if config.getoption("--workflow-environment") not in _ENVIRONMENTS_WITHOUT_CHANNELS:
-        return
-    skip = pytest.mark.skip(
-        reason="needs a server that serves notification channels; name one with -E"
-    )
+    skips: list[tuple[str, pytest.MarkDecorator]] = []
+    if config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS:
+        skips.append(
+            (
+                "needs_channel_server",
+                pytest.mark.skip(
+                    reason="needs a server that serves notification channels; "
+                    "name one with -E"
+                ),
+            )
+        )
+    if not PINNED_CORE_HANDLES_CHANNEL_COMMAND:
+        skips.append(
+            (
+                "needs_channel_core",
+                pytest.mark.skip(
+                    reason="the pinned Core refuses the subscribe command; py-05 "
+                    "pins one that handles it"
+                ),
+            )
+        )
     for item in items:
-        if item.get_closest_marker("needs_channel_server"):
-            item.add_marker(skip)
+        for marker, skip in skips:
+            if item.get_closest_marker(marker):
+                item.add_marker(skip)

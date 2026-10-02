@@ -235,6 +235,7 @@ async def test_an_empty_channel_name_is_refused():
 
 
 @pytest.mark.needs_channel_server
+@pytest.mark.needs_channel_core
 async def test_a_workflow_receives_a_client_notification(client: Client):
     channel = f"orders-{uuid.uuid4()}"
     worker = new_worker(client, ReceiveOne)
@@ -315,3 +316,42 @@ async def test_a_callback_listener_registers_and_unregisters(client: Client):
     await client.unregister_channel_listener(channel, listener_id)
     description = await client.describe_channel(channel)
     assert description.listeners == []
+
+
+@pytest.mark.needs_channel_server
+async def test_a_channel_retains_notifications_for_pollers(client: Client):
+    channel = f"orders-{uuid.uuid4()}"
+    # Nobody listens yet: the notification is kept for pollers and the count
+    # says zero.
+    assert await client.notify_channel(channel, position=b"2-0", counter=2) == 0
+    polled = await client.poll_channel(channel, wait=False)
+    assert [(n.position, n.counter) for n in polled] == [(b"2-0", 2)]
+    # At or below the latest counter a notify changes nothing and is not kept.
+    assert await client.notify_channel(channel, position=b"1-0", counter=1) == 0
+    assert await client.notify_channel(channel, position=b"2-0", counter=2) == 0
+    description = await client.describe_channel(channel)
+    assert description.latest is not None and description.latest.counter == 2
+    assert description.retained_count == 1
+    # Above it the notification is kept, metadata and all, and a poll after
+    # the earlier counter sees only the new one.
+    assert (
+        await client.notify_channel(
+            channel, position=b"3-0", counter=3, metadata={"topic": "inputs"}
+        )
+        == 0
+    )
+    [newest] = await client.poll_channel(channel, after_counter=2, wait=False)
+    assert newest.counter == 3
+    assert (
+        client.data_converter.payload_converter.from_payload(
+            newest.metadata["topic"], str
+        )
+        == "inputs"
+    )
+    polled = await client.poll_channel(channel, wait=False)
+    assert [n.counter for n in polled] == [2, 3]
+    # A poll above the latest waits its bound out and comes back empty.
+    polled = await client.poll_channel(
+        channel, after_counter=3, wait=timedelta(seconds=1)
+    )
+    assert polled == []
