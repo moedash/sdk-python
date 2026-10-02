@@ -38,6 +38,20 @@ def pytest_configure(config: pytest.Config) -> None:
         "to a workflow, named with -E host:port; the case skips itself on one "
         "with only independent channels",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_server: the case needs a server that accepts the "
+        "unsubscribe-notification-channel command, named with -E host:port; an "
+        "older channel server fails the Workflow Task that carries it",
+    )
+
+
+#: The markers naming a server capability the suite's own servers lack.
+_CHANNEL_SERVER_MARKERS = (
+    "needs_channel_server",
+    "needs_linked_server",
+    "needs_unsubscribe_server",
+)
 
 
 def pytest_collection_modifyitems(
@@ -49,9 +63,7 @@ def pytest_collection_modifyitems(
         reason="needs a server that serves notification channels; name one with -E"
     )
     for item in items:
-        if item.get_closest_marker("needs_channel_server") or item.get_closest_marker(
-            "needs_linked_server"
-        ):
+        if any(item.get_closest_marker(marker) for marker in _CHANNEL_SERVER_MARKERS):
             item.add_marker(skip)
 
 
@@ -79,25 +91,6 @@ async def server_channel_support(client: Any) -> Any:
         return await channel_support(client, handle.id)
     finally:
         await handle.terminate()
-
-
-@pytest_asyncio.fixture  # type: ignore[reportUntypedFunctionDecorator]
-async def first_task_retained(client: object) -> None:
-    """Holds a case to servers where the task that opens a reader stays open.
-
-    On a server whose channels are all independent that task carries the
-    subscribe command, which Core cannot retain or park, so a case built on a
-    retained or parked first task measures nothing there. With the linked
-    kind a workflow-owned stream needs no command and the task stays open, as
-    it does on a server without channels.
-    """
-    from temporalio.contrib.external_workflow_streams._wake import ChannelSupport
-
-    if await server_channel_support(client) is ChannelSupport.INDEPENDENT:
-        pytest.skip(
-            "the subscribe command ends the task that opens the first reader; "
-            "the linked channel kind keeps it open"
-        )
 
 
 @pytest.fixture(autouse=True)

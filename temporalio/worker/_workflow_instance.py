@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import (
     Awaitable,
     Callable,
+    Collection,
     Coroutine,
     Generator,
     Iterable,
@@ -363,6 +364,14 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         #: ``subscribe_stream_channel``.
         self._stream_channels_enabled: bool | None = None
         self._stream_channels_linked = False
+        #: Whether a stream reader has been opened on a server with channels.
+        #: From then on every completion reports the channels the run
+        #: listens on, the empty set included, and Core keeps the server's
+        #: subscriptions in step with the report.
+        self._stream_channels_reporting = False
+        #: The last report, so a notification on a channel the readers
+        #: listen on is told from one nobody asked for.
+        self._stream_channels: list[str] = []
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
         self._time_ns = 0
@@ -995,10 +1004,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         for proto in job.notifications:
             if proto.HasField("linked_to"):
                 subscriptions = self._linked_channel_subscriptions
-                listened = self._linked_channels
+                listened: Collection[str] = self._linked_channels
             else:
                 subscriptions = self._channel_subscriptions
-                listened = self._subscribed_channels
+                listened = self._subscribed_channels.union(self._stream_channels)
             subscription = subscriptions.get(proto.channel)
             if subscription is not None:
                 subscription._deliver(
@@ -1044,21 +1053,29 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         The external-stream runtime's entry, gated where the public
         :py:func:`temporalio.workflow.subscribe_channel` is not: a reader opens
         on whatever server the Worker talks to, and a server without channels
-        fails a Workflow Task that carries the command. The Worker asks the
+        fails a Workflow Task that carries a subscription. The Worker asks the
         server once and the answer becomes two lang flags, read here on the
         run's first stream subscription and kept until continue-as-new, so a
         replay takes the path the live run took.
 
-        With the linked kind a stream owned by this workflow needs no command:
-        its channel lives in this run's state and the run is its listener by
-        construction, so the task that opens the reader can stay retained.
-        A stream with another owner, or no owner, listens on the independent
-        channel of its name by command.
+        No command is issued here. The subscribe command is server-bound, so
+        a completion carrying it cannot be retained, and the task that opens
+        a reader is the one that should stay open and park. Instead every
+        completion from now on reports the channels of the open readers in
+        ``WorkflowStreamChannels``, and Core subscribes the new ones on the
+        completion that ends the task, after the progress marker, and
+        unsubscribes the ones whose readers have gone; see
+        :meth:`_report_stream_channels`.
+
+        With the linked kind a stream owned by this workflow is not reported
+        at all: its channel lives in this run's state and the run is its
+        listener by construction. A stream with another owner, or no owner,
+        listens on the independent channel of its name.
 
         Returns whether the run listens on the channel after this call.
         """
         channel: str = address.channel
-        if channel in self._subscribed_channels or channel in self._linked_channels:
+        if channel in self._linked_channels:
             return True
         if self._read_only:
             return False
@@ -1072,14 +1089,47 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 )
         if not self._stream_channels_enabled:
             return False
+        self._stream_channels_reporting = True
         if (
             self._stream_channels_linked
             and address.workflow_id == self._info.workflow_id
         ):
             self._linked_channels.add(channel)
-            return True
-        self._issue_channel_subscription(channel)
         return True
+
+    def _stream_channel_name(self, stream_key: Any) -> str | None:
+        """The channel an open reader's stream is listened on.
+
+        ``None`` for a stream this run is the listener of by construction.
+        """
+        from temporalio.contrib.external_workflow_streams._wake import channel_for
+
+        address = channel_for(stream_key)
+        if (
+            self._stream_channels_linked
+            and address.workflow_id == self._info.workflow_id
+        ):
+            return None
+        return address.channel
+
+    def _report_stream_channels(self, runtime: Any) -> None:
+        """Puts the complete set of channels the open readers listen on in the
+        completion.
+
+        Emitted on every completion once a reader has been opened on a server
+        with channels, the empty set included: Core treats an absent report as
+        unchanged, and only the latest report counts, so a reader opened and
+        closed inside one task is never subscribed. The order is the readers'
+        ``wait_id`` order with repeats dropped, which replay reproduces, and
+        Core issues the subscribes in it.
+        """
+        channels: list[str] = []
+        for stream_key in runtime.listened_stream_keys():
+            channel = self._stream_channel_name(stream_key)
+            if channel is not None and channel not in channels:
+                channels.append(channel)
+        self._stream_channels = channels
+        self._add_command().workflow_stream_channels.channels.extend(channels)
 
     def _issue_channel_subscription(self, channel: str) -> None:
         """Emits the subscribe command once per channel per run.
@@ -2965,6 +3015,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 # the consumed data.
                 commands.insert(0, progress)
 
+        # Whether or not anything is blocked, and on replay too: the report
+        # is what Core derives the server's subscriptions from, and a task
+        # that read a record and then scheduled an activity leaves with no
+        # snapshot but still with readers to keep listening for.
+        if self._stream_channels_reporting:
+            self._report_stream_channels(runtime)
+
         if not snapshot:
             return
 
@@ -4751,15 +4808,16 @@ class _WorkflowLogicFlag(IntEnum):
 
     RAISE_ON_CANCELLING_COMPLETED_ACTIVITY = 1
     PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH = 2
-    # Whether the run's external-stream readers subscribe to their channels.
-    # Set by the Worker from one probe of the server; a run reads it on its
-    # first stream subscription and keeps that answer until continue-as-new.
-    # Numbered away from the values upstream hands out in sequence, so a flag
-    # the main SDK adds later cannot read a History written with this one.
+    # Whether the run reports the channels its external-stream readers listen
+    # on, for Core to subscribe it to. Set by the Worker from one probe of the
+    # server; a run reads it on its first stream subscription and keeps that
+    # answer until continue-as-new. Numbered away from the values upstream
+    # hands out in sequence, so a flag the main SDK adds later cannot read a
+    # History written with this one.
     SUBSCRIBE_NOTIFICATION_CHANNELS = 100
     # Whether a stream this workflow owns listens on its linked channel, which
-    # needs no command, rather than subscribing to the independent one. Set
-    # with the flag above from the same probe and read with it.
+    # needs no subscription, rather than on the independent one. Set with the
+    # flag above from the same probe and read with it.
     LINKED_NOTIFICATION_CHANNELS = 101
 
 
