@@ -5205,6 +5205,7 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
     CALLBACKS_FIELD_NUMBER: builtins.int
     PENDING_NEXUS_OPERATIONS_FIELD_NUMBER: builtins.int
     WORKFLOW_EXTENDED_INFO_FIELD_NUMBER: builtins.int
+    CHANNEL_SUBSCRIPTIONS_FIELD_NUMBER: builtins.int
     @property
     def execution_config(
         self,
@@ -5245,6 +5246,15 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
     def workflow_extended_info(
         self,
     ) -> temporalio.api.workflow.v1.message_pb2.WorkflowExecutionExtendedInfo: ...
+    @property
+    def channel_subscriptions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.workflow.v1.message_pb2.ChannelSubscriptionInfo
+    ]:
+        """The notification channels this run stands on: the independent channels it subscribed to and
+        the channels linked to it that hold any state. Empty when there are none.
+        """
     def __init__(
         self,
         *,
@@ -5272,6 +5282,10 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
         | None = ...,
         workflow_extended_info: temporalio.api.workflow.v1.message_pb2.WorkflowExecutionExtendedInfo
         | None = ...,
+        channel_subscriptions: collections.abc.Iterable[
+            temporalio.api.workflow.v1.message_pb2.ChannelSubscriptionInfo
+        ]
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -5291,6 +5305,8 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "callbacks",
             b"callbacks",
+            "channel_subscriptions",
+            b"channel_subscriptions",
             "execution_config",
             b"execution_config",
             "pending_activities",
