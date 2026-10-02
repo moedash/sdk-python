@@ -148,6 +148,7 @@ async def _output_stage_was_logged(redis_client: Any, prefix: str) -> bool:
 
 
 @pytest.mark.timeout(240)
+@pytest.mark.usefixtures("first_task_retained")
 async def test_a_crash_before_the_marker_makes_the_next_worker_re_read(
     client: Client, redis_worker_id: str
 ) -> None:

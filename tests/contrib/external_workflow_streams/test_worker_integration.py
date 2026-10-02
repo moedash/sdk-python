@@ -1769,6 +1769,7 @@ async def test_each_failure_row_is_reported_as_its_own(
     )
 
 
+@pytest.mark.needs_channel_server
 async def test_an_outside_producer_wakes_the_reader_through_the_channel(
     client: Client, backend: MemoryStreamBackend
 ) -> None:
