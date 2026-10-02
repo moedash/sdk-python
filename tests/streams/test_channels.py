@@ -584,6 +584,7 @@ async def _stop(handle: Any, worker: Any, running: asyncio.Task[None]) -> None:
 
 
 @pytest.mark.needs_linked_server
+@pytest.mark.needs_linked_core
 async def test_a_workflow_receives_a_notification_on_its_linked_channel(
     client: Client,
 ):
@@ -606,13 +607,15 @@ async def test_a_workflow_receives_a_notification_on_its_linked_channel(
         assert description.retained_count == 0
         assert description.linked_to is not None
         assert description.linked_to.workflow_id == handle.id
-        await client.notify_channel(
+        # The owner is the one listener.
+        listeners = await client.notify_channel(
             channel,
             position=b"1-0",
             counter=1,
             metadata={"topic": "inputs"},
             workflow_id=handle.id,
         )
+        assert listeners == 1
         assert await asyncio.wait_for(handle.result(), 30) == {
             "channel": channel,
             "counter": 1,
@@ -632,33 +635,59 @@ async def test_a_workflow_receives_a_notification_on_its_linked_channel(
 
 
 @pytest.mark.needs_linked_server
-async def test_a_linked_channel_of_a_running_workflow_exists_untouched(client: Client):
-    worker = new_worker(client, CountLinked)
-    running = asyncio.create_task(worker.run())
+async def test_a_linked_channel_lives_and_dies_with_its_workflow(client: Client):
+    """The client side alone: no worker polls, so the run stays open until ended."""
+    channel = f"orders-{uuid.uuid4()}"
     handle = await client.start_workflow(
         CountLinked.run,
-        f"orders-{uuid.uuid4()}",
+        channel,
         id=f"wf-{uuid.uuid4()}",
-        task_queue=worker.task_queue,
+        task_queue=f"nobody-polls-{uuid.uuid4()}",
     )
-    try:
-        untouched = f"untouched-{uuid.uuid4()}"
-        description = await client.describe_channel(untouched, workflow_id=handle.id)
-        assert description.kind == ChannelKind.LINKED
-        assert (description.listeners, description.latest) == ([], None)
-        assert description.retained_count == 0
-        assert description.linked_to is not None
-        assert description.linked_to.workflow_id == handle.id
-        # The independent channel of that name is a different thing and does
-        # not exist.
-        with pytest.raises(RPCError) as independent:
-            await client.describe_channel(untouched)
-        assert independent.value.status == RPCStatusCode.NOT_FOUND
-    finally:
-        await _stop(handle, worker, running)
+    run_id = handle.first_execution_run_id
+    assert run_id is not None
+    # A name nobody has notified exists all the same, with nothing in it.
+    description = await client.describe_channel(channel, workflow_id=handle.id)
+    assert description.kind == ChannelKind.LINKED
+    assert (description.listeners, description.latest) == ([], None)
+    assert description.retained_count == 0
+    assert description.linked_to is not None
+    assert (description.linked_to.workflow_id, description.linked_to.run_id) == (
+        handle.id,
+        run_id,
+    )
+    # The independent channel of that name is a different thing and does not
+    # exist.
+    with pytest.raises(RPCError) as independent:
+        await client.describe_channel(channel)
+    assert independent.value.status == RPCStatusCode.NOT_FOUND
+    # A run id names that run; one that is not the chain's is not found, and
+    # neither is a workflow that never ran.
+    description = await client.describe_channel(
+        channel, workflow_id=handle.id, run_id=run_id
+    )
+    assert description.kind == ChannelKind.LINKED
+    for wrong in (
+        client.describe_channel(
+            channel, workflow_id=handle.id, run_id=str(uuid.uuid4())
+        ),
+        client.notify_channel(
+            channel, counter=1, workflow_id=handle.id, run_id=str(uuid.uuid4())
+        ),
+        client.notify_channel(channel, counter=1, workflow_id=f"never-{uuid.uuid4()}"),
+    ):
+        with pytest.raises(RPCError) as missing:
+            await wrong
+        assert missing.value.status == RPCStatusCode.NOT_FOUND
+    # The channel ends with the run.
+    await handle.terminate()
+    with pytest.raises(RPCError) as closed:
+        await client.notify_channel(channel, counter=1, workflow_id=handle.id)
+    assert closed.value.status == RPCStatusCode.NOT_FOUND
 
 
 @pytest.mark.needs_linked_server
+@pytest.mark.needs_linked_core
 async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
     channel = f"orders-{uuid.uuid4()}"
     worker = new_worker(client, CountLinked)
@@ -670,13 +699,26 @@ async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
         task_queue=worker.task_queue,
     )
     try:
-        await client.notify_channel(
-            channel, position=b"1-0", counter=1, workflow_id=handle.id
+        assert (
+            await client.notify_channel(
+                channel, position=b"1-0", counter=1, workflow_id=handle.id
+            )
+            == 1
         )
         polled = await client.poll_channel(channel, workflow_id=handle.id, wait=False)
         assert [(n.position, n.counter) for n in polled] == [(b"1-0", 1)]
         assert polled[0].linked_to is not None
         assert polled[0].linked_to.workflow_id == handle.id
+        # The run id reaches the same channel.
+        assert [
+            n.counter
+            for n in await client.poll_channel(
+                channel,
+                workflow_id=handle.id,
+                run_id=handle.first_execution_run_id,
+                wait=False,
+            )
+        ] == [1]
         description = await client.describe_channel(channel, workflow_id=handle.id)
         assert description.kind == ChannelKind.LINKED
         assert description.latest is not None and description.latest.counter == 1
@@ -686,9 +728,16 @@ async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
             channel, workflow_id=handle.id, after_counter=1, wait=timedelta(seconds=1)
         )
         assert polled == []
-        await client.notify_channel(
-            channel, position=b"2-0", counter=2, workflow_id=handle.id
+        assert (
+            await client.notify_channel(
+                channel, position=b"2-0", counter=2, workflow_id=handle.id
+            )
+            == 1
         )
         assert await asyncio.wait_for(handle.result(), 30) == 2
+        polled = await client.poll_channel(
+            channel, workflow_id=handle.id, after_counter=1, wait=False
+        )
+        assert [n.counter for n in polled] == [2]
     finally:
         await _stop(handle, worker, running)
