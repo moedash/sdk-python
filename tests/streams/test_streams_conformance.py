@@ -888,6 +888,7 @@ class ReadUntilFinished:
 
 
 @pytest.mark.wakes_by_notification
+@pytest.mark.needs_channel_server
 async def test_an_outside_producer_wakes_the_reader_through_the_channel(
     case: ProviderCase, client: Client
 ):

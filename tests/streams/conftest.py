@@ -25,3 +25,26 @@ def pytest_configure(config: pytest.Config) -> None:
         "wakes_by_notification: the case needs an outside append to wake a parked "
         "workflow reader through the server",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_channel_server: the case needs a server that serves notification "
+        "channels, named with -E host:port",
+    )
+
+
+#: The environments whose server the suite starts for itself. None of them
+#: accepts the subscribe-notification-channel command.
+_ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--workflow-environment") not in _ENVIRONMENTS_WITHOUT_CHANNELS:
+        return
+    skip = pytest.mark.skip(
+        reason="needs a server that serves notification channels; name one with -E"
+    )
+    for item in items:
+        if item.get_closest_marker("needs_channel_server"):
+            item.add_marker(skip)
