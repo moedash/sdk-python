@@ -282,8 +282,8 @@ class StreamBackend(abc.ABC):
 
     Held on the backend because it is the one object both the producer and the
     consuming Worker are configured with. A provider may set it per instance.
-    ``"auto"`` notifies the stream's channel, then falls back to the wake call
-    and the Signal on a server without it.
+    ``"auto"`` notifies the stream's channel and falls back to the Signal on a
+    server without channels.
     """
 
     def wake_counter_for(self, offset: Offset) -> int:

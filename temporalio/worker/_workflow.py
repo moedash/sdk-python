@@ -1501,7 +1501,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         decision is a lang flag the Run reads at construction. A probe that
         cannot tell leaves the question open for the next activation; the Runs
         built meanwhile do not subscribe, and their records still arrive by the
-        wake call or the Signal.
+        Signal.
         """
         from temporalio.contrib.external_workflow_streams._wake import (
             server_has_channels,

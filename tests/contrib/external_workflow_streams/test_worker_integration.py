@@ -490,7 +490,7 @@ async def test_an_append_with_no_open_task_wakes_the_workflow(
     reliable rather than incidental.
     """
     # The Signal is the mechanism under test, so it is asked for outright: on
-    # a server with channels or the wake call, "auto" would leave no Signal.
+    # a server with channels, "auto" would leave no Signal.
     backend.wake_transport = "signal"
     task_queue = f"tq-{uuid.uuid4()}"
     async with Worker(
