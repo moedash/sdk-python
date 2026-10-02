@@ -4,10 +4,10 @@ The unit cases drive :class:`StreamConsumerOperation` with a client stand-in
 over the memory store and the deliveries a server would post, and catch what
 it posts back as completions. The live cases need a server with notification
 channels and a Nexus HTTP ingress, named with ``-E host:port`` and
-``TEMPORAL_HTTP``; they put the memory store behind the Nexus front, because
-this layer carries no store whose producers notify a channel themselves, so
-the producer notifies the stream's channel by hand the way such a store
-would. The consumer's HTTP port is ``STREAM_CONSUMER_PORT``, 8813 by default.
+``TEMPORAL_HTTP``; they put the memory store behind the Nexus front, where
+the producer notifies the stream's channel by hand, and with
+``STREAMS_LIVE=redis`` the Redis provider, whose producer notifies it itself.
+The consumer's HTTP port is ``STREAM_CONSUMER_PORT``, 8813 by default.
 """
 
 from __future__ import annotations
@@ -39,12 +39,16 @@ from temporalio.api.operatorservice.v1 import (
     DeleteNexusEndpointRequest,
 )
 from temporalio.client import Callback, ChannelAddress, Client, stream_channel
+from temporalio.contrib.external_workflow_streams._wake import (
+    channel_for as external_channel_for,
+)
 from temporalio.exceptions import NexusOperationError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import BEGINNING, StreamProvider, StreamRecord, StreamRef
 from temporalio.streams._ref import open_ref
 from temporalio.streams.providers import nexus
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.native import NativeStreams
 from temporalio.streams.providers.nexus import (
     STREAM_CONSUMER_TOKEN_HEADER,
     NexusStreams,
@@ -59,6 +63,7 @@ from temporalio.streams.providers.nexus_consumer_service import (
     _NeverCancelled,
     collect_values,
 )
+from temporalio.streams.providers.redis import RedisStreams, _chain
 from temporalio.worker import Worker
 from tests.helpers import assert_eventually
 from tests.streams.test_nexus_provider import _own_endpoint
@@ -70,6 +75,9 @@ CALLBACK_HEADERS = {"temporal-callback-token": "caller-token"}
 
 _HTTP = os.environ.get("TEMPORAL_HTTP", "http://127.0.0.1:7243")
 _PORT = int(os.environ.get("STREAM_CONSUMER_PORT", "8813"))
+_REDIS_URL = os.environ.get("TEMPORAL_TEST_REDIS_URL") or os.environ.get(
+    "AI198_REDIS_URL", "redis://127.0.0.1:6379"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +693,10 @@ class _Live:
 
 @contextlib.asynccontextmanager
 async def _consumer_service(
-    client: Client, store: StreamProvider | None = None
+    client: Client,
+    store: StreamProvider | None = None,
+    *,
+    channel_for: nexus.ChannelRule = stream_channel,
 ) -> AsyncIterator[_Live]:
     """Stand up the front over ``store`` and the standalone consumer behind an endpoint."""
     store = store or MemoryStreams()
@@ -707,6 +718,7 @@ async def _consumer_service(
             initial=list,
             listener_url=f"http://127.0.0.1:{_PORT}/deliveries",
             client=fronted,
+            channel_for=channel_for,
         )
         service = NexusHttpService(
             nexusrpc.handler.Handler([CollectStreamHandler(consumer)]),
@@ -727,19 +739,25 @@ async def _consumer_service(
             await stream_handler.close()
 
 
-async def _listener_token(client: Client, channel: str) -> str:
+async def _listener_token(
+    client: Client, channel: str, *, workflow_id: str | None = None
+) -> str:
     """The operation token the one callback listener on ``channel`` carries."""
 
     async def registered() -> str:
         # The channel comes into being with the registration, so a describe
         # that races it is answered with not found.
         try:
-            description = await client.describe_channel(channel)
+            description = await client.describe_channel(
+                channel, workflow_id=workflow_id
+            )
         except RPCError as err:
             assert err.status != RPCStatusCode.NOT_FOUND, "channel not created yet"
             raise
-        assert len(description.listeners) == 1, description.listeners
-        [listener] = description.listeners
+        # A channel linked to a workflow lists its owner as a listener as well.
+        callbacks = [one for one in description.listeners if one.callback is not None]
+        assert len(callbacks) == 1, description.listeners
+        [listener] = callbacks
         assert listener.callback is not None
         # The server reports the registration's headers in lower case.
         headers = {
@@ -852,6 +870,101 @@ async def test_cancel_unregisters_the_listener(client: Client):
         assert await asyncio.wait_for(run.result(), 60) == "canceled"
         assert live.consumer.state(token) is None
         assert (await client.describe_channel(channel)).listeners == []
+
+
+@workflow.defn
+class StreamOwner:
+    """Owns the stream an outside producer writes to, and reads nothing itself."""
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+
+@pytest.mark.needs_channel_server
+@pytest.mark.skipif(
+    os.environ.get("STREAMS_LIVE") != "redis",
+    reason="needs a Redis; run with STREAMS_LIVE=redis",
+)
+async def test_a_redis_stream_is_consumed_through_the_channel_its_producer_notifies(
+    client: Client,
+):
+    """The Redis provider notifies the stream's channel on every append, so no
+    one notifies by hand: the channel is the owner's, named by the chain."""
+    provider = RedisStreams(
+        url=_REDIS_URL, key_prefix=f"nexus-consumer-{uuid.uuid4().hex}"
+    )
+    config = client.config()
+    config["plugins"] = [provider]
+    redis_client = Client(**config)
+    owner_id = f"owner-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            client,
+            task_queue=f"owners-{owner_id}",
+            workflows=[StreamOwner, ConsumeCaller],
+        ) as worker:
+            owner = await client.start_workflow(
+                StreamOwner.run, id=owner_id, task_queue=worker.task_queue
+            )
+            try:
+                chain = await _chain(redis_client, owner_id)
+                address = external_channel_for(chain.stream_key(VALUES))
+                ref = StreamRef.for_workflow(owner_id, topic=VALUES)
+                producer = redis_client.get_stream_handle(owner_id).producer(
+                    topic=VALUES, producer_id="writer", attempt=1
+                )
+                async with _consumer_service(
+                    redis_client,
+                    provider,
+                    channel_for=lambda ref: external_channel_for(
+                        chain.stream_key(ref.topic)
+                    ),
+                ) as live:
+                    # Written before the consumer exists: the start reads them.
+                    await producer.append("a", "b")
+                    run = await client.start_workflow(
+                        ConsumeCaller.run,
+                        ConsumeInput(live.endpoint, live.service, ref),
+                        id=f"caller-{owner_id}",
+                        task_queue=worker.task_queue,
+                    )
+                    token = await _listener_token(
+                        client, address.channel, workflow_id=address.workflow_id
+                    )
+                    await _consumed(live.consumer, token, 2)
+
+                    # Each append notifies the channel, and the consumer reads
+                    # from its cursor on the delivery.
+                    await producer.append("c")
+                    await _consumed(live.consumer, token, 3)
+                    await producer.append("d", "e", "f")
+                    await _consumed(live.consumer, token, 6)
+                    state = live.consumer.state(token)
+                    assert state is not None
+                    assert state.value == ["a", "b", "c", "d", "e", "f"]
+                    assert state.deliveries >= 2
+
+                    # The producer's FINISH is a record like any other, and the
+                    # consumer completes on it.
+                    await producer.finish()
+                    assert await asyncio.wait_for(run.result(), 60) == [
+                        "a",
+                        "b",
+                        "c",
+                        "d",
+                        "e",
+                        "f",
+                    ]
+                    assert live.consumer.state(token) is None
+                    description = await client.describe_channel(
+                        address.channel, workflow_id=address.workflow_id
+                    )
+                    assert [one for one in description.listeners if one.callback] == []
+            finally:
+                await owner.terminate()
+    finally:
+        await provider.close()
 
 
 # ---------------------------------------------------------------------------
@@ -998,8 +1111,12 @@ async def test_a_worker_hosted_consumer_is_reached_through_the_frontend(
 async def test_a_native_standalone_stream_is_consumed_through_its_channel(
     client: Client,
 ):
-    provider: StreamProvider | None = client.config().get("stream_provider")
-    assert provider is not None, "the client needs the native provider registered"
+    provider = NativeStreams()
+    client = await Client.connect(
+        client.service_client.config.target_host,
+        namespace=client.namespace,
+        plugins=[provider],
+    )
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await client.create_stream(stream_id)
     ref = handle.ref(topic=VALUES)
