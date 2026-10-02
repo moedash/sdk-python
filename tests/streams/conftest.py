@@ -7,9 +7,11 @@ _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
 # the native layers move to handles it.
 PINNED_CORE_HANDLES_CHANNEL_COMMAND = True
 
-# A channel linked to a workflow needs no command or machine in Core, only
-# the protos that carry `linked_to` on the notification, so the protos-only
-# pin already handles it and the live linked cases run from this layer on.
+# A channel linked to a workflow needs no command, but a notification reaches
+# workflow code as the `NotificationsReceived` job Core builds from the
+# scheduled event, and the protos-only pin ignores that job. So a linked case
+# in which the workflow receives waits for the delivery pin as well; one that
+# only talks to the server from the client runs on every layer.
 PINNED_CORE_HANDLES_LINKED_CHANNEL = True
 
 
@@ -45,8 +47,12 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "needs_linked_server: the case needs a server that serves channels linked "
-        "to a workflow, named with -E host:port, and a Core whose protos carry "
-        "the linked contract",
+        "to a workflow, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_linked_core: the case needs the pinned Core to hand a linked "
+        "channel's notifications to workflow code",
     )
 
 
@@ -77,16 +83,23 @@ def pytest_collection_modifyitems(
                 ),
             )
         )
-    if (
-        config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS
-        or not PINNED_CORE_HANDLES_LINKED_CHANNEL
-    ):
+    if config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS:
         skips.append(
             (
                 "needs_linked_server",
                 pytest.mark.skip(
-                    reason="needs a server with channels linked to a workflow, "
-                    "named with -E, and a Core pin with the linked contract"
+                    reason="needs a server with channels linked to a workflow; "
+                    "name one with -E"
+                ),
+            )
+        )
+    if not PINNED_CORE_HANDLES_LINKED_CHANNEL:
+        skips.append(
+            (
+                "needs_linked_core",
+                pytest.mark.skip(
+                    reason="the pinned Core ignores the notifications job; py-05 "
+                    "pins one that delivers it"
                 ),
             )
         )
