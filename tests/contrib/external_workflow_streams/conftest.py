@@ -20,6 +20,48 @@ import pytest_asyncio
 #: that asks for neither never observes a clock, so no environment can fail it.
 _SERVER_FIXTURES = frozenset({"client", "env"})
 
+#: The environments whose server the suite starts for itself. None of them
+#: accepts the subscribe-notification-channel command.
+_ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "needs_channel_server: the case needs a server that serves notification "
+        "channels, named with -E host:port",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--workflow-environment") not in _ENVIRONMENTS_WITHOUT_CHANNELS:
+        return
+    skip = pytest.mark.skip(
+        reason="needs a server that serves notification channels; name one with -E"
+    )
+    for item in items:
+        if item.get_closest_marker("needs_channel_server"):
+            item.add_marker(skip)
+
+
+@pytest_asyncio.fixture  # type: ignore[reportUntypedFunctionDecorator]
+async def first_task_retained(client: object) -> None:
+    """Holds a case to servers where the task that opens a reader stays open.
+
+    On a server with notification channels that task carries the subscribe
+    command, which Core cannot retain or park, so a case built on a retained or
+    parked first task measures nothing there.
+    """
+    from temporalio.contrib.external_workflow_streams._wake import server_has_channels
+
+    if await server_has_channels(client):  # type: ignore[arg-type]
+        pytest.skip(
+            "the subscribe command ends the task that opens the first reader; "
+            "the follow-up defers it to the leaving completion"
+        )
+
 
 @pytest.fixture(autouse=True)
 def skip_under_time_skipping(request: pytest.FixtureRequest) -> None:

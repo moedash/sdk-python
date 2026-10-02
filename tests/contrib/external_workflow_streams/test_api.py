@@ -33,6 +33,7 @@ from temporalio.contrib.external_workflow_streams._record import (
     RecordKind,
     StreamRecord,
 )
+from temporalio.contrib.external_workflow_streams._wake import channel_for
 
 
 class FakeRuntime:
@@ -790,3 +791,34 @@ async def test_an_unprepared_record_is_refused_rather_than_decoded_late(
     with pytest.raises(StreamDecodeError, match="could not be decoded"):
         await subscription.__aiter__().__anext__()
     assert runtime.consumed == []
+
+
+# --- the stream's channel -----------------------------------------------------
+
+
+def test_a_subscription_asks_the_run_to_listen_on_its_streams_channel(
+    runtime: FakeRuntime, workflow_instance: FakeInstance
+) -> None:
+    """Every ``subscribe()`` asks; the Run keeps it to one command per channel."""
+    asked: list[str] = []
+
+    def subscribe_channel(channel: str) -> bool:
+        asked.append(channel)
+        return True
+
+    workflow_instance.subscribe_stream_channel = subscribe_channel  # type: ignore[attr-defined]
+
+    external_stream.topic("tokens").subscribe()
+    external_stream.topic("tokens").subscribe()
+    external_stream.topic("events").subscribe()
+
+    tokens = channel_for(runtime.stream_key("tokens"))
+    events = channel_for(runtime.stream_key("events"))
+    assert asked == [tokens, tokens, events]
+
+
+def test_a_run_that_cannot_listen_still_subscribes(runtime: FakeRuntime) -> None:
+    # The bare FakeInstance has no subscribe_stream_channel, like a Run object
+    # that predates the channel; the subscription itself is unaffected.
+    assert external_stream.topic("tokens").subscribe().wait_id == 1
+    assert runtime.registrations[0][0] == 1
