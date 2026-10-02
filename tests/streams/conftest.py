@@ -20,3 +20,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "hosts_standalone_streams: the case needs a stream with an id of its own and "
         "no owner",
     )
+    config.addinivalue_line(
+        "markers",
+        "wakes_by_notification: the case needs an outside append to wake a parked "
+        "workflow reader through the server",
+    )

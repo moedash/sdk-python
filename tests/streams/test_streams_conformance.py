@@ -40,6 +40,7 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.common import RawValue
+from temporalio.contrib.external_workflow_streams._wake import server_has_channels
 from temporalio.converter import (
     DataConverter,
     ExternalStorage,
@@ -105,6 +106,9 @@ class ProviderCase:
     trims_open_stream_by_age: bool = True
     """A standalone stream drops records older than ``retention`` while it is
     open, rather than keeping them that long after it closes."""
+    wakes_by_notification: bool = False
+    """An outside append wakes a parked workflow reader through the server,
+    rather than the reader finding the record on a timer of its own."""
 
     async def open(
         self,
@@ -251,6 +255,7 @@ _CAPABILITIES = {
     "detects_divergent_retries": lambda case: case.detects_divergent_retries,
     "truncates": lambda case: case.truncate is not None,
     "hosts_standalone_streams": lambda case: case.hosts_standalone_streams,
+    "wakes_by_notification": lambda case: case.wakes_by_notification,
 }
 
 
@@ -862,3 +867,77 @@ async def test_a_publish_from_the_constructor_is_delivered(
     stream = case.provider.get_stream_handle(worker_client, workflow_id)
     records = await take(stream.read(topic=OUT), 2, 30)
     assert [r.value for r in records] == [{"from": "init"}, {"from": "run"}]
+
+
+@workflow.defn
+class ReadUntilFinished:
+    """Reads ``OUT`` until its producer finishes.
+
+    Nothing but an outside append moves it, so what wakes it between appends
+    is the transport under test.
+    """
+
+    @workflow.run
+    async def run(self) -> list[Any]:
+        seen: list[Any] = []
+        async for record in workflow.stream_reader(OUT):
+            if record.kind is RecordKind.FINISH:
+                break
+            seen.append(record.value)
+        return seen
+
+
+@pytest.mark.wakes_by_notification
+async def test_an_outside_producer_wakes_the_reader_through_the_channel(
+    case: ProviderCase, client: Client
+):
+    """The channel path, on the public surface.
+
+    The reader's run subscribes to the stream's channel on the task that opens
+    the reader, the producer's append notifies that channel, and the server
+    wakes the run with a Workflow Task whose scheduled event carries the
+    notification. History then holds the subscription and no Signal.
+    """
+    worker_client = case.client or client
+    if not await server_has_channels(worker_client):
+        pytest.skip("the server does not implement notification channels")
+    plugins = [] if case.client is not None else [case.provider]
+    workflow_id = new_workflow_id()
+    async with new_worker(worker_client, ReadUntilFinished, plugins=plugins) as worker:
+        handle = await worker_client.start_workflow(
+            ReadUntilFinished.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = case.provider.get_stream_handle(worker_client, workflow_id)
+        producer = stream.producer(topic=OUT, producer_id="model", attempt=1)
+        # Spaced past the reader's idle timeout, so the reader parks between
+        # appends and only a wake from outside can move it.
+        for n in (1, 2):
+            await producer.append({"n": n})
+            await asyncio.sleep(2)
+        await producer.finish()
+        assert await asyncio.wait_for(handle.result(), 60) == [{"n": 1}, {"n": 2}]
+
+    events = [e async for e in handle.fetch_history_events()]
+    signalled = [
+        e for e in events if e.HasField("workflow_execution_signaled_event_attributes")
+    ]
+    assert signalled == [], (
+        "a Signal woke the reader, so the channel was not the transport"
+    )
+    subscribed = [
+        e
+        for e in events
+        if e.HasField("workflow_notification_channel_subscribed_event_attributes")
+    ]
+    assert len(subscribed) == 1, "the run subscribes once per channel"
+    notified = [
+        notification
+        for e in events
+        if e.HasField("workflow_task_scheduled_event_attributes")
+        for notification in e.workflow_task_scheduled_event_attributes.notifications
+    ]
+    assert notified, "no Workflow Task was scheduled with a notification"
+    channel = subscribed[
+        0
+    ].workflow_notification_channel_subscribed_event_attributes.channel
+    assert {n.channel for n in notified} == {channel}
