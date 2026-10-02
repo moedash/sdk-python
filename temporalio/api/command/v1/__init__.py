@@ -19,6 +19,7 @@ from .message_pb2 import (
     StartTimerCommandAttributes,
     SubscribeNotificationChannelCommandAttributes,
     SubscribeStreamCommandAttributes,
+    UnsubscribeNotificationChannelCommandAttributes,
     UpsertWorkflowSearchAttributesCommandAttributes,
 )
 
@@ -43,5 +44,6 @@ __all__ = [
     "StartTimerCommandAttributes",
     "SubscribeNotificationChannelCommandAttributes",
     "SubscribeStreamCommandAttributes",
+    "UnsubscribeNotificationChannelCommandAttributes",
     "UpsertWorkflowSearchAttributesCommandAttributes",
 ]
