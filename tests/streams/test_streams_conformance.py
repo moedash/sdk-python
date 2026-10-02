@@ -305,6 +305,9 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             # stream is open.
             bounds_standalone_bytes=True,
             trims_open_stream_by_age=True,
+            # An outside append notifies the stream's channel, and the
+            # reader's worker subscribes to it on the task that opens the read.
+            wakes_by_notification=True,
         )
         for handle in hosts.values():
             await handle.terminate()
