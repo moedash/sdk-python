@@ -230,6 +230,11 @@ class _EventTypeEnumTypeWrapper(
     """A Workflow became a listener of a notification channel for its run.
     The notifications themselves ride the WorkflowTaskScheduled event.
     """
+    EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED: _EventType.ValueType  # 64
+    """A Workflow stopped listening on a notification channel for its run.
+    Recorded for every UnsubscribeNotificationChannel command, including one
+    naming a channel the run was not subscribed to.
+    """
 
 class EventType(_EventType, metaclass=_EventTypeEnumTypeWrapper):
     """Whenever this list of events is changed do change the function shouldBufferEvent in mutableStateBuilder.go to make sure to do the correct event ordering"""
@@ -435,5 +440,10 @@ the stream's own log, never into History.
 EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED: EventType.ValueType  # 63
 """A Workflow became a listener of a notification channel for its run.
 The notifications themselves ride the WorkflowTaskScheduled event.
+"""
+EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED: EventType.ValueType  # 64
+"""A Workflow stopped listening on a notification channel for its run.
+Recorded for every UnsubscribeNotificationChannel command, including one
+naming a channel the run was not subscribed to.
 """
 global___EventType = EventType
