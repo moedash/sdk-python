@@ -209,6 +209,10 @@ class _WorkflowTaskFailedCauseEnumTypeWrapper(
     """A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
     subscription or listener limit.
     """
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 45
+    """An UnsubscribeNotificationChannel command named an empty or too-long channel."""
 
 class WorkflowTaskFailedCause(
     _WorkflowTaskFailedCause, metaclass=_WorkflowTaskFailedCauseEnumTypeWrapper
@@ -388,6 +392,10 @@ WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
 """A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
 subscription or listener limit.
 """
+WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 45
+"""An UnsubscribeNotificationChannel command named an empty or too-long channel."""
 global___WorkflowTaskFailedCause = WorkflowTaskFailedCause
 
 class _ActivityTaskFailedCause:
