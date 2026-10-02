@@ -14,6 +14,12 @@ PINNED_CORE_HANDLES_CHANNEL_COMMAND = False
 # only talks to the server from the client runs on every layer.
 PINNED_CORE_HANDLES_LINKED_CHANNEL = False
 
+# A native stream's writes notify a channel named after the stream only on a
+# server that has the stream component do so. The channel servers this chain
+# runs against do not yet, so a case that consumes a native stream through
+# its channel waits for one that does.
+SERVER_NAMES_STREAM_CHANNELS = False
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
@@ -64,6 +70,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "needs_linked_core: the case needs the pinned Core to hand a linked "
         "channel's notifications to workflow code",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_stream_channel_server: the case needs a server whose native streams "
+        "notify a channel named after them, named with -E host:port",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -110,6 +121,19 @@ def pytest_collection_modifyitems(
                 pytest.mark.skip(
                     reason="the pinned Core ignores the notifications job; py-05 "
                     "pins one that delivers it"
+                ),
+            )
+        )
+    if (
+        config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS
+        or not SERVER_NAMES_STREAM_CHANNELS
+    ):
+        skips.append(
+            (
+                "needs_stream_channel_server",
+                pytest.mark.skip(
+                    reason="needs a server whose native streams notify a channel "
+                    "named after them; name one with -E once a layer has it"
                 ),
             )
         )
