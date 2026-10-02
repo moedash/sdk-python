@@ -658,5 +658,5 @@ def wake_request_for(
         position=position,
         position_counter=position_counter,
         channel=address.channel,
-        channel_workflow_id=address.workflow_id,
+        channel_workflow_id=address.workflow_id or "",
     )
