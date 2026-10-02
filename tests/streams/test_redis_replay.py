@@ -1281,6 +1281,16 @@ async def test_an_outside_producer_wakes_the_reader_through_the_channel(
     events = await _consume_three_through_the_channel(live_client)
     subscribed = _subscribed(events)
     assert len(subscribed) == 1, "the run subscribes once per channel"
+    [index] = [
+        i
+        for i, e in enumerate(events)
+        if e.HasField("workflow_notification_channel_subscribed_event_attributes")
+    ]
+    # Core issues the subscription after the marker of the completion that
+    # ends the task, so the task that opened the reader stayed retained.
+    assert events[index - 1].HasField("marker_recorded_event_attributes"), (
+        "the subscription did not wait for the completion that ends the task"
+    )
     notified = _notified(events)
     assert {n.channel for n in notified} == set(subscribed)
     assert not any(n.HasField("linked_to") for n in notified)

@@ -57,33 +57,56 @@ A failure from the endpoint reaches the caller as the
 :class:`temporalio.streams.StreamError` the store raised, when the handler
 named one, and as :class:`temporalio.service.RPCError` otherwise, never as an
 HTTP or urllib exception.
+
+The third piece is the consumer side of a Nexus operation.
+:class:`StreamConsumerOperation`, built with :func:`stream_consumer_operation`,
+is an asynchronous operation handler whose input is a ``StreamRef`` and whose
+result is what a consume function folded the stream's records into. It does
+not poll. On start it registers a callback listener on the stream's
+notification channel, with a URL the hosting process serves and a header that
+names the operation, and reads the stream from its start through the client's
+provider, the front when the client carries one. The server posts every
+notification on the channel to that URL, the handler reads from its cursor to
+the head, and the close completes the operation through the caller's
+completion callback. The delivery is what the server's channel library posts:
+``POST`` to the listener's URL, the ``Notification`` as protobuf JSON with
+``Content-Type: application/json``, the listener's own headers and the
+channel's name in ``Temporal-Notification-Channel``. A process that hosts the
+handler feeds each such request to :meth:`StreamConsumerOperation.deliver`;
+``nexus_consumer_service`` in this package is the standalone one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import http.client
+import inspect
 import json
 import logging
 import time
 import urllib.error
 import urllib.request
+import uuid
 import weakref
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, NoReturn, TypeVar, cast
 
 import nexusrpc
 import nexusrpc.handler
+from google.protobuf import json_format
 from google.protobuf.message import DecodeError
 
+import temporalio.api.notification.v1
 import temporalio.client
 import temporalio.converter
+import temporalio.nexus
 from temporalio.api.common.v1 import Payload
 from temporalio.api.operatorservice.v1 import ListNexusEndpointsRequest
-from temporalio.client import Client, ClientConfig
+from temporalio.client import Callback, Client, ClientConfig
 from temporalio.common import RawValue
 from temporalio.service import ConnectConfig, RPCError, RPCStatusCode, ServiceClient
 from temporalio.streams._errors import (
@@ -120,16 +143,24 @@ from temporalio.streams.providers._nexus_generated import (
     TemporalStreams,
 )
 from temporalio.streams.providers._nexus_generated import StreamRef as WireStreamRef
+from temporalio.workflow import Notification
 
 __all__ = [
+    "NOTIFICATION_CHANNEL_HEADER",
+    "STREAM_CONSUMER_TOKEN_HEADER",
+    "ConsumerState",
+    "Delivery",
     "NexusProducer",
     "NexusStreamHandle",
     "NexusStreams",
+    "StreamConsumerOperation",
     "TemporalStreamsHandler",
     "WireStreamRef",
+    "stream_consumer_operation",
 ]
 
 T = TypeVar("T")
+S = TypeVar("S")
 
 # The reference's identity on the handler, topic included, so one parked read
 # and one producer state key on exactly what the wire names.
@@ -1240,3 +1271,590 @@ class NexusStreams(StreamProvider, temporalio.client.Plugin):
                         )
                     self._resolved = found.endpoints[0].id
         return self._resolved
+
+
+# ---------------------------------------------------------------------------
+# A Nexus operation as a stream consumer.
+# ---------------------------------------------------------------------------
+
+NOTIFICATION_CHANNEL_HEADER = "Temporal-Notification-Channel"
+"""The header the server adds to a channel's callback delivery, naming the channel."""
+
+STREAM_CONSUMER_TOKEN_HEADER = "Temporal-Stream-Consumer-Token"
+"""The header a consumer's listener registration carries, naming the operation.
+
+The server sends a listener's own headers back on every delivery, so this is
+how one delivery URL serves any number of operations.
+"""
+
+_COMPLETION_TIMEOUT = timedelta(seconds=30)
+_CLOSED_KEY = "closed"
+_FAILURE_CONTENT_TYPE = "application/json"
+_CONTENT_TYPE_HEADER = "Content-Type"
+_STATE_HEADER = "Nexus-Operation-State"
+_TOKEN_HEADER = "Nexus-Operation-Token"
+_START_TIME_HEADER = "Nexus-Operation-Start-Time"
+
+
+ConsumeFunction = Callable[[StreamRecord[Any], S], "S | Awaitable[S]"]
+ChannelRule = Callable[
+    [StreamRef], "temporalio.client.ChannelAddress | tuple[str, str | None]"
+]
+
+
+def _address(where: Any) -> tuple[str, str | None]:
+    """The channel name and the owner a rule answered with, as an address or a pair."""
+    channel = getattr(where, "channel", None)
+    if isinstance(channel, str):
+        return channel, getattr(where, "workflow_id", None)
+    channel, owner = where
+    return channel, owner
+
+
+@dataclass(frozen=True)
+class ConsumerState(Generic[S]):
+    """What a consumer operation holds for one token, read-only.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    ref: StreamRef
+    """The stream being consumed."""
+
+    channel: str
+    """The channel the listener is registered on."""
+
+    owner: str | None
+    """The workflow a linked channel belongs to, ``None`` for an independent one."""
+
+    listener_id: str
+    """The listener id the server assigned."""
+
+    cursor: Cursor
+    """Where the next read starts. :data:`BEGINNING` until a record was consumed."""
+
+    value: S
+    """What the consume function has folded the records into so far."""
+
+    reads: int
+    """How many read passes reached the store, the start's included."""
+
+    deliveries: int
+    """How many notifications were delivered for this operation."""
+
+    records: int
+    """How many records the consume function has been handed."""
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """What one delivered notification led to.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    token: str | None
+    """The operation the delivery named, when the headers carried one."""
+
+    known: bool
+    """Whether this process holds that operation. A delivery for one it does not is ignored."""
+
+    read: bool
+    """Whether the delivery led to a read. One that brought nothing new does not."""
+
+    records: int
+    """How many records that read handed to the consume function."""
+
+    completed: bool
+    """Whether the delivery closed the operation."""
+
+
+@dataclass
+class _Consumption(Generic[S]):
+    ref: StreamRef
+    channel: str
+    owner: str | None
+    listener_id: str
+    callback_url: str | None
+    callback_headers: dict[str, str]
+    started: datetime
+    value: S
+    cursor: Cursor = BEGINNING
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    reads: int = 0
+    deliveries: int = 0
+    records: int = 0
+    finished: bool = False
+    done: bool = False
+    opening: asyncio.Task[None] | None = None
+
+
+def _header(headers: Mapping[str, str], name: str) -> str | None:
+    wanted = name.lower()
+    for key, value in headers.items():
+        if key.lower() == wanted:
+            return value
+    return None
+
+
+def _parse_notification(body: bytes | str | Mapping[str, Any]) -> Notification:
+    """The notification a delivery carries, from the JSON the server posts."""
+    text = json.dumps(body) if isinstance(body, Mapping) else body
+    if isinstance(text, bytes):
+        text = text.decode()
+    proto = json_format.Parse(
+        text, temporalio.api.notification.v1.Notification(), ignore_unknown_fields=True
+    )
+    return Notification._from_proto(proto)
+
+
+def _payload_content(payload: Payload) -> tuple[dict[str, str], bytes]:
+    """The HTTP content headers and body that carry ``payload`` to the server.
+
+    The mapping is the server's: a plain JSON payload travels as JSON, a null
+    one as an empty body with no type, and anything else, a codec's output
+    included, as the serialized payload itself.
+    """
+    metadata = {key: value.decode() for key, value in payload.metadata.items()}
+    encoding = metadata.get("encoding")
+    if set(metadata) == {"encoding"}:
+        if encoding == "json/plain":
+            return {_CONTENT_TYPE_HEADER: "application/json"}, payload.data
+        if encoding == "binary/plain":
+            return {_CONTENT_TYPE_HEADER: "application/octet-stream"}, payload.data
+        if encoding == "binary/null":
+            return {}, b""
+    return (
+        {_CONTENT_TYPE_HEADER: "application/x-temporal-payload"},
+        payload.SerializeToString(),
+    )
+
+
+def _post_completion(
+    url: str, body: bytes, headers: Mapping[str, str], timeout: timedelta
+) -> None:
+    """Post an operation completion to the caller's callback URL.
+
+    Unlike :func:`_post` this sets no content type of its own, because a null
+    result travels without one.
+
+    Raises:
+        _EndpointFailure: The callback answered with an error or not at all.
+    """
+    try:
+        request = urllib.request.Request(
+            url, data=body or None, headers=dict(headers), method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=timeout.total_seconds()):
+            return
+    except urllib.error.HTTPError as error:
+        raise _EndpointFailure(
+            error.read().decode(errors="replace"), error.code
+        ) from error
+    except urllib.error.URLError as error:
+        raise _EndpointFailure(
+            f"completion callback unreachable at {url}: {error.reason}", None
+        ) from error
+    except (TimeoutError, http.client.HTTPException, OSError, ValueError) as error:
+        raise _EndpointFailure(
+            f"completion callback at {url} did not answer: {error!r}", None
+        ) from error
+
+
+class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
+    """An asynchronous operation that consumes the stream its input names.
+
+    The caller starts it with a :class:`temporalio.streams.StreamRef` and
+    awaits its result. On start the handler registers a callback listener on
+    the stream's notification channel, with the URL the hosting process
+    serves and this operation's token in a header, and reads the stream from
+    its start through the client's provider. Every notification the server
+    delivers leads to one read from the cursor to the head, however many
+    writes the channel folded into it, and a delivery that brings nothing new
+    reads nothing. The operation completes through the caller's completion
+    callback when the notification says the stream closed, when the read
+    reaches ``FINISH`` or when the store ends the read, with what the consume
+    function folded the records into. Cancel unregisters the listener and
+    reports the operation canceled.
+
+    The consume function is a reducer: it takes a record and the value so far
+    and returns the new value, awaitable or not. It is handed every record
+    kind and narrows on ``kind`` itself. An exception from it fails the
+    operation. The cursor and the value live in this process keyed by the
+    operation token, so a process that loses them loses the operation; a
+    durable cursor is a follow-up.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    def __init__(
+        self,
+        consume: ConsumeFunction[S],
+        *,
+        initial: Callable[[], S],
+        listener_url: str,
+        client: Client | None = None,
+        channel_for: ChannelRule = temporalio.client.stream_channel,
+        result_type: type | None = None,
+        token_header: str = STREAM_CONSUMER_TOKEN_HEADER,
+    ) -> None:
+        """Consume with ``consume``, served at ``listener_url``.
+
+        Args:
+            consume: The reducer each record is handed with the value so far.
+            initial: Makes the value an operation starts with.
+            listener_url: Where the server posts the channel's notifications.
+                The hosting process serves it and feeds each request to
+                :meth:`deliver`.
+            client: Registers the listener and opens the stream. Leave it
+                unset in a handler hosted by a Temporal worker, where the
+                operation context's client is used.
+            channel_for: Names the channel for a ref and the workflow a
+                linked channel belongs to, as a
+                :class:`temporalio.client.ChannelAddress` or a
+                ``(channel, workflow_id)`` pair. The default is
+                :func:`temporalio.client.stream_channel`, the server's rule
+                for native streams; a store that names channels its own
+                way passes its rule.
+            result_type: What record values are decoded as.
+            token_header: The header carrying the operation token on the
+                registration and so on every delivery.
+        """
+        if not listener_url:
+            raise ValueError("listener_url must not be empty")
+        self._consume = consume
+        self._initial = initial
+        self._listener_url = listener_url
+        self._given_client = client
+        self._channel_for = channel_for
+        self._result_type = result_type
+        self._token_header = token_header
+        self._states: dict[str, _Consumption[S]] = {}
+
+    @property
+    def tokens(self) -> list[str]:
+        """The operations this process holds, oldest first."""
+        return list(self._states)
+
+    def state(self, token: str) -> ConsumerState[S] | None:
+        """What is held for ``token``, or ``None`` once it completed or never was."""
+        held = self._states.get(token)
+        if held is None:
+            return None
+        return ConsumerState(
+            ref=held.ref,
+            channel=held.channel,
+            owner=held.owner,
+            listener_id=held.listener_id,
+            cursor=held.cursor,
+            value=held.value,
+            reads=held.reads,
+            deliveries=held.deliveries,
+            records=held.records,
+        )
+
+    def _client(self) -> Client:
+        if self._given_client is not None:
+            return self._given_client
+        return temporalio.nexus.client()
+
+    async def start(
+        self, ctx: nexusrpc.handler.StartOperationContext, input: StreamRef
+    ) -> nexusrpc.handler.StartOperationResultAsync:
+        """Register as the stream's listener and start reading it.
+
+        The read runs after the start answers, so a long stream does not hold
+        the start request, and the first delivery waits on it.
+        """
+        client = self._client()
+        token = uuid.uuid4().hex
+        channel, owner = _address(self._channel_for(input))
+        # Registered before the first read: a record appended between the
+        # read and the registration would otherwise be missed, where one
+        # appended between the registration and the read is read twice at
+        # worst, once by the read and once by the delivery it provokes, and
+        # the cursor makes the second a no-op.
+        listener_id = await client.register_channel_listener(
+            channel,
+            Callback(url=self._listener_url, headers={self._token_header: token}),
+            workflow_id=owner,
+        )
+        state: _Consumption[S] = _Consumption(
+            ref=input,
+            channel=channel,
+            owner=owner,
+            listener_id=listener_id,
+            callback_url=ctx.callback_url,
+            callback_headers=dict(ctx.callback_headers),
+            started=datetime.now(timezone.utc),
+            value=self._initial(),
+        )
+        self._states[token] = state
+        state.opening = asyncio.create_task(self._open(token, state, client))
+        return nexusrpc.handler.StartOperationResultAsync(token)
+
+    async def _open(self, token: str, state: _Consumption[S], client: Client) -> None:
+        try:
+            async with state.lock:
+                if state.done:
+                    return
+                await self._catch_up(token, state, client)
+                if state.finished and not state.done:
+                    await self._complete(token, state, client)
+        except Exception:
+            # The next delivery reads again from the cursor, so a failure here
+            # costs nothing but the records it would have consumed early.
+            logger.exception("the first read of %s failed", state.ref)
+
+    async def deliver(
+        self, headers: Mapping[str, str], body: bytes | str | Mapping[str, Any]
+    ) -> Delivery:
+        """Act on one notification the server posted to the listener URL.
+
+        ``headers`` are the request's, in any case; ``body`` is the
+        ``Notification`` as protobuf JSON, raw or already parsed. The delivery
+        is matched to its operation by the token header. Reading from the
+        cursor to the head happens under the operation's lock, so a delivery
+        that arrives during the first read waits for it and then finds the
+        cursor at the head.
+
+        A failure to read raises, so the hosting process answers the server
+        with an error and the server retries the delivery; a failure in the
+        consume function fails the operation instead.
+        """
+        token = _header(headers, self._token_header)
+        state = self._states.get(token) if token is not None else None
+        if token is None or state is None:
+            logger.warning(
+                "ignoring a channel delivery for an operation this process does not hold"
+            )
+            return Delivery(token, known=False, read=False, records=0, completed=False)
+        client = self._client()
+        notification = _parse_notification(body)
+        closed = await self._closed(notification, client)
+        async with state.lock:
+            if state.done:
+                return Delivery(token, True, read=False, records=0, completed=True)
+            state.deliveries += 1
+            reads_before = state.reads
+            records = await self._catch_up(token, state, client)
+            completed = False
+            if (closed or state.finished) and not state.done:
+                await self._complete(token, state, client)
+                completed = True
+        return Delivery(
+            token,
+            True,
+            read=state.reads > reads_before,
+            records=records,
+            completed=completed,
+        )
+
+    async def _closed(self, notification: Notification, client: Client) -> bool:
+        payload = notification.metadata.get(_CLOSED_KEY)
+        if payload is None:
+            return False
+        try:
+            converter = client.data_converter
+            if converter.payload_codec is not None:
+                [payload] = await converter.payload_codec.decode([payload])
+            return bool(converter.payload_converter.from_payload(payload, bool))
+        except Exception:
+            logger.warning(
+                "could not decode the notification's closed flag", exc_info=True
+            )
+            return False
+
+    async def _catch_up(
+        self, token: str, state: _Consumption[S], client: Client
+    ) -> int:
+        """Read from the cursor to the head, consuming, and return how many records."""
+        handle = client.get_stream_handle(state.ref)
+        head = await handle.latest()
+        if head == state.cursor:
+            return 0
+        state.reads += 1
+        source = handle.read(after=state.cursor, result_type=self._result_type)
+        count = 0
+        exhausted = True
+        try:
+            async for record in source:
+                try:
+                    value = self._consume(record, state.value)
+                    if inspect.isawaitable(value):
+                        value = await value
+                except Exception as error:
+                    await self._complete(token, state, client, error=error)
+                    return count
+                state.value = cast(S, value)
+                state.cursor = record.cursor
+                state.records += 1
+                count += 1
+                if record.kind is RecordKind.FINISH:
+                    state.finished = True
+                    exhausted = False
+                    break
+                if record.cursor == head:
+                    exhausted = False
+                    break
+        finally:
+            await source.aclose()
+        if exhausted:
+            # The store ended the read: nothing more will arrive on it.
+            state.finished = True
+        return count
+
+    async def _complete(
+        self,
+        token: str,
+        state: _Consumption[S],
+        client: Client,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        state.done = True
+        if error is None:
+            await self._post_result(token, state, client)
+        else:
+            await self._post_failure(
+                token, state, "failed", f"{type(error).__name__}: {error}"
+            )
+        await self._unregister(client, state)
+        self._states.pop(token, None)
+
+    async def cancel(
+        self, ctx: nexusrpc.handler.CancelOperationContext, token: str
+    ) -> None:
+        """Unregister the listener and report the operation canceled.
+
+        Raises:
+            nexusrpc.HandlerError: ``NOT_FOUND`` when this process holds no
+                operation under ``token``.
+        """
+        del ctx
+        state = self._states.get(token)
+        if state is None:
+            raise nexusrpc.HandlerError(
+                "no stream consumer operation is held under this token",
+                type=nexusrpc.HandlerErrorType.NOT_FOUND,
+                retryable_override=False,
+            )
+        client = self._client()
+        if state.opening is not None and not state.opening.done():
+            state.opening.cancel()
+        async with state.lock:
+            if state.done:
+                return
+            state.done = True
+            await self._unregister(client, state)
+            await self._post_failure(
+                token, state, "canceled", "the caller canceled the stream consumer"
+            )
+            self._states.pop(token, None)
+
+    async def close(self) -> None:
+        """Unregister every listener this process still holds, completing nothing.
+
+        Call it when the hosting process stops, so the server does not keep
+        posting to a URL nobody serves.
+        """
+        client = self._given_client
+        for token, state in list(self._states.items()):
+            if state.opening is not None and not state.opening.done():
+                state.opening.cancel()
+            state.done = True
+            if client is not None:
+                await self._unregister(client, state)
+            self._states.pop(token, None)
+
+    async def _unregister(self, client: Client, state: _Consumption[S]) -> None:
+        try:
+            await client.unregister_channel_listener(
+                state.channel, state.listener_id, workflow_id=state.owner
+            )
+        except RPCError:
+            logger.warning(
+                "could not unregister listener %s from channel %s",
+                state.listener_id,
+                state.channel,
+                exc_info=True,
+            )
+
+    async def _post_result(
+        self, token: str, state: _Consumption[S], client: Client
+    ) -> None:
+        converter = client.data_converter
+        [payload] = converter.payload_converter.to_payloads([state.value])
+        if converter.payload_codec is not None:
+            [payload] = await converter.payload_codec.encode([payload])
+        headers, body = _payload_content(payload)
+        await self._post(token, state, "succeeded", headers, body)
+
+    async def _post_failure(
+        self, token: str, state: _Consumption[S], outcome: str, message: str
+    ) -> None:
+        await self._post(
+            token,
+            state,
+            outcome,
+            {_CONTENT_TYPE_HEADER: _FAILURE_CONTENT_TYPE},
+            json.dumps({"message": message}).encode(),
+        )
+
+    async def _post(
+        self,
+        token: str,
+        state: _Consumption[S],
+        outcome: str,
+        content: Mapping[str, str],
+        body: bytes,
+    ) -> None:
+        if not state.callback_url:
+            logger.warning(
+                "operation %s %s with no completion callback to tell", token, outcome
+            )
+            return
+        headers = {
+            **state.callback_headers,
+            _TOKEN_HEADER: token,
+            _STATE_HEADER: outcome,
+            _START_TIME_HEADER: email.utils.format_datetime(state.started, usegmt=True),
+            **content,
+        }
+        try:
+            await asyncio.to_thread(
+                _post_completion, state.callback_url, body, headers, _COMPLETION_TIMEOUT
+            )
+        except _EndpointFailure:
+            logger.exception("could not complete operation %s as %s", token, outcome)
+
+
+def stream_consumer_operation(
+    consume: ConsumeFunction[S],
+    *,
+    initial: Callable[[], S],
+    listener_url: str,
+    client: Client | None = None,
+    channel_for: ChannelRule = temporalio.client.stream_channel,
+    result_type: type | None = None,
+    token_header: str = STREAM_CONSUMER_TOKEN_HEADER,
+) -> StreamConsumerOperation[S]:
+    """Turn ``consume`` into an asynchronous operation handler that consumes a stream.
+
+    A service handler returns the result from an operation handler factory,
+    and the hosting process feeds the deliveries it receives at
+    ``listener_url`` to the same object's :meth:`StreamConsumerOperation.deliver`.
+    See :class:`StreamConsumerOperation` for the arguments and the contract.
+    """
+    return StreamConsumerOperation(
+        consume,
+        initial=initial,
+        listener_url=listener_url,
+        client=client,
+        channel_for=channel_for,
+        result_type=result_type,
+        token_header=token_header,
+    )

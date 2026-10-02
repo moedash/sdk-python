@@ -41,6 +41,7 @@ import temporalio.api.notification.v1
 import temporalio.api.workflowservice.v1
 import temporalio.service
 from temporalio.bridge.proto.external_stream.external_stream_pb2 import WakeSignal
+from temporalio.client._channel import ChannelAddress
 from temporalio.contrib.external_workflow_streams._record import Offset
 
 if TYPE_CHECKING:
@@ -79,39 +80,6 @@ CHANNEL_PREFIX = "external-stream"
 Keeps these channels apart from any a Workflow subscribes to by hand under a
 name that happens to look like a stream's.
 """
-
-
-@dataclass(frozen=True)
-class ChannelAddress:
-    """Where a stream's notifications go.
-
-    A channel linked to a workflow lives in that workflow's state and is
-    addressed by the channel name and the workflow id; the workflow is its
-    listener by construction. An independent channel is addressed by name
-    alone and listened on by command.
-    """
-
-    channel: str
-    """The channel name, see :func:`channel_for`."""
-
-    workflow_id: str = ""
-    """The workflow the channel is linked to, or empty for an independent channel.
-
-    The chain's id without a run, so the server resolves the chain's current
-    run the way it does for a Signal and a continue-as-new successor is
-    reached by the same address.
-    """
-
-    @property
-    def linked(self) -> bool:
-        """Whether the channel is linked to a workflow."""
-        return bool(self.workflow_id)
-
-    def execution(self) -> temporalio.api.common.v1.WorkflowExecution | None:
-        """The ``workflow_execution`` a channel call carries, or none."""
-        if not self.workflow_id:
-            return None
-        return temporalio.api.common.v1.WorkflowExecution(workflow_id=self.workflow_id)
 
 
 def channel_for(key: StreamKey) -> ChannelAddress:
@@ -239,7 +207,7 @@ class WakeRequest:
     def channel_address(self) -> ChannelAddress:
         """The channel and its owner as one address."""
         return ChannelAddress(
-            channel=self.channel, workflow_id=self.channel_workflow_id
+            channel=self.channel, workflow_id=self.channel_workflow_id or None
         )
 
     @property
@@ -690,5 +658,5 @@ def wake_request_for(
         position=position,
         position_counter=position_counter,
         channel=address.channel,
-        channel_workflow_id=address.workflow_id,
+        channel_workflow_id=address.workflow_id or "",
     )

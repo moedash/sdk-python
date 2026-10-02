@@ -14,6 +14,16 @@ PINNED_CORE_HANDLES_CHANNEL_COMMAND = True
 # only talks to the server from the client runs on every layer.
 PINNED_CORE_HANDLES_LINKED_CHANNEL = True
 
+# The unsubscribe is a command like the subscribe, refused by the protos-only
+# pin and matched against its event by the delivery pin.
+PINNED_CORE_HANDLES_UNSUBSCRIBE = True
+
+# A native stream lives on the server, and only the native layers carry a
+# provider that opens one; the providers here hold streams in memory or in a
+# workflow's History. A case that produces to a native stream waits for the
+# layer with that provider.
+PINNED_LAYER_HOSTS_NATIVE_STREAMS = True
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
@@ -75,6 +85,31 @@ def pytest_configure(config: pytest.Config) -> None:
         "needs_linked_core: the case needs the pinned Core to hand a linked "
         "channel's notifications to workflow code",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_describe_server: the case needs a server whose workflow description "
+        "lists the channel subscriptions, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_server: the case needs a server that accepts the "
+        "unsubscribe-notification-channel command, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_core: the case needs the pinned Core to handle the "
+        "unsubscribe-notification-channel command",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_stream_channel_server: the case needs a server on which a native "
+        "stream notifies the channel named by the stream, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_native_provider: the case needs a provider that opens native streams "
+        "on the server, which only the native layers carry",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -121,6 +156,40 @@ def pytest_collection_modifyitems(
                 pytest.mark.skip(
                     reason="the pinned Core ignores the notifications job; py-05 "
                     "pins one that delivers it"
+                ),
+            )
+        )
+    if config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS:
+        for marker, what in (
+            ("needs_describe_server", "lists channel subscriptions on describe"),
+            ("needs_unsubscribe_server", "accepts the unsubscribe command"),
+            ("needs_stream_channel_server", "notifies a stream's channel"),
+        ):
+            skips.append(
+                (
+                    marker,
+                    pytest.mark.skip(
+                        reason=f"needs a server that {what}; name one with -E"
+                    ),
+                )
+            )
+    if not PINNED_CORE_HANDLES_UNSUBSCRIBE:
+        skips.append(
+            (
+                "needs_unsubscribe_core",
+                pytest.mark.skip(
+                    reason="the pinned Core refuses the unsubscribe command; py-05 "
+                    "pins one that handles it"
+                ),
+            )
+        )
+    if not PINNED_LAYER_HOSTS_NATIVE_STREAMS:
+        skips.append(
+            (
+                "needs_native_provider",
+                pytest.mark.skip(
+                    reason="this layer carries no provider for native streams; the "
+                    "native layers and the union do"
                 ),
             )
         )
