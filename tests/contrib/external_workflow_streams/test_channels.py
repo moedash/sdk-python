@@ -30,7 +30,7 @@ import temporalio.converter
 from temporalio import workflow
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Callback, ChannelKind, Client
-from temporalio.client._impl import _address_channel
+from temporalio.client._impl import _channel_owner
 from temporalio.contrib.external_workflow_streams._wake import ChannelAddress
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker._workflow_instance import (
@@ -440,21 +440,20 @@ async def test_a_replay_takes_the_path_the_live_run_recorded():
 
 
 def test_a_channel_call_names_the_workflow_it_is_linked_to():
-    request = temporalio.api.workflowservice.v1.DescribeChannelRequest(channel="c")
-    _address_channel(request, None, None)
-    assert not request.HasField("workflow_execution")
-    _address_channel(request, "wf", None)
-    assert (
-        request.workflow_execution.workflow_id,
-        request.workflow_execution.run_id,
-    ) == (
-        "wf",
-        "",
-    )
-    _address_channel(request, "wf", "run")
-    assert request.workflow_execution.run_id == "run"
+    assert _channel_owner(None, None) is None
+    owner = _channel_owner("wf", None)
+    assert owner is not None
+    assert (owner.workflow_id, owner.run_id) == ("wf", "")
+    owner = _channel_owner("wf", "run")
+    assert owner is not None
+    assert (owner.workflow_id, owner.run_id) == ("wf", "run")
     with pytest.raises(ValueError, match="workflow_id"):
-        _address_channel(request, None, "run")
+        _channel_owner(None, "run")
+    # Unset, the request addresses the independent channel of that name.
+    request = temporalio.api.workflowservice.v1.DescribeChannelRequest(
+        channel="c", workflow_execution=_channel_owner(None, None)
+    )
+    assert not request.HasField("workflow_execution")
 
 
 async def test_the_client_describes_a_linked_channel_by_its_owner(
@@ -492,7 +491,8 @@ async def test_the_client_describes_a_linked_channel_by_its_owner(
         ),
     )
     description = await client.describe_channel("orders")
-    assert description.kind is None and description.linked_to is None
+    assert description.kind is ChannelKind.UNSPECIFIED
+    assert description.linked_to is None
 
 
 async def _answer(response: Any) -> Any:
@@ -568,16 +568,25 @@ async def test_a_linked_channel_retains_for_pollers_and_takes_callbacks(client: 
             channel, callback, workflow_id=handle.id
         )
         description = await client.describe_channel(channel, workflow_id=handle.id)
-        assert [listener.listener_id for listener in description.listeners] == [
-            listener_id
+        # The owner listens by construction and the server may list it beside
+        # the callback once the channel holds state; the callback is the one
+        # listener that was registered.
+        assert {listener.workflow_id for listener in description.listeners} <= {
+            None,
+            handle.id,
+        }
+        [registered] = [
+            listener for listener in description.listeners if listener.callback
         ]
-        assert description.listeners[0].callback == callback
+        assert (registered.listener_id, registered.callback) == (listener_id, callback)
         await client.unregister_channel_listener(
             channel, listener_id, workflow_id=handle.id
         )
         description = await client.describe_channel(channel, workflow_id=handle.id)
-        assert description.listeners == []
-        # The owner is woken, so a notify counts no registered listener but
+        assert [
+            listener for listener in description.listeners if listener.callback
+        ] == []
+        # The owner is woken, so a notify counts no registered callback but
         # still retains for pollers.
         await client.notify_channel(
             channel, position=b"2-0", counter=2, workflow_id=handle.id

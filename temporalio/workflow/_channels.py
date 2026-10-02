@@ -5,16 +5,9 @@
 
 A channel carries notifications, not data. A writer tells the channel's
 listeners that a source they consume has moved, and each listener reads the
-source itself. A workflow that listens gets the notifications the server
+source itself. A workflow that subscribes gets the notifications the server
 folded for it with each Workflow Task. They travel in History, so a replay
 sees the same ones at the same points.
-
-A channel comes in two kinds. An independent channel is its own execution,
-named in the namespace; any number of workflows subscribe to it with
-:func:`subscribe_channel`, which issues a command. A channel linked to a
-workflow lives in that workflow's own state; the workflow is its listener by
-construction and reads it with :func:`linked_channel`, which issues nothing.
-Writers address a linked channel by the workflow id and the channel name.
 """
 
 from __future__ import annotations
@@ -68,10 +61,12 @@ class Notification:
     """
 
     linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
-    """The workflow the channel is linked to, and the run that received this.
+    """The workflow a linked channel belongs to, and the run that received this.
 
-    ``None`` for a notification from an independent channel. A listener that
-    holds both kinds under one name tells them apart by it.
+    ``None`` for a notification from an independent channel. A workflow that
+    holds both kinds of handle on one name gets a notification on the handle
+    its kind names: :func:`temporalio.workflow.linked_channel` when set,
+    :func:`temporalio.workflow.subscribe_channel` otherwise.
     """
 
     @staticmethod
@@ -88,17 +83,18 @@ class Notification:
 
 
 class ChannelSubscription:
-    """A workflow's subscription to one channel.
+    """A workflow's handle on one channel, of either kind.
 
-    Prefer :func:`temporalio.workflow.subscribe_channel` or
-    :func:`temporalio.workflow.linked_channel`. The subscription is an async
-    iterator over the notifications as they arrive, and :meth:`receive` takes
-    them one at a time. Notifications wait in arrival order until taken. Two
-    loops on one subscription share its buffer and interleave.
+    Prefer :func:`temporalio.workflow.subscribe_channel` for an independent
+    channel and :func:`temporalio.workflow.linked_channel` for one linked to
+    this workflow. The handle is an async iterator over the notifications as
+    they arrive, and :meth:`receive` takes them one at a time. Notifications
+    wait in arrival order until taken. Two loops on one handle share its
+    buffer and interleave.
     """
 
     def __init__(self, channel: str, *, linked: bool = False) -> None:
-        """Prefer :func:`temporalio.workflow.subscribe_channel`."""
+        """Prefer the two module functions named above."""
         self._channel = channel
         self._linked = linked
         self._pending: deque[Notification] = deque()
@@ -106,12 +102,16 @@ class ChannelSubscription:
 
     @property
     def channel(self) -> str:
-        """The channel this subscription is on."""
+        """The channel this handle is on."""
         return self._channel
 
     @property
     def linked(self) -> bool:
-        """Whether the channel is linked to this workflow."""
+        """Whether the channel is the one linked to this workflow.
+
+        A linked handle gets the notifications that carry
+        :attr:`Notification.linked_to`; an independent one gets the rest.
+        """
         return self._linked
 
     async def receive(self) -> Notification:
@@ -171,20 +171,17 @@ def subscribe_channel(channel: str) -> ChannelSubscription:
 
 
 def linked_channel(channel: str) -> ChannelSubscription:
-    """Read the channel named ``channel`` that is linked to this workflow.
+    """Listen on the channel named ``channel`` that is linked to this workflow.
 
-    No command: the channel lives in this workflow's state and the workflow
-    is its listener by construction, so the first call needs no
-    :func:`temporalio.workflow.patched` gate. A second call for the same name
-    returns the subscription already open. Writers reach it with the
-    ``workflow_id`` argument of :py:meth:`temporalio.client.Client.notify_channel`,
-    and each Workflow Task carries the notifications the server folded for
-    it. The channel's state dies with the run: a successor after
-    continue-as-new starts with an empty one, under the same address.
-
-    Needs a server with linked channels. On one without, a writer's
-    notification addressed to this workflow goes to the independent channel
-    of the same name, which this subscription does not hear.
+    A linked channel lives in this workflow's own state, so the workflow is
+    its listener by construction: no command, no event, and no gate needed
+    for a new name. A writer reaches it with the workflow id, as in
+    :py:meth:`temporalio.client.Client.notify_channel` with ``workflow_id``,
+    and a successor run after continue-as-new is reached by the same calls.
+    A second call for the same name returns the handle already open, and the
+    two share its buffer. The name does not collide with an independent
+    channel's: a notification carrying :attr:`Notification.linked_to` comes
+    here, one without it goes to :func:`subscribe_channel`.
 
     Args:
         channel: Name of the channel, scoped to this workflow.
