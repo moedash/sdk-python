@@ -60,6 +60,7 @@ from ._asyncio import (
 from ._channels import (
     ChannelSubscription,
     Notification,
+    linked_channel,
     subscribe_channel,
 )
 from ._context import (  # noqa: F401
@@ -286,6 +287,7 @@ __all__ = [
     "unsafe",
     "ChannelSubscription",
     "Notification",
+    "linked_channel",
     "subscribe_channel",
     "StreamReader",
     "StreamWriter",
