@@ -2135,6 +2135,21 @@ class WorkflowStreamRuntime:
             reduced = min(reduced, state.idle_timeout)
         return reduced
 
+    def listened_stream_keys(self) -> list[StreamKey]:
+        """The stream of every reader still open, in ``wait_id`` order.
+
+        What the run's channel report is built from. A reader that has not
+        blocked yet is open: records appended before its first iteration have
+        to wake the run as much as later ones. A closed reader has left, so its
+        stream is not listened on even though its state is kept for replay and
+        for the Continue-As-New cursor.
+        """
+        return [
+            state.stream_key
+            for _, state in sorted(self._subscriptions.items())
+            if not state.closed
+        ]
+
     # --- teardown -------------------------------------------------------------
 
     def subscriptions(self) -> list[int]:

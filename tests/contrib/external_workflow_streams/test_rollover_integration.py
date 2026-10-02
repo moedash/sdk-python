@@ -411,7 +411,6 @@ async def test_a_continuously_fed_stream_survives_a_rollover(
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.usefixtures("first_task_retained")
 async def test_a_signal_into_a_retained_task_lands_by_the_rollover_deadline(
     client: Client, backend: MemoryStreamBackend
 ) -> None:

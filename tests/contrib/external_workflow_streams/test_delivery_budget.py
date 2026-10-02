@@ -950,6 +950,9 @@ class _CompletionStub:
         self._external_stream_runtime = runtime
         self._deleting = False
         self._is_replaying = replaying
+        # No reader has been opened on a server with channels, so the
+        # completion carries no channel report; the report has its own tests.
+        self._stream_channels_reporting = False
         import temporalio.bridge.proto.workflow_completion
 
         self._current_completion = (
