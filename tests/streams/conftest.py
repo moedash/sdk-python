@@ -5,7 +5,7 @@ _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
 # The Core the bridge pins decides whether a workflow's subscribe command
 # reaches the server. The protos-only pin refuses it; the delivery pin that
 # the native layers move to handles it.
-PINNED_CORE_HANDLES_CHANNEL_COMMAND = False
+PINNED_CORE_HANDLES_CHANNEL_COMMAND = True
 
 
 def pytest_configure(config: pytest.Config) -> None:
