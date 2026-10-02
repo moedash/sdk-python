@@ -346,6 +346,7 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         )
         self._patch_activation_callback = det.patch_activation_callback
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
+        self._subscribed_channels: set[str] = set()
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
         self._time_ns = 0
@@ -558,6 +559,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     job_sets[0].append(job)
                 elif job.HasField("signal_workflow") or job.HasField("do_update"):
                     job_sets[1].append(job)
+                elif job.HasField("notifications_received"):
+                    # Ordered with the Signals, where Core puts them: what a
+                    # task was woken for is known before anything it resolves.
+                    job_sets[1].append(job)
                 elif job.HasField("replay_external_streams"):
                     replay_jobs.append(job)
                 elif not job.HasField("query_workflow"):
@@ -763,6 +768,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._apply_resolve_external_stream_waits(job.resolve_external_stream_waits)
         elif job.HasField("replay_external_streams"):
             self._apply_replay_external_streams(job.replay_external_streams)
+        elif job.HasField("notifications_received"):
+            self._apply_notifications_received(job.notifications_received)
         elif job.HasField("resolve_child_workflow_execution"):
             self._apply_resolve_child_workflow_execution(
                 job.resolve_child_workflow_execution
@@ -953,6 +960,49 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         del job  # The hints are deliberately unused; see above.
         if self._external_stream_runtime is not None:
             self._external_stream_runtime.resolve_all_pending()
+
+    def _apply_notifications_received(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.NotificationsReceived,
+    ) -> None:
+        """Notes the channel notifications this Workflow Task was woken with.
+
+        Nothing is resumed from here. Core resolves the parked waits itself
+        when it hands over this job, live and on replay alike, and the resolve
+        job follows this one in the same activation. Resuming here as well
+        would wake every wait twice for one task. The runtime only keeps the
+        latest position per channel, which is what a notification is: where
+        the store stood, not a record.
+        """
+        if self._external_stream_runtime is not None:
+            self._external_stream_runtime.notifications_received(job.notifications)
+
+    def subscribe_channel(self, channel: str) -> bool:
+        """Makes this run a listener of ``channel``, once per channel per run.
+
+        Emits the ``SubscribeNotificationChannel`` command. The server answers
+        it with an event and nothing else; the notifications arrive later on
+        the scheduled event of a Workflow Task. A second call for the same
+        channel changes nothing, so a run that opens two readers on one stream
+        pays one subscription.
+
+        Gated behind a lang flag rather than emitted outright. A server without
+        channels fails a Workflow Task that carries the command, and the Worker
+        learns which server it talks to only at runtime. The flag records the
+        live decision in History, so a replay emits the command exactly where
+        the live run did, whatever server it replays against.
+
+        Returns whether the run listens on the channel after this call.
+        """
+        if channel in self._subscribed_channels:
+            return True
+        if self._read_only or not self._workflow_logic_flag_enabled(
+            _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS
+        ):
+            return False
+        self._subscribed_channels.add(channel)
+        self._add_command().subscribe_notification_channel.channel = channel
+        return True
 
     def _apply_replay_external_streams(
         self,
@@ -4613,6 +4663,9 @@ class _WorkflowLogicFlag(IntEnum):
 
     RAISE_ON_CANCELLING_COMPLETED_ACTIVITY = 1
     PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH = 2
+    # Numbered away from the values upstream hands out in sequence, so a flag
+    # the main SDK adds later cannot read a History written with this one.
+    SUBSCRIBE_NOTIFICATION_CHANNELS = 100
 
 
 # TODO: Enable PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH by default after

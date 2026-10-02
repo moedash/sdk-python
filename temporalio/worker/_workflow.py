@@ -241,6 +241,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
 
         self._stream_metrics = StreamMetrics.create(metric_meter)
         self._external_stream_manager: Any = None
+        #: Whether the Runs this Worker builds subscribe to their streams'
+        #: notification channels. ``None`` until the server has been asked.
+        self._channel_subscriptions: bool | None = None
 
         self._workflow_failure_exception_types = workflow_failure_exception_types
         self._patch_activation_callback = patch_activation_callback
@@ -473,6 +476,8 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
 
         if self._external_stream_manager is not None:
             self._external_stream_manager.note_workflow_task_started(act.run_id)
+        if self._external_streams_configured and self._channel_subscriptions is None:
+            await self._decide_channel_subscriptions()
 
         # Build default success completion (e.g. remove-job-only activations)
         completion = (
@@ -1421,6 +1426,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         """
         from temporalio.contrib.external_workflow_streams._wake import (
             WakeRequest,
+            channel_for,
             send_wake,
             wake_position,
             wake_transport_of,
@@ -1476,6 +1482,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     wake_counter=subscription.wake_counter,
                     position=position,
                     position_counter=position_counter,
+                    channel=channel_for(key),
                 ),
                 transport=wake_transport_of(subscription.backend),
             )
@@ -1486,6 +1493,37 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 subscription.wait_id,
             )
             raise
+
+    async def _decide_channel_subscriptions(self) -> None:
+        """Turns the readers' channel subscriptions on when the server has channels.
+
+        Decided once per Worker and before the Run is built, because the
+        decision is a lang flag the Run reads at construction. A probe that
+        cannot tell leaves the question open for the next activation; the Runs
+        built meanwhile do not subscribe, and their records still arrive by the
+        wake call or the Signal.
+        """
+        from temporalio.contrib.external_workflow_streams._wake import (
+            server_has_channels,
+        )
+
+        if self._client is None:
+            self._channel_subscriptions = False
+            return
+        try:
+            answer = await server_has_channels(self._client)
+        except Exception:
+            logger.warning(
+                "Could not ask the server whether it has notification channels",
+                exc_info=True,
+            )
+            return
+        if answer is None:
+            return
+        self._channel_subscriptions = answer
+        self._set_default_workflow_logic_flag(
+            _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS, enabled=answer
+        )
 
     def _create_external_stream_runtime(
         self,
