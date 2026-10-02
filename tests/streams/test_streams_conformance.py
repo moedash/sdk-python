@@ -972,8 +972,10 @@ async def test_an_outside_producer_wakes_the_reader_through_the_channel(
 ):
     """The channel path, on the public surface.
 
-    The reader's run subscribes to the stream's channel on the task that opens
-    the reader, the producer's append notifies that channel, and the server
+    The reader's run is subscribed to the stream's channel on the completion
+    that ends the task that opened the reader, after that task's marker, so
+    the task stays retained and parks as it would on a server without
+    channels. The producer's append notifies the channel, and the server
     wakes the run with a Workflow Task whose scheduled event carries the
     notification. History then holds the subscription and no Signal.
     """
@@ -990,6 +992,9 @@ async def test_an_outside_producer_wakes_the_reader_through_the_channel(
     )
     subscribed = _subscribed(events)
     assert len(subscribed) == 1, "the run subscribes once per channel"
+    assert _preceded_by_a_marker(events, _subscribed_event_index(events)), (
+        "the subscription did not wait for the completion that ends the task"
+    )
     notified = _notified(events)
     assert notified, "no Workflow Task was scheduled with a notification"
     assert {n.channel for n in notified} == set(subscribed)
@@ -1142,6 +1147,25 @@ async def test_a_channel_opened_and_closed_in_one_task_is_never_subscribed(
     assert _unsubscribed(events) == [], "the run ended with its reader open"
 
 
+def _subscribed_event_index(events: Sequence[Any]) -> int:
+    [index] = [
+        i
+        for i, e in enumerate(events)
+        if e.HasField("workflow_notification_channel_subscribed_event_attributes")
+    ]
+    return index
+
+
+def _preceded_by_a_marker(events: Sequence[Any], index: int) -> bool:
+    """Whether the event at ``index`` follows the progress marker of its completion.
+
+    Core issues the channel commands after the external stream marker, so an
+    event right after a marker landed on the completion that ended a task
+    rather than on a task of its own.
+    """
+    return events[index - 1].HasField("marker_recorded_event_attributes")
+
+
 def _assert_the_channel_left_after_the_marker(events: Sequence[Any]) -> None:
     [channel] = _subscribed(events)
     assert _unsubscribed(events) == [channel], "the channel leaves once"
@@ -1150,14 +1174,10 @@ def _assert_the_channel_left_after_the_marker(events: Sequence[Any]) -> None:
         for i, e in enumerate(events)
         if e.HasField("workflow_notification_channel_unsubscribed_event_attributes")
     ]
-    [joined] = [
-        e
-        for e in events
-        if e.HasField("workflow_notification_channel_subscribed_event_attributes")
-    ]
+    joined = events[_subscribed_event_index(events)]
     attributes = leaving.workflow_notification_channel_unsubscribed_event_attributes
     assert attributes.subscribed_event_id == joined.event_id
-    assert events[index - 1].HasField("marker_recorded_event_attributes"), (
+    assert _preceded_by_a_marker(events, index), (
         "the unsubscribe follows the progress marker of the leaving completion"
     )
     assert events[index + 1].HasField("timer_started_event_attributes"), (
