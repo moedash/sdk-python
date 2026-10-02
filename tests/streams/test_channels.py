@@ -321,9 +321,18 @@ async def test_a_callback_listener_registers_and_unregisters(client: Client):
 @pytest.mark.needs_channel_server
 async def test_a_channel_retains_notifications_for_pollers(client: Client):
     channel = f"orders-{uuid.uuid4()}"
+    # A channel nobody has touched does not exist.
+    with pytest.raises(RPCError) as untouched:
+        await client.describe_channel(f"untouched-{uuid.uuid4()}")
+    assert untouched.value.status == RPCStatusCode.NOT_FOUND
     # Nobody listens yet: the notification is kept for pollers and the count
     # says zero.
     assert await client.notify_channel(channel, position=b"2-0", counter=2) == 0
+    description = await client.describe_channel(channel)
+    assert description.listeners == []
+    assert description.latest is not None
+    assert (description.latest.position, description.latest.counter) == (b"2-0", 2)
+    assert description.retained_count == 1
     polled = await client.poll_channel(channel, wait=False)
     assert [(n.position, n.counter) for n in polled] == [(b"2-0", 2)]
     # At or below the latest counter a notify changes nothing and is not kept.
