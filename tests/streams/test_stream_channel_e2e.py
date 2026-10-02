@@ -66,17 +66,20 @@ async def test_a_standalone_stream_notifies_the_channel_named_by_its_id(
         # the name and the channel is an independent one.
         assert address == ChannelAddress(f"stream/{stream_id}", None)
         producer = created.producer(topic=OUT, producer_id="writer", attempt=1)
-        await producer.append({"n": 1})
-        await producer.append({"n": 2})
 
-        async def two_changes() -> list[Any]:
-            # A standalone stream reaches its channel through a task of its
-            # own, so the notifications may trail the appends.
+        async def changes(count: int) -> list[Any]:
             polled = await native.poll_channel(address.channel, wait=False)
-            assert [n.counter for n in polled] == [1, 2]
+            assert [n.counter for n in polled] == list(range(1, count + 1))
             return polled
 
-        polled = await assert_eventually(two_changes)
+        # A standalone stream reaches its channel through a task of its own
+        # that hands over the latest change, so the notifications trail the
+        # appends and a burst arrives as its newest change. Each append waits
+        # for its notification so that every change is seen.
+        await producer.append({"n": 1})
+        await assert_eventually(lambda: changes(1))
+        await producer.append({"n": 2})
+        polled = await assert_eventually(lambda: changes(2))
         for notification in polled:
             assert notification.channel == address.channel
             assert notification.linked_to is None
