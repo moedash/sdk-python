@@ -14,11 +14,9 @@ PINNED_CORE_HANDLES_CHANNEL_COMMAND = False
 # only talks to the server from the client runs on every layer.
 PINNED_CORE_HANDLES_LINKED_CHANNEL = False
 
-# A native stream's writes notify a channel named after the stream only on a
-# server that has the stream component do so. The channel servers this chain
-# runs against do not yet, so a case that consumes a native stream through
-# its channel waits for one that does.
-SERVER_NAMES_STREAM_CHANNELS = False
+# The unsubscribe is a command like the subscribe, refused by the protos-only
+# pin and matched against its event by the delivery pin.
+PINNED_CORE_HANDLES_UNSUBSCRIBE = False
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -72,8 +70,23 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "needs_stream_channel_server: the case needs a server whose native streams "
-        "notify a channel named after them, named with -E host:port",
+        "needs_describe_server: the case needs a server whose workflow description "
+        "lists the channel subscriptions, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_server: the case needs a server that accepts the "
+        "unsubscribe-notification-channel command, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_core: the case needs the pinned Core to handle the "
+        "unsubscribe-notification-channel command",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_stream_channel_server: the case needs a server on which a native "
+        "stream notifies the channel named by the stream, named with -E host:port",
     )
 
 
@@ -124,16 +137,27 @@ def pytest_collection_modifyitems(
                 ),
             )
         )
-    if (
-        config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS
-        or not SERVER_NAMES_STREAM_CHANNELS
-    ):
+    if config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS:
+        for marker, what in (
+            ("needs_describe_server", "lists channel subscriptions on describe"),
+            ("needs_unsubscribe_server", "accepts the unsubscribe command"),
+            ("needs_stream_channel_server", "notifies a stream's channel"),
+        ):
+            skips.append(
+                (
+                    marker,
+                    pytest.mark.skip(
+                        reason=f"needs a server that {what}; name one with -E"
+                    ),
+                )
+            )
+    if not PINNED_CORE_HANDLES_UNSUBSCRIBE:
         skips.append(
             (
-                "needs_stream_channel_server",
+                "needs_unsubscribe_core",
                 pytest.mark.skip(
-                    reason="needs a server whose native streams notify a channel "
-                    "named after them; name one with -E once a layer has it"
+                    reason="the pinned Core refuses the unsubscribe command; py-05 "
+                    "pins one that handles it"
                 ),
             )
         )
