@@ -1336,6 +1336,7 @@ async def _serves_channels(client: Client) -> bool:
     return bool(await server_has_channels(client))
 
 
+@pytest.mark.needs_channel_server
 async def test_an_outside_producer_wakes_the_reader_through_the_channel(
     live_client: Client,
 ):

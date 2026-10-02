@@ -797,6 +797,16 @@ class _TopicLogBackend(RedisStreamBackend):
         """The entry id's own order, so producers and workers rank wakes alike."""
         return _wake_counter(offset)
 
+    def wake_counter_now(self) -> int:
+        """The entry id rule applied to the clock, with the largest sequence.
+
+        Above every entry appended before now, so a wake that reports no
+        position, the worker's shutdown sweep, is not folded under the
+        channel's latest notification.
+        """
+        now_ms = int(time.time() * 1000)
+        return (now_ms << _WAKE_SEQUENCE_BITS) + (1 << _WAKE_SEQUENCE_BITS) - 1
+
     def stream_key(self, key: StreamKey) -> str:
         """The topic's log, whichever direction the transport asks for."""
         return super().stream_key(replace(key, direction=StreamDirection.INPUT))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -200,6 +201,16 @@ def test_a_wake_counter_caps_the_sequence_inside_its_millisecond():
 def test_a_wake_counter_fits_the_servers_signed_64_bit_field():
     year_2200_ms = 7258118400000
     assert _wake_counter(Offset(f"{year_2200_ms}-{2**20}")) < 2**63
+
+
+def test_a_positionless_wake_counter_follows_the_entry_id_rule():
+    backend = RedisStreams(client=_NoRedis())._require_backend()
+    before = _wake_counter(Offset(f"{int(time.time() * 1000)}-{2**20 - 1}"))
+    now = backend.wake_counter_now()
+    after = _wake_counter(Offset(f"{int(time.time() * 1000) + 1}-0"))
+    assert before <= now < after
+    # Any entry appended before the call orders below it.
+    assert now > _wake_counter(Offset(f"{int(time.time() * 1000) - 1}-7"))
 
 
 def test_the_wake_transport_reaches_the_backend_both_sides_share():
