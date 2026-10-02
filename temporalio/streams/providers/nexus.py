@@ -156,7 +156,6 @@ __all__ = [
     "StreamConsumerOperation",
     "TemporalStreamsHandler",
     "WireStreamRef",
-    "stream_channel",
     "stream_consumer_operation",
 ]
 
@@ -1297,27 +1296,19 @@ _TOKEN_HEADER = "Nexus-Operation-Token"
 _START_TIME_HEADER = "Nexus-Operation-Start-Time"
 
 
-def stream_channel(ref: StreamRef) -> tuple[str, str | None]:
-    """The channel a native stream notifies, and the owner a linked one belongs to.
-
-    The server's rule: a standalone stream notifies the independent channel
-    ``stream/<stream id>``; a workflow's stream notifies ``stream/<topic>``
-    linked to the owning workflow; an activity's stream notifies
-    ``stream/<activity id>/<topic>``, linked to the workflow that scheduled
-    the activity and independent for a standalone activity. The second
-    member is the workflow id a registration addresses the linked channel
-    with, ``None`` for an independent channel. A store that names channels
-    its own way passes its rule as ``channel_for`` instead.
-    """
-    if ref.kind == "standalone":
-        return f"stream/{ref.stream_id}", None
-    if ref.kind == "activity":
-        return f"stream/{ref.activity_id}/{ref.topic}", ref.workflow_id
-    return f"stream/{ref.topic}", ref.workflow_id
-
-
 ConsumeFunction = Callable[[StreamRecord[Any], S], "S | Awaitable[S]"]
-ChannelRule = Callable[[StreamRef], tuple[str, "str | None"]]
+ChannelRule = Callable[
+    [StreamRef], "temporalio.client.ChannelAddress | tuple[str, str | None]"
+]
+
+
+def _address(where: Any) -> tuple[str, str | None]:
+    """The channel name and the owner a rule answered with, as an address or a pair."""
+    channel = getattr(where, "channel", None)
+    if isinstance(channel, str):
+        return channel, getattr(where, "workflow_id", None)
+    channel, owner = where
+    return channel, owner
 
 
 @dataclass(frozen=True)
@@ -1506,7 +1497,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         initial: Callable[[], S],
         listener_url: str,
         client: Client | None = None,
-        channel_for: ChannelRule = stream_channel,
+        channel_for: ChannelRule = temporalio.client.stream_channel,
         result_type: type | None = None,
         token_header: str = STREAM_CONSUMER_TOKEN_HEADER,
     ) -> None:
@@ -1521,11 +1512,13 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
             client: Registers the listener and opens the stream. Leave it
                 unset in a handler hosted by a Temporal worker, where the
                 operation context's client is used.
-            channel_for: Names the channel for a ref, and the workflow a
-                linked channel belongs to. The default is
-                :func:`stream_channel`, the server's rule for native
-                streams; a store that names channels its own way passes
-                its rule.
+            channel_for: Names the channel for a ref and the workflow a
+                linked channel belongs to, as a
+                :class:`temporalio.client.ChannelAddress` or a
+                ``(channel, workflow_id)`` pair. The default is
+                :func:`temporalio.client.stream_channel`, the server's rule
+                for native streams; a store that names channels its own
+                way passes its rule.
             result_type: What record values are decoded as.
             token_header: The header carrying the operation token on the
                 registration and so on every delivery.
@@ -1578,7 +1571,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         """
         client = self._client()
         token = uuid.uuid4().hex
-        channel, owner = self._channel_for(input)
+        channel, owner = _address(self._channel_for(input))
         # Registered before the first read: a record appended between the
         # read and the registration would otherwise be missed, where one
         # appended between the registration and the read is read twice at
@@ -1845,7 +1838,7 @@ def stream_consumer_operation(
     initial: Callable[[], S],
     listener_url: str,
     client: Client | None = None,
-    channel_for: ChannelRule = stream_channel,
+    channel_for: ChannelRule = temporalio.client.stream_channel,
     result_type: type | None = None,
     token_header: str = STREAM_CONSUMER_TOKEN_HEADER,
 ) -> StreamConsumerOperation[S]:

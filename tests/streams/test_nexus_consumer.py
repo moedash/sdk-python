@@ -38,7 +38,7 @@ from temporalio.api.operatorservice.v1 import (
     CreateNexusEndpointRequest,
     DeleteNexusEndpointRequest,
 )
-from temporalio.client import Callback, Client
+from temporalio.client import Callback, ChannelAddress, Client, stream_channel
 from temporalio.exceptions import NexusOperationError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import BEGINNING, StreamProvider, StreamRecord, StreamRef
@@ -50,7 +50,6 @@ from temporalio.streams.providers.nexus import (
     NexusStreams,
     StreamConsumerOperation,
     TemporalStreamsHandler,
-    stream_channel,
     stream_consumer_operation,
 )
 from temporalio.streams.providers.nexus_consumer_service import (
@@ -220,7 +219,7 @@ async def _rig(
         client,
         operation,
         ref,
-        stream_channel(ref)[0],
+        stream_channel(ref).channel,
         handle.producer(topic=VALUES, producer_id="writer", attempt=1),
     )
 
@@ -230,25 +229,44 @@ async def _rig(
 # ---------------------------------------------------------------------------
 
 
-def test_the_channel_follows_the_servers_names():
-    # A standalone stream's channel is independent; an owned stream's is
-    # linked to the owning workflow, which the second member names.
+def test_the_default_rule_is_the_servers_naming_of_a_streams_channel():
+    # The consumer registers where the server's stream component notifies:
+    # a standalone stream's channel is independent, an owned stream's is
+    # linked to the owning workflow.
     assert stream_channel(StreamRef.for_standalone("s-1", topic="values")) == (
-        "stream/s-1",
-        None,
+        ChannelAddress("stream/s-1", None)
     )
-    assert stream_channel(StreamRef.for_workflow("wf", topic="t")) == ("stream/t", "wf")
-    assert stream_channel(StreamRef.for_workflow("wf", run_id="r", topic="t")) == (
-        "stream/t",
-        "wf",
+    assert stream_channel(StreamRef.for_workflow("wf", topic="t")) == ChannelAddress(
+        "stream/t", "wf"
     )
     assert stream_channel(
         StreamRef.for_activity("act", workflow_id="wf", topic="t")
-    ) == ("stream/act/t", "wf")
+    ) == ChannelAddress("stream/act/t", "wf")
     assert stream_channel(StreamRef.for_activity("act", topic="t")) == (
-        "stream/act/t",
-        None,
+        ChannelAddress("stream/act/t", None)
     )
+
+
+async def test_a_rule_may_answer_with_a_pair(posted: list[_Posted]):
+    # A store's rule that returns (channel, workflow_id) fits as well as an
+    # address does.
+    store = MemoryStreams()
+    handle = await store.create_standalone_stream(None, "paired")
+    client = _ClientStandIn(store)
+    operation = stream_consumer_operation(
+        collect_values,
+        initial=list,
+        listener_url=LISTENER_URL,
+        client=_as_client(client),
+        channel_for=lambda ref: (f"custom/{ref.stream_id}", None),
+    )
+    result = await operation.start(_start_context(), handle.ref(topic=VALUES))
+    assert isinstance(result, nexusrpc.handler.StartOperationResultAsync)
+    state = operation.state(result.token)
+    assert state is not None and (state.channel, state.owner) == ("custom/paired", None)
+    await operation.close()
+    assert client.unregistered == [("custom/paired", "listener-1", None)]
+    assert posted == []
 
 
 async def test_an_owned_stream_registers_on_the_owners_linked_channel(
@@ -502,7 +520,7 @@ async def test_a_null_result_travels_without_a_content_type(posted: list[_Posted
     await handle.producer(topic=VALUES, producer_id="w", attempt=1).finish()
     await operation.deliver(
         {STREAM_CONSUMER_TOKEN_HEADER: result.token},
-        _notification(stream_channel(ref)[0], 1),
+        _notification(stream_channel(ref).channel, 1),
     )
     [completion] = posted
     assert completion.state == "succeeded"
@@ -750,7 +768,7 @@ async def test_a_standalone_service_consumes_an_external_stream_through_its_chan
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await store.create_standalone_stream(None, stream_id)
     ref = handle.ref(topic=VALUES)
-    channel = stream_channel(ref)[0]
+    channel = stream_channel(ref).channel
     producer = handle.producer(topic=VALUES, producer_id="writer", attempt=1)
 
     async with _consumer_service(client, store) as live:
@@ -815,7 +833,7 @@ async def test_cancel_unregisters_the_listener(client: Client):
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await store.create_standalone_stream(None, stream_id)
     ref = handle.ref(topic=VALUES)
-    channel = stream_channel(ref)[0]
+    channel = stream_channel(ref).channel
 
     async with (
         _consumer_service(client, store) as live,
@@ -887,7 +905,7 @@ async def test_a_worker_hosted_consumer_is_reached_through_the_frontend(
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await store.create_standalone_stream(None, stream_id)
     ref = handle.ref(topic=VALUES)
-    channel = stream_channel(ref)[0]
+    channel = stream_channel(ref).channel
     producer = handle.producer(topic=VALUES, producer_id="writer", attempt=1)
     uid = uuid.uuid4().hex
     stream_handler = TemporalStreamsHandler(store, client)
@@ -976,6 +994,7 @@ async def test_a_worker_hosted_consumer_is_reached_through_the_frontend(
 
 
 @pytest.mark.needs_stream_channel_server
+@pytest.mark.needs_native_provider
 async def test_a_native_standalone_stream_is_consumed_through_its_channel(
     client: Client,
 ):
@@ -997,7 +1016,7 @@ async def test_a_native_standalone_stream_is_consumed_through_its_channel(
                 id=f"caller-{stream_id}",
                 task_queue=worker.task_queue,
             )
-            token = await _listener_token(client, stream_channel(ref)[0])
+            token = await _listener_token(client, stream_channel(ref).channel)
             await _consumed(live.consumer, token, 2)
             # The server notifies the stream's channel on every append and on
             # the close, so the records reach the consumer without a notify.
@@ -1007,5 +1026,5 @@ async def test_a_native_standalone_stream_is_consumed_through_its_channel(
             await handle.close()
             assert await asyncio.wait_for(run.result(), 60) == ["a", "b", "c"]
             assert (
-                await client.describe_channel(stream_channel(ref)[0])
+                await client.describe_channel(stream_channel(ref).channel)
             ).listeners == []
