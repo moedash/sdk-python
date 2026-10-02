@@ -1122,6 +1122,7 @@ class Command(google.protobuf.message.Message):
     REQUEST_CANCEL_NEXUS_OPERATION_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     APPEND_STREAM_RECORDS_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     SUBSCRIBE_STREAM_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    SUBSCRIBE_NOTIFICATION_CHANNEL_COMMAND_ATTRIBUTES_FIELD_NUMBER: builtins.int
     command_type: temporalio.api.enums.v1.command_type_pb2.CommandType.ValueType
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
@@ -1220,6 +1221,10 @@ class Command(google.protobuf.message.Message):
     def subscribe_stream_command_attributes(
         self,
     ) -> global___SubscribeStreamCommandAttributes: ...
+    @property
+    def subscribe_notification_channel_command_attributes(
+        self,
+    ) -> global___SubscribeNotificationChannelCommandAttributes: ...
     def __init__(
         self,
         *,
@@ -1268,6 +1273,8 @@ class Command(google.protobuf.message.Message):
         | None = ...,
         subscribe_stream_command_attributes: global___SubscribeStreamCommandAttributes
         | None = ...,
+        subscribe_notification_channel_command_attributes: global___SubscribeNotificationChannelCommandAttributes
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -1308,6 +1315,8 @@ class Command(google.protobuf.message.Message):
             b"start_child_workflow_execution_command_attributes",
             "start_timer_command_attributes",
             b"start_timer_command_attributes",
+            "subscribe_notification_channel_command_attributes",
+            b"subscribe_notification_channel_command_attributes",
             "subscribe_stream_command_attributes",
             b"subscribe_stream_command_attributes",
             "upsert_workflow_search_attributes_command_attributes",
@@ -1359,6 +1368,8 @@ class Command(google.protobuf.message.Message):
             b"start_child_workflow_execution_command_attributes",
             "start_timer_command_attributes",
             b"start_timer_command_attributes",
+            "subscribe_notification_channel_command_attributes",
+            b"subscribe_notification_channel_command_attributes",
             "subscribe_stream_command_attributes",
             b"subscribe_stream_command_attributes",
             "upsert_workflow_search_attributes_command_attributes",
@@ -1390,6 +1401,7 @@ class Command(google.protobuf.message.Message):
             "request_cancel_nexus_operation_command_attributes",
             "append_stream_records_command_attributes",
             "subscribe_stream_command_attributes",
+            "subscribe_notification_channel_command_attributes",
         ]
         | None
     ): ...
@@ -1475,3 +1487,27 @@ class SubscribeStreamCommandAttributes(google.protobuf.message.Message):
     ) -> None: ...
 
 global___SubscribeStreamCommandAttributes = SubscribeStreamCommandAttributes
+
+class SubscribeNotificationChannelCommandAttributes(google.protobuf.message.Message):
+    """Makes the Workflow a listener of a notification channel for this run. The
+    next notifications on the channel arrive on the scheduled event of a Workflow
+    Task. The subscription ends with the run, and a successor subscribes again.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    CHANNEL_FIELD_NUMBER: builtins.int
+    channel: builtins.str
+    """The channel to listen on, as the writers name it."""
+    def __init__(
+        self,
+        *,
+        channel: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["channel", b"channel"]
+    ) -> None: ...
+
+global___SubscribeNotificationChannelCommandAttributes = (
+    SubscribeNotificationChannelCommandAttributes
+)

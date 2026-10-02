@@ -48,6 +48,7 @@ from temporalio.contrib.external_workflow_streams._record import (
     StreamRecord,
 )
 from temporalio.contrib.external_workflow_streams._wake import (
+    PROBE_CHANNEL,
     UNPARKED_WAKE_GENERATION,
     WAKE_SIGNAL_ENCODING,
     WAKE_SIGNAL_ENVELOPE_VERSION,
@@ -55,8 +56,11 @@ from temporalio.contrib.external_workflow_streams._wake import (
     WAKE_SIGNAL_NAME,
     WakeRequest,
     build_signal_request,
+    channel_for,
     send_wake,
     send_wake_signal,
+    server_has_channels,
+    wake_request_for,
     wake_request_id,
 )
 from temporalio.worker import Worker
@@ -2054,3 +2058,285 @@ async def test_a_wake_reports_a_position_appended_outside_the_producer() -> None
     [wake] = client.wakes
     assert wake.wake.position == outside.token.encode()
     assert wake.wake.counter == backend.wake_counter_for(outside)
+
+
+# --- the notification channel -------------------------------------------------
+
+UNIMPLEMENTED = temporalio.service.RPCStatusCode.UNIMPLEMENTED
+NOT_FOUND = temporalio.service.RPCStatusCode.NOT_FOUND
+UNAVAILABLE = temporalio.service.RPCStatusCode.UNAVAILABLE
+
+
+class ChannelServiceClient(WakeServiceClient):
+    """A client whose service answers the channel calls, or refuses them."""
+
+    def __init__(
+        self,
+        refuse_channel: temporalio.service.RPCStatusCode | None = None,
+        refuse_wake: temporalio.service.RPCStatusCode | None = None,
+        listeners: int = 1,
+        describe: temporalio.service.RPCStatusCode | None = None,
+    ) -> None:
+        super().__init__(refuse=refuse_wake)
+        self.refuse_channel = refuse_channel
+        self.listeners = listeners
+        self.describe_status = describe
+        self.notified: list = []
+        self.described: list = []
+
+    async def notify_channel(self, request):  # type: ignore[no-untyped-def]
+        self.notified.append(request)
+        if self.refuse_channel is not None:
+            raise _rpc_error(self.refuse_channel)
+        return temporalio.api.workflowservice.v1.NotifyChannelResponse(
+            listener_count=self.listeners
+        )
+
+    async def describe_channel(self, request):  # type: ignore[no-untyped-def]
+        self.described.append(request)
+        if self.describe_status is not None:
+            raise _rpc_error(self.describe_status)
+        return temporalio.api.workflowservice.v1.DescribeChannelResponse()
+
+
+TOKENS_CHANNEL = channel_for(CHAIN.stream_key("tokens"))
+
+
+def channel_request(**overrides) -> WakeRequest:  # type: ignore[no-untyped-def]
+    return request(channel=TOKENS_CHANNEL, **overrides)
+
+
+def test_the_channel_is_the_stream_identity_without_the_namespace() -> None:
+    key = StreamKey("ns", "wf-1", "first-run-1", "tokens")
+
+    assert channel_for(key) == "external-stream/wf-1/first-run-1/input/tokens"
+    # The server scopes a channel to the namespace of the call.
+    assert channel_for(dataclasses.replace(key, namespace="other")) == channel_for(key)
+
+
+def test_the_channel_tells_the_two_directions_apart() -> None:
+    from temporalio.contrib.external_workflow_streams._backend import StreamDirection
+
+    key = StreamKey("ns", "wf-1", "first-run-1", "tokens")
+    output = dataclasses.replace(key, direction=StreamDirection.OUTPUT)
+
+    assert channel_for(key) != channel_for(output)
+
+
+def test_a_slash_in_a_name_cannot_borrow_another_streams_segments() -> None:
+    first = StreamKey("ns", "wf/1", "first-run-1", "tokens")
+    second = StreamKey("ns", "wf", "1/first-run-1", "tokens")
+
+    assert channel_for(first) != channel_for(second)
+    assert channel_for(first).split("/")[1] == "wf%2F1"
+
+
+def test_the_request_composed_for_a_chain_names_its_channel() -> None:
+    composed = wake_request_for(
+        CHAIN, stream_name="tokens", wait_id=1, park_generation=7, sender_identity=""
+    )
+
+    assert composed.channel == TOKENS_CHANNEL
+
+
+def test_the_channel_is_not_part_of_the_request_id() -> None:
+    assert wake_request_id(channel_request()) == wake_request_id(request())
+
+
+@pytest.mark.asyncio
+async def test_auto_notifies_the_channel_before_anything_else() -> None:
+    client = ChannelServiceClient()
+
+    sent = await send_wake(
+        client,  # type: ignore[arg-type]
+        channel_request(position=b"1700000000000-3", position_counter=42),
+    )
+
+    assert sent == wake_request_id(channel_request())
+    assert client.wakes == []
+    assert client.sent == []
+    [notify] = client.notified
+    assert notify.namespace == "ns"
+    assert notify.notification.channel == TOKENS_CHANNEL
+    assert notify.notification.position == b"1700000000000-3"
+    assert notify.notification.counter == 42
+    assert notify.identity == "producer-identity"
+    # The Signal's deduplication carried over: a retry is the same request.
+    assert notify.request_id == wake_request_id(channel_request())
+
+
+@pytest.mark.asyncio
+async def test_a_channel_with_no_listeners_is_not_a_reason_to_step_down() -> None:
+    client = ChannelServiceClient(listeners=0)
+
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+
+    assert len(client.notified) == 2
+    assert client.wakes == []
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_auto_steps_down_to_the_wake_call_and_remembers_it() -> None:
+    client = ChannelServiceClient(refuse_channel=UNIMPLEMENTED)
+
+    first = await send_wake(client, channel_request())  # type: ignore[arg-type]
+    second = await send_wake(client, channel_request())  # type: ignore[arg-type]
+
+    assert first == second == "current-run"
+    assert len(client.notified) == 1, "the refusal was not remembered for the client"
+    assert len(client.wakes) == 2
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_auto_steps_down_twice_to_the_signal() -> None:
+    client = ChannelServiceClient(
+        refuse_channel=UNIMPLEMENTED, refuse_wake=UNIMPLEMENTED
+    )
+
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+
+    assert len(client.notified) == 1
+    assert len(client.wakes) == 1
+    assert len(client.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_step_down_is_remembered_per_client() -> None:
+    old = ChannelServiceClient(refuse_channel=UNIMPLEMENTED)
+    new = ChannelServiceClient()
+
+    await send_wake(old, channel_request())  # type: ignore[arg-type]
+    await send_wake(new, channel_request())  # type: ignore[arg-type]
+
+    assert len(new.notified) == 1
+    assert new.wakes == []
+
+
+@pytest.mark.asyncio
+async def test_the_channel_transport_propagates_unimplemented() -> None:
+    client = ChannelServiceClient(refuse_channel=UNIMPLEMENTED)
+
+    with pytest.raises(temporalio.service.RPCError) as raised:
+        await send_wake(client, channel_request(), transport="channel")  # type: ignore[arg-type]
+
+    assert raised.value.status == UNIMPLEMENTED
+    assert client.wakes == []
+    assert client.sent == []
+    # Asked for explicitly, so nothing is learned from it either.
+    client.refuse_channel = None
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+    assert len(client.notified) == 2
+    assert client.wakes == []
+
+
+@pytest.mark.asyncio
+async def test_the_channel_transport_needs_a_channel() -> None:
+    client = ChannelServiceClient()
+
+    with pytest.raises(ValueError, match="channel"):
+        await send_wake(client, request(), transport="channel")  # type: ignore[arg-type]
+
+    # Under "auto" a request without a channel wakes by chain and learns nothing.
+    await send_wake(client, request())  # type: ignore[arg-type]
+    assert client.notified == []
+    assert len(client.wakes) == 1
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+    assert len(client.notified) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_client_without_the_notify_call_steps_down_under_auto() -> None:
+    client = WakeServiceClient()
+
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+
+    assert len(client.wakes) == 1
+    assert client.sent == []
+    with pytest.raises(RuntimeError, match="notify_channel"):
+        await send_wake(
+            WakeServiceClient(),  # type: ignore[arg-type]
+            channel_request(),
+            transport="channel",
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_probe_says_yes_for_a_server_with_channels() -> None:
+    client = ChannelServiceClient()
+
+    assert await server_has_channels(client) is True  # type: ignore[arg-type]
+
+    [described] = client.described
+    assert described.namespace == "ns"
+    assert described.channel == PROBE_CHANNEL
+    # An unknown channel is an answer from a server that knows the call.
+    unknown = ChannelServiceClient(describe=NOT_FOUND)
+    assert await server_has_channels(unknown) is True  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_the_probe_remembers_a_server_without_channels() -> None:
+    client = ChannelServiceClient(describe=UNIMPLEMENTED)
+
+    assert await server_has_channels(client) is False  # type: ignore[arg-type]
+
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+    assert client.notified == [], "the probe's answer was not shared with the writers"
+    assert len(client.wakes) == 1
+    assert await server_has_channels(client) is False  # type: ignore[arg-type]
+    assert len(client.described) == 1, "a remembered answer was asked for again"
+
+
+@pytest.mark.asyncio
+async def test_the_probe_leaves_an_unanswered_question_open() -> None:
+    client = ChannelServiceClient(describe=UNAVAILABLE)
+
+    assert await server_has_channels(client) is None  # type: ignore[arg-type]
+
+    client.describe_status = None
+    assert await server_has_channels(client) is True  # type: ignore[arg-type]
+    # A client whose service lacks the call has the answer in its shape.
+    assert await server_has_channels(WakeServiceClient()) is False  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_producer_notifies_the_channel_of_the_stream_it_appended_to() -> None:
+    backend = MemoryStreamBackend()
+    client = ChannelServiceClient()
+    topic = make_producer(backend, client).topic("tokens")
+
+    await topic.publish("hello")
+
+    [notify] = client.notified
+    assert notify.notification.channel == channel_for(topic.stream_key)
+    assert client.wakes == []
+    assert client.sent == []
+
+
+class ClockRuleBackend(CountingBackend):
+    """States the Redis rule for a wake without a position: now, maximal sequence."""
+
+    def wake_counter_now(self) -> int:
+        return 1_700_000_000_000 * 2**20 + 0xFFFFF
+
+
+def test_a_wake_without_a_position_takes_the_backends_clock_rule() -> None:
+    from temporalio.contrib.external_workflow_streams._wake import wake_position
+
+    assert wake_position(ClockRuleBackend(), None) == (
+        b"",
+        1_700_000_000_000 * 2**20 + 0xFFFFF,
+    )
+    # The base rule is the clock in nanoseconds, which orders like the base counter.
+    position, counter = wake_position(MemoryStreamBackend(), None)
+    assert position == b""
+    assert counter > 1_700_000_000 * 10**9
+    # A positioned wake keeps the position's own order.
+    assert wake_position(ClockRuleBackend(), Offset("1700000000000-3")) == (
+        b"1700000000000-3",
+        1_700_000_000_000 * 2**20 + 3,
+    )
