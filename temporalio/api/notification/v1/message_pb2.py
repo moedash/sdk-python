@@ -8,6 +8,7 @@ from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import message as _message
 from google.protobuf import reflection as _reflection
 from google.protobuf import symbol_database as _symbol_database
+from google.protobuf.internal import enum_type_wrapper
 
 # @@protoc_insertion_point(imports)
 
@@ -21,8 +22,14 @@ from temporalio.api.common.v1 import (
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n*temporal/api/notification/v1/message.proto\x12\x1ctemporal.api.notification.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a$temporal/api/common/v1/message.proto"\xe0\x01\n\x0cNotification\x12\x0f\n\x07\x63hannel\x18\x01 \x01(\t\x12\x10\n\x08position\x18\x02 \x01(\x0c\x12\x0f\n\x07\x63ounter\x18\x03 \x01(\x03\x12J\n\x08metadata\x18\x04 \x03(\x0b\x32\x38.temporal.api.notification.v1.Notification.MetadataEntry\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\xe1\x01\n\x0f\x43hannelListener\x12\x13\n\x0blistener_id\x18\x01 \x01(\t\x12\x42\n\x08workflow\x18\x02 \x01(\x0b\x32..temporal.api.notification.v1.WorkflowListenerH\x00\x12\x34\n\x08\x63\x61llback\x18\x03 \x01(\x0b\x32 .temporal.api.common.v1.CallbackH\x00\x12\x33\n\x0fregistered_time\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampB\n\n\x08listener"7\n\x10WorkflowListener\x12\x13\n\x0bworkflow_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\tB\xa7\x01\n\x1fio.temporal.api.notification.v1B\x0cMessageProtoP\x01Z/go.temporal.io/api/notification/v1;notification\xaa\x02\x1eTemporalio.Api.Notification.V1\xea\x02!Temporalio::Api::Notification::V1b\x06proto3'
+    b'\n*temporal/api/notification/v1/message.proto\x12\x1ctemporal.api.notification.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a$temporal/api/common/v1/message.proto"\x9e\x02\n\x0cNotification\x12\x0f\n\x07\x63hannel\x18\x01 \x01(\t\x12\x10\n\x08position\x18\x02 \x01(\x0c\x12\x0f\n\x07\x63ounter\x18\x03 \x01(\x03\x12J\n\x08metadata\x18\x04 \x03(\x0b\x32\x38.temporal.api.notification.v1.Notification.MetadataEntry\x12<\n\tlinked_to\x18\x05 \x01(\x0b\x32).temporal.api.common.v1.WorkflowExecution\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01"\xe1\x01\n\x0f\x43hannelListener\x12\x13\n\x0blistener_id\x18\x01 \x01(\t\x12\x42\n\x08workflow\x18\x02 \x01(\x0b\x32..temporal.api.notification.v1.WorkflowListenerH\x00\x12\x34\n\x08\x63\x61llback\x18\x03 \x01(\x0b\x32 .temporal.api.common.v1.CallbackH\x00\x12\x33\n\x0fregistered_time\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampB\n\n\x08listener"7\n\x10WorkflowListener\x12\x13\n\x0bworkflow_id\x18\x01 \x01(\t\x12\x0e\n\x06run_id\x18\x02 \x01(\t*b\n\x0b\x43hannelKind\x12\x1c\n\x18\x43HANNEL_KIND_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x43HANNEL_KIND_INDEPENDENT\x10\x01\x12\x17\n\x13\x43HANNEL_KIND_LINKED\x10\x02\x42\xa7\x01\n\x1fio.temporal.api.notification.v1B\x0cMessageProtoP\x01Z/go.temporal.io/api/notification/v1;notification\xaa\x02\x1eTemporalio.Api.Notification.V1\xea\x02!Temporalio::Api::Notification::V1b\x06proto3'
 )
+
+_CHANNELKIND = DESCRIPTOR.enum_types_by_name["ChannelKind"]
+ChannelKind = enum_type_wrapper.EnumTypeWrapper(_CHANNELKIND)
+CHANNEL_KIND_UNSPECIFIED = 0
+CHANNEL_KIND_INDEPENDENT = 1
+CHANNEL_KIND_LINKED = 2
 
 
 _NOTIFICATION = DESCRIPTOR.message_types_by_name["Notification"]
@@ -77,12 +84,14 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._serialized_options = b"\n\037io.temporal.api.notification.v1B\014MessageProtoP\001Z/go.temporal.io/api/notification/v1;notification\252\002\036Temporalio.Api.Notification.V1\352\002!Temporalio::Api::Notification::V1"
     _NOTIFICATION_METADATAENTRY._options = None
     _NOTIFICATION_METADATAENTRY._serialized_options = b"8\001"
+    _CHANNELKIND._serialized_start = 721
+    _CHANNELKIND._serialized_end = 819
     _NOTIFICATION._serialized_start = 148
-    _NOTIFICATION._serialized_end = 372
-    _NOTIFICATION_METADATAENTRY._serialized_start = 292
-    _NOTIFICATION_METADATAENTRY._serialized_end = 372
-    _CHANNELLISTENER._serialized_start = 375
-    _CHANNELLISTENER._serialized_end = 600
-    _WORKFLOWLISTENER._serialized_start = 602
-    _WORKFLOWLISTENER._serialized_end = 657
+    _NOTIFICATION._serialized_end = 434
+    _NOTIFICATION_METADATAENTRY._serialized_start = 354
+    _NOTIFICATION_METADATAENTRY._serialized_end = 434
+    _CHANNELLISTENER._serialized_start = 437
+    _CHANNELLISTENER._serialized_end = 662
+    _WORKFLOWLISTENER._serialized_start = 664
+    _WORKFLOWLISTENER._serialized_end = 719
 # @@protoc_insertion_point(module_scope)
