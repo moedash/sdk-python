@@ -5,7 +5,8 @@ to by command, and the one linked to the workflow, which needs none. The
 workflow instance is driven with activations directly, the way Core drives
 it, because the dev server this chain tests against does not accept the
 subscribe command. The live cases at the end need a server that does, or one
-with the linked kind, and skip otherwise.
+with the linked kind, one whose describe lists the subscriptions, or one that
+accepts the unsubscribe, and skip otherwise.
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ from typing import Any
 import pytest
 
 import temporalio.api.common.v1
+import temporalio.api.enums.v1
 import temporalio.api.notification.v1
+import temporalio.api.workflow.v1
 import temporalio.api.workflowservice.v1
 import temporalio.bridge.proto.workflow_activation
 import temporalio.bridge.proto.workflow_completion
@@ -27,8 +30,17 @@ import temporalio.common
 import temporalio.converter
 from temporalio import workflow
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Callback, ChannelKind, Client
+from temporalio.client import (
+    Callback,
+    ChannelAddress,
+    ChannelKind,
+    ChannelSubscriptionInfo,
+    Client,
+    WorkflowExecutionDescription,
+    stream_channel,
+)
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams import DEFAULT_TOPIC, StreamRef
 from temporalio.worker._workflow_instance import (
     UnsandboxedWorkflowRunner,
     WorkflowInstance,
@@ -176,6 +188,80 @@ class CountLinked:
         return seen
 
 
+async def _drain(handle: workflow.ChannelSubscription) -> dict[str, Any]:
+    """What a closed handle still gives: the queue, then the end, then the refusal."""
+    drained = [notification.counter async for notification in handle]
+    try:
+        await handle.receive()
+    except RuntimeError as err:
+        refused: str | None = str(err)
+    else:
+        refused = None
+    return {"closed": handle.closed, "drained": drained, "refused": refused}
+
+
+@workflow.defn
+class ReceiveThenUnsubscribe:
+    """Takes the first notification, unsubscribes twice, then waits to be finished.
+
+    The wait keeps the run open so a late notification can be aimed at it.
+    """
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self, channel: str) -> dict[str, Any]:
+        handle = workflow.subscribe_channel(channel)
+        first = await handle.receive()
+        assert not handle.closed
+        handle.unsubscribe()
+        handle.unsubscribe()
+        drained = await _drain(handle)
+        await workflow.wait_condition(lambda: self._done)
+        return {"first": first.counter, **drained}
+
+    @workflow.signal
+    def finish(self) -> None:
+        self._done = True
+
+
+@workflow.defn
+class UnsubscribeWithOneQueued:
+    """Unsubscribes with a notification still queued and reads it afterwards."""
+
+    @workflow.run
+    async def run(self, channel: str) -> dict[str, Any]:
+        handle = workflow.subscribe_channel(channel)
+        first = await handle.receive()
+        handle.unsubscribe()
+        return {"first": first.counter, **(await _drain(handle))}
+
+
+@workflow.defn
+class UnsubscribeLinked:
+    """Tries to unsubscribe from its linked channel."""
+
+    @workflow.run
+    async def run(self, channel: str) -> None:
+        workflow.linked_channel(channel).unsubscribe()
+
+
+@workflow.defn
+class Resubscribe:
+    """Subscribes, unsubscribes and subscribes again, then receives on the new handle."""
+
+    @workflow.run
+    async def run(self, channel: str) -> dict[str, Any]:
+        first = workflow.subscribe_channel(channel)
+        first.unsubscribe()
+        second = workflow.subscribe_channel(channel)
+        assert second is not first
+        assert first.closed and not second.closed
+        notification = await second.receive()
+        return {"counter": notification.counter, **(await _drain(first))}
+
+
 def _instance(workflow_class: type) -> WorkflowInstance:
     """Build an instance the way the worker does, without a worker.
 
@@ -256,6 +342,12 @@ def _linked(channel: str, counter: int, position: bytes = b"") -> Notification:
     )
 
 
+def _signalled(name: str) -> WorkflowActivation:
+    job = WorkflowActivationJob()
+    job.signal_workflow.signal_name = name
+    return WorkflowActivation(run_id="run", jobs=[job])
+
+
 def _subscribed(completion: WorkflowActivationCompletion) -> list[str]:
     assert completion.HasField("successful"), completion.failed.failure.message
     return [
@@ -263,6 +355,24 @@ def _subscribed(completion: WorkflowActivationCompletion) -> list[str]:
         for command in completion.successful.commands
         if command.HasField("subscribe_notification_channel")
     ]
+
+
+def _channel_commands(
+    completion: WorkflowActivationCompletion,
+) -> list[tuple[str, str]]:
+    """The channel commands of a completion in order, as (verb, channel) pairs."""
+    assert completion.HasField("successful"), completion.failed.failure.message
+    commands: list[tuple[str, str]] = []
+    for command in completion.successful.commands:
+        if command.HasField("subscribe_notification_channel"):
+            commands.append(
+                ("subscribe", command.subscribe_notification_channel.channel)
+            )
+        elif command.HasField("unsubscribe_notification_channel"):
+            commands.append(
+                ("unsubscribe", command.unsubscribe_notification_channel.channel)
+            )
+    return commands
 
 
 def _completed(completion: WorkflowActivationCompletion) -> bool:
@@ -372,6 +482,168 @@ async def test_the_owner_on_a_notification_picks_the_handle_of_its_kind():
     )
     completion = instance.activate(_notified(_linked("orders", 2)))
     assert _result(completion) == {"independent": [5], "linked": [1, 2]}
+
+
+_CLOSED = "channel subscription closed"
+
+
+async def test_an_unsubscribe_is_one_command_and_a_late_notification_is_dropped():
+    instance = _instance(ReceiveThenUnsubscribe)
+    assert _channel_commands(
+        instance.activate(_start(ReceiveThenUnsubscribe, "orders"))
+    ) == [("subscribe", "orders")]
+    # The first notification is taken, then the two unsubscribe calls cost one
+    # command between them.
+    completion = instance.activate(_notified(Notification(channel="orders", counter=1)))
+    assert _channel_commands(completion) == [("unsubscribe", "orders")]
+    assert not _completed(completion)
+    # The server may still hand the run a notification it folded onto a task
+    # before the command landed. Nothing listens, so it changes nothing.
+    completion = instance.activate(_notified(Notification(channel="orders", counter=2)))
+    assert _channel_commands(completion) == []
+    assert not _completed(completion)
+    assert _result(instance.activate(_signalled("finish"))) == {
+        "first": 1,
+        "closed": True,
+        "drained": [],
+        "refused": _CLOSED,
+    }
+
+
+async def test_a_queued_notification_survives_the_unsubscribe_then_the_iteration_ends():
+    instance = _instance(UnsubscribeWithOneQueued)
+    instance.activate(_start(UnsubscribeWithOneQueued, "orders"))
+    completion = instance.activate(
+        _notified(
+            Notification(channel="orders", counter=1),
+            Notification(channel="orders", counter=2),
+        )
+    )
+    assert _channel_commands(completion) == [("unsubscribe", "orders")]
+    assert _result(completion) == {
+        "first": 1,
+        "closed": True,
+        "drained": [2],
+        "refused": _CLOSED,
+    }
+
+
+async def test_a_linked_handle_has_no_subscription_to_end():
+    completion = _instance(UnsubscribeLinked).activate(
+        _start(UnsubscribeLinked, "orders")
+    )
+    assert completion.HasField("failed")
+    assert "a linked channel has no subscription" in completion.failed.failure.message
+
+
+async def test_a_subscription_after_an_unsubscribe_is_a_new_one():
+    instance = _instance(Resubscribe)
+    completion = instance.activate(_start(Resubscribe, "orders"))
+    assert _channel_commands(completion) == [
+        ("subscribe", "orders"),
+        ("unsubscribe", "orders"),
+        ("subscribe", "orders"),
+    ]
+    assert not _completed(completion)
+    # The notification reaches the open handle, and the closed one stays closed.
+    assert _result(
+        instance.activate(_notified(Notification(channel="orders", counter=3)))
+    ) == {
+        "counter": 3,
+        "closed": True,
+        "drained": [],
+        "refused": _CLOSED,
+    }
+
+
+async def test_a_stream_names_the_channel_it_notifies():
+    assert stream_channel(StreamRef.for_workflow("wf", topic="out")) == ChannelAddress(
+        "stream/out", "wf"
+    )
+    assert stream_channel(StreamRef.for_workflow("wf", run_id="run")) == ChannelAddress(
+        "stream/" + DEFAULT_TOPIC, "wf"
+    )
+    assert stream_channel(
+        StreamRef.for_activity("act", workflow_id="wf", topic="out")
+    ) == ChannelAddress("stream/act/out", "wf")
+    # A standalone activity is an execution of its own with no linked channels.
+    assert stream_channel(StreamRef.for_activity("act", topic="out")) == ChannelAddress(
+        "stream/act/out", None
+    )
+    # A standalone stream's topics share one stream on the server, so the
+    # topic is not part of the name.
+    assert stream_channel(
+        StreamRef.for_standalone("sid", topic="out")
+    ) == ChannelAddress("stream/sid", None)
+
+
+async def test_the_description_maps_every_channel_subscription_field():
+    [topic] = temporalio.converter.PayloadConverter.default.to_payloads(["inputs"])
+    pending = Notification(channel="orders", position=b"4-0", counter=4)
+    pending.metadata["topic"].CopyFrom(topic)
+    raw = temporalio.api.workflowservice.v1.DescribeWorkflowExecutionResponse(
+        workflow_execution_info=temporalio.api.workflow.v1.WorkflowExecutionInfo(
+            execution=temporalio.api.common.v1.WorkflowExecution(
+                workflow_id="wf", run_id="run"
+            ),
+            type=temporalio.api.common.v1.WorkflowType(name="ReceiveOne"),
+            status=temporalio.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING,
+            task_queue="tq",
+        ),
+        channel_subscriptions=[
+            temporalio.api.workflow.v1.ChannelSubscriptionInfo(
+                channel="orders",
+                kind=temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_INDEPENDENT,
+                subscribed_event_id=5,
+                last_counter=3,
+                pending_notification=pending,
+                scheduled_counter=4,
+            ),
+            temporalio.api.workflow.v1.ChannelSubscriptionInfo(
+                channel="orders",
+                kind=temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED,
+                last_counter=2,
+                listener_count=1,
+                retained_count=2,
+                accepted_count=7,
+            ),
+        ],
+    )
+    description = await WorkflowExecutionDescription._from_raw_description(
+        raw, "default", temporalio.converter.DataConverter.default
+    )
+    assert description.id == "wf"
+    assert description.channel_subscriptions == (
+        ChannelSubscriptionInfo(
+            channel="orders",
+            kind=ChannelKind.INDEPENDENT,
+            subscribed_event_id=5,
+            last_counter=3,
+            pending_notification=workflow.Notification(
+                channel="orders", position=b"4-0", counter=4, metadata={"topic": topic}
+            ),
+            scheduled_counter=4,
+            listener_count=0,
+            retained_count=0,
+            accepted_count=0,
+        ),
+        ChannelSubscriptionInfo(
+            channel="orders",
+            kind=ChannelKind.LINKED,
+            subscribed_event_id=0,
+            last_counter=2,
+            pending_notification=None,
+            scheduled_counter=0,
+            listener_count=1,
+            retained_count=2,
+            accepted_count=7,
+        ),
+    )
+    raw.ClearField("channel_subscriptions")
+    description = await WorkflowExecutionDescription._from_raw_description(
+        raw, "default", temporalio.converter.DataConverter.default
+    )
+    assert description.channel_subscriptions == ()
 
 
 async def test_the_client_addresses_a_linked_channel_by_workflow(
@@ -742,5 +1014,188 @@ async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
                 channel, workflow_id=handle.id, after_counter=1, wait=False
             )
         assert closed.value.status == RPCStatusCode.NOT_FOUND
+    finally:
+        await _stop(handle, worker, running)
+
+
+_SUBSCRIBED = EventType.EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED
+_UNSUBSCRIBED = EventType.EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED
+
+
+async def _event_ids(handle: Any, event_type: Any) -> list[int]:
+    """The ids of the events of ``event_type`` in the run's History so far."""
+    return [
+        event.event_id
+        async for event in handle.fetch_history_events()
+        if event.event_type == event_type
+    ]
+
+
+async def _one_event(handle: Any, event_type: Any) -> int:
+    """The id of the one event of ``event_type``, failing until it is there."""
+    ids = await _event_ids(handle, event_type)
+    assert len(ids) == 1, ids
+    return ids[0]
+
+
+@pytest.mark.needs_describe_server
+@pytest.mark.needs_channel_core
+async def test_a_description_lists_an_independent_subscription(client: Client):
+    channel = f"orders-{uuid.uuid4()}"
+    worker = new_worker(client, CountToTwo)
+    running = asyncio.create_task(worker.run())
+    handle = await client.start_workflow(
+        CountToTwo.run,
+        channel,
+        id=f"wf-{uuid.uuid4()}",
+        task_queue=worker.task_queue,
+    )
+    try:
+        event_id = await assert_eventually(
+            lambda: _one_event(handle, _SUBSCRIBED), timeout=timedelta(seconds=30)
+        )
+        # Listed from the subscribe event on, with nothing accepted yet. The
+        # counts belong to the channel execution and stay zero here.
+        description = await handle.describe()
+        assert description.channel_subscriptions == (
+            ChannelSubscriptionInfo(
+                channel=channel,
+                kind=ChannelKind.INDEPENDENT,
+                subscribed_event_id=event_id,
+                last_counter=0,
+                pending_notification=None,
+                scheduled_counter=0,
+                listener_count=0,
+                retained_count=0,
+                accepted_count=0,
+            ),
+        )
+        assert await client.notify_channel(channel, position=b"1-0", counter=1) == 1
+
+        async def accepted() -> None:
+            # Once the task that carried it completes, the counter is the
+            # run's and nothing is pending or scheduled any more.
+            [info] = (await handle.describe()).channel_subscriptions
+            assert info.last_counter == 1
+            assert info.pending_notification is None
+            assert info.scheduled_counter == 0
+
+        await assert_eventually(accepted)
+        assert await client.notify_channel(channel, position=b"2-0", counter=2) == 1
+        assert await asyncio.wait_for(handle.result(), 30) == 2
+        # A closed run keeps listing what it stood on.
+        [info] = (await handle.describe()).channel_subscriptions
+        assert (info.kind, info.last_counter) == (ChannelKind.INDEPENDENT, 2)
+    finally:
+        await _stop(handle, worker, running)
+
+
+@pytest.mark.needs_describe_server
+async def test_a_description_lists_a_linked_channel_once_it_holds_state(
+    client: Client,
+):
+    """The client side alone: no worker polls, so the run stays open until ended."""
+    channel = f"orders-{uuid.uuid4()}"
+    handle = await client.start_workflow(
+        CountLinked.run,
+        channel,
+        id=f"wf-{uuid.uuid4()}",
+        task_queue=f"nobody-polls-{uuid.uuid4()}",
+    )
+    try:
+        # An untouched linked name exists by construction and holds nothing,
+        # so it is not listed.
+        assert (await handle.describe()).channel_subscriptions == ()
+        assert (
+            await client.notify_channel(
+                channel, position=b"1-0", counter=1, workflow_id=handle.id
+            )
+            == 1
+        )
+        [info] = (await handle.describe()).channel_subscriptions
+        assert (info.channel, info.kind) == (channel, ChannelKind.LINKED)
+        # The owner's state took the notification in the write that accepted
+        # it, so the counter is the run's at once. Nobody polls, and the first
+        # task was scheduled without a counter when the run started, so the
+        # notification waits behind it as the pending entry.
+        assert (info.subscribed_event_id, info.last_counter) == (0, 1)
+        assert info.pending_notification is not None
+        assert info.pending_notification.counter == 1
+        assert info.pending_notification.linked_to is not None
+        assert info.pending_notification.linked_to.workflow_id == handle.id
+        assert info.scheduled_counter == 0
+        assert (info.listener_count, info.retained_count, info.accepted_count) == (
+            0,
+            1,
+            1,
+        )
+        # A callback on the linked channel shows up in the owner's count.
+        callback = Callback(url="http://localhost:1/never-called", headers={})
+        listener_id = await client.register_channel_listener(
+            channel, callback, workflow_id=handle.id
+        )
+        [info] = (await handle.describe()).channel_subscriptions
+        assert info.listener_count == 1
+        await client.unregister_channel_listener(
+            channel, listener_id, workflow_id=handle.id
+        )
+        [info] = (await handle.describe()).channel_subscriptions
+        assert info.listener_count == 0
+        # A closed run keeps listing what it stood on.
+        await handle.terminate()
+        [info] = (await handle.describe()).channel_subscriptions
+        assert (info.kind, info.last_counter) == (ChannelKind.LINKED, 1)
+    finally:
+        with contextlib.suppress(RPCError):
+            await handle.terminate()
+
+
+@pytest.mark.needs_unsubscribe_server
+@pytest.mark.needs_unsubscribe_core
+async def test_a_workflow_unsubscribes_and_a_later_notify_wakes_nothing(
+    client: Client,
+):
+    channel = f"orders-{uuid.uuid4()}"
+    worker = new_worker(client, ReceiveThenUnsubscribe)
+    running = asyncio.create_task(worker.run())
+    handle = await client.start_workflow(
+        ReceiveThenUnsubscribe.run,
+        channel,
+        id=f"wf-{uuid.uuid4()}",
+        task_queue=worker.task_queue,
+    )
+    try:
+        subscribed_id = await assert_eventually(
+            lambda: _one_event(handle, _SUBSCRIBED), timeout=timedelta(seconds=30)
+        )
+        assert await client.notify_channel(channel, position=b"1-0", counter=1) == 1
+        unsubscribed_id = await assert_eventually(
+            lambda: _one_event(handle, _UNSUBSCRIBED), timeout=timedelta(seconds=30)
+        )
+        assert unsubscribed_id > subscribed_id
+        # The event names the subscription it ended.
+        [event] = [
+            event
+            async for event in handle.fetch_history_events()
+            if event.event_id == unsubscribed_id
+        ]
+        attrs = event.workflow_notification_channel_unsubscribed_event_attributes
+        assert (attrs.channel, attrs.subscribed_event_id) == (channel, subscribed_id)
+        # Gone from both sides: the channel's listeners and the run's standing.
+        description = await client.describe_channel(channel)
+        assert [listener.workflow_id for listener in description.listeners] == []
+        assert (await handle.describe()).channel_subscriptions == ()
+        # Nothing listens any more, so a notify wakes nobody and is only
+        # retained for pollers.
+        assert await client.notify_channel(channel, position=b"2-0", counter=2) == 0
+        await handle.signal(ReceiveThenUnsubscribe.finish)
+        assert await asyncio.wait_for(handle.result(), 30) == {
+            "first": 1,
+            "closed": True,
+            "drained": [],
+            "refused": _CLOSED,
+        }
+        assert await _event_ids(handle, _SUBSCRIBED) == [subscribed_id]
+        assert await _event_ids(handle, _UNSUBSCRIBED) == [unsubscribed_id]
     finally:
         await _stop(handle, worker, running)
