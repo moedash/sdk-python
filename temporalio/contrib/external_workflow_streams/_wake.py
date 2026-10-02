@@ -407,11 +407,14 @@ def wake_transport_of(backend: object) -> WakeTransport:
 def wake_position(backend: object, offset: Offset | None) -> tuple[bytes, int]:
     """The position and counter a wake reports for ``offset`` in ``backend``.
 
-    A counter the backend cannot give is 0, which :func:`wake_call_counter`
-    replaces with the clock.
+    Without an offset the backend's own clock rule gives the counter, so a
+    wake that reports no position still orders above every position the store
+    handed out before now. A counter the backend cannot give is 0, which
+    :func:`wake_call_counter` replaces with the clock.
     """
     if offset is None:
-        return b"", 0
+        counter_now = getattr(backend, "wake_counter_now", None)
+        return b"", max(counter_now(), 0) if counter_now is not None else 0
     counter_for = getattr(backend, "wake_counter_for", None)
     counter = counter_for(offset) if counter_for is not None else 0
     return offset.token.encode("utf-8"), max(counter, 0)

@@ -2315,3 +2315,28 @@ async def test_a_producer_notifies_the_channel_of_the_stream_it_appended_to() ->
     assert notify.notification.channel == channel_for(topic.stream_key)
     assert client.wakes == []
     assert client.sent == []
+
+
+class ClockRuleBackend(CountingBackend):
+    """States the Redis rule for a wake without a position: now, maximal sequence."""
+
+    def wake_counter_now(self) -> int:
+        return 1_700_000_000_000 * 2**20 + 0xFFFFF
+
+
+def test_a_wake_without_a_position_takes_the_backends_clock_rule() -> None:
+    from temporalio.contrib.external_workflow_streams._wake import wake_position
+
+    assert wake_position(ClockRuleBackend(), None) == (
+        b"",
+        1_700_000_000_000 * 2**20 + 0xFFFFF,
+    )
+    # The base rule is the clock in nanoseconds, which orders like the base counter.
+    position, counter = wake_position(MemoryStreamBackend(), None)
+    assert position == b""
+    assert counter > 1_700_000_000 * 10**9
+    # A positioned wake keeps the position's own order.
+    assert wake_position(ClockRuleBackend(), Offset("1700000000000-3")) == (
+        b"1700000000000-3",
+        1_700_000_000_000 * 2**20 + 3,
+    )

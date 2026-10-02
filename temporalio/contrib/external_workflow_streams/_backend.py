@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import abc
 import enum
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -297,6 +298,19 @@ class StreamBackend(abc.ABC):
         """
         del offset
         return 0
+
+    def wake_counter_now(self) -> int:
+        """The counter for a wake that reports no position, from the clock.
+
+        A Worker's shutdown sweep wakes a subscription it leaves behind without
+        knowing where the store stands. Its counter still has to sit above every
+        counter the store has handed out so far, or the server folds the wake
+        into a pending one and the reader stays parked. A provider whose
+        counters follow its offsets derives this from the current time by the
+        same rule, with the largest sequence the rule allows. The default is the
+        clock in nanoseconds, which is the order the base counter has.
+        """
+        return time.time_ns()
 
     # --- parking (P2b) ------------------------------------------------------
 
