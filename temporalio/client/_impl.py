@@ -23,6 +23,7 @@ import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.api.errordetails.v1
 import temporalio.api.failure.v1
+import temporalio.api.notification.v1
 import temporalio.api.schedule.v1
 import temporalio.api.taskqueue.v1
 import temporalio.api.update.v1
@@ -32,6 +33,7 @@ import temporalio.converter
 import temporalio.exceptions
 import temporalio.nexus
 import temporalio.nexus._operation_context
+import temporalio.workflow
 from temporalio.activity import ActivityCancellationDetails
 from temporalio.converter import (
     ActivitySerializationContext,
@@ -54,6 +56,7 @@ from ._activity import (
     ActivityHandle,
     AsyncActivityIDReference,
 )
+from ._channel import ChannelDescription, ChannelListener
 from ._exceptions import (
     AsyncActivityCancelledError,
     ScheduleAlreadyRunningError,
@@ -74,6 +77,7 @@ from ._interceptor import (
     CreateScheduleInput,
     DeleteScheduleInput,
     DescribeActivityInput,
+    DescribeChannelInput,
     DescribeNexusOperationInput,
     DescribeScheduleInput,
     DescribeWorkflowInput,
@@ -87,10 +91,13 @@ from ._interceptor import (
     ListNexusOperationsInput,
     ListSchedulesInput,
     ListWorkflowsInput,
+    NotifyChannelInput,
     OutboundInterceptor,
     PauseActivityInput,
     PauseScheduleInput,
+    PollChannelInput,
     QueryWorkflowInput,
+    RegisterChannelListenerInput,
     ReportCancellationAsyncActivityInput,
     SignalWorkflowInput,
     StartActivityInput,
@@ -104,6 +111,7 @@ from ._interceptor import (
     TriggerScheduleInput,
     UnpauseActivityInput,
     UnpauseScheduleInput,
+    UnregisterChannelListenerInput,
     UpdateActivityOptionsInput,
     UpdateScheduleInput,
     UpdateWithStartStartWorkflowInput,
@@ -1762,6 +1770,120 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
                 metadata=input.rpc_metadata,
                 timeout=input.rpc_timeout,
             )
+        )
+
+    ### Notification channel calls
+
+    async def notify_channel(self, input: NotifyChannelInput) -> int:
+        notification = temporalio.api.notification.v1.Notification(
+            channel=input.channel, position=input.position, counter=input.counter
+        )
+        for key, value in (input.metadata or {}).items():
+            [payload] = await self._client.data_converter.encode([value])
+            notification.metadata[key].CopyFrom(payload)
+        resp = await self._client.workflow_service.notify_channel(
+            temporalio.api.workflowservice.v1.NotifyChannelRequest(
+                namespace=self._client.namespace,
+                notification=notification,
+                identity=self._client.identity,
+                request_id=str(uuid.uuid4()),
+            ),
+            retry=True,
+            metadata=input.rpc_metadata,
+            timeout=input.rpc_timeout,
+        )
+        return resp.listener_count
+
+    async def poll_channel(
+        self, input: PollChannelInput
+    ) -> list[temporalio.workflow.Notification]:
+        req = temporalio.api.workflowservice.v1.PollChannelRequest(
+            namespace=self._client.namespace,
+            channel=input.channel,
+            after_counter=input.after_counter,
+            max_notifications=input.max_notifications,
+        )
+        if input.wait is not None:
+            req.wait.FromTimedelta(input.wait)
+        resp = await self._client.workflow_service.poll_channel(
+            req, retry=True, metadata=input.rpc_metadata, timeout=input.rpc_timeout
+        )
+        return [await self._notification_from_proto(n) for n in resp.notifications]
+
+    async def describe_channel(self, input: DescribeChannelInput) -> ChannelDescription:
+        resp = await self._client.workflow_service.describe_channel(
+            temporalio.api.workflowservice.v1.DescribeChannelRequest(
+                namespace=self._client.namespace, channel=input.channel
+            ),
+            retry=True,
+            metadata=input.rpc_metadata,
+            timeout=input.rpc_timeout,
+        )
+        return ChannelDescription(
+            listeners=[
+                ChannelListener._from_proto(listener) for listener in resp.listeners
+            ],
+            latest=(
+                await self._notification_from_proto(resp.latest)
+                if resp.HasField("latest")
+                else None
+            ),
+            retained_count=resp.retained_count,
+        )
+
+    async def register_channel_listener(
+        self, input: RegisterChannelListenerInput
+    ) -> str:
+        resp = await self._client.workflow_service.register_channel_listener(
+            temporalio.api.workflowservice.v1.RegisterChannelListenerRequest(
+                namespace=self._client.namespace,
+                channel=input.channel,
+                callback=temporalio.api.common.v1.Callback(
+                    nexus=temporalio.api.common.v1.Callback.Nexus(
+                        url=input.callback.url, header=input.callback.headers
+                    )
+                ),
+                request_id=str(uuid.uuid4()),
+                identity=self._client.identity,
+            ),
+            retry=True,
+            metadata=input.rpc_metadata,
+            timeout=input.rpc_timeout,
+        )
+        return resp.listener_id
+
+    async def unregister_channel_listener(
+        self, input: UnregisterChannelListenerInput
+    ) -> None:
+        await self._client.workflow_service.unregister_channel_listener(
+            temporalio.api.workflowservice.v1.UnregisterChannelListenerRequest(
+                namespace=self._client.namespace,
+                channel=input.channel,
+                listener_id=input.listener_id,
+                identity=self._client.identity,
+            ),
+            retry=True,
+            metadata=input.rpc_metadata,
+            timeout=input.rpc_timeout,
+        )
+
+    async def _notification_from_proto(
+        self, proto: temporalio.api.notification.v1.Notification
+    ) -> temporalio.workflow.Notification:
+        # The worker runs the codec over a workflow's notifications before
+        # they reach workflow code. The client does the same here, so both
+        # sides hand out payloads a converter can read.
+        metadata = dict(proto.metadata.items())
+        codec = self._client.data_converter.payload_codec
+        if codec and metadata:
+            keys = list(metadata)
+            decoded = await codec.decode([metadata[k] for k in keys])
+            metadata = dict(zip(keys, decoded))
+        return temporalio.workflow.Notification(
+            channel=proto.channel,
+            position=proto.position,
+            counter=proto.counter,
+            metadata=metadata,
         )
 
     async def _apply_headers(

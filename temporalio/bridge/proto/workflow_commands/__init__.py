@@ -1,6 +1,5 @@
 from .workflow_commands_pb2 import (
     ActivityCancellationType,
-    AppendStreamRecords,
     CancelChildWorkflowExecution,
     CancelSignalWorkflow,
     CancelTimer,
@@ -22,7 +21,7 @@ from .workflow_commands_pb2 import (
     SignalExternalWorkflowExecution,
     StartChildWorkflowExecution,
     StartTimer,
-    SubscribeStream,
+    SubscribeNotificationChannel,
     UpdateResponse,
     UpsertWorkflowSearchAttributes,
     WorkflowCommand,
@@ -30,7 +29,6 @@ from .workflow_commands_pb2 import (
 
 __all__ = [
     "ActivityCancellationType",
-    "AppendStreamRecords",
     "CancelChildWorkflowExecution",
     "CancelSignalWorkflow",
     "CancelTimer",
@@ -52,7 +50,7 @@ __all__ = [
     "SignalExternalWorkflowExecution",
     "StartChildWorkflowExecution",
     "StartTimer",
-    "SubscribeStream",
+    "SubscribeNotificationChannel",
     "UpdateResponse",
     "UpsertWorkflowSearchAttributes",
     "WorkflowCommand",

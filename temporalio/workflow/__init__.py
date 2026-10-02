@@ -57,6 +57,11 @@ from ._asyncio import (
     as_completed,
     wait,
 )
+from ._channels import (
+    ChannelSubscription,
+    Notification,
+    subscribe_channel,
+)
 from ._context import (
     Info,
     ParentInfo,
@@ -264,6 +269,9 @@ __all__ = [
     "SandboxImportNotificationPolicy",
     "logger",
     "unsafe",
+    "ChannelSubscription",
+    "Notification",
+    "subscribe_channel",
     "StreamReader",
     "StreamWriter",
     "stream_reader",
