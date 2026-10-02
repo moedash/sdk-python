@@ -538,10 +538,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         ] = {}
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._subscribed_channels: set[str] = set()
-        # Keyed by channel name; one subscription per channel per run
-        self._channel_subscriptions: dict[
-            str, temporalio.workflow.ChannelSubscription
-        ] = {}
         #: The gate's answer for this run, taken on the first stream subscription
         #: and kept until continue-as-new; see ``subscribe_stream_channel``.
         self._stream_channels_enabled: bool | None = None
@@ -986,8 +982,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._apply_resolve_external_stream_waits(job.resolve_external_stream_waits)
         elif job.HasField("replay_external_streams"):
             self._apply_replay_external_streams(job.replay_external_streams)
-        elif job.HasField("notifications_received"):
-            self._apply_notifications_received(job.notifications_received)
         elif job.HasField("resolve_child_workflow_execution"):
             self._apply_resolve_child_workflow_execution(
                 job.resolve_child_workflow_execution
@@ -1543,23 +1537,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
         # Schedule it
         self.create_task(run_query(), name=f"query: {job.query_type}")
-
-    def _apply_notifications_received(
-        self, job: temporalio.bridge.proto.workflow_activation.NotificationsReceived
-    ) -> None:
-        for proto in job.notifications:
-            subscription = self._channel_subscriptions.get(proto.channel)
-            if subscription is None:
-                # The server fans out to whatever listened at the time, so a
-                # channel this run never subscribed to is not the workflow's
-                # concern.
-                logger.debug(
-                    "Dropping a notification on channel %r, which this run has not "
-                    "subscribed to",
-                    proto.channel,
-                )
-                continue
-            subscription._deliver(temporalio.workflow.Notification._from_proto(proto))
 
     def _apply_notify_has_patch(
         self, job: temporalio.bridge.proto.workflow_activation.NotifyHasPatch
@@ -2620,18 +2597,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 self._stream_provider.workflow_provider()
             )
         return self._streams
-
-    def workflow_subscribe_channel(
-        self, channel: str
-    ) -> temporalio.workflow.ChannelSubscription:
-        existing = self._channel_subscriptions.get(channel)
-        if existing is not None:
-            return existing
-        command = self._add_command()
-        command.subscribe_notification_channel.channel = channel
-        subscription = temporalio.workflow.ChannelSubscription(channel)
-        self._channel_subscriptions[channel] = subscription
-        return subscription
 
     def workflow_time_ns(self) -> int:
         return self._time_ns
