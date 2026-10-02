@@ -12,7 +12,7 @@ PINNED_CORE_HANDLES_CHANNEL_COMMAND = True
 # scheduled event, and the protos-only pin ignores that job. So a linked case
 # in which the workflow receives waits for the delivery pin as well; one that
 # only talks to the server from the client runs on every layer.
-PINNED_CORE_HANDLES_LINKED_CHANNEL = False
+PINNED_CORE_HANDLES_LINKED_CHANNEL = True
 
 
 def pytest_configure(config: pytest.Config) -> None:
