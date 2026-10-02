@@ -16,7 +16,7 @@ PINNED_CORE_HANDLES_LINKED_CHANNEL = True
 
 # The unsubscribe is a command like the subscribe, refused by the protos-only
 # pin and matched against its event by the delivery pin.
-PINNED_CORE_HANDLES_UNSUBSCRIBE = False
+PINNED_CORE_HANDLES_UNSUBSCRIBE = True
 
 
 def pytest_configure(config: pytest.Config) -> None:
