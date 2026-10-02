@@ -41,11 +41,24 @@ def pytest_configure(config: pytest.Config) -> None:
         "to a workflow, named with -E host:port; the case skips itself on one "
         "with only independent channels",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_server: the case needs a server that accepts the "
+        "unsubscribe-notification-channel command, named with -E host:port; an "
+        "older channel server fails the Workflow Task that carries it",
+    )
 
 
 #: The environments whose server the suite starts for itself. None of them
 #: accepts the subscribe-notification-channel command.
 _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
+
+#: The markers naming a server capability the suite's own servers lack.
+_CHANNEL_SERVER_MARKERS = (
+    "needs_channel_server",
+    "needs_linked_server",
+    "needs_unsubscribe_server",
+)
 
 
 def pytest_collection_modifyitems(
@@ -57,7 +70,5 @@ def pytest_collection_modifyitems(
         reason="needs a server that serves notification channels; name one with -E"
     )
     for item in items:
-        if item.get_closest_marker("needs_channel_server") or item.get_closest_marker(
-            "needs_linked_server"
-        ):
+        if any(item.get_closest_marker(marker) for marker in _CHANNEL_SERVER_MARKERS):
             item.add_marker(skip)

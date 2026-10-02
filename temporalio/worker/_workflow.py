@@ -143,8 +143,15 @@ def _try_buffer_external_output(
         and commands[0].HasField("external_stream_park_result")
         and commands[0].external_stream_park_result.HasField("became_ready")
     )
+    # The channel report rides every completion and asks nothing of the
+    # server, so it does not make a quiescent completion anything else.
     quiescent = "workflow_stream_quiescent" in variants and all(
-        variant in ("workflow_stream_progress", "workflow_stream_quiescent")
+        variant
+        in (
+            "workflow_stream_progress",
+            "workflow_stream_quiescent",
+            "workflow_stream_channels",
+        )
         for variant in variants
     )
     if not became_ready and not quiescent:
