@@ -133,7 +133,7 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import Any, Final, Generic, TypeVar
+from typing import Any, Final, Generic, TypeVar, get_args
 from urllib.parse import quote
 
 from google.protobuf.message import DecodeError
@@ -1956,7 +1956,8 @@ class RedisStreams(ProviderPlugin):
                 Signal, which does; ``"auto"`` tries the wake call and falls
                 back to the Signal on a server without it.
         """
-        if wake_transport not in ("auto", "wake", "signal"):
+        # Checked against the alias so an untyped caller still gets a ValueError.
+        if wake_transport not in get_args(WakeTransport):
             raise ValueError(f"unknown wake transport {wake_transport!r}")
         if retention is not None and retention <= timedelta(0):
             raise ValueError("retention must be positive")
