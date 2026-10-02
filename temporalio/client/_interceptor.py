@@ -716,6 +716,8 @@ class NotifyChannelInput:
     metadata: Mapping[str, Any] | None
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
+    workflow_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass
@@ -732,6 +734,8 @@ class PollChannelInput:
     max_notifications: int
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
+    workflow_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass
@@ -745,6 +749,8 @@ class DescribeChannelInput:
     channel: str
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
+    workflow_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass
@@ -759,6 +765,8 @@ class RegisterChannelListenerInput:
     callback: Callback
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
+    workflow_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass
@@ -773,6 +781,8 @@ class UnregisterChannelListenerInput:
     listener_id: str
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
+    workflow_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass

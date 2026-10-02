@@ -21,7 +21,12 @@ import temporalio.api.common.v1
 import temporalio.api.notification.v1
 from temporalio.workflow._context import _Runtime
 
-__all__ = ["ChannelSubscription", "Notification", "subscribe_channel"]
+__all__ = [
+    "ChannelSubscription",
+    "Notification",
+    "linked_channel",
+    "subscribe_channel",
+]
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,15 @@ class Notification:
     converter :py:func:`temporalio.workflow.payload_converter` returns.
     """
 
+    linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
+    """The workflow a linked channel belongs to, and the run that received this.
+
+    ``None`` for a notification from an independent channel. A workflow that
+    holds both kinds of handle on one name gets a notification on the handle
+    its kind names: :func:`temporalio.workflow.linked_channel` when set,
+    :func:`temporalio.workflow.subscribe_channel` otherwise.
+    """
+
     @staticmethod
     def _from_proto(
         proto: temporalio.api.notification.v1.Notification,
@@ -64,29 +78,41 @@ class Notification:
             position=proto.position,
             counter=proto.counter,
             metadata=dict(proto.metadata.items()),
+            linked_to=proto.linked_to if proto.HasField("linked_to") else None,
         )
 
 
 class ChannelSubscription:
-    """A workflow's subscription to one channel.
+    """A workflow's handle on one channel, of either kind.
 
-    Prefer :func:`temporalio.workflow.subscribe_channel`. The subscription is
-    an async iterator over the notifications as they arrive, and
-    :meth:`receive` takes them one at a time. Notifications wait in arrival
-    order until taken. Two loops on one subscription share its buffer and
-    interleave.
+    Prefer :func:`temporalio.workflow.subscribe_channel` for an independent
+    channel and :func:`temporalio.workflow.linked_channel` for one linked to
+    this workflow. The handle is an async iterator over the notifications as
+    they arrive, and :meth:`receive` takes them one at a time. Notifications
+    wait in arrival order until taken. Two loops on one handle share its
+    buffer and interleave.
     """
 
-    def __init__(self, channel: str) -> None:
-        """Prefer :func:`temporalio.workflow.subscribe_channel`."""
+    def __init__(self, channel: str, *, linked: bool = False) -> None:
+        """Prefer the two module functions named above."""
         self._channel = channel
+        self._linked = linked
         self._pending: deque[Notification] = deque()
         self._waiters: deque[asyncio.Future[None]] = deque()
 
     @property
     def channel(self) -> str:
-        """The channel this subscription is on."""
+        """The channel this handle is on."""
         return self._channel
+
+    @property
+    def linked(self) -> bool:
+        """Whether the channel is the one linked to this workflow.
+
+        A linked handle gets the notifications that carry
+        :attr:`Notification.linked_to`; an independent one gets the rest.
+        """
+        return self._linked
 
     async def receive(self) -> Notification:
         """The next notification on this channel, waiting for one to arrive.
@@ -142,3 +168,27 @@ def subscribe_channel(channel: str) -> ChannelSubscription:
     if not channel:
         raise ValueError("channel must not be empty")
     return _Runtime.current().workflow_subscribe_channel(channel)
+
+
+def linked_channel(channel: str) -> ChannelSubscription:
+    """Listen on the channel named ``channel`` that is linked to this workflow.
+
+    A linked channel lives in this workflow's own state, so the workflow is
+    its listener by construction: no command, no event, and no gate needed
+    for a new name. A writer reaches it with the workflow id, as in
+    :py:meth:`temporalio.client.Client.notify_channel` with ``workflow_id``,
+    and a successor run after continue-as-new is reached by the same calls.
+    A second call for the same name returns the handle already open, and the
+    two share its buffer. The name does not collide with an independent
+    channel's: a notification carrying :attr:`Notification.linked_to` comes
+    here, one without it goes to :func:`subscribe_channel`.
+
+    Args:
+        channel: Name of the channel, scoped to this workflow.
+
+    Raises:
+        ValueError: ``channel`` is empty.
+    """
+    if not channel:
+        raise ValueError("channel must not be empty")
+    return _Runtime.current().workflow_linked_channel(channel)

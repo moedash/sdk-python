@@ -475,6 +475,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._channel_subscriptions: dict[
             str, temporalio.workflow.ChannelSubscription
         ] = {}
+        # The channels linked to this workflow, keyed by name as well. No
+        # command: the owner is the listener by construction, so the map only
+        # routes a notification carrying ``linked_to`` to its handle.
+        self._linked_channel_subscriptions: dict[
+            str, temporalio.workflow.ChannelSubscription
+        ] = {}
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
@@ -1061,14 +1067,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self, job: temporalio.bridge.proto.workflow_activation.NotificationsReceived
     ) -> None:
         for proto in job.notifications:
-            subscription = self._channel_subscriptions.get(proto.channel)
+            # A name may be open as both kinds; the kind the server stamped
+            # on the notification picks the handle.
+            if proto.HasField("linked_to"):
+                subscription = self._linked_channel_subscriptions.get(proto.channel)
+            else:
+                subscription = self._channel_subscriptions.get(proto.channel)
             if subscription is None:
                 # The server fans out to whatever listened at the time, so a
-                # channel this run never subscribed to is not the workflow's
+                # channel this run never asked for is not the workflow's
                 # concern.
                 logger.debug(
-                    "Dropping a notification on channel %r, which this run has not "
-                    "subscribed to",
+                    "Dropping a notification on channel %r, which this run does "
+                    "not listen on",
                     proto.channel,
                 )
                 continue
@@ -2138,6 +2149,16 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         command.subscribe_notification_channel.channel = channel
         subscription = temporalio.workflow.ChannelSubscription(channel)
         self._channel_subscriptions[channel] = subscription
+        return subscription
+
+    def workflow_linked_channel(
+        self, channel: str
+    ) -> temporalio.workflow.ChannelSubscription:
+        existing = self._linked_channel_subscriptions.get(channel)
+        if existing is not None:
+            return existing
+        subscription = temporalio.workflow.ChannelSubscription(channel, linked=True)
+        self._linked_channel_subscriptions[channel] = subscription
         return subscription
 
     def workflow_time_ns(self) -> int:

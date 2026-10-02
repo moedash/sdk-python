@@ -66,6 +66,7 @@ from ._callback import (
 )
 from ._channel import (
     ChannelDescription,
+    ChannelKind,
     ChannelListener,
 )
 from ._client import (
@@ -366,6 +367,7 @@ __all__ = [
     "Plugin",
     "Callback",
     "ChannelDescription",
+    "ChannelKind",
     "ChannelListener",
     "_ClientImpl",
     "_apply_headers",

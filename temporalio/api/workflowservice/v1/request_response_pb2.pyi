@@ -1282,7 +1282,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
     POLLER_GROUP_INFOS_FIELD_NUMBER: builtins.int
     POLLER_GROUPS_INFO_FIELD_NUMBER: builtins.int
     STREAM_SLICES_FIELD_NUMBER: builtins.int
-    WAKES_FIELD_NUMBER: builtins.int
     task_token: builtins.bytes
     """A unique identifier for this task"""
     @property
@@ -1406,17 +1405,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         """Stream data attached to this task. Delivered out of band so the payloads
         never enter History; only the offset ranges are recorded there.
         """
-    @property
-    def wakes(
-        self,
-    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
-        temporalio.api.workflow.v1.message_pb2.Wake
-    ]:
-        """Wakes pending for this execution when the task started, folded by
-        source. Not recorded in History and never re-supplied on replay: the
-        Workflow treats one as a reason to read its source now and records what
-        it read itself.
-        """
     def __init__(
         self,
         *,
@@ -1455,8 +1443,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         stream_slices: collections.abc.Iterable[
             temporalio.api.stream.v1.message_pb2.StreamSlice
         ]
-        | None = ...,
-        wakes: collections.abc.Iterable[temporalio.api.workflow.v1.message_pb2.Wake]
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -1519,8 +1505,6 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
             b"stream_slices",
             "task_token",
             b"task_token",
-            "wakes",
-            b"wakes",
             "workflow_execution",
             b"workflow_execution",
             "workflow_execution_task_queue",
@@ -3350,84 +3334,6 @@ class SignalWorkflowExecutionResponse(google.protobuf.message.Message):
 
 global___SignalWorkflowExecutionResponse = SignalWorkflowExecutionResponse
 
-class WakeWorkflowExecutionRequest(google.protobuf.message.Message):
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    NAMESPACE_FIELD_NUMBER: builtins.int
-    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
-    WAKE_FIELD_NUMBER: builtins.int
-    IDENTITY_FIELD_NUMBER: builtins.int
-    namespace: builtins.str
-    @property
-    def workflow_execution(
-        self,
-    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
-        """The Workflow to wake. `run_id` is optional. When set, the wake goes to
-        the current run of the chain that run belongs to, so a sender that
-        learned a run id before a continue-as-new still reaches the consumer,
-        and it is refused with NotFound once that chain has ended. When unset,
-        the wake goes to the current run under the Workflow Id, whichever chain.
-        """
-    @property
-    def wake(self) -> temporalio.api.workflow.v1.message_pb2.Wake: ...
-    identity: builtins.str
-    """The identity of the sender, for metrics and logs."""
-    def __init__(
-        self,
-        *,
-        namespace: builtins.str = ...,
-        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
-        | None = ...,
-        wake: temporalio.api.workflow.v1.message_pb2.Wake | None = ...,
-        identity: builtins.str = ...,
-    ) -> None: ...
-    def HasField(
-        self,
-        field_name: typing_extensions.Literal[
-            "wake", b"wake", "workflow_execution", b"workflow_execution"
-        ],
-    ) -> builtins.bool: ...
-    def ClearField(
-        self,
-        field_name: typing_extensions.Literal[
-            "identity",
-            b"identity",
-            "namespace",
-            b"namespace",
-            "wake",
-            b"wake",
-            "workflow_execution",
-            b"workflow_execution",
-        ],
-    ) -> None: ...
-
-global___WakeWorkflowExecutionRequest = WakeWorkflowExecutionRequest
-
-class WakeWorkflowExecutionResponse(google.protobuf.message.Message):
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    RUN_ID_FIELD_NUMBER: builtins.int
-    FOLDED_FIELD_NUMBER: builtins.int
-    run_id: builtins.str
-    """The run the wake was stored on."""
-    folded: builtins.bool
-    """True when a wake for the source was already pending and no task had
-    received it yet, so this one changed nothing but possibly the position
-    and no new task results from it.
-    """
-    def __init__(
-        self,
-        *,
-        run_id: builtins.str = ...,
-        folded: builtins.bool = ...,
-    ) -> None: ...
-    def ClearField(
-        self,
-        field_name: typing_extensions.Literal["folded", b"folded", "run_id", b"run_id"],
-    ) -> None: ...
-
-global___WakeWorkflowExecutionResponse = WakeWorkflowExecutionResponse
-
 class NotifyChannelRequest(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -3435,6 +3341,7 @@ class NotifyChannelRequest(google.protobuf.message.Message):
     NOTIFICATION_FIELD_NUMBER: builtins.int
     IDENTITY_FIELD_NUMBER: builtins.int
     REQUEST_ID_FIELD_NUMBER: builtins.int
+    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     @property
     def notification(
@@ -3444,6 +3351,14 @@ class NotifyChannelRequest(google.protobuf.message.Message):
     """The identity of the writer, for metrics and logs."""
     request_id: builtins.str
     """Used to de-dupe a retried notification."""
+    @property
+    def workflow_execution(
+        self,
+    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """When set, the call addresses the channel linked to this workflow; `run_id`
+        is optional and resolves to the chain's current run, as a Signal does.
+        When unset, the call addresses the independent channel of that name.
+        """
     def __init__(
         self,
         *,
@@ -3452,9 +3367,14 @@ class NotifyChannelRequest(google.protobuf.message.Message):
         | None = ...,
         identity: builtins.str = ...,
         request_id: builtins.str = ...,
+        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
+        | None = ...,
     ) -> None: ...
     def HasField(
-        self, field_name: typing_extensions.Literal["notification", b"notification"]
+        self,
+        field_name: typing_extensions.Literal[
+            "notification", b"notification", "workflow_execution", b"workflow_execution"
+        ],
     ) -> builtins.bool: ...
     def ClearField(
         self,
@@ -3467,6 +3387,8 @@ class NotifyChannelRequest(google.protobuf.message.Message):
             b"notification",
             "request_id",
             b"request_id",
+            "workflow_execution",
+            b"workflow_execution",
         ],
     ) -> None: ...
 
@@ -3499,6 +3421,7 @@ class RegisterChannelListenerRequest(google.protobuf.message.Message):
     CALLBACK_FIELD_NUMBER: builtins.int
     REQUEST_ID_FIELD_NUMBER: builtins.int
     IDENTITY_FIELD_NUMBER: builtins.int
+    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     channel: builtins.str
     @property
@@ -3508,6 +3431,14 @@ class RegisterChannelListenerRequest(google.protobuf.message.Message):
     """Used to de-dupe a retried registration."""
     identity: builtins.str
     """The identity of the caller, for metrics and logs."""
+    @property
+    def workflow_execution(
+        self,
+    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """When set, the call addresses the channel linked to this workflow; `run_id`
+        is optional and resolves to the chain's current run, as a Signal does.
+        When unset, the call addresses the independent channel of that name.
+        """
     def __init__(
         self,
         *,
@@ -3516,9 +3447,14 @@ class RegisterChannelListenerRequest(google.protobuf.message.Message):
         callback: temporalio.api.common.v1.message_pb2.Callback | None = ...,
         request_id: builtins.str = ...,
         identity: builtins.str = ...,
+        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
+        | None = ...,
     ) -> None: ...
     def HasField(
-        self, field_name: typing_extensions.Literal["callback", b"callback"]
+        self,
+        field_name: typing_extensions.Literal[
+            "callback", b"callback", "workflow_execution", b"workflow_execution"
+        ],
     ) -> builtins.bool: ...
     def ClearField(
         self,
@@ -3533,6 +3469,8 @@ class RegisterChannelListenerRequest(google.protobuf.message.Message):
             b"namespace",
             "request_id",
             b"request_id",
+            "workflow_execution",
+            b"workflow_execution",
         ],
     ) -> None: ...
 
@@ -3561,11 +3499,20 @@ class UnregisterChannelListenerRequest(google.protobuf.message.Message):
     CHANNEL_FIELD_NUMBER: builtins.int
     LISTENER_ID_FIELD_NUMBER: builtins.int
     IDENTITY_FIELD_NUMBER: builtins.int
+    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     channel: builtins.str
     listener_id: builtins.str
     identity: builtins.str
     """The identity of the caller, for metrics and logs."""
+    @property
+    def workflow_execution(
+        self,
+    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """When set, the call addresses the channel linked to this workflow; `run_id`
+        is optional and resolves to the chain's current run, as a Signal does.
+        When unset, the call addresses the independent channel of that name.
+        """
     def __init__(
         self,
         *,
@@ -3573,7 +3520,15 @@ class UnregisterChannelListenerRequest(google.protobuf.message.Message):
         channel: builtins.str = ...,
         listener_id: builtins.str = ...,
         identity: builtins.str = ...,
+        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "workflow_execution", b"workflow_execution"
+        ],
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -3585,6 +3540,8 @@ class UnregisterChannelListenerRequest(google.protobuf.message.Message):
             b"listener_id",
             "namespace",
             b"namespace",
+            "workflow_execution",
+            b"workflow_execution",
         ],
     ) -> None: ...
 
@@ -3607,6 +3564,7 @@ class PollChannelRequest(google.protobuf.message.Message):
     AFTER_COUNTER_FIELD_NUMBER: builtins.int
     WAIT_FIELD_NUMBER: builtins.int
     MAX_NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     channel: builtins.str
     after_counter: builtins.int
@@ -3623,6 +3581,14 @@ class PollChannelRequest(google.protobuf.message.Message):
     """At most this many notifications are returned. Zero means the server's
     default.
     """
+    @property
+    def workflow_execution(
+        self,
+    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """When set, the call addresses the channel linked to this workflow; `run_id`
+        is optional and resolves to the chain's current run, as a Signal does.
+        When unset, the call addresses the independent channel of that name.
+        """
     def __init__(
         self,
         *,
@@ -3631,9 +3597,14 @@ class PollChannelRequest(google.protobuf.message.Message):
         after_counter: builtins.int = ...,
         wait: google.protobuf.duration_pb2.Duration | None = ...,
         max_notifications: builtins.int = ...,
+        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
+        | None = ...,
     ) -> None: ...
     def HasField(
-        self, field_name: typing_extensions.Literal["wait", b"wait"]
+        self,
+        field_name: typing_extensions.Literal[
+            "wait", b"wait", "workflow_execution", b"workflow_execution"
+        ],
     ) -> builtins.bool: ...
     def ClearField(
         self,
@@ -3648,6 +3619,8 @@ class PollChannelRequest(google.protobuf.message.Message):
             b"namespace",
             "wait",
             b"wait",
+            "workflow_execution",
+            b"workflow_execution",
         ],
     ) -> None: ...
 
@@ -3682,18 +3655,40 @@ class DescribeChannelRequest(google.protobuf.message.Message):
 
     NAMESPACE_FIELD_NUMBER: builtins.int
     CHANNEL_FIELD_NUMBER: builtins.int
+    WORKFLOW_EXECUTION_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     channel: builtins.str
+    @property
+    def workflow_execution(
+        self,
+    ) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """When set, the call addresses the channel linked to this workflow; `run_id`
+        is optional and resolves to the chain's current run, as a Signal does.
+        When unset, the call addresses the independent channel of that name.
+        """
     def __init__(
         self,
         *,
         namespace: builtins.str = ...,
         channel: builtins.str = ...,
+        workflow_execution: temporalio.api.common.v1.message_pb2.WorkflowExecution
+        | None = ...,
     ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "workflow_execution", b"workflow_execution"
+        ],
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "channel", b"channel", "namespace", b"namespace"
+            "channel",
+            b"channel",
+            "namespace",
+            b"namespace",
+            "workflow_execution",
+            b"workflow_execution",
         ],
     ) -> None: ...
 
@@ -3705,6 +3700,8 @@ class DescribeChannelResponse(google.protobuf.message.Message):
     LISTENERS_FIELD_NUMBER: builtins.int
     LATEST_FIELD_NUMBER: builtins.int
     RETAINED_COUNT_FIELD_NUMBER: builtins.int
+    KIND_FIELD_NUMBER: builtins.int
+    LINKED_TO_FIELD_NUMBER: builtins.int
     @property
     def listeners(
         self,
@@ -3716,6 +3713,14 @@ class DescribeChannelResponse(google.protobuf.message.Message):
         """The notification with the highest counter the channel retains."""
     retained_count: builtins.int
     """How many notifications the channel retains for pollers."""
+    kind: temporalio.api.notification.v1.message_pb2.ChannelKind.ValueType
+    @property
+    def linked_to(self) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """The owner of a linked channel and the run that holds it. Empty for an
+        independent channel.
+        (-- api-linter: core::0140::prepositions=disabled
+            aip.dev/not-precedent: "to" names the owner the channel is linked to. --)
+        """
     def __init__(
         self,
         *,
@@ -3725,15 +3730,24 @@ class DescribeChannelResponse(google.protobuf.message.Message):
         | None = ...,
         latest: temporalio.api.notification.v1.message_pb2.Notification | None = ...,
         retained_count: builtins.int = ...,
+        kind: temporalio.api.notification.v1.message_pb2.ChannelKind.ValueType = ...,
+        linked_to: temporalio.api.common.v1.message_pb2.WorkflowExecution | None = ...,
     ) -> None: ...
     def HasField(
-        self, field_name: typing_extensions.Literal["latest", b"latest"]
+        self,
+        field_name: typing_extensions.Literal[
+            "latest", b"latest", "linked_to", b"linked_to"
+        ],
     ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "kind",
+            b"kind",
             "latest",
             b"latest",
+            "linked_to",
+            b"linked_to",
             "listeners",
             b"listeners",
             "retained_count",
