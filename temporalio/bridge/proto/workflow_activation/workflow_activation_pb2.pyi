@@ -22,6 +22,7 @@ import temporalio.api.common.v1.message_pb2
 import temporalio.api.enums.v1.failed_cause_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
 import temporalio.api.stream.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.bridge.proto.activity_result.activity_result_pb2
@@ -46,7 +47,7 @@ class WorkflowActivation(google.protobuf.message.Message):
     1. init workflow
     2. patches
     3. random-seed-updates
-    4. signals/updates
+    4. signals/updates/channel notifications
     5. all others
     6. local activity resolutions
     7. queries
@@ -56,6 +57,8 @@ class WorkflowActivation(google.protobuf.message.Message):
     * Patches are expected to apply to the entire activation
     * Signal and update handlers should be invoked before workflow routines are iterated. That is to
      say before the users' main workflow function and anything spawned by it is allowed to continue.
+    * Channel notifications are input from outside the workflow, like signals, so they go with
+     them and ahead of the stream ranges among the other jobs.
     * Local activities resolutions go after other normal jobs because while *not* replaying, they
      will always take longer than anything else that produces an immediate job (which is
      effectively instant). When *replaying* we need to scan ahead for LA markers so that we can
@@ -238,6 +241,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     DELIVER_STREAM_RECORDS_FIELD_NUMBER: builtins.int
+    NOTIFICATIONS_RECEIVED_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -306,6 +310,9 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         A range of a stream the workflow subscribed to.
         """
     @property
+    def notifications_received(self) -> global___NotificationsReceived:
+        """Notifications from the channels the workflow subscribed to."""
+    @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
         cache after performing the activation. It is guaranteed that this will be the only job
@@ -334,6 +341,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
         deliver_stream_records: global___DeliverStreamRecords | None = ...,
+        notifications_received: global___NotificationsReceived | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -349,6 +357,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
+            "notifications_received",
+            b"notifications_received",
             "notify_has_patch",
             b"notify_has_patch",
             "query_workflow",
@@ -390,6 +400,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
+            "notifications_received",
+            b"notifications_received",
             "notify_has_patch",
             b"notify_has_patch",
             "query_workflow",
@@ -438,6 +450,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
             "deliver_stream_records",
+            "notifications_received",
             "remove_from_cache",
         ]
         | None
@@ -501,6 +514,37 @@ class DeliverStreamRecords(google.protobuf.message.Message):
     ) -> None: ...
 
 global___DeliverStreamRecords = DeliverStreamRecords
+
+class NotificationsReceived(google.protobuf.message.Message):
+    """Hand a workflow the notifications the server folded for its channels.
+
+    They come from the scheduled event of the Workflow Task this activation
+    belongs to. History is the record, so a replay yields the same job with the
+    same notifications at the same point.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]: ...
+    def __init__(
+        self,
+        *,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
+    ) -> None: ...
+
+global___NotificationsReceived = NotificationsReceived
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""
