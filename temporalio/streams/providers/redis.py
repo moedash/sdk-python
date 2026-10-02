@@ -1951,10 +1951,12 @@ class RedisStreams(ProviderPlugin):
                 is trimmed before its commit; a batch at or above it is
                 refused where it is staged.
             wake_transport: How a producer and a worker wake a workflow after
-                an append. ``"wake"`` uses the server's wake call, which
-                records no History event; ``"signal"`` uses the reserved
-                Signal, which does; ``"auto"`` tries the wake call and falls
-                back to the Signal on a server without it.
+                an append. ``"channel"`` notifies the stream's channel, which
+                wakes every subscribed reader with the entry id as the
+                position; ``"wake"`` uses the server's deprecated wake call;
+                ``"signal"`` uses the reserved Signal, which writes a History
+                event; ``"auto"`` tries them in that order and steps down on
+                a server without the call.
         """
         # Checked against the alias so an untyped caller still gets a ValueError.
         if wake_transport not in get_args(WakeTransport):

@@ -208,6 +208,8 @@ def test_the_wake_transport_reaches_the_backend_both_sides_share():
     assert backend.wake_transport == "signal"
     assert backend.wake_counter_for(Offset("2-1")) == _wake_counter(Offset("2-1"))
     assert RedisStreams(client=_NoRedis())._require_backend().wake_transport == "auto"
+    channel = RedisStreams(client=_NoRedis(), wake_transport="channel")
+    assert channel._require_backend().wake_transport == "channel"
 
 
 def test_an_unknown_wake_transport_is_refused_at_construction():
