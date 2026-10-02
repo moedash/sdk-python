@@ -735,9 +735,12 @@ async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
             == 1
         )
         assert await asyncio.wait_for(handle.result(), 30) == 2
-        polled = await client.poll_channel(
-            channel, workflow_id=handle.id, after_counter=1, wait=False
-        )
-        assert [n.counter for n in polled] == [2]
+        # The ring went with the run, so a poll after the close finds nothing
+        # to read.
+        with pytest.raises(RPCError) as closed:
+            await client.poll_channel(
+                channel, workflow_id=handle.id, after_counter=1, wait=False
+            )
+        assert closed.value.status == RPCStatusCode.NOT_FOUND
     finally:
         await _stop(handle, worker, running)
