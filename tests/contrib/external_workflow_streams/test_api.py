@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio.contrib.external_workflow_streams import _api
 from temporalio.contrib.external_workflow_streams._api import (
     DEFAULT_IDLE_TIMEOUT,
