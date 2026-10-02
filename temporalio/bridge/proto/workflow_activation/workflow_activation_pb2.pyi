@@ -21,6 +21,7 @@ import google.protobuf.timestamp_pb2
 import temporalio.api.common.v1.message_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.bridge.proto.activity_result.activity_result_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
@@ -235,6 +236,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     DO_UPDATE_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    NOTIFICATIONS_RECEIVED_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -295,6 +297,12 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     def resolve_nexus_operation(self) -> global___ResolveNexusOperation:
         """A nexus operation resolved."""
     @property
+    def notifications_received(self) -> global___NotificationsReceived:
+        """17 to 21 are taken by the stream jobs, which share this message.
+
+        Notifications from the channels the workflow subscribed to.
+        """
+    @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
         cache after performing the activation. It is guaranteed that this will be the only job
@@ -322,6 +330,7 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         do_update: global___DoUpdate | None = ...,
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
+        notifications_received: global___NotificationsReceived | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -335,6 +344,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
+            "notifications_received",
+            b"notifications_received",
             "notify_has_patch",
             b"notify_has_patch",
             "query_workflow",
@@ -374,6 +385,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
+            "notifications_received",
+            b"notifications_received",
             "notify_has_patch",
             b"notify_has_patch",
             "query_workflow",
@@ -421,12 +434,44 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "do_update",
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
+            "notifications_received",
             "remove_from_cache",
         ]
         | None
     ): ...
 
 global___WorkflowActivationJob = WorkflowActivationJob
+
+class NotificationsReceived(google.protobuf.message.Message):
+    """Hand a workflow the notifications the server folded for its channels.
+
+    They come from the scheduled event of the Workflow Task this activation
+    belongs to. History is the record, so a replay yields the same job with the
+    same notifications at the same point.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]: ...
+    def __init__(
+        self,
+        *,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
+    ) -> None: ...
+
+global___NotificationsReceived = NotificationsReceived
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""

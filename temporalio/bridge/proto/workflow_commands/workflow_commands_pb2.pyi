@@ -103,6 +103,7 @@ class WorkflowCommand(google.protobuf.message.Message):
     UPDATE_RESPONSE_FIELD_NUMBER: builtins.int
     SCHEDULE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     REQUEST_CANCEL_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    SUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """User metadata that may or may not be persisted into history depending on the command type.
@@ -177,6 +178,9 @@ class WorkflowCommand(google.protobuf.message.Message):
     def request_cancel_nexus_operation(
         self,
     ) -> global___RequestCancelNexusOperation: ...
+    @property
+    def subscribe_notification_channel(self) -> global___SubscribeNotificationChannel:
+        """23 to 30 are taken by the stream commands, which share this message."""
     def __init__(
         self,
         *,
@@ -214,6 +218,8 @@ class WorkflowCommand(google.protobuf.message.Message):
         update_response: global___UpdateResponse | None = ...,
         schedule_nexus_operation: global___ScheduleNexusOperation | None = ...,
         request_cancel_nexus_operation: global___RequestCancelNexusOperation
+        | None = ...,
+        subscribe_notification_channel: global___SubscribeNotificationChannel
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -259,6 +265,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"start_child_workflow_execution",
             "start_timer",
             b"start_timer",
+            "subscribe_notification_channel",
+            b"subscribe_notification_channel",
             "update_response",
             b"update_response",
             "upsert_workflow_search_attributes",
@@ -314,6 +322,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"start_child_workflow_execution",
             "start_timer",
             b"start_timer",
+            "subscribe_notification_channel",
+            b"subscribe_notification_channel",
             "update_response",
             b"update_response",
             "upsert_workflow_search_attributes",
@@ -350,11 +360,36 @@ class WorkflowCommand(google.protobuf.message.Message):
             "update_response",
             "schedule_nexus_operation",
             "request_cancel_nexus_operation",
+            "subscribe_notification_channel",
         ]
         | None
     ): ...
 
 global___WorkflowCommand = WorkflowCommand
+
+class SubscribeNotificationChannel(google.protobuf.message.Message):
+    """Subscribe this workflow to a notification channel, so the scheduled event of
+    each later Workflow Task carries the notifications folded for it.
+
+    The notifications live in History rather than arriving by a side channel, so
+    a replay reads the same ones the live run saw.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    CHANNEL_FIELD_NUMBER: builtins.int
+    channel: builtins.str
+    """Name of the channel, scoped to the namespace."""
+    def __init__(
+        self,
+        *,
+        channel: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["channel", b"channel"]
+    ) -> None: ...
+
+global___SubscribeNotificationChannel = SubscribeNotificationChannel
 
 class StartTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
