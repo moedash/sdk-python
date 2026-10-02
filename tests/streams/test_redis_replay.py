@@ -138,75 +138,6 @@ async def test_interface_loop_over_redis(live_client: Client, provider: RedisStr
         assert all(r.producer_id == "model" and r.attempt == 1 for r in inputs)
 
 
-async def _serves_wakes(client: Client) -> bool:
-    """Whether the server implements the wake call, probed with a wake to nobody."""
-    import temporalio.api.common.v1
-    import temporalio.api.workflow.v1
-    import temporalio.api.workflowservice.v1
-    from temporalio.service import RPCError, RPCStatusCode
-
-    try:
-        await client.workflow_service.wake_workflow_execution(
-            temporalio.api.workflowservice.v1.WakeWorkflowExecutionRequest(
-                namespace=client.namespace,
-                workflow_execution=temporalio.api.common.v1.WorkflowExecution(
-                    workflow_id=f"streams-redis-probe-{uuid.uuid4().hex}"
-                ),
-                wake=temporalio.api.workflow.v1.Wake(source="probe", counter=1),
-            )
-        )
-    except RPCError as error:
-        return error.status != RPCStatusCode.UNIMPLEMENTED
-    return True
-
-
-async def test_an_outside_producer_wakes_the_reader_without_a_signal(
-    live_client: Client,
-):
-    if not await _serves_wakes(live_client):
-        pytest.skip("the server does not implement WakeWorkflowExecution")
-    # The wake transport rather than "auto", so a fallback to the Signal fails
-    # the History check below instead of passing quietly.
-    provider = RedisStreams(
-        url=redis_url(),
-        key_prefix=f"streams-redis-{uuid.uuid4().hex}",
-        wake_transport="wake",
-    )
-    workflow_id = f"streams-redis-wake-{uuid.uuid4().hex}"
-    try:
-        async with Worker(
-            live_client,
-            task_queue=f"tq-{workflow_id}",
-            workflows=[ContractLoop],
-            plugins=[provider],
-            max_cached_workflows=100,
-        ):
-            handle = await live_client.start_workflow(
-                ContractLoop.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
-            )
-            stream = provider.get_stream_handle(live_client, workflow_id)
-            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
-            # Spaced past the reader's idle timeout, so the reader parks between
-            # appends and only a wake from outside can move it.
-            for n in (1, 2, 3):
-                await producer.append({"n": n})
-                await asyncio.sleep(2)
-            await producer.finish()
-
-            result = await asyncio.wait_for(handle.result(), 60)
-            assert [entry.get("n") for entry in result[:3]] == [1, 2, 3]
-            assert result[3] == {"kind": "finish", "producer": "model"}
-
-            signalled = [
-                event
-                async for event in handle.fetch_history_events()
-                if event.HasField("workflow_execution_signaled_event_attributes")
-            ]
-            assert signalled == []
-    finally:
-        await provider.close()
-
-
 async def test_an_outside_producer_and_the_workflow_share_a_topic(
     live_client: Client, provider: RedisStreams
 ):
@@ -1329,23 +1260,64 @@ async def test_a_batch_staged_for_a_rejected_task_does_not_stay_in_the_log(
         await provider.close()
 
 
-async def _serves_channels(client: Client) -> bool:
-    """Whether the server implements notification channels, asked of a probe channel."""
-    from temporalio.contrib.external_workflow_streams._wake import server_has_channels
+async def _channel_support(client: Client) -> Any:
+    """What the server offers the readers: no channels, independent ones or linked ones."""
+    from tests.contrib.external_workflow_streams.conftest import server_channel_support
 
-    return bool(await server_has_channels(client))
+    return await server_channel_support(client)
 
 
 @pytest.mark.needs_channel_server
 async def test_an_outside_producer_wakes_the_reader_through_the_channel(
     live_client: Client,
 ):
-    if not await _serves_channels(live_client):
+    from temporalio.contrib.external_workflow_streams._wake import ChannelSupport
+
+    support = await _channel_support(live_client)
+    if support is ChannelSupport.NONE:
         pytest.skip("the server does not implement notification channels")
+    if support is ChannelSupport.LINKED:
+        pytest.skip("a workflow-owned stream listens on its linked channel there")
+    events = await _consume_three_through_the_channel(live_client)
+    subscribed = _subscribed(events)
+    assert len(subscribed) == 1, "the run subscribes once per channel"
+    notified = _notified(events)
+    assert {n.channel for n in notified} == set(subscribed)
+    assert not any(n.HasField("linked_to") for n in notified)
+
+
+@pytest.mark.needs_linked_server
+async def test_an_outside_producer_wakes_the_reader_through_its_linked_channel(
+    live_client: Client,
+):
+    """The stream's channel is the reading workflow's own, so nothing subscribes."""
+    from temporalio.contrib.external_workflow_streams._wake import ChannelSupport
+
+    if await _channel_support(live_client) is not ChannelSupport.LINKED:
+        pytest.skip("the server does not serve channels linked to a workflow")
+    events = await _consume_three_through_the_channel(live_client)
+    assert _subscribed(events) == [], "the owner is the listener by construction"
+    notified = _notified(events)
+    assert len({n.channel for n in notified}) == 1
+    [workflow_id] = {
+        e.workflow_execution_started_event_attributes.workflow_id
+        for e in events
+        if e.HasField("workflow_execution_started_event_attributes")
+    } or {""}
+    assert {n.linked_to.workflow_id for n in notified} == {workflow_id}
+
+
+async def _consume_three_through_the_channel(live_client: Client) -> list[Any]:
+    """Runs the contract loop with three spaced appends and returns its History.
+
+    The channel outright rather than ``"auto"``, so a step down to the Signal
+    fails the checks here instead of passing quietly. Common to both channel
+    kinds: no Signal, a notification per wake, and the entry id as the
+    position with the counter derived from it, so producers and workers order
+    the same wakes alike.
+    """
     from temporalio.contrib.external_workflow_streams._record import Offset
 
-    # The channel outright rather than "auto", so a step down to the wake call
-    # or the Signal fails the History checks below instead of passing quietly.
     provider = RedisStreams(
         url=redis_url(),
         key_prefix=f"streams-redis-{uuid.uuid4().hex}",
@@ -1377,34 +1349,34 @@ async def test_an_outside_producer_wakes_the_reader_through_the_channel(
             assert result[3] == {"kind": "finish", "producer": "model"}
 
             events = [e async for e in handle.fetch_history_events()]
-            signalled = [
-                e
-                for e in events
-                if e.HasField("workflow_execution_signaled_event_attributes")
-            ]
-            assert signalled == [], "a Signal woke the reader"
-            subscribed = [
-                e.workflow_notification_channel_subscribed_event_attributes.channel
-                for e in events
-                if e.HasField(
-                    "workflow_notification_channel_subscribed_event_attributes"
-                )
-            ]
-            assert len(subscribed) == 1, "the run subscribes once per channel"
-            notified = [
-                n
-                for e in events
-                if e.HasField("workflow_task_scheduled_event_attributes")
-                for n in e.workflow_task_scheduled_event_attributes.notifications
-            ]
-            assert notified, "no Workflow Task was scheduled with a notification"
-            assert {n.channel for n in notified} == set(subscribed)
-            # The position is the appended entry id and the counter derives
-            # from it, so producers and workers order the same wakes alike.
-            positioned = [note for note in notified if note.position]
-            assert positioned, "no notification carried the store's position"
-            for note in positioned:
-                offset = Offset(note.position.decode())
-                assert note.counter == redis_provider._wake_counter(offset)
     finally:
         await provider.close()
+    signalled = [
+        e for e in events if e.HasField("workflow_execution_signaled_event_attributes")
+    ]
+    assert signalled == [], "a Signal woke the reader"
+    notified = _notified(events)
+    assert notified, "no Workflow Task was scheduled with a notification"
+    positioned = [note for note in notified if note.position]
+    assert positioned, "no notification carried the store's position"
+    for note in positioned:
+        offset = Offset(note.position.decode())
+        assert note.counter == redis_provider._wake_counter(offset)
+    return events
+
+
+def _subscribed(events: list[Any]) -> list[str]:
+    return [
+        e.workflow_notification_channel_subscribed_event_attributes.channel
+        for e in events
+        if e.HasField("workflow_notification_channel_subscribed_event_attributes")
+    ]
+
+
+def _notified(events: list[Any]) -> list[Any]:
+    return [
+        n
+        for e in events
+        if e.HasField("workflow_task_scheduled_event_attributes")
+        for n in e.workflow_task_scheduled_event_attributes.notifications
+    ]
