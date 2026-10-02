@@ -39,6 +39,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "wakes_by_notification: the case needs an outside append to wake a parked "
+        "workflow reader through the server",
+    )
+    config.addinivalue_line(
+        "markers",
         "needs_channel_server: the case needs a server that serves notification "
         "channels, named with -E host:port",
     )

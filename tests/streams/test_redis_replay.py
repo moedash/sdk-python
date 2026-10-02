@@ -925,16 +925,54 @@ async def _completed_tasks(client: Client, workflow_id: str, run_id: str) -> lis
     ]
 
 
-async def _reset_at(client: Client, workflow_id: str, run_id: str, *, task: int) -> str:
-    """Reset ``run_id`` at its ``task``-th completed Workflow Task; the new run id.
+_MARKER_DETAILS_KEY = "external_stream"
+
+
+async def _consuming_tasks(client: Client, workflow_id: str, run_id: str) -> list[int]:
+    """The completed Workflow Tasks whose marker delivered a record, in order.
+
+    Read from the markers rather than counted by position: which task opens
+    the reader, and whether that task can stay open for the first record,
+    depends on the server, so a task index names a different task from one
+    server to the next while the marker says what each task consumed.
+    """
+    from temporalio.bridge.proto.external_data import ExternalStreamMarkerData
+    from temporalio.contrib.external_workflow_streams._annotation import (
+        decode_annotation,
+    )
+
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    completed: int | None = None
+    consuming: list[int] = []
+    async for event in handle.fetch_history_events():
+        if event.HasField("workflow_task_completed_event_attributes"):
+            completed = event.event_id
+            continue
+        if not event.HasField("marker_recorded_event_attributes"):
+            continue
+        details = event.marker_recorded_event_attributes.details
+        if _MARKER_DETAILS_KEY not in details or completed is None:
+            continue
+        data = ExternalStreamMarkerData()
+        data.ParseFromString(details[_MARKER_DETAILS_KEY].payloads[0].data)
+        annotation = decode_annotation(data.replay_annotation)
+        if any(segment.runs for segment in annotation.segments):
+            consuming.append(completed)
+    return consuming
+
+
+async def _reset_at(
+    client: Client, workflow_id: str, run_id: str, *, finish_event_id: int
+) -> str:
+    """Reset ``run_id`` at the Workflow Task completed by ``finish_event_id``.
 
     The server keeps History up to that task's completion and runs the task
     again, so the tasks before it are inherited and the task itself is not.
+    Returns the new run id.
     """
     from temporalio.api.common.v1 import WorkflowExecution
     from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 
-    completed = await _completed_tasks(client, workflow_id, run_id)
     response = await client.workflow_service.reset_workflow_execution(
         ResetWorkflowExecutionRequest(
             namespace=client.namespace,
@@ -942,7 +980,7 @@ async def _reset_at(client: Client, workflow_id: str, run_id: str, *, task: int)
                 workflow_id=workflow_id, run_id=run_id
             ),
             reason="streams: reset mid-stream",
-            workflow_task_finish_event_id=completed[task],
+            workflow_task_finish_event_id=finish_event_id,
             request_id=uuid.uuid4().hex,
         )
     )
@@ -952,7 +990,7 @@ async def _reset_at(client: Client, workflow_id: str, run_id: str, *, task: int)
 async def _consume_two_then_nudge(
     live_client: Client, provider: RedisStreams, workflow_id: str, task_queue: str
 ) -> tuple[str, Any, Any]:
-    """Two records in two tasks, then a task that consumes nothing; the base run."""
+    """Two records, each consumed by a task of its own, then a nudged task; the base run."""
     handle = await live_client.start_workflow(
         NudgedLoop.run, id=workflow_id, task_queue=task_queue
     )
@@ -992,7 +1030,10 @@ async def test_a_reset_run_replays_the_inherited_ranges_and_continues(
         base_run, stream, producer = await _consume_two_then_nudge(
             live_client, provider, workflow_id, f"tq-{workflow_id}"
         )
-        reset_run = await _reset_at(live_client, workflow_id, base_run, task=-1)
+        last_task = (await _completed_tasks(live_client, workflow_id, base_run))[-1]
+        reset_run = await _reset_at(
+            live_client, workflow_id, base_run, finish_event_id=last_task
+        )
         assert reset_run != base_run
 
         await producer.append({"n": 3})
@@ -1016,8 +1057,9 @@ async def test_a_reset_run_replays_the_inherited_ranges_and_continues(
 async def test_a_reset_point_task_is_run_again_from_the_log(
     live_client: Client, provider: RedisStreams
 ):
-    # Reset at the second consuming task's completion: the first task is
-    # inherited and the second is run again. The record it consumed is still
+    # Reset at the completion of the task that consumed the second record: the
+    # tasks before it are inherited, the one that consumed the first record
+    # among them, and this one is run again. The record it consumed is still
     # in the log, so the reset run reads it again and publishes again, and an
     # outside reader sees that decision from both runs.
     workflow_id = f"streams-redis-reset-rerun-{uuid.uuid4().hex}"
@@ -1031,7 +1073,10 @@ async def test_a_reset_point_task_is_run_again_from_the_log(
         base_run, stream, producer = await _consume_two_then_nudge(
             live_client, provider, workflow_id, f"tq-{workflow_id}"
         )
-        reset_run = await _reset_at(live_client, workflow_id, base_run, task=1)
+        second = (await _consuming_tasks(live_client, workflow_id, base_run))[1]
+        reset_run = await _reset_at(
+            live_client, workflow_id, base_run, finish_event_id=second
+        )
 
         await producer.append({"n": 3})
         await producer.finish()
@@ -1280,5 +1325,86 @@ async def test_a_batch_staged_for_a_rejected_task_does_not_stay_in_the_log(
                 (RecordKind.DATA, {"from": "workflow"}),
                 (RecordKind.FINISH, None),
             ]
+    finally:
+        await provider.close()
+
+
+async def _serves_channels(client: Client) -> bool:
+    """Whether the server implements notification channels, asked of a probe channel."""
+    from temporalio.contrib.external_workflow_streams._wake import server_has_channels
+
+    return bool(await server_has_channels(client))
+
+
+@pytest.mark.needs_channel_server
+async def test_an_outside_producer_wakes_the_reader_through_the_channel(
+    live_client: Client,
+):
+    if not await _serves_channels(live_client):
+        pytest.skip("the server does not implement notification channels")
+    from temporalio.contrib.external_workflow_streams._record import Offset
+
+    # The channel outright rather than "auto", so a step down to the wake call
+    # or the Signal fails the History checks below instead of passing quietly.
+    provider = RedisStreams(
+        url=redis_url(),
+        key_prefix=f"streams-redis-{uuid.uuid4().hex}",
+        wake_transport="channel",
+    )
+    workflow_id = f"streams-redis-channel-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[ContractLoop],
+            plugins=[provider],
+            max_cached_workflows=100,
+        ):
+            handle = await live_client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+            )
+            stream = provider.get_stream_handle(live_client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+            # Spaced past the reader's idle timeout, so the reader parks between
+            # appends and only a notification from outside can move it.
+            for n in (1, 2, 3):
+                await producer.append({"n": n})
+                await asyncio.sleep(2)
+            await producer.finish()
+
+            result = await asyncio.wait_for(handle.result(), 60)
+            assert [entry.get("n") for entry in result[:3]] == [1, 2, 3]
+            assert result[3] == {"kind": "finish", "producer": "model"}
+
+            events = [e async for e in handle.fetch_history_events()]
+            signalled = [
+                e
+                for e in events
+                if e.HasField("workflow_execution_signaled_event_attributes")
+            ]
+            assert signalled == [], "a Signal woke the reader"
+            subscribed = [
+                e.workflow_notification_channel_subscribed_event_attributes.channel
+                for e in events
+                if e.HasField(
+                    "workflow_notification_channel_subscribed_event_attributes"
+                )
+            ]
+            assert len(subscribed) == 1, "the run subscribes once per channel"
+            notified = [
+                n
+                for e in events
+                if e.HasField("workflow_task_scheduled_event_attributes")
+                for n in e.workflow_task_scheduled_event_attributes.notifications
+            ]
+            assert notified, "no Workflow Task was scheduled with a notification"
+            assert {n.channel for n in notified} == set(subscribed)
+            # The position is the appended entry id and the counter derives
+            # from it, so producers and workers order the same wakes alike.
+            positioned = [note for note in notified if note.position]
+            assert positioned, "no notification carried the store's position"
+            for note in positioned:
+                offset = Offset(note.position.decode())
+                assert note.counter == redis_provider._wake_counter(offset)
     finally:
         await provider.close()

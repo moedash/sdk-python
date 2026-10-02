@@ -138,7 +138,11 @@ class LeftWithNoOpenTaskWorkflow:
 
 @pytest.fixture
 def backend() -> MemoryStreamBackend:
-    return MemoryStreamBackend()
+    backend = MemoryStreamBackend()
+    # These cases read the reserved Signal's envelope, so the transport is
+    # pinned to it rather than left to step down from a server that has more.
+    backend.wake_transport = "signal"
+    return backend
 
 
 async def history(handle: Any) -> list[Any]:
@@ -530,6 +534,7 @@ async def _park_is_installed(backend: MemoryStreamBackend, key: StreamKey) -> bo
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.usefixtures("first_task_retained")
 async def test_a_wake_that_resolves_a_park_removes_its_intent(
     client: Client, backend: MemoryStreamBackend
 ) -> None:
@@ -567,6 +572,7 @@ async def test_a_wake_that_resolves_a_park_removes_its_intent(
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.usefixtures("first_task_retained")
 async def test_the_shutdown_probe_is_asked_while_core_still_holds_the_run(
     client: Client, backend: MemoryStreamBackend
 ) -> None:

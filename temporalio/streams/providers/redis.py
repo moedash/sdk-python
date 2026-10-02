@@ -133,7 +133,7 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import Any, Final, Generic, TypeVar
+from typing import Any, Final, Generic, TypeVar, get_args
 from urllib.parse import quote
 
 from google.protobuf.message import DecodeError
@@ -796,6 +796,16 @@ class _TopicLogBackend(RedisStreamBackend):
     def wake_counter_for(self, offset: Offset) -> int:
         """The entry id's own order, so producers and workers rank wakes alike."""
         return _wake_counter(offset)
+
+    def wake_counter_now(self) -> int:
+        """The entry id rule applied to the clock, with the largest sequence.
+
+        Above every entry appended before now, so a wake that reports no
+        position, the worker's shutdown sweep, is not folded under the
+        channel's latest notification.
+        """
+        now_ms = int(time.time() * 1000)
+        return (now_ms << _WAKE_SEQUENCE_BITS) + (1 << _WAKE_SEQUENCE_BITS) - 1
 
     def stream_key(self, key: StreamKey) -> str:
         """The topic's log, whichever direction the transport asks for."""
@@ -1953,12 +1963,15 @@ class RedisStreams(ProviderPlugin):
                 is trimmed before its commit; a batch at or above it is
                 refused where it is staged.
             wake_transport: How a producer and a worker wake a workflow after
-                an append. ``"wake"`` uses the server's wake call, which
-                records no History event; ``"signal"`` uses the reserved
-                Signal, which does; ``"auto"`` tries the wake call and falls
-                back to the Signal on a server without it.
+                an append. ``"channel"`` notifies the stream's channel, which
+                wakes every subscribed reader with the entry id as the
+                position; ``"wake"`` uses the server's deprecated wake call;
+                ``"signal"`` uses the reserved Signal, which writes a History
+                event; ``"auto"`` tries them in that order and steps down on
+                a server without the call.
         """
-        if wake_transport not in ("auto", "wake", "signal"):
+        # Checked against the alias so an untyped caller still gets a ValueError.
+        if wake_transport not in get_args(WakeTransport):
             raise ValueError(f"unknown wake transport {wake_transport!r}")
         if retention is not None and retention <= timedelta(0):
             raise ValueError("retention must be positive")
