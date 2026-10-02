@@ -2862,27 +2862,36 @@ class Client:
         position: bytes = b"",
         counter: int = 0,
         metadata: Mapping[str, Any] | None = None,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
         rpc_metadata: Mapping[str, str | bytes] = {},
         rpc_timeout: timedelta | None = None,
     ) -> int:
         """Notify the listeners of ``channel`` that a source they consume has moved.
 
         A workflow listening with :py:func:`temporalio.workflow.subscribe_channel`
-        runs a Workflow Task that carries the notification. The server folds
-        notifications per listener while one is pending, keeping the one with
-        the highest ``counter``, so a burst of writes costs a listener one task.
+        or :py:func:`temporalio.workflow.linked_channel` runs a Workflow Task
+        that carries the notification. The server folds notifications per
+        listener while one is pending, keeping the one with the highest
+        ``counter``, so a burst of writes costs a listener one task.
 
         .. warning::
            This API is experimental and unstable.
 
         Args:
-            channel: Name of the channel, scoped to the namespace.
+            channel: Name of the channel. Scoped to the namespace, or to the
+                workflow when ``workflow_id`` is given.
             position: Where the source stands after the write, in the writer's
                 own terms. Opaque to the server.
             counter: Orders notifications from this channel's writers. Derive it
                 from ``position``, since only the source can order its positions.
             metadata: Details for the listener, such as which topic moved. Each
                 value is encoded with the client's data converter.
+            workflow_id: Address the channel linked to this workflow instead of
+                the independent channel of that name.
+            run_id: With ``workflow_id``, a run of its chain; the call reaches
+                the chain's current run, as a Signal does. Unset means the
+                current run under the workflow id.
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
@@ -2898,6 +2907,8 @@ class Client:
                 metadata=metadata,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                workflow_id=workflow_id,
+                run_id=run_id,
             )
         )
 
@@ -2908,6 +2919,8 @@ class Client:
         after_counter: int = 0,
         wait: bool | timedelta = True,
         max_notifications: int = 100,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
         rpc_metadata: Mapping[str, str | bytes] = {},
         rpc_timeout: timedelta | None = None,
     ) -> list[temporalio.workflow.Notification]:
@@ -2917,13 +2930,18 @@ class Client:
            This API is experimental and unstable.
 
         Args:
-            channel: Name of the channel, scoped to the namespace.
+            channel: Name of the channel. Scoped to the namespace, or to the
+                workflow when ``workflow_id`` is given.
             after_counter: Only notifications with a counter above this one are
                 returned. Pass the highest counter seen so far to page.
             wait: How long the server holds the call when nothing is retained
                 above ``after_counter``. ``True`` waits up to
                 :py:data:`DEFAULT_CHANNEL_POLL_WAIT`, ``False`` returns at once.
             max_notifications: Upper bound on the notifications returned.
+            workflow_id: Address the channel linked to this workflow instead of
+                the independent channel of that name.
+            run_id: With ``workflow_id``, a run of its chain; the call reaches
+                the chain's current run.
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
@@ -2945,6 +2963,8 @@ class Client:
                 max_notifications=max_notifications,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                workflow_id=workflow_id,
+                run_id=run_id,
             )
         )
 
@@ -2952,23 +2972,37 @@ class Client:
         self,
         channel: str,
         *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
         rpc_metadata: Mapping[str, str | bytes] = {},
         rpc_timeout: timedelta | None = None,
     ) -> ChannelDescription:
-        """Describe ``channel``: its listeners and what it retains.
+        """Describe ``channel``: its kind, its listeners and what it retains.
 
         .. warning::
            This API is experimental and unstable.
 
         Args:
-            channel: Name of the channel, scoped to the namespace.
+            channel: Name of the channel. Scoped to the namespace, or to the
+                workflow when ``workflow_id`` is given.
+            workflow_id: Describe the channel linked to this workflow instead
+                of the independent channel of that name. A linked channel of a
+                running workflow exists by construction, so the answer for a
+                name nobody has notified yet is a linked channel with no
+                listeners and nothing retained, not a not-found error.
+            run_id: With ``workflow_id``, a run of its chain; the call reaches
+                the chain's current run.
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
         """
         return await self._impl.describe_channel(
             DescribeChannelInput(
-                channel=channel, rpc_metadata=rpc_metadata, rpc_timeout=rpc_timeout
+                channel=channel,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                workflow_id=workflow_id,
+                run_id=run_id,
             )
         )
 
@@ -2977,6 +3011,8 @@ class Client:
         channel: str,
         callback: Callback,
         *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
         rpc_metadata: Mapping[str, str | bytes] = {},
         rpc_timeout: timedelta | None = None,
     ) -> str:
@@ -2989,8 +3025,14 @@ class Client:
            This API is experimental and unstable.
 
         Args:
-            channel: Name of the channel, scoped to the namespace.
+            channel: Name of the channel. Scoped to the namespace, or to the
+                workflow when ``workflow_id`` is given.
             callback: The callback to invoke.
+            workflow_id: Listen on the channel linked to this workflow instead
+                of the independent channel of that name. The listener lives in
+                that workflow's state and ends with its run.
+            run_id: With ``workflow_id``, a run of its chain; the call reaches
+                the chain's current run.
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
@@ -3004,6 +3046,8 @@ class Client:
                 callback=callback,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                workflow_id=workflow_id,
+                run_id=run_id,
             )
         )
 
@@ -3012,6 +3056,8 @@ class Client:
         channel: str,
         listener_id: str,
         *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
         rpc_metadata: Mapping[str, str | bytes] = {},
         rpc_timeout: timedelta | None = None,
     ) -> None:
@@ -3021,8 +3067,13 @@ class Client:
            This API is experimental and unstable.
 
         Args:
-            channel: Name of the channel, scoped to the namespace.
+            channel: Name of the channel. Scoped to the namespace, or to the
+                workflow when ``workflow_id`` is given.
             listener_id: The id :py:meth:`register_channel_listener` returned.
+            workflow_id: The workflow whose linked channel the listener is on,
+                when it was registered with one.
+            run_id: With ``workflow_id``, a run of its chain; the call reaches
+                the chain's current run.
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
@@ -3033,6 +3084,8 @@ class Client:
                 listener_id=listener_id,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                workflow_id=workflow_id,
+                run_id=run_id,
             )
         )
 
