@@ -536,6 +536,12 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._channel_subscriptions: dict[
             str, temporalio.workflow.ChannelSubscription
         ] = {}
+        # The channels linked to this workflow, keyed by name as well. No
+        # command: the owner is the listener by construction, so the map only
+        # routes a notification carrying ``linked_to`` to its handle.
+        self._linked_channel_subscriptions: dict[
+            str, temporalio.workflow.ChannelSubscription
+        ] = {}
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._subscribed_channels: set[str] = set()
         #: The gate's answer for this run, taken on the first stream subscription
