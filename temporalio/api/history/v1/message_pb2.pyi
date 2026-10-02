@@ -3723,6 +3723,48 @@ global___WorkflowNotificationChannelSubscribedEventAttributes = (
     WorkflowNotificationChannelSubscribedEventAttributes
 )
 
+class WorkflowNotificationChannelUnsubscribedEventAttributes(
+    google.protobuf.message.Message
+):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    SUBSCRIBED_EVENT_ID_FIELD_NUMBER: builtins.int
+    workflow_task_completed_event_id: builtins.int
+    """The WorkflowTaskCompleted event of the task whose command ended this
+    subscription.
+    """
+    channel: builtins.str
+    """The channel the Workflow stopped listening on."""
+    subscribed_event_id: builtins.int
+    """The WorkflowNotificationChannelSubscribed event that recorded the
+    subscription this command ended. Zero when the run held no subscription
+    for the channel.
+    """
+    def __init__(
+        self,
+        *,
+        workflow_task_completed_event_id: builtins.int = ...,
+        channel: builtins.str = ...,
+        subscribed_event_id: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel",
+            b"channel",
+            "subscribed_event_id",
+            b"subscribed_event_id",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___WorkflowNotificationChannelUnsubscribedEventAttributes = (
+    WorkflowNotificationChannelUnsubscribedEventAttributes
+)
+
 class WorkflowStreamRecordsAppendedEventAttributes(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -4636,6 +4678,9 @@ class HistoryEvent(google.protobuf.message.Message):
     WORKFLOW_STREAM_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
     WORKFLOW_STREAM_RECORDS_APPENDED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
     WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: (
+        builtins.int
+    )
     event_id: builtins.int
     """Monotonically increasing event number, starts at 1."""
     @property
@@ -4933,6 +4978,10 @@ class HistoryEvent(google.protobuf.message.Message):
     def workflow_notification_channel_subscribed_event_attributes(
         self,
     ) -> global___WorkflowNotificationChannelSubscribedEventAttributes: ...
+    @property
+    def workflow_notification_channel_unsubscribed_event_attributes(
+        self,
+    ) -> global___WorkflowNotificationChannelUnsubscribedEventAttributes: ...
     def __init__(
         self,
         *,
@@ -5076,6 +5125,8 @@ class HistoryEvent(google.protobuf.message.Message):
         | None = ...,
         workflow_notification_channel_subscribed_event_attributes: global___WorkflowNotificationChannelSubscribedEventAttributes
         | None = ...,
+        workflow_notification_channel_unsubscribed_event_attributes: global___WorkflowNotificationChannelUnsubscribedEventAttributes
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -5196,6 +5247,8 @@ class HistoryEvent(google.protobuf.message.Message):
             b"workflow_execution_update_rejected_event_attributes",
             "workflow_notification_channel_subscribed_event_attributes",
             b"workflow_notification_channel_subscribed_event_attributes",
+            "workflow_notification_channel_unsubscribed_event_attributes",
+            b"workflow_notification_channel_unsubscribed_event_attributes",
             "workflow_properties_modified_event_attributes",
             b"workflow_properties_modified_event_attributes",
             "workflow_properties_modified_externally_event_attributes",
@@ -5349,6 +5402,8 @@ class HistoryEvent(google.protobuf.message.Message):
             b"workflow_execution_update_rejected_event_attributes",
             "workflow_notification_channel_subscribed_event_attributes",
             b"workflow_notification_channel_subscribed_event_attributes",
+            "workflow_notification_channel_unsubscribed_event_attributes",
+            b"workflow_notification_channel_unsubscribed_event_attributes",
             "workflow_properties_modified_event_attributes",
             b"workflow_properties_modified_event_attributes",
             "workflow_properties_modified_externally_event_attributes",
@@ -5436,6 +5491,7 @@ class HistoryEvent(google.protobuf.message.Message):
             "workflow_stream_subscribed_event_attributes",
             "workflow_stream_records_appended_event_attributes",
             "workflow_notification_channel_subscribed_event_attributes",
+            "workflow_notification_channel_unsubscribed_event_attributes",
         ]
         | None
     ): ...

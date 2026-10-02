@@ -61,6 +61,7 @@ from ..types import (
     ReturnType,
     SelfType,
 )
+from ._channel import ChannelSubscriptionInfo
 from ._exceptions import (
     WorkflowContinuedAsNewError,
     WorkflowFailureError,
@@ -1420,6 +1421,18 @@ class WorkflowExecutionDescription(WorkflowExecution):
     raw_description: temporalio.api.workflowservice.v1.DescribeWorkflowExecutionResponse
     """Underlying protobuf description."""
 
+    channel_subscriptions: Sequence[ChannelSubscriptionInfo] = ()
+    """The notification channels this run stands on.
+
+    The independent channels it subscribed to and the channels linked to it
+    that hold any state, sorted by name with the independent kind first.
+    Empty when there are none. See
+    :py:class:`temporalio.client.ChannelSubscriptionInfo`.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
     _static_summary: str | None = None
     _static_details: str | None = None
     _metadata_decoded: bool = False
@@ -1458,6 +1471,10 @@ class WorkflowExecutionDescription(WorkflowExecution):
             namespace=namespace,
             converter=converter,
             raw_description=description,
+            channel_subscriptions=tuple(
+                ChannelSubscriptionInfo._from_proto(info)
+                for info in description.channel_subscriptions
+            ),
         )
 
 

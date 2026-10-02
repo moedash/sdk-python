@@ -24,6 +24,7 @@ import temporalio.api.enums.v1.common_pb2
 import temporalio.api.enums.v1.event_type_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 
@@ -1894,6 +1895,94 @@ class NexusOperationCancellationInfo(google.protobuf.message.Message):
     ) -> None: ...
 
 global___NexusOperationCancellationInfo = NexusOperationCancellationInfo
+
+class ChannelSubscriptionInfo(google.protobuf.message.Message):
+    """A workflow's standing on a notification channel, as reported by DescribeWorkflowExecution."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    CHANNEL_FIELD_NUMBER: builtins.int
+    KIND_FIELD_NUMBER: builtins.int
+    SUBSCRIBED_EVENT_ID_FIELD_NUMBER: builtins.int
+    LAST_COUNTER_FIELD_NUMBER: builtins.int
+    PENDING_NOTIFICATION_FIELD_NUMBER: builtins.int
+    SCHEDULED_COUNTER_FIELD_NUMBER: builtins.int
+    LISTENER_COUNT_FIELD_NUMBER: builtins.int
+    RETAINED_COUNT_FIELD_NUMBER: builtins.int
+    ACCEPTED_COUNT_FIELD_NUMBER: builtins.int
+    channel: builtins.str
+    """Channel name."""
+    kind: temporalio.api.notification.v1.message_pb2.ChannelKind.ValueType
+    """CHANNEL_KIND_INDEPENDENT for a channel the workflow subscribed to with a
+    SubscribeNotificationChannel command. CHANNEL_KIND_LINKED for a channel linked to this
+    workflow, which lists it once the channel holds any state.
+    """
+    subscribed_event_id: builtins.int
+    """Independent kind: id of the WorkflowNotificationChannelSubscribed event that recorded the
+    subscription. Zero for the linked kind.
+    """
+    last_counter: builtins.int
+    """Highest counter the workflow has accepted from the channel. Zero when none has arrived."""
+    @property
+    def pending_notification(
+        self,
+    ) -> temporalio.api.notification.v1.message_pb2.Notification:
+        """The notification held for the workflow's next Workflow Task, when one is pending."""
+    scheduled_counter: builtins.int
+    """Counter carried by the scheduled event of a Workflow Task that has not started yet. Zero
+    otherwise.
+    """
+    listener_count: builtins.int
+    """Linked kind: callback listeners registered on the channel."""
+    retained_count: builtins.int
+    """Linked kind: notifications retained for pollers."""
+    accepted_count: builtins.int
+    """Linked kind: notifications the channel has accepted over its life."""
+    def __init__(
+        self,
+        *,
+        channel: builtins.str = ...,
+        kind: temporalio.api.notification.v1.message_pb2.ChannelKind.ValueType = ...,
+        subscribed_event_id: builtins.int = ...,
+        last_counter: builtins.int = ...,
+        pending_notification: temporalio.api.notification.v1.message_pb2.Notification
+        | None = ...,
+        scheduled_counter: builtins.int = ...,
+        listener_count: builtins.int = ...,
+        retained_count: builtins.int = ...,
+        accepted_count: builtins.int = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "pending_notification", b"pending_notification"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "accepted_count",
+            b"accepted_count",
+            "channel",
+            b"channel",
+            "kind",
+            b"kind",
+            "last_counter",
+            b"last_counter",
+            "listener_count",
+            b"listener_count",
+            "pending_notification",
+            b"pending_notification",
+            "retained_count",
+            b"retained_count",
+            "scheduled_counter",
+            b"scheduled_counter",
+            "subscribed_event_id",
+            b"subscribed_event_id",
+        ],
+    ) -> None: ...
+
+global___ChannelSubscriptionInfo = ChannelSubscriptionInfo
 
 class WorkflowExecutionOptions(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

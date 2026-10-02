@@ -107,6 +107,7 @@ class WorkflowCommand(google.protobuf.message.Message):
     SUBSCRIBE_STREAM_FIELD_NUMBER: builtins.int
     APPEND_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     SUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
+    UNSUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """User metadata that may or may not be persisted into history depending on the command type.
@@ -193,6 +194,10 @@ class WorkflowCommand(google.protobuf.message.Message):
     def subscribe_notification_channel(
         self,
     ) -> global___SubscribeNotificationChannel: ...
+    @property
+    def unsubscribe_notification_channel(
+        self,
+    ) -> global___UnsubscribeNotificationChannel: ...
     def __init__(
         self,
         *,
@@ -234,6 +239,8 @@ class WorkflowCommand(google.protobuf.message.Message):
         subscribe_stream: global___SubscribeStream | None = ...,
         append_stream_records: global___AppendStreamRecords | None = ...,
         subscribe_notification_channel: global___SubscribeNotificationChannel
+        | None = ...,
+        unsubscribe_notification_channel: global___UnsubscribeNotificationChannel
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -285,6 +292,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"subscribe_notification_channel",
             "subscribe_stream",
             b"subscribe_stream",
+            "unsubscribe_notification_channel",
+            b"unsubscribe_notification_channel",
             "update_response",
             b"update_response",
             "upsert_workflow_search_attributes",
@@ -346,6 +355,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"subscribe_notification_channel",
             "subscribe_stream",
             b"subscribe_stream",
+            "unsubscribe_notification_channel",
+            b"unsubscribe_notification_channel",
             "update_response",
             b"update_response",
             "upsert_workflow_search_attributes",
@@ -385,6 +396,7 @@ class WorkflowCommand(google.protobuf.message.Message):
             "subscribe_stream",
             "append_stream_records",
             "subscribe_notification_channel",
+            "unsubscribe_notification_channel",
         ]
         | None
     ): ...
@@ -517,6 +529,30 @@ class SubscribeNotificationChannel(google.protobuf.message.Message):
     ) -> None: ...
 
 global___SubscribeNotificationChannel = SubscribeNotificationChannel
+
+class UnsubscribeNotificationChannel(google.protobuf.message.Message):
+    """End this workflow's subscription to a notification channel. Notifications
+    already recorded on a scheduled event still reach that Workflow Task.
+
+    The server records an event for every unsubscribe, also one naming a channel
+    the run is not subscribed to, so replay can hold each command to its event.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    CHANNEL_FIELD_NUMBER: builtins.int
+    channel: builtins.str
+    """Name of the channel, scoped to the namespace."""
+    def __init__(
+        self,
+        *,
+        channel: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["channel", b"channel"]
+    ) -> None: ...
+
+global___UnsubscribeNotificationChannel = UnsubscribeNotificationChannel
 
 class StartTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

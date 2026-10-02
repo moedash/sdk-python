@@ -2151,6 +2151,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._channel_subscriptions[channel] = subscription
         return subscription
 
+    def workflow_unsubscribe_channel(self, channel: str) -> None:
+        command = self._add_command()
+        command.unsubscribe_notification_channel.channel = channel
+        # Out of the map before the next activation: the server may still hand
+        # this run a notification it folded onto a task ahead of the command.
+        self._channel_subscriptions.pop(channel, None)
+
     def workflow_linked_channel(
         self, channel: str
     ) -> temporalio.workflow.ChannelSubscription:
