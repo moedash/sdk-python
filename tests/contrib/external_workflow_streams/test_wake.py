@@ -2065,13 +2065,12 @@ def test_the_channel_is_linked_to_the_streams_workflow() -> None:
     address = channel_for(StreamKey("ns", "wf-1", "first-run-1", "tokens"))
 
     assert address.workflow_id == "wf-1"
-    assert address.linked
-    execution = address.execution()
-    assert execution is not None
-    assert execution.workflow_id == "wf-1" and execution.run_id == ""
+    assert address == ChannelAddress(
+        "external-stream/wf-1/first-run-1/input/tokens", "wf-1"
+    )
     # A channel without an owner is addressed by name alone.
-    independent = ChannelAddress(channel="orders")
-    assert not independent.linked and independent.execution() is None
+    independent = ChannelAddress(channel="orders", workflow_id=None)
+    assert independent.workflow_id is None
 
 
 def test_the_channel_tells_the_two_directions_apart() -> None:
