@@ -1114,19 +1114,21 @@ async def test_a_description_lists_a_linked_channel_once_it_holds_state(
         )
         [info] = (await handle.describe()).channel_subscriptions
         assert (info.channel, info.kind) == (channel, ChannelKind.LINKED)
-        assert (info.subscribed_event_id, info.last_counter) == (0, 0)
+        # The owner's state took the notification in the write that accepted
+        # it, so the counter is the run's at once. Nobody polls, and the first
+        # task was scheduled without a counter when the run started, so the
+        # notification waits behind it as the pending entry.
+        assert (info.subscribed_event_id, info.last_counter) == (0, 1)
+        assert info.pending_notification is not None
+        assert info.pending_notification.counter == 1
+        assert info.pending_notification.linked_to is not None
+        assert info.pending_notification.linked_to.workflow_id == handle.id
+        assert info.scheduled_counter == 0
         assert (info.listener_count, info.retained_count, info.accepted_count) == (
             0,
             1,
             1,
         )
-        # Nobody polls. The notification either rode the task the notify
-        # scheduled or waits behind the first task, which was scheduled
-        # without a counter when the run started.
-        pending = (
-            info.pending_notification.counter if info.pending_notification else None
-        )
-        assert (info.scheduled_counter, pending) in {(1, None), (0, 1)}
         # A callback on the linked channel shows up in the owner's count.
         callback = Callback(url="http://localhost:1/never-called", headers={})
         listener_id = await client.register_channel_listener(
@@ -1139,6 +1141,10 @@ async def test_a_description_lists_a_linked_channel_once_it_holds_state(
         )
         [info] = (await handle.describe()).channel_subscriptions
         assert info.listener_count == 0
+        # A closed run keeps listing what it stood on.
+        await handle.terminate()
+        [info] = (await handle.describe()).channel_subscriptions
+        assert (info.kind, info.last_counter) == (ChannelKind.LINKED, 1)
     finally:
         with contextlib.suppress(RPCError):
             await handle.terminate()
