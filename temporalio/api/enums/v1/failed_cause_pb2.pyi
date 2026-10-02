@@ -203,6 +203,12 @@ class _WorkflowTaskFailedCauseEnumTypeWrapper(
     History can no longer be served, for example after truncation or because it exceeds the
     replay bound. Check the workflow task failure message for more information.
     """
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 44
+    """A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
+    subscription or listener limit.
+    """
 
 class WorkflowTaskFailedCause(
     _WorkflowTaskFailedCause, metaclass=_WorkflowTaskFailedCauseEnumTypeWrapper
@@ -375,6 +381,12 @@ WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
 """A workflow task could not be started because a stream range it consumed and recorded in
 History can no longer be served, for example after truncation or because it exceeds the
 replay bound. Check the workflow task failure message for more information.
+"""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 44
+"""A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
+subscription or listener limit.
 """
 global___WorkflowTaskFailedCause = WorkflowTaskFailedCause
 

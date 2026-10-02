@@ -369,6 +369,24 @@ class WorkflowService:
             timeout=timeout,
         )
 
+    async def describe_channel(
+        self,
+        req: temporalio.api.workflowservice.v1.DescribeChannelRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.DescribeChannelResponse:
+        """Invokes the WorkflowService.describe_channel rpc method."""
+        return await self._client._rpc_call(
+            rpc="describe_channel",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.DescribeChannelResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
     async def describe_deployment(
         self,
         req: temporalio.api.workflowservice.v1.DescribeDeploymentRequest,
@@ -1035,6 +1053,24 @@ class WorkflowService:
             timeout=timeout,
         )
 
+    async def notify_channel(
+        self,
+        req: temporalio.api.workflowservice.v1.NotifyChannelRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.NotifyChannelResponse:
+        """Invokes the WorkflowService.notify_channel rpc method."""
+        return await self._client._rpc_call(
+            rpc="notify_channel",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.NotifyChannelResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
     async def patch_schedule(
         self,
         req: temporalio.api.workflowservice.v1.PatchScheduleRequest,
@@ -1138,6 +1174,24 @@ class WorkflowService:
             req=req,
             service=self._service,
             resp_type=temporalio.api.workflowservice.v1.PollActivityTaskQueueResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
+    async def poll_channel(
+        self,
+        req: temporalio.api.workflowservice.v1.PollChannelRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.PollChannelResponse:
+        """Invokes the WorkflowService.poll_channel rpc method."""
+        return await self._client._rpc_call(
+            rpc="poll_channel",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.PollChannelResponse,
             retry=retry,
             metadata=metadata,
             timeout=timeout,
@@ -1300,6 +1354,24 @@ class WorkflowService:
             req=req,
             service=self._service,
             resp_type=temporalio.api.workflowservice.v1.RecordWorkerHeartbeatResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
+    async def register_channel_listener(
+        self,
+        req: temporalio.api.workflowservice.v1.RegisterChannelListenerRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.RegisterChannelListenerResponse:
+        """Invokes the WorkflowService.register_channel_listener rpc method."""
+        return await self._client._rpc_call(
+            rpc="register_channel_listener",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.RegisterChannelListenerResponse,
             retry=retry,
             metadata=metadata,
             timeout=timeout,
@@ -2002,6 +2074,24 @@ class WorkflowService:
             req=req,
             service=self._service,
             resp_type=temporalio.api.workflowservice.v1.UnpauseWorkflowExecutionResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
+    async def unregister_channel_listener(
+        self,
+        req: temporalio.api.workflowservice.v1.UnregisterChannelListenerRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.UnregisterChannelListenerResponse:
+        """Invokes the WorkflowService.unregister_channel_listener rpc method."""
+        return await self._client._rpc_call(
+            rpc="unregister_channel_listener",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.UnregisterChannelListenerResponse,
             retry=retry,
             metadata=metadata,
             timeout=timeout,

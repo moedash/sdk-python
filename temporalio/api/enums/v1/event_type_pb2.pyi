@@ -226,6 +226,10 @@ class _EventTypeEnumTypeWrapper(
     batch, and carrying only the offset range it landed at: the bodies go to
     the stream's own log, never into History.
     """
+    EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED: _EventType.ValueType  # 63
+    """A Workflow became a listener of a notification channel for its run.
+    The notifications themselves ride the WorkflowTaskScheduled event.
+    """
 
 class EventType(_EventType, metaclass=_EventTypeEnumTypeWrapper):
     """Whenever this list of events is changed do change the function shouldBufferEvent in mutableStateBuilder.go to make sure to do the correct event ordering"""
@@ -427,5 +431,9 @@ EVENT_TYPE_WORKFLOW_STREAM_RECORDS_APPENDED: EventType.ValueType  # 62
 """A Workflow appended a batch of records to a stream. Recorded per
 batch, and carrying only the offset range it landed at: the bodies go to
 the stream's own log, never into History.
+"""
+EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED: EventType.ValueType  # 63
+"""A Workflow became a listener of a notification channel for its run.
+The notifications themselves ride the WorkflowTaskScheduled event.
 """
 global___EventType = EventType
