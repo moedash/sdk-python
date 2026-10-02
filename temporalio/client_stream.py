@@ -65,6 +65,12 @@ _T = TypeVar("_T")
 # it sends carry it: a repeat with different content, and one behind the
 # sequence it accepted last.
 _PRODUCER_CONFLICT = "producer sequence"
+# The status the server puts on a producer conflict; the older one is kept
+# so a server built before the reason tokens still gets the typed error.
+_PRODUCER_CONFLICT_CODES = (
+    grpc.StatusCode.FAILED_PRECONDITION,
+    grpc.StatusCode.INVALID_ARGUMENT,
+)
 
 
 @dataclass(frozen=True)
@@ -171,10 +177,12 @@ def _translate(error: grpc.aio.AioRpcError) -> Exception:
     details = error.details() or code.name
     if code is grpc.StatusCode.NOT_FOUND:
         return StreamNotFoundError(details)
-    if code is grpc.StatusCode.INVALID_ARGUMENT and _PRODUCER_CONFLICT in details:
+    if code in _PRODUCER_CONFLICT_CODES and _PRODUCER_CONFLICT in details:
         # A producer sequence the store already holds, either with different
         # content or behind the one it accepted last. The caller asked to be
-        # deduplicated and could not be, which is a condition of its own.
+        # deduplicated and could not be, which is a condition of its own. The
+        # server reports it as a failed precondition; one built before the
+        # reason tokens existed called it an invalid argument.
         return StreamProducerError(details)
     raw = b""
     # The aio metadata iterates as (key, value) pairs at runtime, whatever
