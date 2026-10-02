@@ -31,7 +31,7 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import temporalio.api.common.v1
 import temporalio.api.workflow.v1
@@ -374,7 +374,9 @@ async def send_wake(
             ``"wake"`` this includes ``UNIMPLEMENTED``, since that transport
             was asked for explicitly.
     """
-    if transport not in ("auto", "wake", "signal"):
+    # Checked against the alias rather than a literal tuple so an untyped caller
+    # still gets a ValueError instead of a silent Signal.
+    if transport not in get_args(WakeTransport):
         raise ValueError(f"unknown wake transport {transport!r}")
     if transport == "auto" and _known_signal_only(client):
         transport = "signal"
