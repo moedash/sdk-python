@@ -279,19 +279,6 @@ class WorkflowServiceStub:
     This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
     task being created for the execution.
     """
-    WakeWorkflowExecution: grpc.UnaryUnaryMultiCallable[
-        temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionRequest,
-        temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionResponse,
-    ]
-    """WakeWorkflowExecution asks a running Workflow Execution to run a Workflow
-    Task because a source it consumes has moved. Unlike a Signal it records
-    no event, carries no payload, and folds with other wakes for the same
-    source, so a burst of writes costs one task. The Workflow learns the
-    source and its position from the task and reads the source itself.
-
-    Superseded by the notification channel (`NotifyChannel` and the
-    `SubscribeNotificationChannel` command). Kept for one round and slated for removal.
-    """
     NotifyChannel: grpc.UnaryUnaryMultiCallable[
         temporalio.api.workflowservice.v1.request_response_pb2.NotifyChannelRequest,
         temporalio.api.workflowservice.v1.request_response_pb2.NotifyChannelResponse,
@@ -1535,21 +1522,6 @@ class WorkflowServiceServicer(metaclass=abc.ABCMeta):
 
         This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
         task being created for the execution.
-        """
-    @abc.abstractmethod
-    def WakeWorkflowExecution(
-        self,
-        request: temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionRequest,
-        context: grpc.ServicerContext,
-    ) -> temporalio.api.workflowservice.v1.request_response_pb2.WakeWorkflowExecutionResponse:
-        """WakeWorkflowExecution asks a running Workflow Execution to run a Workflow
-        Task because a source it consumes has moved. Unlike a Signal it records
-        no event, carries no payload, and folds with other wakes for the same
-        source, so a burst of writes costs one task. The Workflow learns the
-        source and its position from the task and reads the source itself.
-
-        Superseded by the notification channel (`NotifyChannel` and the
-        `SubscribeNotificationChannel` command). Kept for one round and slated for removal.
         """
     @abc.abstractmethod
     def NotifyChannel(
