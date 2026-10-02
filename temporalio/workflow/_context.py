@@ -23,6 +23,7 @@ from ._exceptions import _NotInWorkflowEventLoopError
 
 if TYPE_CHECKING:
     from ._activities import ActivityCancellationType, ActivityHandle
+    from ._channels import ChannelSubscription
     from ._event_groups import EventGroup
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
     from ._nexus import NexusOperationCancellationType, NexusOperationHandle
@@ -535,6 +536,9 @@ class _Runtime(ABC):
 
     @abstractmethod
     def workflow_streams(self) -> _WorkflowStreams: ...
+
+    @abstractmethod
+    def workflow_subscribe_channel(self, channel: str) -> ChannelSubscription: ...
 
     @abstractmethod
     def workflow_time_ns(self) -> int: ...
