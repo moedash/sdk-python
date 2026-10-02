@@ -2446,6 +2446,10 @@ class Wake(google.protobuf.message.Message):
     pending and no task has received it yet, so a burst of writes costs one
     task. Once a task has been handed the wake, a new wake for the source is
     accepted again, because only the receiver knows what it read.
+
+    Superseded by the notification channel (`NotifyChannel` and the
+    `SubscribeNotificationChannel` command). Kept for one round and slated for
+    removal.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

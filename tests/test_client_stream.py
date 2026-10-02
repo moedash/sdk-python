@@ -26,7 +26,11 @@ from temporalio.api.stream.v1 import (
 )
 from temporalio.client_stream import StreamClient, StreamHandle
 from temporalio.service import RPCError
-from temporalio.streams import StreamNotFoundError, StreamProducerError
+from temporalio.streams import (
+    StreamCursorError,
+    StreamNotFoundError,
+    StreamProducerError,
+)
 
 TARGET = os.environ.get("TEMPORAL_STREAM_TARGET")
 
@@ -230,7 +234,7 @@ async def test_earliest_reads_from_the_floor_of_a_truncated_stream(
 
     # Offset zero is what a reader with no position used to send, and a
     # truncated stream no longer holds it.
-    with pytest.raises(RPCError, match="truncated"):
+    with pytest.raises(StreamCursorError, match="truncated"):
         await stream.read(from_offset=0)
     entries, next_offset = await stream.read(start=StreamStartPosition(earliest=True))
     assert data(entries) == [b"c", b"d"]

@@ -1,0 +1,78 @@
+"""Notification channel descriptions as the client reports them."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import temporalio.api.notification.v1
+from temporalio.workflow import Notification
+
+from ._callback import Callback
+
+__all__ = ["ChannelDescription", "ChannelListener"]
+
+
+@dataclass(frozen=True)
+class ChannelListener:
+    """One listener of a channel: a workflow or a callback.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    listener_id: str
+    """Assigned by the server when the listener registered."""
+
+    workflow_id: str | None
+    """The subscribed workflow, when the listener is one."""
+
+    run_id: str | None
+    """The run that subscribed. Delivery follows the chain's current run."""
+
+    callback: Callback | None
+    """The callback the server invokes, when the listener is one."""
+
+    registered_time: datetime | None
+    """When the listener registered."""
+
+    @staticmethod
+    def _from_proto(
+        proto: temporalio.api.notification.v1.ChannelListener,
+    ) -> ChannelListener:
+        callback: Callback | None = None
+        if proto.HasField("callback") and proto.callback.HasField("nexus"):
+            callback = Callback(
+                url=proto.callback.nexus.url, headers=dict(proto.callback.nexus.header)
+            )
+        workflow = proto.workflow if proto.HasField("workflow") else None
+        return ChannelListener(
+            listener_id=proto.listener_id,
+            workflow_id=workflow.workflow_id if workflow else None,
+            run_id=workflow.run_id if workflow else None,
+            callback=callback,
+            registered_time=(
+                proto.registered_time.ToDatetime(tzinfo=timezone.utc)
+                if proto.HasField("registered_time")
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ChannelDescription:
+    """What the server knows about a channel.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    listeners: Sequence[ChannelListener]
+    """Who is listening, workflows and callbacks alike."""
+
+    latest: Notification | None
+    """The notification with the highest counter the channel retains."""
+
+    retained_count: int
+    """How many notifications the channel keeps for pollers."""
