@@ -2,13 +2,17 @@
 
 The workflow instance is driven with activations directly, the way Core
 drives it, because the dev server this chain tests against does not accept
-the subscribe command.
+the subscribe command. The live cases at the end need a server that does and
+skip otherwise.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+import pytest
 
 import temporalio.api.common.v1
 import temporalio.api.notification.v1
@@ -17,11 +21,13 @@ import temporalio.bridge.proto.workflow_completion
 import temporalio.common
 import temporalio.converter
 from temporalio import workflow
+from temporalio.client import Callback, Client
 from temporalio.worker._workflow_instance import (
     UnsandboxedWorkflowRunner,
     WorkflowInstance,
     WorkflowInstanceDetails,
 )
+from tests.helpers import assert_eventually, new_worker
 
 WorkflowActivation = temporalio.bridge.proto.workflow_activation.WorkflowActivation
 WorkflowActivationJob = (
@@ -222,3 +228,50 @@ async def test_an_empty_channel_name_is_refused():
     completion = _instance(EmptyChannel).activate(_start(EmptyChannel))
     assert completion.HasField("failed")
     assert "channel must not be empty" in completion.failed.failure.message
+
+
+@pytest.mark.needs_channel_server
+async def test_a_workflow_receives_a_client_notification(client: Client):
+    channel = f"orders-{uuid.uuid4()}"
+    async with new_worker(client, ReceiveOne) as worker:
+        handle = await client.start_workflow(
+            ReceiveOne.run,
+            channel,
+            id=f"wf-{uuid.uuid4()}",
+            task_queue=worker.task_queue,
+        )
+
+        async def listening() -> None:
+            description = await client.describe_channel(channel)
+            assert [listener.workflow_id for listener in description.listeners] == [
+                handle.id
+            ]
+
+        await assert_eventually(listening)
+        listeners = await client.notify_channel(
+            channel, position=b"1-0", counter=1, metadata={"topic": "inputs"}
+        )
+        assert listeners == 1
+        assert await handle.result() == {
+            "channel": channel,
+            "counter": 1,
+            "position": "1-0",
+            "topic": "inputs",
+        }
+        polled = await client.poll_channel(channel, wait=False)
+        assert [n.counter for n in polled] == [1]
+        description = await client.describe_channel(channel)
+        assert description.latest is not None and description.latest.counter == 1
+
+
+@pytest.mark.needs_channel_server
+async def test_a_callback_listener_registers_and_unregisters(client: Client):
+    channel = f"orders-{uuid.uuid4()}"
+    callback = Callback(url="http://localhost:1/never-called", headers={})
+    listener_id = await client.register_channel_listener(channel, callback)
+    description = await client.describe_channel(channel)
+    assert [listener.listener_id for listener in description.listeners] == [listener_id]
+    assert description.listeners[0].callback == callback
+    await client.unregister_channel_listener(channel, listener_id)
+    description = await client.describe_channel(channel)
+    assert description.listeners == []
