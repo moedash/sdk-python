@@ -50,7 +50,7 @@ from temporalio.streams.providers.nexus import (
     NexusStreams,
     StreamConsumerOperation,
     TemporalStreamsHandler,
-    stream_channel_name,
+    stream_channel,
     stream_consumer_operation,
 )
 from temporalio.streams.providers.nexus_consumer_service import (
@@ -89,19 +89,23 @@ class _ClientStandIn:
     def __init__(self, store: MemoryStreams) -> None:
         self._store = store
         self.data_converter = temporalio.converter.DataConverter.default
-        self.registered: list[tuple[str, Callback]] = []
-        self.unregistered: list[tuple[str, str]] = []
+        self.registered: list[tuple[str, Callback, str | None]] = []
+        self.unregistered: list[tuple[str, str, str | None]] = []
 
     def get_stream_handle(self, ref: StreamRef) -> Any:
         # The memory store opens a handle without a client.
         return open_ref(self._store, _as_client(None), ref)
 
-    async def register_channel_listener(self, channel: str, callback: Callback) -> str:
-        self.registered.append((channel, callback))
+    async def register_channel_listener(
+        self, channel: str, callback: Callback, *, workflow_id: str | None = None
+    ) -> str:
+        self.registered.append((channel, callback, workflow_id))
         return f"listener-{len(self.registered)}"
 
-    async def unregister_channel_listener(self, channel: str, listener_id: str) -> None:
-        self.unregistered.append((channel, listener_id))
+    async def unregister_channel_listener(
+        self, channel: str, listener_id: str, *, workflow_id: str | None = None
+    ) -> None:
+        self.unregistered.append((channel, listener_id, workflow_id))
 
 
 @dataclass
@@ -216,7 +220,7 @@ async def _rig(
         client,
         operation,
         ref,
-        stream_channel_name(ref),
+        stream_channel(ref)[0],
         handle.producer(topic=VALUES, producer_id="writer", attempt=1),
     )
 
@@ -226,23 +230,52 @@ async def _rig(
 # ---------------------------------------------------------------------------
 
 
-def test_the_channel_name_folds_the_owner_and_the_topic():
-    assert (
-        stream_channel_name(StreamRef.for_standalone("s-1", topic="values"))
-        == "stream:standalone:s-1:values"
+def test_the_channel_follows_the_servers_names():
+    # A standalone stream's channel is independent; an owned stream's is
+    # linked to the owning workflow, which the second member names.
+    assert stream_channel(StreamRef.for_standalone("s-1", topic="values")) == (
+        "stream/s-1",
+        None,
     )
-    assert (
-        stream_channel_name(StreamRef.for_workflow("wf", topic="t"))
-        == "stream:workflow:wf::t"
+    assert stream_channel(StreamRef.for_workflow("wf", topic="t")) == ("stream/t", "wf")
+    assert stream_channel(StreamRef.for_workflow("wf", run_id="r", topic="t")) == (
+        "stream/t",
+        "wf",
     )
-    assert (
-        stream_channel_name(StreamRef.for_workflow("wf", run_id="r", topic="t"))
-        == "stream:workflow:wf:r:t"
+    assert stream_channel(
+        StreamRef.for_activity("act", workflow_id="wf", topic="t")
+    ) == ("stream/act/t", "wf")
+    assert stream_channel(StreamRef.for_activity("act", topic="t")) == (
+        "stream/act/t",
+        None,
     )
-    assert (
-        stream_channel_name(StreamRef.for_activity("act", workflow_id="wf", topic="t"))
-        == "stream:activity:wf::act:t"
+
+
+async def test_an_owned_stream_registers_on_the_owners_linked_channel(
+    posted: list[_Posted],
+):
+    store = MemoryStreams()
+    ref = store.get_stream_handle(None, "wf-1").ref(topic=VALUES)
+    client = _ClientStandIn(store)
+    operation = stream_consumer_operation(
+        collect_values,
+        initial=list,
+        listener_url=LISTENER_URL,
+        client=_as_client(client),
     )
+    result = await operation.start(_start_context(), ref)
+    assert isinstance(result, nexusrpc.handler.StartOperationResultAsync)
+    state = operation.state(result.token)
+    assert state is not None and (state.channel, state.owner) == (
+        "stream/values",
+        "wf-1",
+    )
+    assert [(channel, owner) for channel, _, owner in client.registered] == [
+        ("stream/values", "wf-1")
+    ]
+    await operation.close()
+    assert client.unregistered == [("stream/values", "listener-1", "wf-1")]
+    assert posted == []
 
 
 async def test_start_registers_the_listener_and_reads_what_was_there(
@@ -257,6 +290,7 @@ async def test_start_registers_the_listener_and_reads_what_was_there(
         (
             rig.channel,
             Callback(url=LISTENER_URL, headers={STREAM_CONSUMER_TOKEN_HEADER: token}),
+            None,
         )
     ]
     state = rig.operation.state(token)
@@ -326,7 +360,7 @@ async def test_the_close_completes_through_the_callers_callback(
         completion.headers["Nexus-Operation-Start-Time"]
     )
     assert json.loads(completion.body) == ["a", "b"]
-    assert rig.client.unregistered == [(rig.channel, "listener-1")]
+    assert rig.client.unregistered == [(rig.channel, "listener-1", None)]
     assert rig.operation.state(token) is None
     assert rig.operation.tokens == []
 
@@ -347,7 +381,7 @@ async def test_a_finish_record_closes_the_operation(posted: list[_Posted]):
     [completion] = posted
     assert completion.state == "succeeded"
     assert json.loads(completion.body) == ["only"]
-    assert rig.client.unregistered == [(rig.channel, "listener-1")]
+    assert rig.client.unregistered == [(rig.channel, "listener-1", None)]
 
 
 async def test_a_stream_finished_before_the_start_completes_at_once(
@@ -368,7 +402,7 @@ async def test_cancel_unregisters_and_reports_canceled(posted: list[_Posted]):
     token = await rig.start()
 
     await rig.operation.cancel(_cancel_context(), token)
-    assert rig.client.unregistered == [(rig.channel, "listener-1")]
+    assert rig.client.unregistered == [(rig.channel, "listener-1", None)]
     [completion] = posted
     assert completion.state == "canceled"
     assert completion.headers["Nexus-Operation-Token"] == token
@@ -407,7 +441,7 @@ async def test_a_consume_failure_fails_the_operation(posted: list[_Posted]):
     [completion] = posted
     assert completion.state == "failed"
     assert json.loads(completion.body)["message"] == "ValueError: cannot take bad"
-    assert rig.client.unregistered == [(rig.channel, "listener-1")]
+    assert rig.client.unregistered == [(rig.channel, "listener-1", None)]
     assert rig.operation.state(token) is None
 
 
@@ -442,8 +476,8 @@ async def test_close_lets_go_of_every_listener_without_completing(
     await rig.operation.close()
     assert rig.operation.tokens == []
     assert rig.client.unregistered == [
-        (rig.channel, "listener-1"),
-        (rig.channel, "listener-2"),
+        (rig.channel, "listener-1", None),
+        (rig.channel, "listener-2", None),
     ]
     assert posted == []
 
@@ -468,7 +502,7 @@ async def test_a_null_result_travels_without_a_content_type(posted: list[_Posted
     await handle.producer(topic=VALUES, producer_id="w", attempt=1).finish()
     await operation.deliver(
         {STREAM_CONSUMER_TOKEN_HEADER: result.token},
-        _notification(stream_channel_name(ref), 1),
+        _notification(stream_channel(ref)[0], 1),
     )
     [completion] = posted
     assert completion.state == "succeeded"
@@ -716,7 +750,7 @@ async def test_a_standalone_service_consumes_an_external_stream_through_its_chan
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await store.create_standalone_stream(None, stream_id)
     ref = handle.ref(topic=VALUES)
-    channel = stream_channel_name(ref)
+    channel = stream_channel(ref)[0]
     producer = handle.producer(topic=VALUES, producer_id="writer", attempt=1)
 
     async with _consumer_service(client, store) as live:
@@ -781,7 +815,7 @@ async def test_cancel_unregisters_the_listener(client: Client):
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await store.create_standalone_stream(None, stream_id)
     ref = handle.ref(topic=VALUES)
-    channel = stream_channel_name(ref)
+    channel = stream_channel(ref)[0]
 
     async with (
         _consumer_service(client, store) as live,
@@ -853,7 +887,7 @@ async def test_a_worker_hosted_consumer_is_reached_through_the_frontend(
     stream_id = f"consumed-{uuid.uuid4().hex}"
     handle = await store.create_standalone_stream(None, stream_id)
     ref = handle.ref(topic=VALUES)
-    channel = stream_channel_name(ref)
+    channel = stream_channel(ref)[0]
     producer = handle.producer(topic=VALUES, producer_id="writer", attempt=1)
     uid = uuid.uuid4().hex
     stream_handler = TemporalStreamsHandler(store, client)
@@ -963,7 +997,7 @@ async def test_a_native_standalone_stream_is_consumed_through_its_channel(
                 id=f"caller-{stream_id}",
                 task_queue=worker.task_queue,
             )
-            token = await _listener_token(client, stream_channel_name(ref))
+            token = await _listener_token(client, stream_channel(ref)[0])
             await _consumed(live.consumer, token, 2)
             # The server notifies the stream's channel on every append and on
             # the close, so the records reach the consumer without a notify.
@@ -973,5 +1007,5 @@ async def test_a_native_standalone_stream_is_consumed_through_its_channel(
             await handle.close()
             assert await asyncio.wait_for(run.result(), 60) == ["a", "b", "c"]
             assert (
-                await client.describe_channel(stream_channel_name(ref))
+                await client.describe_channel(stream_channel(ref)[0])
             ).listeners == []

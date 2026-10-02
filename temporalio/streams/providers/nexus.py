@@ -156,7 +156,7 @@ __all__ = [
     "StreamConsumerOperation",
     "TemporalStreamsHandler",
     "WireStreamRef",
-    "stream_channel_name",
+    "stream_channel",
     "stream_consumer_operation",
 ]
 
@@ -1297,26 +1297,27 @@ _TOKEN_HEADER = "Nexus-Operation-Token"
 _START_TIME_HEADER = "Nexus-Operation-Start-Time"
 
 
-def stream_channel_name(ref: StreamRef) -> str:
-    """The notification channel a stream's writers notify, from the stream's identity.
+def stream_channel(ref: StreamRef) -> tuple[str, str | None]:
+    """The channel a native stream notifies, and the owner a linked one belongs to.
 
-    The name folds the owner the ref names and the topic into one string, so
-    a producer and a consumer that hold the same ref meet on the same
-    channel. A ref pinned to a run names a different channel from one that
-    follows the chain, because the two name different streams.
+    The server's rule: a standalone stream notifies the independent channel
+    ``stream/<stream id>``; a workflow's stream notifies ``stream/<topic>``
+    linked to the owning workflow; an activity's stream notifies
+    ``stream/<activity id>/<topic>``, linked to the workflow that scheduled
+    the activity and independent for a standalone activity. The second
+    member is the workflow id a registration addresses the linked channel
+    with, ``None`` for an independent channel. A store that names channels
+    its own way passes its rule as ``channel_for`` instead.
     """
-    parts = ["stream", ref.kind]
-    if ref.kind == "workflow":
-        parts += [ref.workflow_id or "", ref.run_id or ""]
-    elif ref.kind == "activity":
-        parts += [ref.workflow_id or "", ref.run_id or "", ref.activity_id or ""]
-    else:
-        parts.append(ref.stream_id or "")
-    parts.append(ref.topic)
-    return ":".join(parts)
+    if ref.kind == "standalone":
+        return f"stream/{ref.stream_id}", None
+    if ref.kind == "activity":
+        return f"stream/{ref.activity_id}/{ref.topic}", ref.workflow_id
+    return f"stream/{ref.topic}", ref.workflow_id
 
 
 ConsumeFunction = Callable[[StreamRecord[Any], S], "S | Awaitable[S]"]
+ChannelRule = Callable[[StreamRef], tuple[str, "str | None"]]
 
 
 @dataclass(frozen=True)
@@ -1332,6 +1333,9 @@ class ConsumerState(Generic[S]):
 
     channel: str
     """The channel the listener is registered on."""
+
+    owner: str | None
+    """The workflow a linked channel belongs to, ``None`` for an independent one."""
 
     listener_id: str
     """The listener id the server assigned."""
@@ -1380,6 +1384,7 @@ class Delivery:
 class _Consumption(Generic[S]):
     ref: StreamRef
     channel: str
+    owner: str | None
     listener_id: str
     callback_url: str | None
     callback_headers: dict[str, str]
@@ -1501,7 +1506,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         initial: Callable[[], S],
         listener_url: str,
         client: Client | None = None,
-        channel_for: Callable[[StreamRef], str] = stream_channel_name,
+        channel_for: ChannelRule = stream_channel,
         result_type: type | None = None,
         token_header: str = STREAM_CONSUMER_TOKEN_HEADER,
     ) -> None:
@@ -1516,9 +1521,11 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
             client: Registers the listener and opens the stream. Leave it
                 unset in a handler hosted by a Temporal worker, where the
                 operation context's client is used.
-            channel_for: Names the channel for a ref. The default is
-                :func:`stream_channel_name`; a store that names channels
-                its own way passes its rule.
+            channel_for: Names the channel for a ref, and the workflow a
+                linked channel belongs to. The default is
+                :func:`stream_channel`, the server's rule for native
+                streams; a store that names channels its own way passes
+                its rule.
             result_type: What record values are decoded as.
             token_header: The header carrying the operation token on the
                 registration and so on every delivery.
@@ -1547,6 +1554,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         return ConsumerState(
             ref=held.ref,
             channel=held.channel,
+            owner=held.owner,
             listener_id=held.listener_id,
             cursor=held.cursor,
             value=held.value,
@@ -1570,7 +1578,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         """
         client = self._client()
         token = uuid.uuid4().hex
-        channel = self._channel_for(input)
+        channel, owner = self._channel_for(input)
         # Registered before the first read: a record appended between the
         # read and the registration would otherwise be missed, where one
         # appended between the registration and the read is read twice at
@@ -1579,10 +1587,12 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         listener_id = await client.register_channel_listener(
             channel,
             Callback(url=self._listener_url, headers={self._token_header: token}),
+            workflow_id=owner,
         )
         state: _Consumption[S] = _Consumption(
             ref=input,
             channel=channel,
+            owner=owner,
             listener_id=listener_id,
             callback_url=ctx.callback_url,
             callback_headers=dict(ctx.callback_headers),
@@ -1769,7 +1779,9 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
 
     async def _unregister(self, client: Client, state: _Consumption[S]) -> None:
         try:
-            await client.unregister_channel_listener(state.channel, state.listener_id)
+            await client.unregister_channel_listener(
+                state.channel, state.listener_id, workflow_id=state.owner
+            )
         except RPCError:
             logger.warning(
                 "could not unregister listener %s from channel %s",
@@ -1833,7 +1845,7 @@ def stream_consumer_operation(
     initial: Callable[[], S],
     listener_url: str,
     client: Client | None = None,
-    channel_for: Callable[[StreamRef], str] = stream_channel_name,
+    channel_for: ChannelRule = stream_channel,
     result_type: type | None = None,
     token_header: str = STREAM_CONSUMER_TOKEN_HEADER,
 ) -> StreamConsumerOperation[S]:
