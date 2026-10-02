@@ -308,6 +308,18 @@ class PayloadVisitor:
         if o.HasField("result"):
             await self._visit_coresdk_nexus_NexusOperationResult(fs, o.result)
 
+    async def _visit_temporal_api_notification_v1_Notification(
+        self, fs: VisitorFunctions, o: Any
+    ):
+        for v in o.metadata.values():
+            await self._visit_temporal_api_common_v1_Payload(fs, v)
+
+    async def _visit_coresdk_workflow_activation_NotificationsReceived(
+        self, fs: VisitorFunctions, o: Any
+    ):
+        for v in o.notifications:
+            await self._visit_temporal_api_notification_v1_Notification(fs, v)
+
     async def _visit_coresdk_workflow_activation_WorkflowActivationJob(
         self, fs: VisitorFunctions, o: Any
     ):
@@ -352,6 +364,10 @@ class PayloadVisitor:
         elif o.HasField("resolve_nexus_operation"):
             await self._visit_coresdk_workflow_activation_ResolveNexusOperation(
                 fs, o.resolve_nexus_operation
+            )
+        elif o.HasField("notifications_received"):
+            await self._visit_coresdk_workflow_activation_NotificationsReceived(
+                fs, o.notifications_received
             )
 
     async def _visit_coresdk_workflow_activation_WorkflowActivation(

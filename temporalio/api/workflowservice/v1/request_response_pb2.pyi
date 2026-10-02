@@ -38,6 +38,7 @@ import temporalio.api.filter.v1.message_pb2
 import temporalio.api.history.v1.message_pb2
 import temporalio.api.namespace.v1.message_pb2
 import temporalio.api.nexus.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
 import temporalio.api.protocol.v1.message_pb2
 import temporalio.api.query.v1.message_pb2
 import temporalio.api.replication.v1.message_pb2
@@ -3411,6 +3412,321 @@ class WakeWorkflowExecutionResponse(google.protobuf.message.Message):
     ) -> None: ...
 
 global___WakeWorkflowExecutionResponse = WakeWorkflowExecutionResponse
+
+class NotifyChannelRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    NOTIFICATION_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def notification(
+        self,
+    ) -> temporalio.api.notification.v1.message_pb2.Notification: ...
+    identity: builtins.str
+    """The identity of the writer, for metrics and logs."""
+    request_id: builtins.str
+    """Used to de-dupe a retried notification."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        notification: temporalio.api.notification.v1.message_pb2.Notification
+        | None = ...,
+        identity: builtins.str = ...,
+        request_id: builtins.str = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["notification", b"notification"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "notification",
+            b"notification",
+            "request_id",
+            b"request_id",
+        ],
+    ) -> None: ...
+
+global___NotifyChannelRequest = NotifyChannelRequest
+
+class NotifyChannelResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LISTENER_COUNT_FIELD_NUMBER: builtins.int
+    listener_count: builtins.int
+    """Listeners registered when the notification was accepted. Zero means the
+    notification was retained for pollers and woke nobody.
+    """
+    def __init__(
+        self,
+        *,
+        listener_count: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["listener_count", b"listener_count"]
+    ) -> None: ...
+
+global___NotifyChannelResponse = NotifyChannelResponse
+
+class RegisterChannelListenerRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    CALLBACK_FIELD_NUMBER: builtins.int
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    @property
+    def callback(self) -> temporalio.api.common.v1.message_pb2.Callback:
+        """Invoked with each notification on the channel."""
+    request_id: builtins.str
+    """Used to de-dupe a retried registration."""
+    identity: builtins.str
+    """The identity of the caller, for metrics and logs."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        callback: temporalio.api.common.v1.message_pb2.Callback | None = ...,
+        request_id: builtins.str = ...,
+        identity: builtins.str = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["callback", b"callback"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "callback",
+            b"callback",
+            "channel",
+            b"channel",
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "request_id",
+            b"request_id",
+        ],
+    ) -> None: ...
+
+global___RegisterChannelListenerRequest = RegisterChannelListenerRequest
+
+class RegisterChannelListenerResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LISTENER_ID_FIELD_NUMBER: builtins.int
+    listener_id: builtins.str
+    def __init__(
+        self,
+        *,
+        listener_id: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["listener_id", b"listener_id"]
+    ) -> None: ...
+
+global___RegisterChannelListenerResponse = RegisterChannelListenerResponse
+
+class UnregisterChannelListenerRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    LISTENER_ID_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    listener_id: builtins.str
+    identity: builtins.str
+    """The identity of the caller, for metrics and logs."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        listener_id: builtins.str = ...,
+        identity: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel",
+            b"channel",
+            "identity",
+            b"identity",
+            "listener_id",
+            b"listener_id",
+            "namespace",
+            b"namespace",
+        ],
+    ) -> None: ...
+
+global___UnregisterChannelListenerRequest = UnregisterChannelListenerRequest
+
+class UnregisterChannelListenerResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___UnregisterChannelListenerResponse = UnregisterChannelListenerResponse
+
+class PollChannelRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    AFTER_COUNTER_FIELD_NUMBER: builtins.int
+    WAIT_FIELD_NUMBER: builtins.int
+    MAX_NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    after_counter: builtins.int
+    """Only notifications with a counter above this one are returned.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "after" names the exclusive lower bound. --)
+    """
+    @property
+    def wait(self) -> google.protobuf.duration_pb2.Duration:
+        """How long to wait for a notification when none is retained above
+        `after_counter`.
+        """
+    max_notifications: builtins.int
+    """At most this many notifications are returned. Zero means the server's
+    default.
+    """
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        after_counter: builtins.int = ...,
+        wait: google.protobuf.duration_pb2.Duration | None = ...,
+        max_notifications: builtins.int = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["wait", b"wait"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "after_counter",
+            b"after_counter",
+            "channel",
+            b"channel",
+            "max_notifications",
+            b"max_notifications",
+            "namespace",
+            b"namespace",
+            "wait",
+            b"wait",
+        ],
+    ) -> None: ...
+
+global___PollChannelRequest = PollChannelRequest
+
+class PollChannelResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]: ...
+    def __init__(
+        self,
+        *,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
+    ) -> None: ...
+
+global___PollChannelResponse = PollChannelResponse
+
+class DescribeChannelRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel", b"channel", "namespace", b"namespace"
+        ],
+    ) -> None: ...
+
+global___DescribeChannelRequest = DescribeChannelRequest
+
+class DescribeChannelResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LISTENERS_FIELD_NUMBER: builtins.int
+    LATEST_FIELD_NUMBER: builtins.int
+    RETAINED_COUNT_FIELD_NUMBER: builtins.int
+    @property
+    def listeners(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.ChannelListener
+    ]: ...
+    @property
+    def latest(self) -> temporalio.api.notification.v1.message_pb2.Notification:
+        """The notification with the highest counter the channel retains."""
+    retained_count: builtins.int
+    """How many notifications the channel retains for pollers."""
+    def __init__(
+        self,
+        *,
+        listeners: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.ChannelListener
+        ]
+        | None = ...,
+        latest: temporalio.api.notification.v1.message_pb2.Notification | None = ...,
+        retained_count: builtins.int = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["latest", b"latest"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "latest",
+            b"latest",
+            "listeners",
+            b"listeners",
+            "retained_count",
+            b"retained_count",
+        ],
+    ) -> None: ...
+
+global___DescribeChannelResponse = DescribeChannelResponse
 
 class SignalWithStartWorkflowExecutionRequest(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
