@@ -536,7 +536,6 @@ async def test_workflow_output_round_trips_through_core_and_client(
         assert b"workflow-output-secret" not in envelope.payloads[0].data
 
 
-@pytest.mark.usefixtures("first_task_retained")
 async def test_output_latency_flushes_a_retained_workflow_task(
     client: Client,
 ) -> None:
@@ -1204,7 +1203,6 @@ async def test_cursor_resume_crosses_rollover_and_continue_as_new(
 
 
 @pytest.mark.timeout(90)
-@pytest.mark.usefixtures("first_task_retained")
 async def test_output_deadline_wins_park_race_and_removes_every_intent(
     client: Client,
 ) -> None:

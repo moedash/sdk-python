@@ -388,7 +388,10 @@ async def test_a_stream_the_run_owns_listens_on_its_linked_channel_without_a_com
     assert _used_flags(completion) == {int(INDEPENDENT), int(LINKED)}
 
 
-async def test_a_stream_with_another_owner_subscribes_by_command_on_a_linked_server():
+async def test_a_stream_with_another_owner_is_listened_on_by_report_on_a_linked_server():
+    """No command of its own either way: the run's channel report, built from
+    the stream runtime's open readers on every completion, is what Core
+    subscribes from. See ``test_channel_report`` for the report itself."""
     # Both built before either runs: a completed run leaves no loop to build on.
     another_owner = _instance(ListenOnStream, flags=[INDEPENDENT, LINKED])
     no_owner = _instance(ListenOnStream, flags=[INDEPENDENT, LINKED])
@@ -396,17 +399,18 @@ async def test_a_stream_with_another_owner_subscribes_by_command_on_a_linked_ser
         _start(ListenOnStream, "external-stream/x", "other")
     )
     assert _result(completion) is True
-    assert _subscribed(completion) == ["external-stream/x"]
+    assert _subscribed(completion) == []
     # A stream nobody owns does the same.
     completion = no_owner.activate(_start(ListenOnStream, "standalone/x", ""))
-    assert _subscribed(completion) == ["standalone/x"]
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
 
 
-async def test_a_server_with_only_independent_channels_takes_the_command():
+async def test_a_server_with_only_independent_channels_listens_by_report():
     instance = _instance(ListenOnStream, flags=[INDEPENDENT])
     completion = instance.activate(_start(ListenOnStream, "external-stream/x", "wf"))
     assert _result(completion) is True
-    assert _subscribed(completion) == ["external-stream/x"]
+    assert _subscribed(completion) == []
     assert _used_flags(completion) == {int(INDEPENDENT)}
 
 
@@ -437,7 +441,7 @@ async def test_a_replay_takes_the_path_the_live_run_recorded():
         _start(ListenOnStream, "external-stream/x", "wf", recorded_flags=[INDEPENDENT])
     )
     assert _result(completion) is True
-    assert _subscribed(completion) == ["external-stream/x"]
+    assert _subscribed(completion) == []
 
 
 def test_a_channel_call_names_the_workflow_it_is_linked_to():

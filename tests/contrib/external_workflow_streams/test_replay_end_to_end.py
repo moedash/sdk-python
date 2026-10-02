@@ -293,7 +293,6 @@ async def test_replaying_a_stream_history_reproduces_the_same_observations(
     )
 
 
-@pytest.mark.usefixtures("first_task_retained")
 async def test_live_and_replay_share_one_input_output_drain_schedule(
     client: Client,
 ) -> None:
@@ -803,7 +802,6 @@ def trace_readiness(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped
     LIVE_MANAGERS.clear()
 
 
-@pytest.mark.usefixtures("first_task_retained")
 async def test_an_empty_stream_parked_and_evicted_replays_from_the_recorded_cursor(
     client: Client,
     backend: MemoryStreamBackend,
