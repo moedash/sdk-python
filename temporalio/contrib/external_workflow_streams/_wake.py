@@ -26,6 +26,7 @@ wake.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import time
 import uuid
@@ -48,9 +49,12 @@ if TYPE_CHECKING:
     from temporalio.contrib.external_workflow_streams._producer import WorkflowChainKey
 
 __all__ = [
+    "ChannelAddress",
+    "ChannelSupport",
     "WakeRequest",
     "WakeTransport",
     "channel_for",
+    "channel_support",
     "new_sender_identity",
     "send_wake",
     "send_wake_signal",
@@ -77,7 +81,40 @@ name that happens to look like a stream's.
 """
 
 
-def channel_for(key: StreamKey) -> str:
+@dataclass(frozen=True)
+class ChannelAddress:
+    """Where a stream's notifications go.
+
+    A channel linked to a workflow lives in that workflow's state and is
+    addressed by the channel name and the workflow id; the workflow is its
+    listener by construction. An independent channel is addressed by name
+    alone and listened on by command.
+    """
+
+    channel: str
+    """The channel name, see :func:`channel_for`."""
+
+    workflow_id: str = ""
+    """The workflow the channel is linked to, or empty for an independent channel.
+
+    The chain's id without a run, so the server resolves the chain's current
+    run the way it does for a Signal and a continue-as-new successor is
+    reached by the same address.
+    """
+
+    @property
+    def linked(self) -> bool:
+        """Whether the channel is linked to a workflow."""
+        return bool(self.workflow_id)
+
+    def execution(self) -> temporalio.api.common.v1.WorkflowExecution | None:
+        """The ``workflow_execution`` a channel call carries, or none."""
+        if not self.workflow_id:
+            return None
+        return temporalio.api.common.v1.WorkflowExecution(workflow_id=self.workflow_id)
+
+
+def channel_for(key: StreamKey) -> ChannelAddress:
     """The channel a stream's writers notify and its readers listen on.
 
     One formatting for both sides, so a producer process and the consuming
@@ -85,8 +122,15 @@ def channel_for(key: StreamKey) -> str:
     server scopes a channel to the namespace of the call. Every segment is
     percent-encoded, so a Workflow ID or stream name containing ``/`` cannot
     collide with another stream's segments.
+
+    A stream key names a workflow chain, so the channel is linked to that
+    workflow: it is the stream's owner and the one reader of its input. A
+    server with the linked kind keeps the channel in the owner's state, where
+    a notification is one write and no subscription is needed. A server
+    without it ignores the owner and serves the independent channel of the
+    same name, which the reader then subscribes to by command.
     """
-    return "/".join(
+    channel = "/".join(
         quote(part, safe="")
         for part in (
             CHANNEL_PREFIX,
@@ -96,6 +140,7 @@ def channel_for(key: StreamKey) -> str:
             key.stream_name,
         )
     )
+    return ChannelAddress(channel=channel, workflow_id=key.workflow_id)
 
 
 WAKE_SIGNAL_NAME = "__temporal_external_stream_wake"
@@ -180,9 +225,22 @@ class WakeRequest:
     """The channel the stream's readers listen on, see :func:`channel_for`.
 
     Empty for a request composed by code that predates the channel, which the
-    transport then wakes by chain. Not part of the request ID: the ID names the
-    wake, and the channel is only where it is delivered.
+    transport then wakes by Signal. Not part of the request ID: the ID names
+    the wake, and the channel is only where it is delivered.
     """
+    channel_workflow_id: str = ""
+    """The workflow the channel is linked to, empty for an independent channel.
+
+    Set with ``channel`` for a workflow-owned stream, so the notification
+    addresses the owner's linked channel on a server that has the kind.
+    """
+
+    @property
+    def channel_address(self) -> ChannelAddress:
+        """The channel and its owner as one address."""
+        return ChannelAddress(
+            channel=self.channel, workflow_id=self.channel_workflow_id
+        )
 
     @property
     def is_unparked(self) -> bool:
@@ -357,41 +415,99 @@ PROBE_CHANNEL = f"{CHANNEL_PREFIX}/probe"
 """A channel nobody writes to, described to learn whether the server has any."""
 
 
+class ChannelSupport(enum.Enum):
+    """What a server offers a stream's readers, as :func:`channel_support` finds it."""
+
+    NONE = "none"
+    """No notification channels: readers are woken by the Signal."""
+
+    INDEPENDENT = "independent"
+    """Channels, each its own execution: readers subscribe to them by command."""
+
+    LINKED = "linked"
+    """Channels linked to a workflow as well: a workflow-owned stream's reader is
+    the channel's listener by construction, and only the other streams need
+    the command."""
+
+
+async def _describe_probe(
+    client: temporalio.client.Client,
+    workflow_id: str | None,
+) -> temporalio.api.workflowservice.v1.DescribeChannelResponse | None:
+    """Describes the probe channel, or returns ``None`` for a server without channels.
+
+    A refusal is remembered the way a refused notify is, so the writers on
+    the same client skip the call as well. Any other failure propagates for
+    the caller to decide what it means.
+    """
+    if _best_transport(client) != "channel":
+        return None
+    service = getattr(client, "workflow_service", None)
+    call = getattr(service, "describe_channel", None)
+    if call is None:
+        _step_down(client, "channel")
+        return None
+    request = temporalio.api.workflowservice.v1.DescribeChannelRequest(
+        namespace=client.namespace, channel=PROBE_CHANNEL
+    )
+    if workflow_id:
+        request.workflow_execution.workflow_id = workflow_id
+    try:
+        return await call(request)
+    except temporalio.service.RPCError as err:
+        if err.status == temporalio.service.RPCStatusCode.UNIMPLEMENTED:
+            _step_down(client, "channel")
+            return None
+        raise
+
+
 async def server_has_channels(client: temporalio.client.Client) -> bool | None:
     """Whether this client's server implements notification channels.
 
     Asked with a ``DescribeChannel`` of a channel nobody writes to, because the
     one reader-side decision that depends on the answer is a command: a
     Workflow Task that subscribes to a channel on a server without them fails,
-    and nothing in the wake path would ever tell the reader. A refusal is
-    remembered the way a refused notify is, so the writers on the same client
-    skip the call as well.
+    and nothing in the wake path would ever tell the reader.
 
     Returns ``None`` when the server could not be asked, so the caller can ask
     again later rather than settle on an answer the server never gave.
     """
-    if _best_transport(client) != "channel":
-        return False
-    service = getattr(client, "workflow_service", None)
-    call = getattr(service, "describe_channel", None)
-    if call is None:
-        _step_down(client, "channel")
-        return False
     try:
-        await call(
-            temporalio.api.workflowservice.v1.DescribeChannelRequest(
-                namespace=client.namespace, channel=PROBE_CHANNEL
-            )
-        )
+        return await _describe_probe(client, None) is not None
     except temporalio.service.RPCError as err:
-        if err.status == temporalio.service.RPCStatusCode.UNIMPLEMENTED:
-            _step_down(client, "channel")
-            return False
         if err.status == temporalio.service.RPCStatusCode.NOT_FOUND:
             # The server knows the call and has never seen this channel.
             return True
         return None
-    return True
+
+
+async def channel_support(
+    client: temporalio.client.Client, workflow_id: str
+) -> ChannelSupport | None:
+    """What this client's server offers the readers of ``workflow_id``'s streams.
+
+    Asked with a ``DescribeChannel`` of the probe channel linked to that
+    workflow, which has to be running: a linked channel of a running workflow
+    exists by construction, so a server with the kind describes it, with no
+    listeners and nothing retained, where a server with only independent
+    channels ignores the owner and answers ``NOT_FOUND`` for a name nobody has
+    notified, and a server without channels answers ``UNIMPLEMENTED``.
+
+    The caller records the answer on the run's first task as a lang flag, so
+    a replay takes the same path whatever server replays it. Returns ``None``
+    when the server could not be asked.
+    """
+    try:
+        response = await _describe_probe(client, workflow_id)
+    except temporalio.service.RPCError as err:
+        if err.status == temporalio.service.RPCStatusCode.NOT_FOUND:
+            return ChannelSupport.INDEPENDENT
+        return None
+    if response is None:
+        return ChannelSupport.NONE
+    if response.kind == temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED:
+        return ChannelSupport.LINKED
+    return ChannelSupport.INDEPENDENT
 
 
 def wake_transport_of(backend: object) -> WakeTransport:
@@ -444,13 +560,18 @@ def build_notify_request(
     Signal's derivation serves here unchanged: two producers waking one parked
     generation send the identical request, and a sender retrying an attempt
     that may have landed sends it again rather than waking twice.
+
+    A channel with an owner is addressed to it, so a server with the linked
+    kind delivers to the owner's own channel; one without the kind ignores
+    the owner and serves the independent channel of the same name, which is
+    the one the reader subscribed to there.
     """
     if not request.channel:
         raise ValueError(
             "a channel notification needs the stream's channel; compose the "
             "request with wake_request_for() or set WakeRequest.channel"
         )
-    return temporalio.api.workflowservice.v1.NotifyChannelRequest(
+    notify = temporalio.api.workflowservice.v1.NotifyChannelRequest(
         namespace=request.namespace,
         notification=temporalio.api.notification.v1.Notification(
             channel=request.channel,
@@ -461,6 +582,9 @@ def build_notify_request(
         identity=identity,
         request_id=wake_request_id(request),
     )
+    if request.channel_workflow_id:
+        notify.workflow_execution.workflow_id = request.channel_workflow_id
+    return notify
 
 
 async def send_wake(
@@ -551,6 +675,7 @@ def wake_request_for(
     becomes an unparked wake rather than no wake at all. The channel is the
     input stream's, which is the only direction a producer writes.
     """
+    address = channel_for(workflow.stream_key(stream_name))
     return WakeRequest(
         namespace=workflow.namespace,
         workflow_id=workflow.workflow_id,
@@ -564,5 +689,6 @@ def wake_request_for(
         wake_counter=wake_counter,
         position=position,
         position_counter=position_counter,
-        channel=channel_for(workflow.stream_key(stream_name)),
+        channel=address.channel,
+        channel_workflow_id=address.workflow_id,
     )

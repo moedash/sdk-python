@@ -22,6 +22,7 @@ from datetime import timedelta
 import pytest
 
 import temporalio.api.common.v1
+import temporalio.api.notification.v1
 import temporalio.api.workflowservice.v1
 import temporalio.bridge
 import temporalio.converter
@@ -54,9 +55,12 @@ from temporalio.contrib.external_workflow_streams._wake import (
     WAKE_SIGNAL_ENVELOPE_VERSION,
     WAKE_SIGNAL_MESSAGE_TYPE,
     WAKE_SIGNAL_NAME,
+    ChannelAddress,
+    ChannelSupport,
     WakeRequest,
     build_signal_request,
     channel_for,
+    channel_support,
     send_wake,
     send_wake_signal,
     server_has_channels,
@@ -1843,11 +1847,14 @@ class ChannelServiceClient(RecordingClient):
         refuse_channel: temporalio.service.RPCStatusCode | None = None,
         listeners: int = 1,
         describe: temporalio.service.RPCStatusCode | None = None,
+        linked: bool = False,
     ) -> None:
         super().__init__()
         self.refuse_channel = refuse_channel
         self.listeners = listeners
         self.describe_status = describe
+        #: Whether a describe addressed to a workflow finds its linked channel.
+        self.linked = linked
         self.notified: list = []
         self.described: list = []
 
@@ -1863,10 +1870,17 @@ class ChannelServiceClient(RecordingClient):
         self.described.append(request)
         if self.describe_status is not None:
             raise _rpc_error(self.describe_status)
+        if self.linked and request.HasField("workflow_execution"):
+            return temporalio.api.workflowservice.v1.DescribeChannelResponse(
+                kind=temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED,
+                linked_to=temporalio.api.common.v1.WorkflowExecution(
+                    workflow_id=request.workflow_execution.workflow_id, run_id="run"
+                ),
+            )
         return temporalio.api.workflowservice.v1.DescribeChannelResponse()
 
 
-TOKENS_CHANNEL = channel_for(CHAIN.stream_key("tokens"))
+TOKENS_CHANNEL = channel_for(CHAIN.stream_key("tokens")).channel
 
 
 def channel_request(**overrides) -> WakeRequest:  # type: ignore[no-untyped-def]
@@ -2041,9 +2055,23 @@ async def test_a_wake_reports_a_position_appended_outside_the_producer() -> None
 def test_the_channel_is_the_stream_identity_without_the_namespace() -> None:
     key = StreamKey("ns", "wf-1", "first-run-1", "tokens")
 
-    assert channel_for(key) == "external-stream/wf-1/first-run-1/input/tokens"
+    assert channel_for(key).channel == "external-stream/wf-1/first-run-1/input/tokens"
     # The server scopes a channel to the namespace of the call.
     assert channel_for(dataclasses.replace(key, namespace="other")) == channel_for(key)
+
+
+def test_the_channel_is_linked_to_the_streams_workflow() -> None:
+    """A stream key names a chain, so its channel is the owner's, by id alone."""
+    address = channel_for(StreamKey("ns", "wf-1", "first-run-1", "tokens"))
+
+    assert address.workflow_id == "wf-1"
+    assert address.linked
+    execution = address.execution()
+    assert execution is not None
+    assert execution.workflow_id == "wf-1" and execution.run_id == ""
+    # A channel without an owner is addressed by name alone.
+    independent = ChannelAddress(channel="orders")
+    assert not independent.linked and independent.execution() is None
 
 
 def test_the_channel_tells_the_two_directions_apart() -> None:
@@ -2060,7 +2088,7 @@ def test_a_slash_in_a_name_cannot_borrow_another_streams_segments() -> None:
     second = StreamKey("ns", "wf", "1/first-run-1", "tokens")
 
     assert channel_for(first) != channel_for(second)
-    assert channel_for(first).split("/")[1] == "wf%2F1"
+    assert channel_for(first).channel.split("/")[1] == "wf%2F1"
 
 
 def test_the_request_composed_for_a_chain_names_its_channel() -> None:
@@ -2069,6 +2097,8 @@ def test_the_request_composed_for_a_chain_names_its_channel() -> None:
     )
 
     assert composed.channel == TOKENS_CHANNEL
+    assert composed.channel_workflow_id == "wf-1"
+    assert composed.channel_address == channel_for(CHAIN.stream_key("tokens"))
 
 
 def test_the_channel_is_not_part_of_the_request_id() -> None:
@@ -2205,6 +2235,59 @@ async def test_the_probe_leaves_an_unanswered_question_open() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_probe_finds_the_linked_kind_on_a_running_workflow() -> None:
+    """A running workflow's linked channel exists by construction, so describing
+    the probe channel as that workflow's is answered, kind and all."""
+    client = ChannelServiceClient(linked=True)
+
+    assert await channel_support(client, "wf-1") is ChannelSupport.LINKED  # type: ignore[arg-type]
+
+    [described] = client.described
+    assert described.namespace == "ns"
+    assert described.channel == PROBE_CHANNEL
+    assert described.workflow_execution.workflow_id == "wf-1"
+    assert described.workflow_execution.run_id == ""
+
+
+@pytest.mark.asyncio
+async def test_a_server_with_only_independent_channels_answers_not_found() -> None:
+    # The owner is ignored there, and the probe channel has never been notified.
+    client = ChannelServiceClient(describe=NOT_FOUND)
+
+    assert await channel_support(client, "wf-1") is ChannelSupport.INDEPENDENT  # type: ignore[arg-type]
+    # A describe answered without a kind is from a server that predates them.
+    assert (
+        await channel_support(ChannelServiceClient(), "wf-1")  # type: ignore[arg-type]
+        is ChannelSupport.INDEPENDENT
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_server_without_channels_is_remembered_by_the_three_way_probe() -> None:
+    client = ChannelServiceClient(describe=UNIMPLEMENTED)
+
+    assert await channel_support(client, "wf-1") is ChannelSupport.NONE  # type: ignore[arg-type]
+
+    await send_wake(client, channel_request())  # type: ignore[arg-type]
+    assert client.notified == [], "the probe's answer was not shared with the writers"
+    assert len(client.sent) == 1
+    assert await channel_support(client, "wf-1") is ChannelSupport.NONE  # type: ignore[arg-type]
+    assert len(client.described) == 1, "a remembered answer was asked for again"
+    # A client whose service lacks the call has the answer in its shape.
+    assert await channel_support(RecordingClient(), "wf-1") is ChannelSupport.NONE  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_the_three_way_probe_leaves_an_unanswered_question_open() -> None:
+    client = ChannelServiceClient(describe=UNAVAILABLE, linked=True)
+
+    assert await channel_support(client, "wf-1") is None  # type: ignore[arg-type]
+
+    client.describe_status = None
+    assert await channel_support(client, "wf-1") is ChannelSupport.LINKED  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_a_producer_notifies_the_channel_of_the_stream_it_appended_to() -> None:
     backend = MemoryStreamBackend()
     client = ChannelServiceClient()
@@ -2213,7 +2296,10 @@ async def test_a_producer_notifies_the_channel_of_the_stream_it_appended_to() ->
     await topic.publish("hello")
 
     [notify] = client.notified
-    assert notify.notification.channel == channel_for(topic.stream_key)
+    assert notify.notification.channel == channel_for(topic.stream_key).channel
+    # The owner rides along, so a server with linked channels delivers to it.
+    assert notify.workflow_execution.workflow_id == "wf-1"
+    assert notify.workflow_execution.run_id == ""
     assert client.sent == []
 
 
