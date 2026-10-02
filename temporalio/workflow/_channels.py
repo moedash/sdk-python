@@ -90,13 +90,15 @@ class ChannelSubscription:
     this workflow. The handle is an async iterator over the notifications as
     they arrive, and :meth:`receive` takes them one at a time. Notifications
     wait in arrival order until taken. Two loops on one handle share its
-    buffer and interleave.
+    buffer and interleave. :meth:`unsubscribe` ends an independent
+    subscription; a linked channel lasts as long as the run.
     """
 
     def __init__(self, channel: str, *, linked: bool = False) -> None:
         """Prefer the two module functions named above."""
         self._channel = channel
         self._linked = linked
+        self._closed = False
         self._pending: deque[Notification] = deque()
         self._waiters: deque[asyncio.Future[None]] = deque()
 
@@ -114,13 +116,68 @@ class ChannelSubscription:
         """
         return self._linked
 
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`unsubscribe` has ended this subscription.
+
+        A closed handle still hands out the notifications it had queued, then
+        :meth:`receive` raises and iteration ends.
+        """
+        return self._closed
+
+    def unsubscribe(self) -> None:
+        """End this workflow's subscription to the channel.
+
+        Issues the unsubscribe command once; a second call changes nothing.
+        Notifications already queued on this handle can still be read, and
+        one the server put on a scheduled Workflow Task before the command
+        landed is dropped on arrival. A later
+        :func:`temporalio.workflow.subscribe_channel` for the same name opens
+        a new subscription with a new command.
+
+        Raises:
+            ValueError: The handle is from
+                :func:`temporalio.workflow.linked_channel`. A linked channel is
+                part of the run and has no subscription to end.
+        """
+        if self._linked:
+            raise ValueError("a linked channel has no subscription")
+        if self._closed:
+            return
+        _Runtime.current().workflow_unsubscribe_channel(self._channel)
+        self._closed = True
+        # The waiters wake to find the handle closed with nothing queued.
+        self._wake()
+
     async def receive(self) -> Notification:
         """The next notification on this channel, waiting for one to arrive.
 
         The wait is a future the delivery resolves, so it adds no command and
         replays the same way.
+
+        Raises:
+            RuntimeError: The subscription is closed and nothing is queued.
         """
+        notification = await self._next()
+        if notification is None:
+            raise RuntimeError("channel subscription closed")
+        return notification
+
+    def __aiter__(self) -> ChannelSubscription:
+        """The subscription is its own iterator."""
+        return self
+
+    async def __anext__(self) -> Notification:
+        """The next notification. The iteration ends once the handle is closed and drained."""
+        notification = await self._next()
+        if notification is None:
+            raise StopAsyncIteration
+        return notification
+
+    async def _next(self) -> Notification | None:
         while not self._pending:
+            if self._closed:
+                return None
             waiter: asyncio.Future[None] = asyncio.Future()
             self._waiters.append(waiter)
             try:
@@ -130,16 +187,11 @@ class ChannelSubscription:
                     self._waiters.remove(waiter)
         return self._pending.popleft()
 
-    def __aiter__(self) -> ChannelSubscription:
-        """The subscription is its own iterator."""
-        return self
-
-    async def __anext__(self) -> Notification:
-        """The next notification; the iteration never ends on its own."""
-        return await self.receive()
-
     def _deliver(self, notification: Notification) -> None:
         self._pending.append(notification)
+        self._wake()
+
+    def _wake(self) -> None:
         # Every waiter wakes; the ones that find the buffer empty again wait
         # once more.
         while self._waiters:
