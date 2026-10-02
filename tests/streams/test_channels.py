@@ -8,6 +8,8 @@ skip otherwise.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -21,7 +23,9 @@ import temporalio.bridge.proto.workflow_completion
 import temporalio.common
 import temporalio.converter
 from temporalio import workflow
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import Callback, Client
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker._workflow_instance import (
     UnsandboxedWorkflowRunner,
     WorkflowInstance,
@@ -233,16 +237,40 @@ async def test_an_empty_channel_name_is_refused():
 @pytest.mark.needs_channel_server
 async def test_a_workflow_receives_a_client_notification(client: Client):
     channel = f"orders-{uuid.uuid4()}"
-    async with new_worker(client, ReceiveOne) as worker:
-        handle = await client.start_workflow(
-            ReceiveOne.run,
-            channel,
-            id=f"wf-{uuid.uuid4()}",
-            task_queue=worker.task_queue,
-        )
+    worker = new_worker(client, ReceiveOne)
+    running = asyncio.create_task(worker.run())
+    handle = await client.start_workflow(
+        ReceiveOne.run,
+        channel,
+        id=f"wf-{uuid.uuid4()}",
+        task_queue=worker.task_queue,
+    )
+    try:
+
+        async def subscribed() -> None:
+            # The worker's Core has to carry the subscribe command to the
+            # server. One that refuses it fails every completion, and the task
+            # times out instead; say so rather than wait on the result forever.
+            events = [event.event_type async for event in handle.fetch_history_events()]
+            if EventType.EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT in events:
+                pytest.fail(
+                    "the worker could not complete the task that subscribes; the Core "
+                    "the bridge pins must carry the subscribe command"
+                )
+            assert (
+                EventType.EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED in events
+            )
+
+        await assert_eventually(subscribed, timeout=timedelta(seconds=30))
 
         async def listening() -> None:
-            description = await client.describe_channel(channel)
+            # The channel exists once the subscribe lands, so a describe that
+            # races it is answered with not found.
+            try:
+                description = await client.describe_channel(channel)
+            except RPCError as err:
+                assert err.status != RPCStatusCode.NOT_FOUND, "channel not created yet"
+                raise
             assert [listener.workflow_id for listener in description.listeners] == [
                 handle.id
             ]
@@ -252,7 +280,7 @@ async def test_a_workflow_receives_a_client_notification(client: Client):
             channel, position=b"1-0", counter=1, metadata={"topic": "inputs"}
         )
         assert listeners == 1
-        assert await handle.result() == {
+        assert await asyncio.wait_for(handle.result(), 30) == {
             "channel": channel,
             "counter": 1,
             "position": "1-0",
@@ -262,6 +290,18 @@ async def test_a_workflow_receives_a_client_notification(client: Client):
         assert [n.counter for n in polled] == [1]
         description = await client.describe_channel(channel)
         assert description.latest is not None and description.latest.counter == 1
+    finally:
+        # A Core that refuses the subscribe command leaves the task in a
+        # timeout loop and the worker's shutdown waiting on it, so end the run
+        # first and give the shutdown a bound.
+        with contextlib.suppress(RPCError):
+            await handle.terminate()
+        try:
+            await asyncio.wait_for(worker.shutdown(), 15)
+        except asyncio.TimeoutError:
+            running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
 
 
 @pytest.mark.needs_channel_server
