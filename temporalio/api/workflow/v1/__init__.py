@@ -1,5 +1,6 @@
 from .message_pb2 import (
     CallbackInfo,
+    ChannelSubscriptionInfo,
     DeploymentTransition,
     DeploymentVersionTransition,
     NewWorkflowExecutionInfo,
@@ -24,6 +25,7 @@ from .message_pb2 import (
 
 __all__ = [
     "CallbackInfo",
+    "ChannelSubscriptionInfo",
     "DeploymentTransition",
     "DeploymentVersionTransition",
     "NewWorkflowExecutionInfo",
