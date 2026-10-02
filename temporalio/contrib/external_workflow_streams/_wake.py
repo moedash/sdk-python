@@ -3,10 +3,9 @@
 The server-visible wakeup, used whenever no open Workflow Task can accept local
 readiness. It carries no stream payload. It goes out as a notification on the
 stream's channel when the server has channels, see :func:`send_wake` and
-:func:`channel_for`, over the deprecated ``WakeWorkflowExecution`` call when it
-has only that, and otherwise as the reserved Signal described below, which
-carries only enough identity for Core to decide whether it is a wake, a stale
-claim, or someone else's chain.
+:func:`channel_for`, and otherwise as the reserved Signal described below,
+which carries only enough identity for Core to decide whether it is a wake, a
+stale claim, or someone else's chain.
 
 Two properties are load-bearing and neither is available from the public Signal
 API, which is why this path does not reuse it:
@@ -27,6 +26,7 @@ wake.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import time
 import uuid
@@ -38,7 +38,6 @@ from urllib.parse import quote
 
 import temporalio.api.common.v1
 import temporalio.api.notification.v1
-import temporalio.api.workflow.v1
 import temporalio.api.workflowservice.v1
 import temporalio.service
 from temporalio.bridge.proto.external_stream.external_stream_pb2 import WakeSignal
@@ -50,9 +49,12 @@ if TYPE_CHECKING:
     from temporalio.contrib.external_workflow_streams._producer import WorkflowChainKey
 
 __all__ = [
+    "ChannelAddress",
+    "ChannelSupport",
     "WakeRequest",
     "WakeTransport",
     "channel_for",
+    "channel_support",
     "new_sender_identity",
     "send_wake",
     "send_wake_signal",
@@ -60,15 +62,15 @@ __all__ = [
     "wake_request_id",
 ]
 
-WakeTransport = Literal["auto", "channel", "wake", "signal"]
+WakeTransport = Literal["auto", "channel", "signal"]
 """How a wake reaches the server.
 
-``"channel"`` notifies the stream's channel with ``NotifyChannel``. Every run
-that subscribed to the channel is woken, and the only record is the
-notification on the scheduled event of the Workflow Task it causes. ``"wake"``
-uses the deprecated ``WakeWorkflowExecution`` call, addressed to one chain.
-``"signal"`` uses the reserved Signal. ``"auto"`` tries them in that order and
-steps down on ``UNIMPLEMENTED``, remembering per client what the server lacks.
+``"channel"`` notifies the stream's channel with ``NotifyChannel``. Every
+listener of the channel is woken, and the only record is the notification on
+the scheduled event of the Workflow Task it causes. ``"signal"`` uses the
+reserved Signal. ``"auto"`` tries the channel first and steps down to the
+Signal on ``UNIMPLEMENTED``, remembering per client that the server lacks
+channels.
 """
 
 CHANNEL_PREFIX = "external-stream"
@@ -79,7 +81,40 @@ name that happens to look like a stream's.
 """
 
 
-def channel_for(key: StreamKey) -> str:
+@dataclass(frozen=True)
+class ChannelAddress:
+    """Where a stream's notifications go.
+
+    A channel linked to a workflow lives in that workflow's state and is
+    addressed by the channel name and the workflow id; the workflow is its
+    listener by construction. An independent channel is addressed by name
+    alone and listened on by command.
+    """
+
+    channel: str
+    """The channel name, see :func:`channel_for`."""
+
+    workflow_id: str = ""
+    """The workflow the channel is linked to, or empty for an independent channel.
+
+    The chain's id without a run, so the server resolves the chain's current
+    run the way it does for a Signal and a continue-as-new successor is
+    reached by the same address.
+    """
+
+    @property
+    def linked(self) -> bool:
+        """Whether the channel is linked to a workflow."""
+        return bool(self.workflow_id)
+
+    def execution(self) -> temporalio.api.common.v1.WorkflowExecution | None:
+        """The ``workflow_execution`` a channel call carries, or none."""
+        if not self.workflow_id:
+            return None
+        return temporalio.api.common.v1.WorkflowExecution(workflow_id=self.workflow_id)
+
+
+def channel_for(key: StreamKey) -> ChannelAddress:
     """The channel a stream's writers notify and its readers listen on.
 
     One formatting for both sides, so a producer process and the consuming
@@ -87,8 +122,15 @@ def channel_for(key: StreamKey) -> str:
     server scopes a channel to the namespace of the call. Every segment is
     percent-encoded, so a Workflow ID or stream name containing ``/`` cannot
     collide with another stream's segments.
+
+    A stream key names a workflow chain, so the channel is linked to that
+    workflow: it is the stream's owner and the one reader of its input. A
+    server with the linked kind keeps the channel in the owner's state, where
+    a notification is one write and no subscription is needed. A server
+    without it ignores the owner and serves the independent channel of the
+    same name, which the reader then subscribes to by command.
     """
-    return "/".join(
+    channel = "/".join(
         quote(part, safe="")
         for part in (
             CHANNEL_PREFIX,
@@ -98,6 +140,7 @@ def channel_for(key: StreamKey) -> str:
             key.stream_name,
         )
     )
+    return ChannelAddress(channel=channel, workflow_id=key.workflow_id)
 
 
 WAKE_SIGNAL_NAME = "__temporal_external_stream_wake"
@@ -182,9 +225,22 @@ class WakeRequest:
     """The channel the stream's readers listen on, see :func:`channel_for`.
 
     Empty for a request composed by code that predates the channel, which the
-    transport then wakes by chain. Not part of the request ID: the ID names the
-    wake, and the channel is only where it is delivered.
+    transport then wakes by Signal. Not part of the request ID: the ID names
+    the wake, and the channel is only where it is delivered.
     """
+    channel_workflow_id: str = ""
+    """The workflow the channel is linked to, empty for an independent channel.
+
+    Set with ``channel`` for a workflow-owned stream, so the notification
+    addresses the owner's linked channel on a server that has the kind.
+    """
+
+    @property
+    def channel_address(self) -> ChannelAddress:
+        """The channel and its owner as one address."""
+        return ChannelAddress(
+            channel=self.channel, workflow_id=self.channel_workflow_id
+        )
 
     @property
     def is_unparked(self) -> bool:
@@ -306,15 +362,12 @@ async def send_wake_signal(
     return signal_request.request_id
 
 
-_TRANSPORT_ORDER: tuple[str, ...] = ("channel", "wake", "signal")
+_TRANSPORT_ORDER: tuple[str, ...] = ("channel", "signal")
 """What ``"auto"`` tries, in order.
 
-Each step is taken by every server that takes the one before it, so stepping
-down never loses a wake, only the folding and the History the later transport
-costs.
+Every server takes the Signal, so stepping down never loses a wake, only the
+folding the channel gives and the History event the Signal costs.
 """
-
-_CALL_NAMES = {"channel": "notify_channel", "wake": "wake_workflow_execution"}
 
 _BEST_TRANSPORT: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
 """Per service client, the first transport its server has not refused.
@@ -362,41 +415,99 @@ PROBE_CHANNEL = f"{CHANNEL_PREFIX}/probe"
 """A channel nobody writes to, described to learn whether the server has any."""
 
 
+class ChannelSupport(enum.Enum):
+    """What a server offers a stream's readers, as :func:`channel_support` finds it."""
+
+    NONE = "none"
+    """No notification channels: readers are woken by the Signal."""
+
+    INDEPENDENT = "independent"
+    """Channels, each its own execution: readers subscribe to them by command."""
+
+    LINKED = "linked"
+    """Channels linked to a workflow as well: a workflow-owned stream's reader is
+    the channel's listener by construction, and only the other streams need
+    the command."""
+
+
+async def _describe_probe(
+    client: temporalio.client.Client,
+    workflow_id: str | None,
+) -> temporalio.api.workflowservice.v1.DescribeChannelResponse | None:
+    """Describes the probe channel, or returns ``None`` for a server without channels.
+
+    A refusal is remembered the way a refused notify is, so the writers on
+    the same client skip the call as well. Any other failure propagates for
+    the caller to decide what it means.
+    """
+    if _best_transport(client) != "channel":
+        return None
+    service = getattr(client, "workflow_service", None)
+    call = getattr(service, "describe_channel", None)
+    if call is None:
+        _step_down(client, "channel")
+        return None
+    request = temporalio.api.workflowservice.v1.DescribeChannelRequest(
+        namespace=client.namespace, channel=PROBE_CHANNEL
+    )
+    if workflow_id:
+        request.workflow_execution.workflow_id = workflow_id
+    try:
+        return await call(request)
+    except temporalio.service.RPCError as err:
+        if err.status == temporalio.service.RPCStatusCode.UNIMPLEMENTED:
+            _step_down(client, "channel")
+            return None
+        raise
+
+
 async def server_has_channels(client: temporalio.client.Client) -> bool | None:
     """Whether this client's server implements notification channels.
 
     Asked with a ``DescribeChannel`` of a channel nobody writes to, because the
     one reader-side decision that depends on the answer is a command: a
     Workflow Task that subscribes to a channel on a server without them fails,
-    and nothing in the wake path would ever tell the reader. A refusal is
-    remembered the way a refused notify is, so the writers on the same client
-    skip the call as well.
+    and nothing in the wake path would ever tell the reader.
 
     Returns ``None`` when the server could not be asked, so the caller can ask
     again later rather than settle on an answer the server never gave.
     """
-    if _best_transport(client) != "channel":
-        return False
-    service = getattr(client, "workflow_service", None)
-    call = getattr(service, "describe_channel", None)
-    if call is None:
-        _step_down(client, "channel")
-        return False
     try:
-        await call(
-            temporalio.api.workflowservice.v1.DescribeChannelRequest(
-                namespace=client.namespace, channel=PROBE_CHANNEL
-            )
-        )
+        return await _describe_probe(client, None) is not None
     except temporalio.service.RPCError as err:
-        if err.status == temporalio.service.RPCStatusCode.UNIMPLEMENTED:
-            _step_down(client, "channel")
-            return False
         if err.status == temporalio.service.RPCStatusCode.NOT_FOUND:
             # The server knows the call and has never seen this channel.
             return True
         return None
-    return True
+
+
+async def channel_support(
+    client: temporalio.client.Client, workflow_id: str
+) -> ChannelSupport | None:
+    """What this client's server offers the readers of ``workflow_id``'s streams.
+
+    Asked with a ``DescribeChannel`` of the probe channel linked to that
+    workflow, which has to be running: a linked channel of a running workflow
+    exists by construction, so a server with the kind describes it, with no
+    listeners and nothing retained, where a server with only independent
+    channels ignores the owner and answers ``NOT_FOUND`` for a name nobody has
+    notified, and a server without channels answers ``UNIMPLEMENTED``.
+
+    The caller records the answer on the run's first task as a lang flag, so
+    a replay takes the same path whatever server replays it. Returns ``None``
+    when the server could not be asked.
+    """
+    try:
+        response = await _describe_probe(client, workflow_id)
+    except temporalio.service.RPCError as err:
+        if err.status == temporalio.service.RPCStatusCode.NOT_FOUND:
+            return ChannelSupport.INDEPENDENT
+        return None
+    if response is None:
+        return ChannelSupport.NONE
+    if response.kind == temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED:
+        return ChannelSupport.LINKED
+    return ChannelSupport.INDEPENDENT
 
 
 def wake_transport_of(backend: object) -> WakeTransport:
@@ -421,44 +532,20 @@ def wake_position(backend: object, offset: Offset | None) -> tuple[bytes, int]:
 
 
 def wake_call_counter(request: WakeRequest) -> int:
-    """The counter the wake call carries for ``request``.
+    """The counter the notification carries for ``request``.
 
-    The server folds a wake into one still pending for the same source when
-    its counter is not above the pending one, so the counter decides which
-    position the receiving task sees. The store's own order when it has one.
-    Otherwise the wall clock in nanoseconds, which keeps one sender's wakes
-    increasing but is not ordered across senders: a pending wake can then end
-    up reporting an older position than another sender's. That costs latency
-    only, because the task still reads from its own cursor and the watcher
-    reports whatever it finds.
+    The server folds a notification into one still pending for the same
+    listener when its counter is not above the pending one, so the counter
+    decides which position the receiving task sees. The store's own order when
+    it has one. Otherwise the wall clock in nanoseconds, which keeps one
+    sender's wakes increasing but is not ordered across senders: a pending
+    notification can then end up reporting an older position than another
+    sender's. That costs latency only, because the task still reads from its
+    own cursor and the watcher reports whatever it finds.
     """
     if request.position_counter > 0:
         return request.position_counter
     return time.time_ns()
-
-
-def build_wake_request(
-    request: WakeRequest, *, identity: str
-) -> temporalio.api.workflowservice.v1.WakeWorkflowExecutionRequest:
-    """The ``WakeWorkflowExecution`` request for one wake.
-
-    ``run_id`` is the chain's first execution run, so the server follows the
-    chain to its current run and answers ``NOT_FOUND`` once the chain has
-    ended rather than waking a later chain that reused the Workflow ID.
-    """
-    return temporalio.api.workflowservice.v1.WakeWorkflowExecutionRequest(
-        namespace=request.namespace,
-        workflow_execution=temporalio.api.common.v1.WorkflowExecution(
-            workflow_id=request.workflow_id,
-            run_id=request.first_execution_run_id,
-        ),
-        wake=temporalio.api.workflow.v1.Wake(
-            source=request.stream_name,
-            position=request.position,
-            counter=wake_call_counter(request),
-        ),
-        identity=identity,
-    )
 
 
 def build_notify_request(
@@ -473,13 +560,18 @@ def build_notify_request(
     Signal's derivation serves here unchanged: two producers waking one parked
     generation send the identical request, and a sender retrying an attempt
     that may have landed sends it again rather than waking twice.
+
+    A channel with an owner is addressed to it, so a server with the linked
+    kind delivers to the owner's own channel; one without the kind ignores
+    the owner and serves the independent channel of the same name, which is
+    the one the reader subscribed to there.
     """
     if not request.channel:
         raise ValueError(
             "a channel notification needs the stream's channel; compose the "
             "request with wake_request_for() or set WakeRequest.channel"
         )
-    return temporalio.api.workflowservice.v1.NotifyChannelRequest(
+    notify = temporalio.api.workflowservice.v1.NotifyChannelRequest(
         namespace=request.namespace,
         notification=temporalio.api.notification.v1.Notification(
             channel=request.channel,
@@ -490,6 +582,9 @@ def build_notify_request(
         identity=identity,
         request_id=wake_request_id(request),
     )
+    if request.channel_workflow_id:
+        notify.workflow_execution.workflow_id = request.channel_workflow_id
+    return notify
 
 
 async def send_wake(
@@ -500,11 +595,7 @@ async def send_wake(
     transport: WakeTransport = "auto",
     metadata: Mapping[str, temporalio.api.common.v1.Payload] | None = None,
 ) -> str:
-    """Sends one wake over ``transport`` and returns an identifier for it.
-
-    The channel and the Signal return the request ID the wake went out under.
-    The wake call has no request ID, since the server folds by counter
-    instead, so it returns the run the wake was stored on.
+    """Sends one wake over ``transport`` and returns the request ID it went under.
 
     ``"auto"`` starts at the best transport this client's server is known to
     take and steps down on ``UNIMPLEMENTED``, remembering the step. A channel
@@ -513,7 +604,7 @@ async def send_wake(
     what closes the gap between a reader's last look at the store and its
     subscription taking effect.
 
-    A ``NOT_FOUND`` from the wake call propagates as the ``RPCError`` it is,
+    A ``NOT_FOUND`` from the channel propagates as the ``RPCError`` it is,
     which is what a Signal to an ended Workflow raises as well, so callers keep
     one meaning for "the chain is over".
 
@@ -524,8 +615,8 @@ async def send_wake(
 
     Raises:
         temporalio.service.RPCError: The server refused the wake. With
-            ``"channel"`` or ``"wake"`` this includes ``UNIMPLEMENTED``, since
-            that transport was asked for explicitly.
+            ``"channel"`` this includes ``UNIMPLEMENTED``, since that
+            transport was asked for explicitly.
     """
     # Checked against the alias rather than a literal tuple so an untyped caller
     # still gets a ValueError instead of a silent Signal.
@@ -535,36 +626,33 @@ async def send_wake(
     if attempt == "channel" and not request.channel and transport == "auto":
         # Composed without its channel by a caller that predates it. Nothing
         # about the server follows from that, so nothing is remembered.
-        attempt = "wake"
-    while attempt != "signal":
+        attempt = "signal"
+    if attempt == "channel":
         service = getattr(client, "workflow_service", None)
-        call = getattr(service, _CALL_NAMES[attempt], None)
+        call = getattr(service, "notify_channel", None)
         if call is None:
             # An SDK build whose generated service lacks the call can no more
-            # send a wake than a server that lacks it can take one.
+            # send a notification than a server that lacks it can take one.
             if transport != "auto":
                 raise RuntimeError(
-                    f"the {attempt} transport was requested but this client has "
-                    f"no {_CALL_NAMES[attempt]} call"
+                    "the channel transport was requested but this client has "
+                    "no notify_channel call"
                 )
-            attempt = _step_down(client, attempt)
-            continue
-        identity = client.service_client.config.identity
-        try:
-            if attempt == "channel":
+            _step_down(client, "channel")
+        else:
+            identity = client.service_client.config.identity
+            try:
                 await call(
                     build_notify_request(request, identity=identity, metadata=metadata)
                 )
                 return wake_request_id(request)
-            response = await call(build_wake_request(request, identity=identity))
-            return response.run_id
-        except temporalio.service.RPCError as err:
-            if (
-                transport != "auto"
-                or err.status != temporalio.service.RPCStatusCode.UNIMPLEMENTED
-            ):
-                raise
-            attempt = _step_down(client, attempt)
+            except temporalio.service.RPCError as err:
+                if (
+                    transport != "auto"
+                    or err.status != temporalio.service.RPCStatusCode.UNIMPLEMENTED
+                ):
+                    raise
+                _step_down(client, "channel")
     return await send_wake_signal(
         client, request, producer_session_id=producer_session_id
     )
@@ -587,6 +675,7 @@ def wake_request_for(
     becomes an unparked wake rather than no wake at all. The channel is the
     input stream's, which is the only direction a producer writes.
     """
+    address = channel_for(workflow.stream_key(stream_name))
     return WakeRequest(
         namespace=workflow.namespace,
         workflow_id=workflow.workflow_id,
@@ -600,5 +689,6 @@ def wake_request_for(
         wake_counter=wake_counter,
         position=position,
         position_counter=position_counter,
-        channel=channel_for(workflow.stream_key(stream_name)),
+        channel=address.channel,
+        channel_workflow_id=address.workflow_id,
     )

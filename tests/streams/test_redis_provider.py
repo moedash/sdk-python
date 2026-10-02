@@ -171,8 +171,9 @@ async def test_a_wake_refused_for_another_reason_for_the_whole_window_is_raised(
 
 @pytest.mark.usefixtures("quick_wake_retries")
 async def test_a_wake_refused_as_not_found_ends_without_a_describe():
-    # The wake call names the chain's first run, so the server's NOT_FOUND
-    # already says the chain has ended.
+    # The server answers NOT_FOUND for a chain that has ended, whether the
+    # wake went as a Signal or to the owner's linked channel, so nothing is
+    # left to describe.
     client = _ChainClient(WorkflowExecutionStatus.RUNNING)
     refusal = WakeNotAcknowledgedError("gone", pending=[])
     refusal.__cause__ = RPCError("gone", RPCStatusCode.NOT_FOUND, b"")
