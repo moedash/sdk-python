@@ -2333,24 +2333,6 @@ class WorkflowService:
             timeout=timeout,
         )
 
-    async def wake_workflow_execution(
-        self,
-        req: temporalio.api.workflowservice.v1.WakeWorkflowExecutionRequest,
-        retry: bool = False,
-        metadata: Mapping[str, str | bytes] = {},
-        timeout: timedelta | None = None,
-    ) -> temporalio.api.workflowservice.v1.WakeWorkflowExecutionResponse:
-        """Invokes the WorkflowService.wake_workflow_execution rpc method."""
-        return await self._client._rpc_call(
-            rpc="wake_workflow_execution",
-            req=req,
-            service=self._service,
-            resp_type=temporalio.api.workflowservice.v1.WakeWorkflowExecutionResponse,
-            retry=retry,
-            metadata=metadata,
-            timeout=timeout,
-        )
-
 
 class OperatorService:
     """RPC calls for the OperatorService."""
