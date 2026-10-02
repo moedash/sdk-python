@@ -806,7 +806,7 @@ def test_a_subscription_asks_the_run_to_listen_on_its_streams_channel(
         asked.append(channel)
         return True
 
-    workflow_instance.subscribe_channel = subscribe_channel  # type: ignore[attr-defined]
+    workflow_instance.subscribe_stream_channel = subscribe_channel  # type: ignore[attr-defined]
 
     external_stream.topic("tokens").subscribe()
     external_stream.topic("tokens").subscribe()
@@ -818,7 +818,7 @@ def test_a_subscription_asks_the_run_to_listen_on_its_streams_channel(
 
 
 def test_a_run_that_cannot_listen_still_subscribes(runtime: FakeRuntime) -> None:
-    # The bare FakeInstance has no subscribe_channel, like a Run object that
-    # predates the channel; the subscription itself is unaffected.
+    # The bare FakeInstance has no subscribe_stream_channel, like a Run object
+    # that predates the channel; the subscription itself is unaffected.
     assert external_stream.topic("tokens").subscribe().wait_id == 1
     assert runtime.registrations[0][0] == 1

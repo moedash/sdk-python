@@ -312,9 +312,9 @@ class ExternalStreamTopic(Generic[AnyType]):
         # the Run rather than of the stream runtime, because the answer is a
         # command and commands are the Run's to emit; it also decides, from the
         # server it talks to, whether to emit one at all.
-        subscribe_channel = getattr(_run_holder(), "subscribe_channel", None)
-        if subscribe_channel is not None:
-            subscribe_channel(channel_for(stream_key))
+        subscribe = getattr(_run_holder(), "subscribe_stream_channel", None)
+        if subscribe is not None:
+            subscribe(channel_for(stream_key))
         # Registering a wait is not blocking on one. The quiescent snapshot is a
         # request to Core to retain the Workflow Task and, once the idle timer
         # expires, to park it; a subscription Workflow code has not begun

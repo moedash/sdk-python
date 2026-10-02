@@ -64,22 +64,28 @@ from ._activity import (
     AsyncActivityIDReference,
 )
 from ._callback import Callback
+from ._channel import ChannelDescription
 from ._impl import _ClientImpl
 from ._interceptor import (
     CountActivitiesInput,
     CountNexusOperationsInput,
     CountWorkflowsInput,
     CreateScheduleInput,
+    DescribeChannelInput,
     GetWorkerBuildIdCompatibilityInput,
     GetWorkerTaskReachabilityInput,
     ListActivitiesInput,
     ListNexusOperationsInput,
     ListSchedulesInput,
     ListWorkflowsInput,
+    NotifyChannelInput,
     OutboundInterceptor,
+    PollChannelInput,
+    RegisterChannelListenerInput,
     StartActivityInput,
     StartWorkflowInput,
     StartWorkflowUpdateWithStartInput,
+    UnregisterChannelListenerInput,
     UpdateWithStartUpdateWorkflowInput,
     UpdateWorkerBuildIdCompatibilityInput,
 )
@@ -114,6 +120,9 @@ from ._workflow import (
 if TYPE_CHECKING:
     from ._interceptor import Interceptor
     from ._plugin import Plugin
+
+DEFAULT_CHANNEL_POLL_WAIT = timedelta(seconds=30)
+"""How long :py:meth:`Client.poll_channel` waits for a notification by default."""
 
 
 class Client:
@@ -2875,6 +2884,187 @@ class Client:
                 build_ids,
                 task_queues,
                 reachability_type,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def notify_channel(
+        self,
+        channel: str,
+        *,
+        position: bytes = b"",
+        counter: int = 0,
+        metadata: Mapping[str, Any] | None = None,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> int:
+        """Notify the listeners of ``channel`` that a source they consume has moved.
+
+        A workflow listening with :py:func:`temporalio.workflow.subscribe_channel`
+        runs a Workflow Task that carries the notification. The server folds
+        notifications per listener while one is pending, keeping the one with
+        the highest ``counter``, so a burst of writes costs a listener one task.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel, scoped to the namespace.
+            position: Where the source stands after the write, in the writer's
+                own terms. Opaque to the server.
+            counter: Orders notifications from this channel's writers. Derive it
+                from ``position``, since only the source can order its positions.
+            metadata: Details for the listener, such as which topic moved. Each
+                value is encoded with the client's data converter.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Returns:
+            How many listeners the channel had when the notification arrived.
+        """
+        return await self._impl.notify_channel(
+            NotifyChannelInput(
+                channel=channel,
+                position=position,
+                counter=counter,
+                metadata=metadata,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def poll_channel(
+        self,
+        channel: str,
+        *,
+        after_counter: int = 0,
+        wait: bool | timedelta = True,
+        max_notifications: int = 100,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> list[temporalio.workflow.Notification]:
+        """Read the notifications ``channel`` retains above a counter.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel, scoped to the namespace.
+            after_counter: Only notifications with a counter above this one are
+                returned. Pass the highest counter seen so far to page.
+            wait: How long the server holds the call when nothing is retained
+                above ``after_counter``. ``True`` waits up to
+                :py:data:`DEFAULT_CHANNEL_POLL_WAIT`, ``False`` returns at once.
+            max_notifications: Upper bound on the notifications returned.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Returns:
+            The notifications, oldest first. Empty when the wait ran out.
+        """
+        if wait is True:
+            wait_for: timedelta | None = DEFAULT_CHANNEL_POLL_WAIT
+        elif wait is False:
+            wait_for = None
+        else:
+            wait_for = wait
+        return await self._impl.poll_channel(
+            PollChannelInput(
+                channel=channel,
+                after_counter=after_counter,
+                wait=wait_for,
+                max_notifications=max_notifications,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def describe_channel(
+        self,
+        channel: str,
+        *,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> ChannelDescription:
+        """Describe ``channel``: its listeners and what it retains.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel, scoped to the namespace.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+        """
+        return await self._impl.describe_channel(
+            DescribeChannelInput(
+                channel=channel, rpc_metadata=rpc_metadata, rpc_timeout=rpc_timeout
+            )
+        )
+
+    async def register_channel_listener(
+        self,
+        channel: str,
+        callback: Callback,
+        *,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> str:
+        """Register ``callback`` as a listener of ``channel``.
+
+        The server invokes the callback with each notification on the channel
+        until :py:meth:`unregister_channel_listener` removes it.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel, scoped to the namespace.
+            callback: The callback to invoke.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Returns:
+            The listener id the server assigned.
+        """
+        return await self._impl.register_channel_listener(
+            RegisterChannelListenerInput(
+                channel=channel,
+                callback=callback,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def unregister_channel_listener(
+        self,
+        channel: str,
+        listener_id: str,
+        *,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> None:
+        """Remove a listener from ``channel``.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel, scoped to the namespace.
+            listener_id: The id :py:meth:`register_channel_listener` returned.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+        """
+        await self._impl.unregister_channel_listener(
+            UnregisterChannelListenerInput(
+                channel=channel,
+                listener_id=listener_id,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
             )

@@ -347,6 +347,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._patch_activation_callback = det.patch_activation_callback
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._subscribed_channels: set[str] = set()
+        # Keyed by channel name; one subscription per channel per run
+        self._channel_subscriptions: dict[
+            str, temporalio.workflow.ChannelSubscription
+        ] = {}
+        #: The gate's answer for this run, taken on the first stream subscription
+        #: and kept until continue-as-new; see ``subscribe_stream_channel``.
+        self._stream_channels_enabled: bool | None = None
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
         self._time_ns = 0
@@ -965,44 +972,79 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self,
         job: temporalio.bridge.proto.workflow_activation.NotificationsReceived,
     ) -> None:
-        """Notes the channel notifications this Workflow Task was woken with.
+        """Hands the notifications this Workflow Task was woken with to their takers.
 
-        Nothing is resumed from here. Core resolves the parked waits itself
-        when it hands over this job, live and on replay alike, and the resolve
-        job follows this one in the same activation. Resuming here as well
-        would wake every wait twice for one task. The runtime only keeps the
-        latest position per channel, which is what a notification is: where
-        the store stood, not a record.
+        A public subscription gets them in arrival order. The external-stream
+        runtime only notes the latest position per channel: Core resolves the
+        parked waits itself when it hands over this job, live and on replay
+        alike, and the resolve job follows this one in the same activation, so
+        resuming here as well would wake every wait twice for one task.
         """
+        for proto in job.notifications:
+            subscription = self._channel_subscriptions.get(proto.channel)
+            if subscription is not None:
+                subscription._deliver(
+                    temporalio.workflow.Notification._from_proto(proto)
+                )
+            elif proto.channel not in self._subscribed_channels:
+                # The server fans out to whatever listened at the time, so a
+                # channel this run never subscribed to is not the workflow's
+                # concern.
+                logger.debug(
+                    "Dropping a notification on channel %r, which this run has not "
+                    "subscribed to",
+                    proto.channel,
+                )
         if self._external_stream_runtime is not None:
             self._external_stream_runtime.notifications_received(job.notifications)
 
-    def subscribe_channel(self, channel: str) -> bool:
-        """Makes this run a listener of ``channel``, once per channel per run.
+    def workflow_subscribe_channel(
+        self, channel: str
+    ) -> temporalio.workflow.ChannelSubscription:
+        existing = self._channel_subscriptions.get(channel)
+        if existing is not None:
+            return existing
+        self._issue_channel_subscription(channel)
+        subscription = temporalio.workflow.ChannelSubscription(channel)
+        self._channel_subscriptions[channel] = subscription
+        return subscription
 
-        Emits the ``SubscribeNotificationChannel`` command. The server answers
-        it with an event and nothing else; the notifications arrive later on
-        the scheduled event of a Workflow Task. A second call for the same
-        channel changes nothing, so a run that opens two readers on one stream
-        pays one subscription.
+    def subscribe_stream_channel(self, channel: str) -> bool:
+        """Makes this run a listener of an external stream's channel, when it can.
 
-        Gated behind a lang flag rather than emitted outright. A server without
-        channels fails a Workflow Task that carries the command, and the Worker
-        learns which server it talks to only at runtime. The flag records the
-        live decision in History, so a replay emits the command exactly where
-        the live run did, whatever server it replays against.
+        The external-stream runtime's entry, gated where the public
+        :py:func:`temporalio.workflow.subscribe_channel` is not: a reader opens
+        on whatever server the Worker talks to, and a server without channels
+        fails a Workflow Task that carries the command. The Worker asks the
+        server once and the answer becomes a lang flag, read here on the run's
+        first stream subscription and kept until continue-as-new, so a replay
+        emits the command exactly where the live run did.
 
         Returns whether the run listens on the channel after this call.
         """
         if channel in self._subscribed_channels:
             return True
-        if self._read_only or not self._workflow_logic_flag_enabled(
-            _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS
-        ):
+        if self._read_only:
             return False
+        if self._stream_channels_enabled is None:
+            self._stream_channels_enabled = self._workflow_logic_flag_enabled(
+                _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS
+            )
+        if not self._stream_channels_enabled:
+            return False
+        self._issue_channel_subscription(channel)
+        return True
+
+    def _issue_channel_subscription(self, channel: str) -> None:
+        """Emits the subscribe command once per channel per run.
+
+        A second command for one channel would only record a second event, so
+        the public subscription and the stream runtime share this set.
+        """
+        if channel in self._subscribed_channels:
+            return
         self._subscribed_channels.add(channel)
         self._add_command().subscribe_notification_channel.channel = channel
-        return True
 
     def _apply_replay_external_streams(
         self,
@@ -4663,6 +4705,9 @@ class _WorkflowLogicFlag(IntEnum):
 
     RAISE_ON_CANCELLING_COMPLETED_ACTIVITY = 1
     PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH = 2
+    # Whether the run's external-stream readers subscribe to their channels.
+    # Set by the Worker from one probe of the server; a run reads it on its
+    # first stream subscription and keeps that answer until continue-as-new.
     # Numbered away from the values upstream hands out in sequence, so a flag
     # the main SDK adds later cannot read a History written with this one.
     SUBSCRIBE_NOTIFICATION_CHANNELS = 100
