@@ -23,15 +23,25 @@ class ChannelKind(IntEnum):
        This API is experimental and unstable.
     """
 
+    UNSPECIFIED = int(
+        temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_UNSPECIFIED
+    )
+    """The server did not say; an older server answers this."""
+
     INDEPENDENT = int(
         temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_INDEPENDENT
     )
-    """Its own execution, keyed by namespace and channel name. Any number of
-    workflows and callbacks listen to it."""
+    """Its own execution, keyed by namespace and channel name.
+
+    Any number of workflows subscribe to it and callbacks register on it.
+    """
 
     LINKED = int(temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED)
-    """Kept in one workflow's state, keyed by namespace, workflow id and channel
-    name. The owning workflow is its listener by construction."""
+    """Kept in one workflow's state, keyed by namespace, workflow id and name.
+
+    The owning workflow is its listener by construction; a call reaches it
+    with the ``workflow_id`` argument.
+    """
 
 
 @dataclass(frozen=True)
@@ -97,8 +107,16 @@ class ChannelDescription:
     retained_count: int
     """How many notifications the channel keeps for pollers."""
 
-    kind: ChannelKind | None = None
-    """Which kind of channel this is, or ``None`` from a server that predates the kinds."""
+    kind: ChannelKind = ChannelKind.UNSPECIFIED
+    """Which kind of channel this is.
+
+    A linked channel of a running workflow exists by construction, so a
+    describe with ``workflow_id`` answers :attr:`ChannelKind.LINKED` with no
+    listeners and nothing retained for a name nobody has notified yet.
+    """
 
     linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
-    """The owner of a linked channel and the run that holds it; ``None`` otherwise."""
+    """The owner of a linked channel and the run that holds it.
+
+    ``None`` for an independent channel.
+    """

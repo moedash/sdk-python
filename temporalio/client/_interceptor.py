@@ -698,7 +698,6 @@ class NotifyChannelInput:
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
-    """The workflow whose linked channel is addressed; ``None`` for an independent channel."""
     run_id: str | None = None
 
 
@@ -717,7 +716,6 @@ class PollChannelInput:
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
-    """The workflow whose linked channel is addressed; ``None`` for an independent channel."""
     run_id: str | None = None
 
 
@@ -733,7 +731,6 @@ class DescribeChannelInput:
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
-    """The workflow whose linked channel is addressed; ``None`` for an independent channel."""
     run_id: str | None = None
 
 
@@ -750,7 +747,6 @@ class RegisterChannelListenerInput:
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
-    """The workflow whose linked channel is addressed; ``None`` for an independent channel."""
     run_id: str | None = None
 
 
@@ -767,7 +763,6 @@ class UnregisterChannelListenerInput:
     rpc_metadata: Mapping[str, str | bytes]
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
-    """The workflow whose linked channel is addressed; ``None`` for an independent channel."""
     run_id: str | None = None
 
 
