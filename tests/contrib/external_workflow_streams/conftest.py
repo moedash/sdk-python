@@ -12,6 +12,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -31,6 +32,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "needs_channel_server: the case needs a server that serves notification "
         "channels, named with -E host:port",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_linked_server: the case needs a server that serves channels linked "
+        "to a workflow, named with -E host:port; the case skips itself on one "
+        "with only independent channels",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -42,24 +49,54 @@ def pytest_collection_modifyitems(
         reason="needs a server that serves notification channels; name one with -E"
     )
     for item in items:
-        if item.get_closest_marker("needs_channel_server"):
+        if item.get_closest_marker("needs_channel_server") or item.get_closest_marker(
+            "needs_linked_server"
+        ):
             item.add_marker(skip)
+
+
+async def server_channel_support(client: Any) -> Any:
+    """What the server offers a stream's readers, as the Worker would find it.
+
+    The linked kind shows only on a running workflow, so one is started on a
+    task queue nobody polls and asked about; the probe is the Worker's own.
+    """
+    from temporalio.contrib.external_workflow_streams._wake import (
+        ChannelSupport,
+        channel_support,
+        server_has_channels,
+    )
+
+    if not await server_has_channels(client):
+        return ChannelSupport.NONE
+    probe = uuid.uuid4().hex
+    handle = await client.start_workflow(
+        "ChannelSupportProbe",
+        id=f"channel-support-probe-{probe}",
+        task_queue=f"nobody-polls-{probe}",
+    )
+    try:
+        return await channel_support(client, handle.id)
+    finally:
+        await handle.terminate()
 
 
 @pytest_asyncio.fixture  # type: ignore[reportUntypedFunctionDecorator]
 async def first_task_retained(client: object) -> None:
     """Holds a case to servers where the task that opens a reader stays open.
 
-    On a server with notification channels that task carries the subscribe
-    command, which Core cannot retain or park, so a case built on a retained or
-    parked first task measures nothing there.
+    On a server whose channels are all independent that task carries the
+    subscribe command, which Core cannot retain or park, so a case built on a
+    retained or parked first task measures nothing there. With the linked
+    kind a workflow-owned stream needs no command and the task stays open, as
+    it does on a server without channels.
     """
-    from temporalio.contrib.external_workflow_streams._wake import server_has_channels
+    from temporalio.contrib.external_workflow_streams._wake import ChannelSupport
 
-    if await server_has_channels(client):  # type: ignore[arg-type]
+    if await server_channel_support(client) is ChannelSupport.INDEPENDENT:
         pytest.skip(
             "the subscribe command ends the task that opens the first reader; "
-            "the follow-up defers it to the leaving completion"
+            "the linked channel kind keeps it open"
         )
 
 

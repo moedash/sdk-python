@@ -339,9 +339,10 @@ class ExternalStreamTopic(Generic[AnyType]):
             **start,
         )
         # The channel the stream's writers notify. Asked of the SDK's object for
-        # the Run rather than of the stream runtime, because the answer is a
-        # command and commands are the Run's to emit; it also decides, from the
-        # server it talks to, whether to emit one at all.
+        # the Run rather than of the stream runtime, because the answer may be
+        # a command and commands are the Run's to emit; it also decides, from
+        # the server it talks to, whether the Run is the channel's listener
+        # already or has to subscribe.
         subscribe = getattr(_run_holder(), "subscribe_stream_channel", None)
         if subscribe is not None:
             subscribe(channel_for(stream_key))

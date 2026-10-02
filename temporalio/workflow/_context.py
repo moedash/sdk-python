@@ -484,6 +484,9 @@ class _Runtime(ABC):
     def workflow_subscribe_channel(self, channel: str) -> ChannelSubscription: ...
 
     @abstractmethod
+    def workflow_linked_channel(self, channel: str) -> ChannelSubscription: ...
+
+    @abstractmethod
     def workflow_time_ns(self) -> int: ...
 
     @abstractmethod
