@@ -310,9 +310,10 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             bounds_standalone_bytes=True,
             trims_open_stream_by_age=True,
             # An outside append notifies the stream's channel, addressed to
-            # the workflow that owns the stream; the reader's worker subscribes
-            # to it on the task that opens the read where the server has no
-            # linked kind, and listens by construction where it has.
+            # the workflow that owns the stream; the reader's run is
+            # subscribed to it when the task that opened the read ends where
+            # the server has no linked kind, and listens by construction
+            # where it has.
             wakes_by_notification=True,
             wakes_by_linked_notification=True,
         )
