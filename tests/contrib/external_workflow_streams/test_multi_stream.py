@@ -20,7 +20,6 @@ import pytest
 import pytest_asyncio
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.contrib.external_workflow_streams._annotation import decode_annotation
