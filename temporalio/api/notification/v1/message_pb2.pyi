@@ -6,20 +6,55 @@ isort:skip_file
 import builtins
 import collections.abc
 import sys
+import typing
 
 import google.protobuf.descriptor
 import google.protobuf.internal.containers
+import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 import google.protobuf.timestamp_pb2
 
 import temporalio.api.common.v1.message_pb2
 
-if sys.version_info >= (3, 8):
+if sys.version_info >= (3, 10):
     import typing as typing_extensions
 else:
     import typing_extensions
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
+
+class _ChannelKind:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _ChannelKindEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_ChannelKind.ValueType],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    CHANNEL_KIND_UNSPECIFIED: _ChannelKind.ValueType  # 0
+    CHANNEL_KIND_INDEPENDENT: _ChannelKind.ValueType  # 1
+    """Its own execution, keyed by namespace and channel name. Any number of
+    workflows and callbacks listen to it.
+    """
+    CHANNEL_KIND_LINKED: _ChannelKind.ValueType  # 2
+    """Kept in one workflow's state, keyed by namespace, workflow id and
+    channel name. The owning workflow is its listener by construction.
+    """
+
+class ChannelKind(_ChannelKind, metaclass=_ChannelKindEnumTypeWrapper):
+    """Where a channel lives, which decides how a call addresses it."""
+
+CHANNEL_KIND_UNSPECIFIED: ChannelKind.ValueType  # 0
+CHANNEL_KIND_INDEPENDENT: ChannelKind.ValueType  # 1
+"""Its own execution, keyed by namespace and channel name. Any number of
+workflows and callbacks listen to it.
+"""
+CHANNEL_KIND_LINKED: ChannelKind.ValueType  # 2
+"""Kept in one workflow's state, keyed by namespace, workflow id and
+channel name. The owning workflow is its listener by construction.
+"""
+global___ChannelKind = ChannelKind
 
 class Notification(google.protobuf.message.Message):
     """A notification tells the listeners of a channel that a source they consume
@@ -58,6 +93,7 @@ class Notification(google.protobuf.message.Message):
     POSITION_FIELD_NUMBER: builtins.int
     COUNTER_FIELD_NUMBER: builtins.int
     METADATA_FIELD_NUMBER: builtins.int
+    LINKED_TO_FIELD_NUMBER: builtins.int
     channel: builtins.str
     """The channel the writer notified. Listeners register on the same name."""
     position: builtins.bytes
@@ -78,6 +114,14 @@ class Notification(google.protobuf.message.Message):
         """Details for the listener, such as which topic moved. Bounded in size and
         carried as payloads, so a codec applies as to any payload.
         """
+    @property
+    def linked_to(self) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
+        """Set for a channel linked to a workflow: the owner and the run that
+        received the notification. Empty for an independent channel. A listener
+        that holds both kinds routes the notification by it.
+        (-- api-linter: core::0140::prepositions=disabled
+            aip.dev/not-precedent: "to" names the owner the channel is linked to. --)
+        """
     def __init__(
         self,
         *,
@@ -88,7 +132,11 @@ class Notification(google.protobuf.message.Message):
             builtins.str, temporalio.api.common.v1.message_pb2.Payload
         ]
         | None = ...,
+        linked_to: temporalio.api.common.v1.message_pb2.WorkflowExecution | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["linked_to", b"linked_to"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
@@ -96,6 +144,8 @@ class Notification(google.protobuf.message.Message):
             b"channel",
             "counter",
             b"counter",
+            "linked_to",
+            b"linked_to",
             "metadata",
             b"metadata",
             "position",
