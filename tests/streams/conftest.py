@@ -51,6 +51,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "wakes_by_linked_notification: the case needs an outside append to wake a "
+        "parked workflow reader through the channel linked to its workflow",
+    )
+    config.addinivalue_line(
+        "markers",
         "needs_channel_server: the case needs a server that serves notification "
         "channels, named with -E host:port",
     )
@@ -62,7 +67,8 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "needs_linked_server: the case needs a server that serves channels linked "
-        "to a workflow, named with -E host:port",
+        "to a workflow, named with -E host:port; the case skips itself on one "
+        "with only independent channels",
     )
     config.addinivalue_line(
         "markers",
