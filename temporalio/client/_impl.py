@@ -55,7 +55,7 @@ from ._activity import (
     ActivityHandle,
     AsyncActivityIDReference,
 )
-from ._channel import ChannelDescription, ChannelListener
+from ._channel import ChannelDescription, ChannelKind, ChannelListener
 from ._exceptions import (
     AsyncActivityCancelledError,
     ScheduleAlreadyRunningError,
@@ -142,6 +142,20 @@ from ._workflow import (
 
 if TYPE_CHECKING:
     from ._client import Client
+
+
+def _address_channel(request: Any, workflow_id: str | None, run_id: str | None) -> None:
+    """Points a channel request at a workflow's linked channel, when one is named.
+
+    Left unset, the request addresses the independent channel of that name.
+    """
+    if workflow_id is None:
+        if run_id is not None:
+            raise ValueError("run_id names a run of workflow_id, which is missing")
+        return
+    request.workflow_execution.workflow_id = workflow_id
+    if run_id is not None:
+        request.workflow_execution.run_id = run_id
 
 
 class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
@@ -1714,16 +1728,15 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
         for key, value in (input.metadata or {}).items():
             [payload] = await self._client.data_converter.encode([value])
             notification.metadata[key].CopyFrom(payload)
+        req = temporalio.api.workflowservice.v1.NotifyChannelRequest(
+            namespace=self._client.namespace,
+            notification=notification,
+            identity=self._client.identity,
+            request_id=str(uuid.uuid4()),
+        )
+        _address_channel(req, input.workflow_id, input.run_id)
         resp = await self._client.workflow_service.notify_channel(
-            temporalio.api.workflowservice.v1.NotifyChannelRequest(
-                namespace=self._client.namespace,
-                notification=notification,
-                identity=self._client.identity,
-                request_id=str(uuid.uuid4()),
-            ),
-            retry=True,
-            metadata=input.rpc_metadata,
-            timeout=input.rpc_timeout,
+            req, retry=True, metadata=input.rpc_metadata, timeout=input.rpc_timeout
         )
         return resp.listener_count
 
@@ -1738,20 +1751,21 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
         )
         if input.wait is not None:
             req.wait.FromTimedelta(input.wait)
+        _address_channel(req, input.workflow_id, input.run_id)
         resp = await self._client.workflow_service.poll_channel(
             req, retry=True, metadata=input.rpc_metadata, timeout=input.rpc_timeout
         )
         return [await self._notification_from_proto(n) for n in resp.notifications]
 
     async def describe_channel(self, input: DescribeChannelInput) -> ChannelDescription:
-        resp = await self._client.workflow_service.describe_channel(
-            temporalio.api.workflowservice.v1.DescribeChannelRequest(
-                namespace=self._client.namespace, channel=input.channel
-            ),
-            retry=True,
-            metadata=input.rpc_metadata,
-            timeout=input.rpc_timeout,
+        req = temporalio.api.workflowservice.v1.DescribeChannelRequest(
+            namespace=self._client.namespace, channel=input.channel
         )
+        _address_channel(req, input.workflow_id, input.run_id)
+        resp = await self._client.workflow_service.describe_channel(
+            req, retry=True, metadata=input.rpc_metadata, timeout=input.rpc_timeout
+        )
+        kinds = temporalio.api.notification.v1.ChannelKind
         return ChannelDescription(
             listeners=[
                 ChannelListener._from_proto(listener) for listener in resp.listeners
@@ -1762,42 +1776,46 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
                 else None
             ),
             retained_count=resp.retained_count,
+            kind=(
+                ChannelKind(resp.kind)
+                if resp.kind != kinds.CHANNEL_KIND_UNSPECIFIED
+                else None
+            ),
+            linked_to=resp.linked_to if resp.HasField("linked_to") else None,
         )
 
     async def register_channel_listener(
         self, input: RegisterChannelListenerInput
     ) -> str:
-        resp = await self._client.workflow_service.register_channel_listener(
-            temporalio.api.workflowservice.v1.RegisterChannelListenerRequest(
-                namespace=self._client.namespace,
-                channel=input.channel,
-                callback=temporalio.api.common.v1.Callback(
-                    nexus=temporalio.api.common.v1.Callback.Nexus(
-                        url=input.callback.url, header=input.callback.headers
-                    )
-                ),
-                request_id=str(uuid.uuid4()),
-                identity=self._client.identity,
+        req = temporalio.api.workflowservice.v1.RegisterChannelListenerRequest(
+            namespace=self._client.namespace,
+            channel=input.channel,
+            callback=temporalio.api.common.v1.Callback(
+                nexus=temporalio.api.common.v1.Callback.Nexus(
+                    url=input.callback.url, header=input.callback.headers
+                )
             ),
-            retry=True,
-            metadata=input.rpc_metadata,
-            timeout=input.rpc_timeout,
+            request_id=str(uuid.uuid4()),
+            identity=self._client.identity,
+        )
+        _address_channel(req, input.workflow_id, input.run_id)
+        resp = await self._client.workflow_service.register_channel_listener(
+            req, retry=True, metadata=input.rpc_metadata, timeout=input.rpc_timeout
         )
         return resp.listener_id
 
     async def unregister_channel_listener(
         self, input: UnregisterChannelListenerInput
     ) -> None:
+        req = temporalio.api.workflowservice.v1.UnregisterChannelListenerRequest(
+            namespace=self._client.namespace,
+            channel=input.channel,
+            listener_id=input.listener_id,
+            identity=self._client.identity,
+        )
+        _address_channel(req, input.workflow_id, input.run_id)
         await self._client.workflow_service.unregister_channel_listener(
-            temporalio.api.workflowservice.v1.UnregisterChannelListenerRequest(
-                namespace=self._client.namespace,
-                channel=input.channel,
-                listener_id=input.listener_id,
-                identity=self._client.identity,
-            ),
-            retry=True,
-            metadata=input.rpc_metadata,
-            timeout=input.rpc_timeout,
+            req, retry=True, metadata=input.rpc_metadata, timeout=input.rpc_timeout
         )
 
     async def _notification_from_proto(
@@ -1817,6 +1835,7 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
             position=proto.position,
             counter=proto.counter,
             metadata=metadata,
+            linked_to=proto.linked_to if proto.HasField("linked_to") else None,
         )
 
     async def _apply_headers(

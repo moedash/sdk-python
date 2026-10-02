@@ -5,13 +5,33 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import IntEnum
 
+import temporalio.api.common.v1
 import temporalio.api.notification.v1
 from temporalio.workflow import Notification
 
 from ._callback import Callback
 
-__all__ = ["ChannelDescription", "ChannelListener"]
+__all__ = ["ChannelDescription", "ChannelKind", "ChannelListener"]
+
+
+class ChannelKind(IntEnum):
+    """Where a channel lives, which decides how a call addresses it.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    INDEPENDENT = int(
+        temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_INDEPENDENT
+    )
+    """Its own execution, keyed by namespace and channel name. Any number of
+    workflows and callbacks listen to it."""
+
+    LINKED = int(temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED)
+    """Kept in one workflow's state, keyed by namespace, workflow id and channel
+    name. The owning workflow is its listener by construction."""
 
 
 @dataclass(frozen=True)
@@ -76,3 +96,9 @@ class ChannelDescription:
 
     retained_count: int
     """How many notifications the channel keeps for pollers."""
+
+    kind: ChannelKind | None = None
+    """Which kind of channel this is, or ``None`` from a server that predates the kinds."""
+
+    linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
+    """The owner of a linked channel and the run that holds it; ``None`` otherwise."""

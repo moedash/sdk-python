@@ -800,9 +800,9 @@ def test_a_subscription_asks_the_run_to_listen_on_its_streams_channel(
     runtime: FakeRuntime, workflow_instance: FakeInstance
 ) -> None:
     """Every ``subscribe()`` asks; the Run keeps it to one command per channel."""
-    asked: list[str] = []
+    asked: list[object] = []
 
-    def subscribe_channel(channel: str) -> bool:
+    def subscribe_channel(channel: object) -> bool:
         asked.append(channel)
         return True
 
