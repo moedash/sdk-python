@@ -19,6 +19,7 @@ streams of a standalone activity, so the cases marked
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from temporalio.streams import (
     topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.redis import RedisStreams
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.testing import WorkflowEnvironment
 from tests.helpers import new_worker
@@ -63,6 +65,27 @@ async def _memory_setup(client: Client) -> AsyncIterator[ActivitySetup]:
     provider.reset()
 
 
+async def _redis_setup(client: Client) -> AsyncIterator[ActivitySetup]:
+    # The store is a Redis the test environment does not start; the server
+    # is the environment's own unless TEMPORAL_ADDRESS names another.
+    address = os.environ.get("TEMPORAL_ADDRESS")
+    if address:
+        client = await Client.connect(
+            address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+        )
+    provider = RedisStreams(
+        url=os.environ.get("TEMPORAL_TEST_REDIS_URL")
+        or os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6379"),
+        # A prefix per setup, because the store keeps what earlier runs wrote.
+        key_prefix=f"streams-activity-{uuid.uuid4().hex}",
+        poll_interval=timedelta(milliseconds=100),
+    )
+    config = client.config()
+    config["plugins"] = [provider]
+    yield ActivitySetup("redis", provider, Client(**config))
+    await provider.close()
+
+
 async def _workflow_streams_setup(client: Client) -> AsyncIterator[ActivitySetup]:
     provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
     config = client.config()
@@ -78,6 +101,8 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ActivitySetup]]] = {
     "memory": _memory_setup,
     "workflow_streams": _workflow_streams_setup,
 }
+if os.environ.get("STREAMS_LIVE") == "redis":
+    SETUPS["redis"] = _redis_setup
 
 
 @pytest.fixture(params=sorted(SETUPS))
