@@ -25,6 +25,7 @@ import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
 import temporalio.api.sdk.v1.event_group_marker_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
@@ -105,6 +106,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     REQUEST_CANCEL_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     SUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
     UNSUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
+    SUBSCRIBE_STREAM_FIELD_NUMBER: builtins.int
+    APPEND_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """User metadata that may or may not be persisted into history depending on the command type.
@@ -182,13 +185,17 @@ class WorkflowCommand(google.protobuf.message.Message):
     @property
     def subscribe_notification_channel(self) -> global___SubscribeNotificationChannel:
         """23 to 28 are taken by the external stream commands, which are developed
-        alongside these and share this message. The two numbers below are fixed
+        alongside these and share this message. The numbers below are fixed
         with that family and must not be reused.
         """
     @property
     def unsubscribe_notification_channel(
         self,
     ) -> global___UnsubscribeNotificationChannel: ...
+    @property
+    def subscribe_stream(self) -> global___SubscribeStream: ...
+    @property
+    def append_stream_records(self) -> global___AppendStreamRecords: ...
     def __init__(
         self,
         *,
@@ -231,10 +238,14 @@ class WorkflowCommand(google.protobuf.message.Message):
         | None = ...,
         unsubscribe_notification_channel: global___UnsubscribeNotificationChannel
         | None = ...,
+        subscribe_stream: global___SubscribeStream | None = ...,
+        append_stream_records: global___AppendStreamRecords | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
+            "append_stream_records",
+            b"append_stream_records",
             "cancel_child_workflow_execution",
             b"cancel_child_workflow_execution",
             "cancel_signal_workflow",
@@ -277,6 +288,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"start_timer",
             "subscribe_notification_channel",
             b"subscribe_notification_channel",
+            "subscribe_stream",
+            b"subscribe_stream",
             "unsubscribe_notification_channel",
             b"unsubscribe_notification_channel",
             "update_response",
@@ -292,6 +305,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "append_stream_records",
+            b"append_stream_records",
             "cancel_child_workflow_execution",
             b"cancel_child_workflow_execution",
             "cancel_signal_workflow",
@@ -336,6 +351,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"start_timer",
             "subscribe_notification_channel",
             b"subscribe_notification_channel",
+            "subscribe_stream",
+            b"subscribe_stream",
             "unsubscribe_notification_channel",
             b"unsubscribe_notification_channel",
             "update_response",
@@ -376,6 +393,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             "request_cancel_nexus_operation",
             "subscribe_notification_channel",
             "unsubscribe_notification_channel",
+            "subscribe_stream",
+            "append_stream_records",
         ]
         | None
     ): ...
@@ -429,6 +448,109 @@ class UnsubscribeNotificationChannel(google.protobuf.message.Message):
     ) -> None: ...
 
 global___UnsubscribeNotificationChannel = UnsubscribeNotificationChannel
+
+class AppendStreamRecords(google.protobuf.message.Message):
+    """Append a batch of records to a stream this workflow owns.
+
+    The bodies go to the stream's own log rather than into History, which gets
+    one fixed-size event naming the offset range. That is what makes the batch
+    size free: a thousand records cost the same in History as one. The server
+    stores each record with an empty producer id, because the workflow is the
+    producer here.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_NAME_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
+    stream_name: builtins.str
+    """Name of a stream this workflow owns, scoped to the workflow. Created on
+    first use. Empty means the workflow's default output stream. A workflow
+    cannot append to a stream in another execution, so this is never the id
+    of a standalone stream.
+    """
+    @property
+    def records(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamRecord
+    ]: ...
+    def __init__(
+        self,
+        *,
+        stream_name: builtins.str = ...,
+        records: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamRecord
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "records", b"records", "stream_name", b"stream_name"
+        ],
+    ) -> None: ...
+
+global___AppendStreamRecords = AppendStreamRecords
+
+class SubscribeStream(google.protobuf.message.Message):
+    """Subscribe this workflow to a stream, so later Workflow Tasks carry the
+    ranges it has not consumed yet.
+
+    The stream's addressing is resolved by the server. A workflow cannot look it
+    up without doing I/O, and a value it carried would be a reading rather than a
+    fact, so it could differ on replay.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_NAME_OR_ID_FIELD_NUMBER: builtins.int
+    START_OFFSET_FIELD_NUMBER: builtins.int
+    START_POSITION_FIELD_NUMBER: builtins.int
+    stream_name_or_id: builtins.str
+    """Stream to consume, named either way round: a stream this workflow owns
+    by the name it appends under, a stream in another execution by its id.
+    The server tries them in that order, so a workflow that owns a stream
+    under this name cannot reach a standalone stream with the same id. When
+    neither exists the workflow gets a stream of its own by that name, which
+    is how a reader subscribes before the first record is written.
+    """
+    start_offset: builtins.int
+    """Where to start, as an absolute offset. Read only when start_position is
+    unset. The server refuses a negative value.
+    """
+    @property
+    def start_position(
+        self,
+    ) -> temporalio.api.stream.v1.message_pb2.StreamStartPosition:
+        """Where to start: an offset, the earliest record held, the tail, or the
+        last N records. The server resolves it and records the resulting offset,
+        so replay does not resolve it again and Core does not keep it.
+        """
+    def __init__(
+        self,
+        *,
+        stream_name_or_id: builtins.str = ...,
+        start_offset: builtins.int = ...,
+        start_position: temporalio.api.stream.v1.message_pb2.StreamStartPosition
+        | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["start_position", b"start_position"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "start_offset",
+            b"start_offset",
+            "start_position",
+            b"start_position",
+            "stream_name_or_id",
+            b"stream_name_or_id",
+        ],
+    ) -> None: ...
+
+global___SubscribeStream = SubscribeStream
 
 class StartTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
