@@ -102,6 +102,7 @@ from google.protobuf.message import DecodeError
 
 import temporalio.api.notification.v1
 import temporalio.client
+import temporalio.common
 import temporalio.converter
 import temporalio.nexus
 from temporalio.api.common.v1 import Payload
@@ -1298,15 +1299,16 @@ _START_TIME_HEADER = "Nexus-Operation-Start-Time"
 
 ConsumeFunction = Callable[[StreamRecord[Any], S], "S | Awaitable[S]"]
 ChannelRule = Callable[
-    [StreamRef], "temporalio.client.ChannelAddress | tuple[str, str | None]"
+    [StreamRef],
+    "temporalio.client.ChannelAddress | tuple[str, temporalio.common.Execution | None]",
 ]
 
 
-def _address(where: Any) -> tuple[str, str | None]:
+def _address(where: Any) -> tuple[str, temporalio.common.Execution | None]:
     """The channel name and the owner a rule answered with, as an address or a pair."""
     channel = getattr(where, "channel", None)
     if isinstance(channel, str):
-        return channel, getattr(where, "workflow_id", None)
+        return channel, getattr(where, "execution", None)
     channel, owner = where
     return channel, owner
 
@@ -1325,8 +1327,8 @@ class ConsumerState(Generic[S]):
     channel: str
     """The channel the listener is registered on."""
 
-    owner: str | None
-    """The workflow a linked channel belongs to, ``None`` for an independent one."""
+    owner: temporalio.common.Execution | None
+    """The execution a linked channel belongs to, ``None`` for an independent one."""
 
     listener_id: str
     """The listener id the server assigned."""
@@ -1375,7 +1377,7 @@ class Delivery:
 class _Consumption(Generic[S]):
     ref: StreamRef
     channel: str
-    owner: str | None
+    owner: temporalio.common.Execution | None
     listener_id: str
     callback_url: str | None
     callback_headers: dict[str, str]
@@ -1512,10 +1514,11 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
             client: Registers the listener and opens the stream. Leave it
                 unset in a handler hosted by a Temporal worker, where the
                 operation context's client is used.
-            channel_for: Names the channel for a ref and the workflow a
-                linked channel belongs to, as a
-                :class:`temporalio.client.ChannelAddress` or a
-                ``(channel, workflow_id)`` pair. The default is
+            channel_for: Names the channel for a ref and the execution a
+                linked channel belongs to, a workflow or a standalone
+                activity, as a :class:`temporalio.client.ChannelAddress` or a
+                ``(channel, execution)`` pair with ``None`` for an
+                independent channel. The default is
                 :func:`temporalio.client.stream_channel`, the server's rule
                 for native streams; a store that names channels its own
                 way passes its rule.
@@ -1580,7 +1583,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
         listener_id = await client.register_channel_listener(
             channel,
             Callback(url=self._listener_url, headers={self._token_header: token}),
-            workflow_id=owner,
+            execution=owner,
         )
         state: _Consumption[S] = _Consumption(
             ref=input,
@@ -1773,7 +1776,7 @@ class StreamConsumerOperation(nexusrpc.handler.OperationHandler[StreamRef, S]):
     async def _unregister(self, client: Client, state: _Consumption[S]) -> None:
         try:
             await client.unregister_channel_listener(
-                state.channel, state.listener_id, workflow_id=state.owner
+                state.channel, state.listener_id, execution=state.owner
             )
         except RPCError:
             logger.warning(
