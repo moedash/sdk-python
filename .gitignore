@@ -15,3 +15,6 @@ temporalio/bridge/temporal_sdk_bridge*
 tags
 /.claude
 tmpclaude-*
+
+# Output of a streams_demo run, written next to the script.
+streams_demo/results-*/
