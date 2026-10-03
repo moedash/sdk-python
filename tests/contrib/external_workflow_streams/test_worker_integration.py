@@ -1831,7 +1831,9 @@ async def test_an_outside_producer_wakes_the_reader_through_its_linked_channel(
     notified = _notified(events)
     assert notified, "no Workflow Task was scheduled with a notification"
     assert {n.channel for n in notified} == {channel_for(key).channel}
-    assert {n.linked_to.workflow_id for n in notified} == {handle.id}
+    assert {(n.linked_to.type, n.linked_to.business_id) for n in notified} == {
+        (temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW, handle.id)
+    }
 
     result = await Replayer(
         workflows=[TimerThenConsumeWorkflow], external_stream_backend=backend

@@ -126,6 +126,28 @@ DEFAULT_CHANNEL_POLL_WAIT = timedelta(seconds=30)
 """How long :py:meth:`Client.poll_channel` waits for a notification by default."""
 
 
+def _channel_execution(
+    execution: temporalio.common.Execution | None,
+    workflow_id: str | None,
+    run_id: str | None,
+) -> temporalio.common.Execution | None:
+    """The execution a channel call addresses, from either spelling of it.
+
+    ``workflow_id`` and ``run_id`` are the short form for a workflow. They
+    cannot be combined with ``execution``, and ``run_id`` needs ``workflow_id``.
+    ``None`` addresses the independent channel of the name.
+    """
+    if execution is not None:
+        if workflow_id is not None or run_id is not None:
+            raise ValueError("pass either execution or workflow_id, not both")
+        return execution
+    if workflow_id is None:
+        if run_id is not None:
+            raise ValueError("run_id needs workflow_id")
+        return None
+    return temporalio.common.Execution.workflow(workflow_id, run_id)
+
+
 class Client:
     """Client for accessing Temporal.
 
@@ -3042,6 +3064,10 @@ class Client:
 
         Returns:
             How many listeners the channel had when the notification arrived.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
         """
         return await self._impl.notify_channel(
             NotifyChannelInput(
@@ -3095,6 +3121,10 @@ class Client:
 
         Returns:
             The notifications, oldest first. Empty when the wait ran out.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
         """
         if wait is True:
             wait_for: timedelta | None = DEFAULT_CHANNEL_POLL_WAIT
@@ -3144,6 +3174,10 @@ class Client:
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
         """
         return await self._impl.describe_channel(
             DescribeChannelInput(
@@ -3190,6 +3224,10 @@ class Client:
 
         Returns:
             The listener id the server assigned.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
         """
         return await self._impl.register_channel_listener(
             RegisterChannelListenerInput(
@@ -3229,6 +3267,10 @@ class Client:
             rpc_metadata: Headers used on the RPC call. Keys here override
                 client-level RPC metadata keys.
             rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
         """
         await self._impl.unregister_channel_listener(
             UnregisterChannelListenerInput(

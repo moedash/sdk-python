@@ -232,9 +232,10 @@ def linked_channel(channel: str) -> ChannelSubscription:
 
     A linked channel lives in this workflow's own state, so the workflow is
     its listener by construction: no command, no event, and no gate needed
-    for a new name. A writer reaches it with the workflow id, as in
-    :py:meth:`temporalio.client.Client.notify_channel` with ``workflow_id``,
-    and a successor run after continue-as-new is reached by the same calls.
+    for a new name. A writer reaches it by naming this workflow as the
+    execution, as in :py:meth:`temporalio.client.Client.notify_channel` with
+    ``workflow_id``, and a successor run after continue-as-new is reached by
+    the same calls.
     A second call for the same name returns the handle already open, and the
     two share its buffer. The name does not collide with an independent
     channel's: a notification carrying :attr:`Notification.linked_to` comes

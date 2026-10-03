@@ -123,8 +123,8 @@ class ChannelDescription:
     kind: ChannelKind = ChannelKind.UNSPECIFIED
     """Which kind of channel this is.
 
-    A linked channel of a running workflow exists by construction, so a
-    describe with ``workflow_id`` answers :attr:`ChannelKind.LINKED` with no
+    A linked channel of a running execution exists by construction, so a
+    describe with ``execution`` answers :attr:`ChannelKind.LINKED` with no
     listeners and nothing retained for a name nobody has notified yet.
     """
 

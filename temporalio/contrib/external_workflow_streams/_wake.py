@@ -39,6 +39,7 @@ from urllib.parse import quote
 import temporalio.api.common.v1
 import temporalio.api.notification.v1
 import temporalio.api.workflowservice.v1
+import temporalio.common
 import temporalio.service
 from temporalio.bridge.proto.external_stream.external_stream_pb2 import WakeSignal
 from temporalio.client._channel import ChannelAddress
@@ -108,7 +109,14 @@ def channel_for(key: StreamKey) -> ChannelAddress:
             key.stream_name,
         )
     )
-    return ChannelAddress(channel=channel, workflow_id=key.workflow_id)
+    return ChannelAddress(
+        channel=channel,
+        execution=(
+            temporalio.common.Execution.workflow(key.workflow_id)
+            if key.workflow_id
+            else None
+        ),
+    )
 
 
 WAKE_SIGNAL_NAME = "__temporal_external_stream_wake"
@@ -196,8 +204,8 @@ class WakeRequest:
     transport then wakes by Signal. Not part of the request ID: the ID names
     the wake, and the channel is only where it is delivered.
     """
-    channel_workflow_id: str = ""
-    """The workflow the channel is linked to, empty for an independent channel.
+    channel_execution: temporalio.common.Execution | None = None
+    """The execution the channel is linked to, ``None`` for an independent channel.
 
     Set with ``channel`` for a workflow-owned stream, so the notification
     addresses the owner's linked channel on a server that has the kind.
@@ -206,9 +214,7 @@ class WakeRequest:
     @property
     def channel_address(self) -> ChannelAddress:
         """The channel and its owner as one address."""
-        return ChannelAddress(
-            channel=self.channel, workflow_id=self.channel_workflow_id or None
-        )
+        return ChannelAddress(channel=self.channel, execution=self.channel_execution)
 
     @property
     def is_unparked(self) -> bool:
@@ -419,7 +425,9 @@ async def _describe_probe(
         namespace=client.namespace, channel=PROBE_CHANNEL
     )
     if workflow_id:
-        request.workflow_execution.workflow_id = workflow_id
+        request.execution.CopyFrom(
+            temporalio.common.Execution.workflow(workflow_id).to_proto()
+        )
     try:
         return await call(request)
     except temporalio.service.RPCError as err:
@@ -550,8 +558,8 @@ def build_notify_request(
         identity=identity,
         request_id=wake_request_id(request),
     )
-    if request.channel_workflow_id:
-        notify.workflow_execution.workflow_id = request.channel_workflow_id
+    if request.channel_execution is not None:
+        notify.execution.CopyFrom(request.channel_execution.to_proto())
     return notify
 
 
@@ -658,5 +666,5 @@ def wake_request_for(
         position=position,
         position_counter=position_counter,
         channel=address.channel,
-        channel_workflow_id=address.workflow_id or "",
+        channel_execution=address.execution,
     )
