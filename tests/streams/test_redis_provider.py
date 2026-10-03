@@ -30,6 +30,7 @@ from temporalio.streams.providers.redis import (
     _ActivityOwner,
     _drive,
     _position,
+    _StandaloneOwner,
 )
 
 
@@ -305,3 +306,16 @@ async def test_the_default_window_is_an_age_and_can_be_turned_off():
         assert unbounded._require_backend().describe_window() == "no retention"
     finally:
         await unbounded.close()
+
+
+def test_standalone_keys_have_their_own_owner_component():
+    owner = _StandaloneOwner("ns", "shared")
+    assert owner.meta("p") == "p:ns:standalone/shared"
+    assert owner.key("p", "t") == "p:ns:standalone/shared:t"
+    # A topic log always has one more component than the hash, and every id and
+    # topic is encoded, so no name can land on the hash or on another topic.
+    assert owner.key("p", "meta") != owner.meta("p")
+    tricky = _StandaloneOwner("n:s", "a/b:c")
+    assert tricky.meta("p") == "p:n%3As:standalone/a%2Fb%3Ac"
+    assert tricky.key("p", "t/u") == "p:n%3As:standalone/a%2Fb%3Ac:t%2Fu"
+    assert str(owner) == "standalone stream 'shared'"
