@@ -23,6 +23,7 @@ import pytest
 
 from temporalio import workflow
 from temporalio.client import Client
+from temporalio.common import Execution, ExecutionType
 from temporalio.contrib.external_workflow_streams import (
     RecordKind as TransportRecordKind,
 )
@@ -1314,7 +1315,10 @@ async def test_an_outside_producer_wakes_the_reader_through_its_linked_channel(
         for e in events
         if e.HasField("workflow_execution_started_event_attributes")
     } or {""}
-    assert {n.linked_to.workflow_id for n in notified} == {workflow_id}
+    owners = {Execution.from_proto(n.linked_to) for n in notified}
+    assert {(owner.type, owner.business_id) for owner in owners} == {
+        (ExecutionType.WORKFLOW, workflow_id)
+    }
 
 
 async def _consume_three_through_the_channel(live_client: Client) -> list[Any]:
