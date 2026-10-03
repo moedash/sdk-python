@@ -33,6 +33,7 @@ from .workflow_commands_pb2 import (
     WorkflowCommand,
     WorkflowOutputStreamBuffered,
     WorkflowOutputStreamCommit,
+    WorkflowStreamChannels,
     WorkflowStreamProgress,
     WorkflowStreamQuiescent,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "WorkflowCommand",
     "WorkflowOutputStreamBuffered",
     "WorkflowOutputStreamCommit",
+    "WorkflowStreamChannels",
     "WorkflowStreamProgress",
     "WorkflowStreamQuiescent",
 ]
