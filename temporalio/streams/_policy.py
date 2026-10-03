@@ -12,6 +12,7 @@ trip and replays without the provider being involved.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from temporalio.streams._record import (
@@ -27,9 +28,10 @@ __all__ = ["AttemptTracker"]
 class AttemptTracker:
     """Watches producer attempts on one subscription."""
 
-    def __init__(self) -> None:
-        """Start with no producer seen."""
+    def __init__(self, warn: Callable[[str], None] | None = None) -> None:
+        """Start with no producer seen, saying anything odd through ``warn``."""
         self._attempts: dict[str, int] = {}
+        self._warn = warn
 
     def note(
         self, producer_id: str, attempt: int, *, topic: str, previous: Cursor
@@ -45,10 +47,21 @@ class AttemptTracker:
         A producer that declares no attempt supersedes nothing, because there
         is no generation to compare. That is the same answer as an unnumbered
         record: the interface reports what it was told and invents nothing.
+
+        An attempt that goes backwards supersedes nothing either, and is said
+        rather than passed off as ordinary data: attempts only ever rise on one
+        producer, so a lower one means a store reordered two generations, and a
+        consumer reading it as the current answer would render a stale one.
         """
         if not producer_id or attempt <= 0:
             return None
         seen = self._attempts.get(producer_id, 0)
+        if attempt < seen and self._warn is not None:
+            self._warn(
+                f"stream record on {topic!r} at {previous} is from attempt {attempt} of "
+                f"producer {producer_id!r}, behind attempt {seen}, which this reader has "
+                "already delivered: the store handed back two generations out of order"
+            )
         if attempt <= seen:
             return None
         self._attempts[producer_id] = attempt
