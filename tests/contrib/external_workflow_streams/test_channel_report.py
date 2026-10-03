@@ -158,6 +158,7 @@ def _instance(
         first_execution_run_id=RUN_ID,
         headers={},
         namespace="default",
+        original_execution_run_id=RUN_ID,
         parent=None,
         root=None,
         priority=temporalio.common.Priority.default,
@@ -177,7 +178,7 @@ def _instance(
     converter = temporalio.converter.DataConverter.default
     return UnsandboxedWorkflowRunner().create_instance(
         WorkflowInstanceDetails(
-            payload_converter_factory=converter._new_payload_converter,
+            payload_converter_factory=converter._new_internal_payload_converter,
             failure_converter_class=converter.failure_converter_class,
             interceptor_classes=[],
             defn=defn,
