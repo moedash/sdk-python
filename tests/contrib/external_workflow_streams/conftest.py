@@ -17,6 +17,10 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
+#: Asking for either of these is what gives a case a running server. A case
+#: that asks for neither never observes a clock, so no environment can fail it.
+_SERVER_FIXTURES = frozenset({"client", "env"})
+
 #: The environments whose server the suite starts for itself. None of them
 #: accepts the subscribe-notification-channel command.
 _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
@@ -105,6 +109,24 @@ async def server_channel_support(client: Any) -> Any:
     if description.kind is ChannelKind.LINKED:
         return ChannelKind.LINKED
     return ChannelKind.INDEPENDENT
+
+
+@pytest.fixture(autouse=True)
+def skip_under_time_skipping(request: pytest.FixtureRequest) -> None:
+    """Hold the server-backed cases to a clock the tests can reason about.
+
+    Those cases measure real-server timing: how long a Workflow Task was held
+    open, the interval a wake sweep runs on, the deadline a shutdown waits out.
+    The time-skipping server advances the clock whenever workers go idle, which
+    removes exactly the quantities being measured, so the failures it produces
+    say nothing about the feature. Which of them fail drifts run to run, so the
+    server-backed cases are held as a group rather than by name. Everything
+    else here is offline and keeps running on both environments.
+    """
+    if _SERVER_FIXTURES.isdisjoint(request.fixturenames):
+        return
+    if request.getfixturevalue("env").supports_time_skipping:
+        pytest.skip("this case measures real-server timing; see conftest")
 
 
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379"
