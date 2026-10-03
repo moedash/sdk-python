@@ -279,6 +279,48 @@ class WorkflowServiceStub:
     This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
     task being created for the execution.
     """
+    NotifyChannel: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.NotifyChannelRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.NotifyChannelResponse,
+    ]
+    """NotifyChannel tells every listener of a channel that a source they consume
+    has moved. The writer names no addressee and never learns who listens. The
+    server wakes each listener: a Workflow with a Workflow Task, a callback by
+    invoking it. Nothing goes to History except the notifications a woken
+    Workflow Task carries on its scheduled event.
+    """
+    RegisterChannelListener: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.RegisterChannelListenerRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.RegisterChannelListenerResponse,
+    ]
+    """RegisterChannelListener registers a callback as a listener of a channel. A
+    Workflow registers itself with the `SubscribeNotificationChannel` command
+    instead.
+    """
+    UnregisterChannelListener: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.UnregisterChannelListenerRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.UnregisterChannelListenerResponse,
+    ]
+    """UnregisterChannelListener removes a listener from a channel.
+
+    (-- api-linter: core::0136::http-method=disabled
+        aip.dev/not-precedent: Removing a listener is a delete of that listener. --)
+    """
+    PollChannel: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.PollChannelRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.PollChannelResponse,
+    ]
+    """PollChannel is a long poll for clients. It returns the retained
+    notifications of a channel with a counter above `after_counter`, waiting
+    up to `wait` for one when none is retained yet.
+    """
+    DescribeChannel: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.DescribeChannelRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.DescribeChannelResponse,
+    ]
+    """DescribeChannel returns the listeners of a channel and its latest
+    notification.
+    """
     SignalWithStartWorkflowExecution: grpc.UnaryUnaryMultiCallable[
         temporalio.api.workflowservice.v1.request_response_pb2.SignalWithStartWorkflowExecutionRequest,
         temporalio.api.workflowservice.v1.request_response_pb2.SignalWithStartWorkflowExecutionResponse,
@@ -1480,6 +1522,58 @@ class WorkflowServiceServicer(metaclass=abc.ABCMeta):
 
         This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
         task being created for the execution.
+        """
+    @abc.abstractmethod
+    def NotifyChannel(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.NotifyChannelRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.NotifyChannelResponse:
+        """NotifyChannel tells every listener of a channel that a source they consume
+        has moved. The writer names no addressee and never learns who listens. The
+        server wakes each listener: a Workflow with a Workflow Task, a callback by
+        invoking it. Nothing goes to History except the notifications a woken
+        Workflow Task carries on its scheduled event.
+        """
+    @abc.abstractmethod
+    def RegisterChannelListener(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.RegisterChannelListenerRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.RegisterChannelListenerResponse:
+        """RegisterChannelListener registers a callback as a listener of a channel. A
+        Workflow registers itself with the `SubscribeNotificationChannel` command
+        instead.
+        """
+    @abc.abstractmethod
+    def UnregisterChannelListener(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.UnregisterChannelListenerRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.UnregisterChannelListenerResponse:
+        """UnregisterChannelListener removes a listener from a channel.
+
+        (-- api-linter: core::0136::http-method=disabled
+            aip.dev/not-precedent: Removing a listener is a delete of that listener. --)
+        """
+    @abc.abstractmethod
+    def PollChannel(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.PollChannelRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.PollChannelResponse:
+        """PollChannel is a long poll for clients. It returns the retained
+        notifications of a channel with a counter above `after_counter`, waiting
+        up to `wait` for one when none is retained yet.
+        """
+    @abc.abstractmethod
+    def DescribeChannel(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.DescribeChannelRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.DescribeChannelResponse:
+        """DescribeChannel returns the listeners of a channel and its latest
+        notification.
         """
     @abc.abstractmethod
     def SignalWithStartWorkflowExecution(
