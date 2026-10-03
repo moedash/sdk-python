@@ -468,6 +468,11 @@ class Worker:
 
         # Prepend applicable client interceptors to the given ones
         client_config = config["client"].config(active_config=True)  # type: ignore[reportTypedDictNotRequiredAccess]
+        # A provider registered on the client serves its workers too, so one
+        # registration covers every context that asks for a stream.
+        stream_provider = config.get("stream_provider") or client_config.get(
+            "stream_provider"
+        )
         interceptors_from_client = cast(
             list[Interceptor],
             [i for i in client_config["interceptors"] if isinstance(i, Interceptor)],
@@ -572,6 +577,7 @@ class Worker:
                 encode_headers=client_config["header_codec_behavior"]
                 != HeaderCodecBehavior.NO_CODEC,
                 max_workflow_task_external_storage_concurrency=max_workflow_task_external_storage_concurrency,
+                stream_provider=stream_provider,
             )
 
         tuner = config.get("tuner")
