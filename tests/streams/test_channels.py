@@ -127,7 +127,7 @@ def _describe(notification: workflow.Notification) -> dict[str, Any]:
             else None
         ),
         "owner": (
-            notification.linked_to.workflow_id if notification.linked_to else None
+            notification.linked_to.business_id if notification.linked_to else None
         ),
         "owner_run": notification.linked_to.run_id if notification.linked_to else None,
     }
@@ -336,9 +336,7 @@ def _linked(channel: str, counter: int, position: bytes = b"") -> Notification:
         channel=channel,
         counter=counter,
         position=position,
-        linked_to=temporalio.api.common.v1.WorkflowExecution(
-            workflow_id="wf", run_id="run"
-        ),
+        linked_to=temporalio.common.Execution.workflow("wf", "run").to_proto(),
     )
 
 
@@ -557,24 +555,32 @@ async def test_a_subscription_after_an_unsubscribe_is_a_new_one():
 
 
 async def test_a_stream_names_the_channel_it_notifies():
+    owner = temporalio.common.Execution.workflow("wf")
     assert stream_channel(StreamRef.for_workflow("wf", topic="out")) == ChannelAddress(
-        "stream/out", "wf"
+        "stream/out", owner
     )
+    # The address names the owner without a run, so it follows the chain.
     assert stream_channel(StreamRef.for_workflow("wf", run_id="run")) == ChannelAddress(
-        "stream/" + DEFAULT_TOPIC, "wf"
+        "stream/" + DEFAULT_TOPIC, owner
     )
     assert stream_channel(
         StreamRef.for_activity("act", workflow_id="wf", topic="out")
-    ) == ChannelAddress("stream/act/out", "wf")
-    # A standalone activity is an execution of its own with no linked channels.
+    ) == ChannelAddress("stream/act/out", owner)
+    # A standalone activity is an execution of its own, so its stream's
+    # channel is linked to it under the topic's name alone.
     assert stream_channel(StreamRef.for_activity("act", topic="out")) == ChannelAddress(
-        "stream/act/out", None
+        "stream/out", temporalio.common.Execution.activity("act")
     )
     # A standalone stream's topics share one stream on the server, so the
     # topic is not part of the name.
     assert stream_channel(
         StreamRef.for_standalone("sid", topic="out")
     ) == ChannelAddress("stream/sid", None)
+    # The workflow id stays readable for a caller that addresses by it, and
+    # only names a workflow.
+    assert stream_channel(StreamRef.for_workflow("wf")).workflow_id == "wf"
+    assert stream_channel(StreamRef.for_activity("act")).workflow_id is None
+    assert stream_channel(StreamRef.for_standalone("sid")).workflow_id is None
 
 
 async def test_the_description_maps_every_channel_subscription_field():
@@ -646,15 +652,15 @@ async def test_the_description_maps_every_channel_subscription_field():
     assert description.channel_subscriptions == ()
 
 
-async def test_the_client_addresses_a_linked_channel_by_workflow(
+async def test_the_client_addresses_a_linked_channel_by_execution(
     client: Client, monkeypatch: pytest.MonkeyPatch
 ):
     """Every channel call carries the owner it was given, and only then."""
     requests: list[Any] = []
-    owner = temporalio.api.common.v1.WorkflowExecution(workflow_id="wf", run_id="run")
+    owner = temporalio.common.Execution.workflow("wf", "run")
     describe_response = temporalio.api.workflowservice.v1.DescribeChannelResponse(
         kind=temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED,
-        linked_to=owner,
+        linked_to=owner.to_proto(),
         latest=_linked("orders", 3, b"3-0"),
     )
     responses = {
@@ -686,17 +692,32 @@ async def test_the_client_addresses_a_linked_channel_by_workflow(
     description = await client.describe_channel("orders", workflow_id="wf")
     await client.register_channel_listener("orders", callback, workflow_id="wf")
     await client.unregister_channel_listener("orders", "listener", workflow_id="wf")
-    assert [req.workflow_execution for req in requests] == [
-        owner,
-        temporalio.api.common.v1.WorkflowExecution(workflow_id="wf"),
-        temporalio.api.common.v1.WorkflowExecution(workflow_id="wf"),
-        temporalio.api.common.v1.WorkflowExecution(workflow_id="wf"),
-        temporalio.api.common.v1.WorkflowExecution(workflow_id="wf"),
+    # The workflow id is shorthand for a workflow execution, run id and all.
+    by_workflow_id = temporalio.common.Execution.workflow("wf").to_proto()
+    assert [req.execution for req in requests] == [
+        owner.to_proto(),
+        by_workflow_id,
+        by_workflow_id,
+        by_workflow_id,
+        by_workflow_id,
     ]
     assert polled.linked_to == owner
     assert description.kind == ChannelKind.LINKED
     assert description.linked_to == owner
     assert description.latest is not None and description.latest.linked_to == owner
+
+    # An execution names any owner, a standalone activity included.
+    requests.clear()
+    activity = temporalio.common.Execution.activity("act", "run")
+    await client.notify_channel("orders", counter=1, execution=activity)
+    await client.poll_channel("orders", execution=activity, wait=False)
+    await client.describe_channel("orders", execution=activity)
+    await client.register_channel_listener("orders", callback, execution=activity)
+    await client.unregister_channel_listener("orders", "listener", execution=activity)
+    assert [req.execution for req in requests] == [activity.to_proto()] * 5
+    assert activity.to_proto().type == (
+        temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_ACTIVITY
+    )
 
     # Without an owner the calls address the independent channel.
     requests.clear()
@@ -705,10 +726,17 @@ async def test_the_client_addresses_a_linked_channel_by_workflow(
     await client.describe_channel("orders")
     await client.register_channel_listener("orders", callback)
     await client.unregister_channel_listener("orders", "listener")
-    assert [req.HasField("workflow_execution") for req in requests] == [False] * 5
+    assert [req.HasField("execution") for req in requests] == [False] * 5
 
     with pytest.raises(ValueError, match="run_id needs workflow_id"):
         await client.notify_channel("orders", counter=1, run_id="run")
+    # The shorthand and the execution are two ways to say one thing.
+    with pytest.raises(ValueError, match="not both"):
+        await client.notify_channel(
+            "orders", counter=1, execution=activity, workflow_id="wf"
+        )
+    with pytest.raises(ValueError, match="not both"):
+        await client.poll_channel("orders", execution=activity, run_id="run")
 
 
 @pytest.mark.needs_channel_server
@@ -878,7 +906,7 @@ async def test_a_workflow_receives_a_notification_on_its_linked_channel(
         assert description.latest is None
         assert description.retained_count == 0
         assert description.linked_to is not None
-        assert description.linked_to.workflow_id == handle.id
+        assert description.linked_to.business_id == handle.id
         # The owner is the one listener.
         listeners = await client.notify_channel(
             channel,
@@ -924,7 +952,7 @@ async def test_a_linked_channel_lives_and_dies_with_its_workflow(client: Client)
     assert (description.listeners, description.latest) == ([], None)
     assert description.retained_count == 0
     assert description.linked_to is not None
-    assert (description.linked_to.workflow_id, description.linked_to.run_id) == (
+    assert (description.linked_to.business_id, description.linked_to.run_id) == (
         handle.id,
         run_id,
     )
@@ -959,6 +987,49 @@ async def test_a_linked_channel_lives_and_dies_with_its_workflow(client: Client)
 
 
 @pytest.mark.needs_linked_server
+@pytest.mark.needs_execution_server
+async def test_a_linked_channel_names_its_owner_as_an_execution(client: Client):
+    """The client side alone: the owner comes back typed, by either spelling."""
+    channel = f"orders-{uuid.uuid4()}"
+    handle = await client.start_workflow(
+        CountLinked.run,
+        channel,
+        id=f"wf-{uuid.uuid4()}",
+        task_queue=f"nobody-polls-{uuid.uuid4()}",
+    )
+    run_id = handle.first_execution_run_id
+    assert run_id is not None
+    by_id = temporalio.common.Execution.workflow(handle.id)
+    by_run = temporalio.common.Execution.workflow(handle.id, run_id)
+    try:
+        description = await client.describe_channel(channel, execution=by_id)
+        assert description.kind == ChannelKind.LINKED
+        assert description.linked_to is not None
+        assert description.linked_to == by_run
+        assert description.linked_to.type is temporalio.common.ExecutionType.WORKFLOW
+        # The execution and the workflow id shorthand reach one channel.
+        assert (
+            await client.notify_channel(
+                channel, position=b"1-0", counter=1, execution=by_id
+            )
+            == 1
+        )
+        [polled] = await client.poll_channel(channel, workflow_id=handle.id, wait=False)
+        assert (polled.counter, polled.linked_to) == (1, by_run)
+        [polled] = await client.poll_channel(channel, execution=by_run, wait=False)
+        assert polled.counter == 1
+        # The same id as an activity names an execution that never ran.
+        with pytest.raises(RPCError) as missing:
+            await client.describe_channel(
+                channel, execution=temporalio.common.Execution.activity(handle.id)
+            )
+        assert missing.value.status == RPCStatusCode.NOT_FOUND
+    finally:
+        with contextlib.suppress(RPCError):
+            await handle.terminate()
+
+
+@pytest.mark.needs_linked_server
 @pytest.mark.needs_linked_core
 async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
     channel = f"orders-{uuid.uuid4()}"
@@ -980,7 +1051,7 @@ async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
         polled = await client.poll_channel(channel, workflow_id=handle.id, wait=False)
         assert [(n.position, n.counter) for n in polled] == [(b"1-0", 1)]
         assert polled[0].linked_to is not None
-        assert polled[0].linked_to.workflow_id == handle.id
+        assert polled[0].linked_to.business_id == handle.id
         # The run id reaches the same channel.
         assert [
             n.counter
@@ -1122,7 +1193,7 @@ async def test_a_description_lists_a_linked_channel_once_it_holds_state(
         assert info.pending_notification is not None
         assert info.pending_notification.counter == 1
         assert info.pending_notification.linked_to is not None
-        assert info.pending_notification.linked_to.workflow_id == handle.id
+        assert info.pending_notification.linked_to.business_id == handle.id
         assert info.scheduled_counter == 0
         assert (info.listener_count, info.retained_count, info.accepted_count) == (
             0,

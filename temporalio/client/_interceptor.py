@@ -718,6 +718,7 @@ class NotifyChannelInput:
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
     run_id: str | None = None
+    execution: temporalio.common.Execution | None = None
 
 
 @dataclass
@@ -736,6 +737,7 @@ class PollChannelInput:
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
     run_id: str | None = None
+    execution: temporalio.common.Execution | None = None
 
 
 @dataclass
@@ -751,6 +753,7 @@ class DescribeChannelInput:
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
     run_id: str | None = None
+    execution: temporalio.common.Execution | None = None
 
 
 @dataclass
@@ -767,6 +770,7 @@ class RegisterChannelListenerInput:
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
     run_id: str | None = None
+    execution: temporalio.common.Execution | None = None
 
 
 @dataclass
@@ -783,6 +787,7 @@ class UnregisterChannelListenerInput:
     rpc_timeout: timedelta | None
     workflow_id: str | None = None
     run_id: str | None = None
+    execution: temporalio.common.Execution | None = None
 
 
 @dataclass
