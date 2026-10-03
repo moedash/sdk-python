@@ -11,20 +11,22 @@ retries Workflow Task failures regardless of cause.** Alerting must therefore
 key on the metrics here rather than on Workflow Task failure counts, which a
 transient backend outage also increments.
 
-============================  ==========================  ====================
-Condition                     Error type                  Operator response
-============================  ==========================  ====================
-Backend unreachable/erroring  :class:`StreamStorageError` None -- clears when
-                                                          the backend recovers
-Recorded offset missing,      :class:`StreamIntegrityError` Repair or restore
-expired, reordered, or                                      the backend, or
-miscounted                                                  terminate the Run
-Bytes intact but undecodable  :class:`StreamDecodeError`  Align the consumer's
-                                                          converter with the
-                                                          producer's
-Annotation does not match     ordinary nondeterminism     Fix or version the
-the subscriptions made                                      Workflow code
-============================  ==========================  ====================
+::
+
+    ============================  ==========================  ====================
+    Condition                     Error type                  Operator response
+    ============================  ==========================  ====================
+    Backend unreachable/erroring  ``StreamStorageError``      None -- clears when
+                                                              the backend recovers
+    Recorded offset missing,      ``StreamIntegrityError``    Repair or restore
+    expired, reordered, or                                    the backend, or
+    miscounted                                                terminate the Run
+    Bytes intact but undecodable  ``StreamDecodeError``       Align the consumer's
+                                                              converter with the
+                                                              producer's
+    Annotation does not match     ordinary nondeterminism     Fix or version the
+    the subscriptions made                                    Workflow code
+    ============================  ==========================  ====================
 
 There is deliberately **no** ``workflow_failure_exception_types`` registration
 here: integrity loss *blocks* a Workflow rather than terminating it (ADR-014).
@@ -83,7 +85,7 @@ class StreamIntegrityError(StreamError):
 class StreamDecodeError(StreamError):
     """A record was present and intact but could not be decoded.
 
-    Separated from :class:`StreamIntegrityError` because it is a configuration
+    Separated from ``StreamIntegrityError`` because it is a configuration
     error on the *consumer* -- a DataConverter or codec that does not match the
     producer's -- and reporting it as integrity loss sends an operator to
     restore a backend that was never damaged (ADR-015).

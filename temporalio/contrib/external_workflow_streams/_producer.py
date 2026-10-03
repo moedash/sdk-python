@@ -118,17 +118,17 @@ class WakeNotAcknowledgedError(Exception):
         whatever ended the attempt (ADR-036).
         """
         self.restart = restart
-        """Whether the caller must call :meth:`.wake` again instead of retrying.
+        """Whether the caller must call ``wake()`` again instead of retrying.
 
         The wake is three steps -- observe the parked set, claim the generation,
         Signal -- and only the third produces the requests
-        :meth:`ProducerTopicHandle.retry_wake` re-sends. A failure in the first
+        ``ProducerTopicHandle.retry_wake()`` re-sends. A failure in the first
         two leaves nothing to re-send, so ``pending`` is empty and retrying it
         would silently do nothing at all: the record would stay durable and
         unannounced while the caller believed it had recovered.
 
         ``True`` therefore says "no wake was composed; compose one". Calling
-        :meth:`ProducerTopicHandle.wake` again is safe and is the whole recovery
+        ``ProducerTopicHandle.wake()`` again is safe and is the whole recovery
         -- it re-observes the parked set, and a parked wake's request ID is
         derived from the generation rather than from the sender, so a wake some
         other producer already sent deduplicates against it.
@@ -198,7 +198,7 @@ class AppendNotAcknowledgedError(Exception):
         """The stream the append was for. Where it must be settled.
 
         Carried because a record does not name its own stream and the backend's
-        idempotency scope does: `(session_id, sequence)` is unused on every
+        idempotency scope does: ``(session_id, sequence)`` is unused on every
         *other* stream, so the same record handed to another topic's
         ``resolve_append`` would append a second copy there rather than
         deduplicate. The recovery refuses that, and this is what a caller
@@ -455,7 +455,7 @@ class ExternalStreamProducer:
         #: Per stream, the appends that never reported an outcome.
         #:
         #: Kept because the operation *is* the recovery: only these exact bytes
-        #: under these exact `(session_id, sequence)` pairs re-append as a no-op
+        #: under these exact ``(session_id, sequence)`` pairs re-append as a no-op
         #: if the first attempt landed, and only what the interrupted call owed
         #: says whether settling it still has a wake to send. A list rather than
         #: a single slot because concurrent publishes to one stream are supported
@@ -872,7 +872,7 @@ class ExternalStreamProducerTopic(Generic[AnyType]):
 
         The lookup **is** the safety check, and it is three checks at once. It
         binds the recovery to the stream, because a record does not name its own
-        stream and `(session_id, sequence)` is unused on every other one -- so a
+        stream and ``(session_id, sequence)`` is unused on every other one -- so a
         record settled against the wrong topic appends a second copy of the value
         rather than deduplicating, and leaves the real stream still blocked. It
         binds the recovery to the exact bytes, because idempotency is on identity
