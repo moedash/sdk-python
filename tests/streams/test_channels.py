@@ -32,12 +32,15 @@ from temporalio import workflow
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import (
     Callback,
+    ChannelAddress,
     ChannelKind,
     ChannelSubscriptionInfo,
     Client,
     WorkflowExecutionDescription,
+    stream_channel,
 )
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams import DEFAULT_TOPIC, StreamRef
 from temporalio.worker._workflow_instance import (
     UnsandboxedWorkflowRunner,
     WorkflowInstance,
@@ -549,6 +552,35 @@ async def test_a_subscription_after_an_unsubscribe_is_a_new_one():
         "drained": [],
         "refused": _CLOSED,
     }
+
+
+async def test_a_stream_names_the_channel_it_notifies():
+    owner = temporalio.common.Execution.workflow("wf")
+    assert stream_channel(StreamRef.for_workflow("wf", topic="out")) == ChannelAddress(
+        "stream/out", owner
+    )
+    # The address names the owner without a run, so it follows the chain.
+    assert stream_channel(StreamRef.for_workflow("wf", run_id="run")) == ChannelAddress(
+        "stream/" + DEFAULT_TOPIC, owner
+    )
+    assert stream_channel(
+        StreamRef.for_activity("act", workflow_id="wf", topic="out")
+    ) == ChannelAddress("stream/act/out", owner)
+    # A standalone activity is an execution of its own, so its stream's
+    # channel is linked to it under the topic's name alone.
+    assert stream_channel(StreamRef.for_activity("act", topic="out")) == ChannelAddress(
+        "stream/out", temporalio.common.Execution.activity("act")
+    )
+    # A standalone stream's topics share one stream on the server, so the
+    # topic is not part of the name.
+    assert stream_channel(
+        StreamRef.for_standalone("sid", topic="out")
+    ) == ChannelAddress("stream/sid", None)
+    # The workflow id stays readable for a caller that addresses by it, and
+    # only names a workflow.
+    assert stream_channel(StreamRef.for_workflow("wf")).workflow_id == "wf"
+    assert stream_channel(StreamRef.for_activity("act")).workflow_id is None
+    assert stream_channel(StreamRef.for_standalone("sid")).workflow_id is None
 
 
 async def test_the_description_maps_every_channel_subscription_field():
