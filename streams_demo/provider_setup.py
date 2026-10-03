@@ -1,9 +1,10 @@
 """Pick the provider for a demo run from the environment.
 
-``STREAMS_PROVIDER`` names a provider; this tree carries ``memory`` and
-``redis``. The demo needs a Temporal server to run the workflow either way;
-``TEMPORAL_ADDRESS`` points at it, and the Redis demo reads its store from
-``AI198_REDIS_URL`` and ``AI198_REDIS_PREFIX``.
+``STREAMS_PROVIDER`` names a provider; this tree carries ``memory``,
+``workflow_streams``, ``native`` and ``redis``. The demo needs a Temporal
+server to run the workflow either way; ``TEMPORAL_ADDRESS`` points at it, the
+native demo needs one built with the stream service, and the Redis demo reads
+its store from ``AI198_REDIS_URL`` and ``AI198_REDIS_PREFIX``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,16 @@ async def open() -> tuple[str, ProviderPlugin]:
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     if NAME == "memory":
         return address, MemoryStreams()
+    if NAME == "workflow_streams":
+        from temporalio.streams.providers.workflow_streams import (
+            WorkflowStreamsProvider,
+        )
+
+        return address, WorkflowStreamsProvider()
+    if NAME == "native":
+        from temporalio.streams.providers.native import NativeStreams
+
+        return address, NativeStreams()
     if NAME == "redis":
         from temporalio.streams.providers.redis import RedisStreams
 
@@ -38,7 +49,7 @@ async def open() -> tuple[str, ProviderPlugin]:
 async def close(provider: ProviderPlugin) -> None:
     """Let go of whatever :func:`open` acquired.
 
-    The memory provider holds no connection and the Redis provider closes
-    the client it opened, so the demo's teardown reads the same on both.
+    Every provider releases what it opened through its own ``close()``, so
+    the demo's teardown reads the same on all of them.
     """
     await provider.close()
