@@ -27,6 +27,7 @@ import temporalio.common
 import temporalio.converter
 import temporalio.runtime
 import temporalio.service
+import temporalio.streams
 import temporalio.workflow
 from temporalio.service import (
     ConnectConfig,
@@ -279,6 +280,7 @@ class Client:
         default_workflow_query_reject_condition: None
         | (temporalio.common.QueryRejectCondition) = None,
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ):
         """Create a Temporal client from a service client.
 
@@ -293,6 +295,7 @@ class Client:
             interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
             header_codec_behavior=header_codec_behavior,
+            stream_provider=stream_provider,
         )
         self._initial_config = config.copy()
 
@@ -3306,6 +3309,7 @@ class ClientConfig(TypedDict, total=False):
         temporalio.common.QueryRejectCondition | None
     ]
     header_codec_behavior: Required[HeaderCodecBehavior]
+    stream_provider: temporalio.streams.StreamProvider | None
 
 
 def _channel_execution(
