@@ -19,6 +19,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "hosts_standalone_streams: the case needs a stream with an id of its own and "
+        "no owner",
+    )
+    config.addinivalue_line(
+        "markers",
         "needs_channel_server: the case needs a server that serves notification "
         "channels, named with -E host:port",
     )
