@@ -54,7 +54,8 @@ to include examples, links to docs, or any other relevant information.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
   reference provider the conformance tests run against, and
   `temporalio.streams.providers.redis.RedisStreams` serves the same interface
-  over External Workflow Streams, one topic as an input and an output stream.
+  over External Workflow Streams, with one Redis log per topic that the workflow
+  and outside readers share.
 - `ExternalStreamSubscription.records()` yields each value with the provider
   offset it was read from, for a reader that has to name where it got to.
 
