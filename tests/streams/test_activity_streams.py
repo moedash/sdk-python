@@ -19,6 +19,7 @@ streams of a standalone activity, so the cases marked
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from temporalio.streams import (
     topic,
 )
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.native import NativeStreams
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.testing import WorkflowEnvironment
 from tests.helpers import new_worker
@@ -63,6 +65,21 @@ async def _memory_setup(client: Client) -> AsyncIterator[ActivitySetup]:
     provider.reset()
 
 
+async def _native_setup(client: Client) -> AsyncIterator[ActivitySetup]:
+    # The store is a server built from the stream-carrying branch, which the
+    # test environment's own server is not; TEMPORAL_ADDRESS names it.
+    address = os.environ.get("TEMPORAL_ADDRESS")
+    if address:
+        client = await Client.connect(
+            address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+        )
+    provider = NativeStreams()
+    config = client.config()
+    config["plugins"] = [provider]
+    yield ActivitySetup("native", provider, Client(**config))
+    await provider.close()
+
+
 async def _workflow_streams_setup(client: Client) -> AsyncIterator[ActivitySetup]:
     provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
     config = client.config()
@@ -78,6 +95,8 @@ SETUPS: dict[str, Callable[[Client], AsyncIterator[ActivitySetup]]] = {
     "memory": _memory_setup,
     "workflow_streams": _workflow_streams_setup,
 }
+if os.environ.get("STREAMS_LIVE") == "native":
+    SETUPS["native"] = _native_setup
 
 
 @pytest.fixture(params=sorted(SETUPS))

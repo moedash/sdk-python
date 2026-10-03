@@ -997,6 +997,7 @@ async def test_a_worker_hosted_consumer_is_reached_through_the_frontend(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.needs_stream_channel_server
 @pytest.mark.needs_native_provider
 async def test_a_native_standalone_stream_is_consumed_through_its_channel(
     client: Client,
