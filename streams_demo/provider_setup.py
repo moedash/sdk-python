@@ -1,8 +1,9 @@
 """Pick the provider for a demo run from the environment.
 
-``STREAMS_PROVIDER`` names a provider; this base tree carries only ``memory``,
-and each provider branch adds its own name here. The demo needs a Temporal
-server to run the workflow either way; ``TEMPORAL_ADDRESS`` points at it.
+``STREAMS_PROVIDER`` names a provider; this tree carries ``memory`` and
+``redis``. The demo needs a Temporal server to run the workflow either way;
+``TEMPORAL_ADDRESS`` points at it, and the Redis demo reads its store from
+``AI198_REDIS_URL`` and ``AI198_REDIS_PREFIX``.
 """
 
 from __future__ import annotations
@@ -21,16 +22,23 @@ WORKFLOW_CACHE = int(os.environ.get("STREAMS_WORKFLOW_CACHE", "512"))
 
 async def open() -> tuple[str, ProviderPlugin]:
     """The server to connect to and the provider the worker and the client share."""
-    if NAME != "memory":
-        raise SystemExit(f"this tree carries no stream provider named {NAME!r}")
-    return os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"), MemoryStreams()
+    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+    if NAME == "memory":
+        return address, MemoryStreams()
+    if NAME == "redis":
+        from temporalio.streams.providers.redis import RedisStreams
+
+        return address, RedisStreams(
+            url=os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6379"),
+            key_prefix=os.environ.get("AI198_REDIS_PREFIX", "ai198-contract"),
+        )
+    raise SystemExit(f"this tree carries no stream provider named {NAME!r}")
 
 
 async def close(provider: ProviderPlugin) -> None:
     """Let go of whatever :func:`open` acquired.
 
-    The memory provider holds no connection, so this is its ``close()`` and
-    nothing more. A provider branch that opens one closes it the same way, so
-    the demo's teardown reads the same on every provider.
+    The memory provider holds no connection and the Redis provider closes
+    the client it opened, so the demo's teardown reads the same on both.
     """
     await provider.close()
