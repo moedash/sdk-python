@@ -78,6 +78,16 @@ to include examples, links to docs, or any other relevant information.
   `WorkflowHistory` while the stream is retained, `to_json()` and `from_json()`
   carry them as `streamSlices` beside the events, and a history that carries
   them replays with no server.
+- **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
+  serves the stream interface over the shipped Workflow Streams transport as a
+  worker plugin, so a workflow reads and publishes through
+  `temporalio.contrib.workflow_streams` without naming it. Records are the
+  `StreamRecord` proto inside the shipped item payload, and a handle without a
+  run id follows continue-as-new run by run and a reset into the run reset to.
+  An outside publish is an Update that answers with the batch's position and
+  refuses a conflicting repeat, falling back to the shipped Signal on a
+  workflow whose worker predates it. A workflow's activity keeps its own
+  streams in the workflow's log under `activity/<id>/<name>`.
 
 ### Changed
 
