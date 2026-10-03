@@ -130,6 +130,8 @@ to include examples, links to docs, or any other relevant information.
   through `ExternalOutputStreamClient`. Workflow output is staged outside
   History and becomes readable only after its compact Workflow Task marker is
   committed.
+- Added `examples/streams`, one agent loop that runs unchanged on every
+  stream provider and on the Nexus front.
 
 ### Changed
 
