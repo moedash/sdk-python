@@ -1,0 +1,161 @@
+"""Notification channel descriptions as the client reports them."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import IntEnum
+
+import temporalio.api.notification.v1
+import temporalio.common
+from temporalio.workflow import Notification
+
+from ._callback import Callback
+
+__all__ = [
+    "ChannelAddress",
+    "ChannelDescription",
+    "ChannelKind",
+    "ChannelListener",
+]
+
+
+class ChannelKind(IntEnum):
+    """Where a channel lives, which decides how a call addresses it.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    UNSPECIFIED = int(
+        temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_UNSPECIFIED
+    )
+    """The server did not say; an older server answers this."""
+
+    INDEPENDENT = int(
+        temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_INDEPENDENT
+    )
+    """Its own execution, keyed by namespace and channel name.
+
+    Any number of workflows subscribe to it and callbacks register on it.
+    """
+
+    LINKED = int(temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED)
+    """Kept in one execution's state, keyed by namespace, execution and name.
+
+    The owning execution, a workflow or a standalone activity, is its listener
+    by construction. A call reaches it with the ``execution`` argument, or
+    with ``workflow_id`` when the owner is a workflow.
+    """
+
+
+@dataclass(frozen=True)
+class ChannelListener:
+    """One listener of a channel: a workflow or a callback.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    listener_id: str
+    """Assigned by the server when the listener registered."""
+
+    workflow_id: str | None
+    """The subscribed workflow, when the listener is one."""
+
+    run_id: str | None
+    """The run that subscribed. Delivery follows the chain's current run."""
+
+    callback: Callback | None
+    """The callback the server invokes, when the listener is one."""
+
+    registered_time: datetime | None
+    """When the listener registered."""
+
+    @staticmethod
+    def _from_proto(
+        proto: temporalio.api.notification.v1.ChannelListener,
+    ) -> ChannelListener:
+        callback: Callback | None = None
+        if proto.HasField("callback") and proto.callback.HasField("nexus"):
+            callback = Callback(
+                url=proto.callback.nexus.url, headers=dict(proto.callback.nexus.header)
+            )
+        workflow = proto.workflow if proto.HasField("workflow") else None
+        return ChannelListener(
+            listener_id=proto.listener_id,
+            workflow_id=workflow.workflow_id if workflow else None,
+            run_id=workflow.run_id if workflow else None,
+            callback=callback,
+            registered_time=(
+                proto.registered_time.ToDatetime(tzinfo=timezone.utc)
+                if proto.HasField("registered_time")
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ChannelDescription:
+    """What the server knows about a channel.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    listeners: Sequence[ChannelListener]
+    """Who is listening, workflows and callbacks alike."""
+
+    latest: Notification | None
+    """The notification with the highest counter the channel retains."""
+
+    retained_count: int
+    """How many notifications the channel keeps for pollers."""
+
+    kind: ChannelKind = ChannelKind.UNSPECIFIED
+    """Which kind of channel this is.
+
+    A linked channel of a running execution exists by construction, so a
+    describe with ``execution`` answers :attr:`ChannelKind.LINKED` with no
+    listeners and nothing retained for a name nobody has notified yet.
+    """
+
+    linked_to: temporalio.common.Execution | None = None
+    """The owner of a linked channel and the run that holds it.
+
+    ``None`` for an independent channel.
+    """
+
+
+@dataclass(frozen=True)
+class ChannelAddress:
+    """Where a channel call reaches a channel: its name and, when linked, its owner.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    """The channel name."""
+
+    execution: temporalio.common.Execution | None
+    """The execution the channel is linked to, or ``None`` for an independent one.
+
+    Pass both to :py:meth:`temporalio.client.Client.poll_channel` and the
+    other channel calls as ``channel`` and ``execution``.
+    """
+
+    @property
+    def workflow_id(self) -> str | None:
+        """The owning workflow's id, when the owner is a workflow.
+
+        ``None`` for an independent channel and for one a standalone activity
+        owns, which only ``execution`` reaches.
+        """
+        if (
+            self.execution is not None
+            and self.execution.type == temporalio.common.ExecutionType.WORKFLOW
+        ):
+            return self.execution.business_id
+        return None
