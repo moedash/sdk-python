@@ -25,6 +25,8 @@ from temporalio.converter import (
 from ._callback import Callback
 
 if TYPE_CHECKING:
+    import temporalio.workflow
+
     from ._activity import (
         ActivityExecutionAsyncIterator,
         ActivityExecutionCount,
@@ -32,6 +34,8 @@ if TYPE_CHECKING:
         ActivityHandle,
         AsyncActivityIDReference,
     )
+    from ._callback import Callback
+    from ._channel import ChannelDescription
     from ._nexus import (
         NexusOperationExecutionAsyncIterator,
         NexusOperationExecutionCount,
@@ -680,6 +684,84 @@ class CountNexusOperationsInput:
 
 
 @dataclass
+class NotifyChannelInput:
+    """Input for :py:meth:`OutboundInterceptor.notify_channel`.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    position: bytes
+    counter: int
+    metadata: Mapping[str, Any] | None
+    rpc_metadata: Mapping[str, str | bytes]
+    rpc_timeout: timedelta | None
+    execution: temporalio.common.Execution | None = None
+
+
+@dataclass
+class PollChannelInput:
+    """Input for :py:meth:`OutboundInterceptor.poll_channel`.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    after_counter: int
+    wait: timedelta | None
+    max_notifications: int
+    rpc_metadata: Mapping[str, str | bytes]
+    rpc_timeout: timedelta | None
+    execution: temporalio.common.Execution | None = None
+
+
+@dataclass
+class DescribeChannelInput:
+    """Input for :py:meth:`OutboundInterceptor.describe_channel`.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    rpc_metadata: Mapping[str, str | bytes]
+    rpc_timeout: timedelta | None
+    execution: temporalio.common.Execution | None = None
+
+
+@dataclass
+class RegisterChannelListenerInput:
+    """Input for :py:meth:`OutboundInterceptor.register_channel_listener`.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    callback: Callback
+    rpc_metadata: Mapping[str, str | bytes]
+    rpc_timeout: timedelta | None
+    execution: temporalio.common.Execution | None = None
+
+
+@dataclass
+class UnregisterChannelListenerInput:
+    """Input for :py:meth:`OutboundInterceptor.unregister_channel_listener`.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    listener_id: str
+    rpc_metadata: Mapping[str, str | bytes]
+    rpc_timeout: timedelta | None
+    execution: temporalio.common.Execution | None = None
+
+
+@dataclass
 class Interceptor:
     """Interceptor for clients.
 
@@ -979,3 +1061,51 @@ class OutboundInterceptor:
            This API is experimental and unstable.
         """
         return await self.next.count_nexus_operations(input)
+
+    ### Notification channel calls
+
+    async def notify_channel(self, input: NotifyChannelInput) -> int:
+        """Called for every :py:meth:`Client.notify_channel` call.
+
+        .. warning::
+           This API is experimental and unstable.
+        """
+        return await self.next.notify_channel(input)
+
+    async def poll_channel(
+        self, input: PollChannelInput
+    ) -> list[temporalio.workflow.Notification]:
+        """Called for every :py:meth:`Client.poll_channel` call.
+
+        .. warning::
+           This API is experimental and unstable.
+        """
+        return await self.next.poll_channel(input)
+
+    async def describe_channel(self, input: DescribeChannelInput) -> ChannelDescription:
+        """Called for every :py:meth:`Client.describe_channel` call.
+
+        .. warning::
+           This API is experimental and unstable.
+        """
+        return await self.next.describe_channel(input)
+
+    async def register_channel_listener(
+        self, input: RegisterChannelListenerInput
+    ) -> str:
+        """Called for every :py:meth:`Client.register_channel_listener` call.
+
+        .. warning::
+           This API is experimental and unstable.
+        """
+        return await self.next.register_channel_listener(input)
+
+    async def unregister_channel_listener(
+        self, input: UnregisterChannelListenerInput
+    ) -> None:
+        """Called for every :py:meth:`Client.unregister_channel_listener` call.
+
+        .. warning::
+           This API is experimental and unstable.
+        """
+        await self.next.unregister_channel_listener(input)

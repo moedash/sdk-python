@@ -33,6 +33,16 @@ to include examples, links to docs, or any other relevant information.
   through `ExternalOutputStreamClient`. Workflow output is staged outside
   History and becomes readable only after its compact Workflow Task marker is
   committed.
+
+- **Experimental**: notification channels. Requires a server that serves notification channels.
+  - `Client.notify_channel`, `poll_channel`, `describe_channel`, `register_channel_listener` and
+    `unregister_channel_listener` reach a named channel on the server. The channel is either
+    independent or linked to an execution, which `execution=` (`temporalio.common.Execution`) or
+    the `workflow_id=` shorthand names.
+  - A workflow subscribes with `workflow.subscribe_channel(name)`, reads a channel linked to it with
+    `workflow.linked_channel(name)` and ends a subscription with `unsubscribe()`. Notifications
+    arrive with the workflow's tasks. `WorkflowExecutionDescription.channel_subscriptions` lists
+    the channels a run listens on.
 ### Changed
 
 - Standalone Activities are now generally available (GA). (Standalone Activities as Nexus operations
