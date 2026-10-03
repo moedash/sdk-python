@@ -42,6 +42,10 @@ to include examples, links to docs, or any other relevant information.
     `unregister_channel_listener` reach a named channel on the server. The channel is either
     independent or linked to an execution, which `execution=` (`temporalio.common.Execution`) or
     the `workflow_id=` shorthand names.
+  - A workflow subscribes with `workflow.subscribe_channel(name)`, reads a channel linked to it with
+    `workflow.linked_channel(name)` and ends a subscription with `unsubscribe()`. Notifications
+    arrive with the workflow's tasks. `WorkflowExecutionDescription.channel_subscriptions` lists
+    the channels a run listens on.
 
 ### Changed
 

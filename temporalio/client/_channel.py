@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from enum import IntEnum
 
 import temporalio.api.notification.v1
+import temporalio.api.workflow.v1
 import temporalio.common
 from temporalio.workflow import Notification
 
@@ -18,6 +19,7 @@ __all__ = [
     "ChannelDescription",
     "ChannelKind",
     "ChannelListener",
+    "ChannelSubscriptionInfo",
 ]
 
 
@@ -126,6 +128,71 @@ class ChannelDescription:
 
     ``None`` for an independent channel.
     """
+
+
+@dataclass(frozen=True)
+class ChannelSubscriptionInfo:
+    """A workflow's standing on one channel, as its description reports it.
+
+    An independent channel is listed from the subscribe event until the run
+    unsubscribes or closes. A linked channel is listed once it holds state. A
+    closed run keeps listing what it stood on, and a continue-as-new
+    successor starts with nothing.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    channel: str
+    """Channel name."""
+
+    kind: ChannelKind
+    """:attr:`ChannelKind.INDEPENDENT` for a subscription the workflow made by
+    command, :attr:`ChannelKind.LINKED` for a channel linked to it."""
+
+    subscribed_event_id: int
+    """Id of the event that recorded the subscription. Zero for the linked kind."""
+
+    last_counter: int
+    """Highest counter the workflow has accepted from the channel. Zero when
+    none has arrived."""
+
+    pending_notification: Notification | None
+    """The notification held for the workflow's next Workflow Task, when one
+    is pending."""
+
+    scheduled_counter: int
+    """Counter carried by the scheduled event of a Workflow Task that has not
+    started yet. Zero otherwise."""
+
+    listener_count: int
+    """Linked kind: callback listeners registered on the channel."""
+
+    retained_count: int
+    """Linked kind: notifications retained for pollers."""
+
+    accepted_count: int
+    """Linked kind: notifications the channel has accepted over its life."""
+
+    @staticmethod
+    def _from_proto(
+        proto: temporalio.api.workflow.v1.ChannelSubscriptionInfo,
+    ) -> ChannelSubscriptionInfo:
+        return ChannelSubscriptionInfo(
+            channel=proto.channel,
+            kind=ChannelKind(proto.kind),
+            subscribed_event_id=proto.subscribed_event_id,
+            last_counter=proto.last_counter,
+            pending_notification=(
+                Notification._from_proto(proto.pending_notification)
+                if proto.HasField("pending_notification")
+                else None
+            ),
+            scheduled_counter=proto.scheduled_counter,
+            listener_count=proto.listener_count,
+            retained_count=proto.retained_count,
+            accepted_count=proto.accepted_count,
+        )
 
 
 @dataclass(frozen=True)
