@@ -29,6 +29,7 @@ from temporalio.streams._record import (
 from temporalio.streams._topic import StreamTopic, resolve_topic
 from temporalio.streams._wire import RecordDecoder, to_wire
 from temporalio.workflow._context import _Runtime, payload_converter
+from temporalio.workflow._exceptions import ReadOnlyContextError
 from temporalio.workflow._sandbox import logger
 
 __all__ = ["StreamReader", "StreamWriter", "stream_reader", "stream_writer"]
@@ -169,9 +170,18 @@ class StreamWriter(Generic[T]):
         Raises:
             ValueError: The topic was already finished in this run, by this
                 writer or by another one on the same topic.
+            temporalio.workflow.ReadOnlyContextError: Called from a query or an
+                update validator, which commit nothing.
         """
         if self._topic in self._finished:
             raise ValueError(f"topic {self._topic!r} was already finished")
+        # A query is answered on a task that carries the answer and nothing else, so a
+        # record published here could only ever be dropped. Said at the call rather than
+        # thrown away later without a word.
+        if _Runtime.current().workflow_is_read_only():
+            raise ReadOnlyContextError(
+                "While in read-only function, action attempted: publish to a stream"
+            )
         self._sink.publish(
             to_wire(
                 payload_converter(),
