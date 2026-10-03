@@ -87,6 +87,11 @@ to include examples, links to docs, or any other relevant information.
   which the handler maps onto the store's accessor for that owner. Configure
   the front with `data_converter=` to run a payload codec on the caller side,
   so records are encoded before they leave the process.
+- **Experimental**: `temporalio.streams.providers.nexus.stream_consumer_operation` builds an
+  asynchronous Nexus operation that consumes a stream. It registers a callback listener on the
+  stream's notification channel, reads on each delivery and completes when the stream closes.
+  `temporalio.streams.providers.nexus_consumer_service` hosts it on its own and needs the
+  `streams-nexus` extra.
 
 ### Changed
 

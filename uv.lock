@@ -4758,6 +4758,9 @@ opentelemetry = [
 pydantic = [
     { name = "pydantic" },
 ]
+streams-nexus = [
+    { name = "aiohttp" },
+]
 strands-agents = [
     { name = "strands-agents" },
 ]
@@ -4813,6 +4816,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", marker = "extra == 'aioboto3'", specifier = ">=10.4.0" },
+    { name = "aiohttp", marker = "extra == 'streams-nexus'", specifier = ">=3.9,<4" },
     { name = "deepagents", marker = "python_full_version >= '3.11' and extra == 'deepagents'", specifier = ">=0.6.12,<0.7" },
     { name = "google-adk", marker = "extra == 'google-adk'", specifier = ">=2.8.0,<3" },
     { name = "google-genai", marker = "extra == 'google-genai'", specifier = ">=2.21.0,<3.0.0" },
@@ -4844,7 +4848,7 @@ requires-dist = [
     { name = "types-protobuf", specifier = ">=3.20,<8.0.0" },
     { name = "typing-extensions", specifier = ">=4.2.0,<5" },
 ]
-provides-extras = ["grpc", "opentelemetry", "pydantic", "openai-agents", "google-adk", "langgraph", "langsmith", "deepagents", "lambda-worker-otel", "cloud-run-worker-otel", "aioboto3", "google-genai", "strands-agents"]
+provides-extras = ["grpc", "opentelemetry", "pydantic", "openai-agents", "google-adk", "langgraph", "langsmith", "deepagents", "lambda-worker-otel", "cloud-run-worker-otel", "aioboto3", "google-genai", "strands-agents", "streams-nexus"]
 
 [package.metadata.requires-dev]
 dev = [

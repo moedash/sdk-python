@@ -2,6 +2,12 @@ import pytest
 
 _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
 
+# A native stream lives on the server, and only the native layers carry a
+# provider that opens one; the providers here hold streams in memory or in a
+# workflow's History. A case that produces to a native stream waits for the
+# layer with that provider.
+PINNED_LAYER_HOSTS_NATIVE_STREAMS = False
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
@@ -58,6 +64,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "channel by execution, a standalone activity's included, named with "
         "-E host:port",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_native_provider: the case needs a provider that opens native streams "
+        "on the server, which only the native layers carry",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -101,6 +112,16 @@ def pytest_collection_modifyitems(
                     ),
                 )
             )
+    if not PINNED_LAYER_HOSTS_NATIVE_STREAMS:
+        skips.append(
+            (
+                "needs_native_provider",
+                pytest.mark.skip(
+                    reason="this layer carries no provider for native streams; the "
+                    "native layers and the union do"
+                ),
+            )
+        )
     for item in items:
         for marker, skip in skips:
             if item.get_closest_marker(marker):
