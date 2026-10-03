@@ -12,12 +12,15 @@ import pytest
 
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.contrib.external_workflow_streams import (
-    StreamError as TransportStreamError,
-)
-from temporalio.contrib.external_workflow_streams import (
+    StreamDirection,
     WakeNotAcknowledgedError,
 )
+from temporalio.contrib.external_workflow_streams import (
+    StreamError as TransportStreamError,
+)
+from temporalio.contrib.external_workflow_streams._backend import StreamKey
 from temporalio.contrib.external_workflow_streams._record import Offset
+from temporalio.contrib.external_workflow_streams._redis import RedisStreamBackend
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
@@ -26,6 +29,7 @@ from temporalio.streams.providers.redis import (
     DEFAULT_RETENTION,
     RedisProducer,
     RedisStreams,
+    _ActivityOwner,
     _drive,
     _position,
     _wake_counter,
@@ -237,6 +241,50 @@ class _NoRedis:
 
     def register_script(self, _script: str) -> None:
         return None
+
+
+def test_activity_keys_encode_their_ids_and_never_meet_chain_keys():
+    # The run is part of the key: a workflow's activity is keyed by the
+    # workflow's run and a standalone one by its own, so an id started again
+    # in a new run starts a new stream.
+    assert (
+        _ActivityOwner("ns", "wf", "act", "run").key("p", "t")
+        == "p:ns:activity/wf/run/act:t"
+    )
+    assert (
+        _ActivityOwner("ns", None, "act", "run").key("p", "t")
+        == "p:ns:activity//run/act:t"
+    )
+    # An id holding a separator is encoded, so it cannot move a boundary.
+    assert (
+        _ActivityOwner("n:s", "w/f", "a:c", "r/1").key("p", "t/u")
+        == "p:n%3As:activity/w%2Ff/r%2F1/a%3Ac:t%2Fu"
+    )
+    # A key needs the run; a handle opened without one resolves it first.
+    with pytest.raises(RuntimeError, match="not resolved"):
+        _ActivityOwner("ns", "wf", "act", None).key("p", "t")
+    # A chain key percent-encodes every id, so none of its components holds a
+    # "/" however the ids are chosen, and the owner component here always does.
+    backend = RedisStreamBackend(client=_NoRedis(), key_prefix="p")
+    forged = StreamKey(
+        namespace="ns",
+        workflow_id="activity/wf/act",
+        first_execution_run_id="t",
+        stream_name="t",
+        direction=StreamDirection.OUTPUT,
+    )
+    assert "/" not in backend.stream_key(forged)
+    assert backend.stream_key(forged) != _ActivityOwner("ns", "wf", "act", "t").key(
+        "p", "t"
+    )
+
+
+def test_an_activity_owner_names_itself_for_messages():
+    assert str(_ActivityOwner("ns", None, "act", None)) == "activity 'act'"
+    assert (
+        str(_ActivityOwner("ns", "wf", "act", "run"))
+        == "activity 'act' of workflow 'wf'"
+    )
 
 
 def test_cursors_name_entries_of_the_topics_one_log():
