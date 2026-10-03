@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
 
-import temporalio.api.common.v1
 import temporalio.api.notification.v1
 import temporalio.api.workflow.v1
+import temporalio.common
 from temporalio.streams._ref import StreamRef
 from temporalio.workflow import Notification
 
@@ -49,10 +49,11 @@ class ChannelKind(IntEnum):
     """
 
     LINKED = int(temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED)
-    """Kept in one workflow's state, keyed by namespace, workflow id and name.
+    """Kept in one execution's state, keyed by namespace, execution and name.
 
-    The owning workflow is its listener by construction; a call reaches it
-    with the ``workflow_id`` argument.
+    The owning execution, a workflow or a standalone activity, is its listener
+    by construction. A call reaches it with the ``execution`` argument, or
+    with ``workflow_id`` when the owner is a workflow.
     """
 
 
@@ -122,12 +123,12 @@ class ChannelDescription:
     kind: ChannelKind = ChannelKind.UNSPECIFIED
     """Which kind of channel this is.
 
-    A linked channel of a running workflow exists by construction, so a
-    describe with ``workflow_id`` answers :attr:`ChannelKind.LINKED` with no
+    A linked channel of a running execution exists by construction, so a
+    describe with ``execution`` answers :attr:`ChannelKind.LINKED` with no
     listeners and nothing retained for a name nobody has notified yet.
     """
 
-    linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
+    linked_to: temporalio.common.Execution | None = None
     """The owner of a linked channel and the run that holds it.
 
     ``None`` for an independent channel.
@@ -210,12 +211,26 @@ class ChannelAddress:
     channel: str
     """The channel name."""
 
-    workflow_id: str | None
-    """The workflow the channel is linked to, or ``None`` for an independent one.
+    execution: temporalio.common.Execution | None
+    """The execution the channel is linked to, or ``None`` for an independent one.
 
     Pass both to :py:meth:`temporalio.client.Client.poll_channel` and the
-    other channel calls as ``channel`` and ``workflow_id``.
+    other channel calls as ``channel`` and ``execution``.
     """
+
+    @property
+    def workflow_id(self) -> str | None:
+        """The owning workflow's id, when the owner is a workflow.
+
+        ``None`` for an independent channel and for one a standalone activity
+        owns, which only ``execution`` reaches.
+        """
+        if (
+            self.execution is not None
+            and self.execution.type == temporalio.common.ExecutionType.WORKFLOW
+        ):
+            return self.execution.business_id
+        return None
 
 
 def stream_channel(ref: StreamRef) -> ChannelAddress:
@@ -225,11 +240,12 @@ def stream_channel(ref: StreamRef) -> ChannelAddress:
     derives the same one, so a client polls or registers a callback without
     asking. A stream a workflow owns notifies ``stream/<topic>`` linked to the
     owning workflow. A stream an activity owns notifies
-    ``stream/<activity id>/<topic>``, linked to the workflow that scheduled
-    the activity, or independent for a standalone activity, which has no
-    linked channels of its own. A standalone stream notifies the independent
-    channel ``stream/<stream id>``, whatever the topic, since its topics share
-    one stream on the server.
+    ``stream/<activity id>/<topic>`` linked to the workflow that scheduled
+    the activity, or ``stream/<topic>`` linked to the activity execution
+    itself when the activity is a standalone one. A standalone stream notifies
+    the independent channel ``stream/<stream id>``, whatever the topic, since
+    its topics share one stream on the server. The address names the owner
+    without a run, so it reaches the owner's current run.
 
     Each change arrives as one notification: the stream's change sequence as
     the counter, the head after the change as the position, and ``closed``
@@ -237,11 +253,20 @@ def stream_channel(ref: StreamRef) -> ChannelAddress:
     """
     if ref.kind == "workflow":
         assert ref.workflow_id is not None
-        return ChannelAddress(STREAM_CHANNEL_PREFIX + ref.topic, ref.workflow_id)
+        return ChannelAddress(
+            STREAM_CHANNEL_PREFIX + ref.topic,
+            temporalio.common.Execution.workflow(ref.workflow_id),
+        )
     if ref.kind == "activity":
         assert ref.activity_id is not None
+        if not ref.workflow_id:
+            return ChannelAddress(
+                STREAM_CHANNEL_PREFIX + ref.topic,
+                temporalio.common.Execution.activity(ref.activity_id),
+            )
         return ChannelAddress(
-            f"{STREAM_CHANNEL_PREFIX}{ref.activity_id}/{ref.topic}", ref.workflow_id
+            f"{STREAM_CHANNEL_PREFIX}{ref.activity_id}/{ref.topic}",
+            temporalio.common.Execution.workflow(ref.workflow_id),
         )
     assert ref.stream_id is not None
     return ChannelAddress(STREAM_CHANNEL_PREFIX + ref.stream_id, None)

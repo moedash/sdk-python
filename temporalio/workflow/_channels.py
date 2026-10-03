@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 import temporalio.api.common.v1
 import temporalio.api.notification.v1
+import temporalio.common
 from temporalio.workflow._context import _Runtime
 
 __all__ = [
@@ -60,8 +61,8 @@ class Notification:
     converter :py:func:`temporalio.workflow.payload_converter` returns.
     """
 
-    linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
-    """The workflow a linked channel belongs to, and the run that received this.
+    linked_to: temporalio.common.Execution | None = None
+    """The execution a linked channel belongs to, and the run that received this.
 
     ``None`` for a notification from an independent channel. A workflow that
     holds both kinds of handle on one name gets a notification on the handle
@@ -78,7 +79,11 @@ class Notification:
             position=proto.position,
             counter=proto.counter,
             metadata=dict(proto.metadata.items()),
-            linked_to=proto.linked_to if proto.HasField("linked_to") else None,
+            linked_to=(
+                temporalio.common.Execution.from_proto(proto.linked_to)
+                if proto.HasField("linked_to")
+                else None
+            ),
         )
 
 
@@ -227,9 +232,10 @@ def linked_channel(channel: str) -> ChannelSubscription:
 
     A linked channel lives in this workflow's own state, so the workflow is
     its listener by construction: no command, no event, and no gate needed
-    for a new name. A writer reaches it with the workflow id, as in
-    :py:meth:`temporalio.client.Client.notify_channel` with ``workflow_id``,
-    and a successor run after continue-as-new is reached by the same calls.
+    for a new name. A writer reaches it by naming this workflow as the
+    execution, as in :py:meth:`temporalio.client.Client.notify_channel` with
+    ``workflow_id``, and a successor run after continue-as-new is reached by
+    the same calls.
     A second call for the same name returns the handle already open, and the
     two share its buffer. The name does not collide with an independent
     channel's: a notification carrying :attr:`Notification.linked_to` comes

@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from temporalio import workflow
+from temporalio import activity, workflow
 from temporalio.client import (
     Callback,
     ChannelAddress,
@@ -26,6 +26,7 @@ from temporalio.client import (
     Client,
     stream_channel,
 )
+from temporalio.common import Execution, ExecutionType
 from temporalio.service import RPCError
 from temporalio.streams import StreamRef, topic
 from temporalio.streams.providers.native import NativeStreams
@@ -144,7 +145,8 @@ async def test_a_workflow_stream_notifies_the_channel_linked_to_its_owner(
     )
     try:
         address = stream_channel(StreamRef.for_workflow(handle.id, topic=OUT))
-        assert address == ChannelAddress("stream/out", handle.id)
+        assert address == ChannelAddress("stream/out", Execution.workflow(handle.id))
+        assert address.workflow_id == handle.id
         assert address == stream_channel(
             native.get_stream_handle(handle.id).ref(topic=OUT)
         )
@@ -167,7 +169,7 @@ async def test_a_workflow_stream_notifies_the_channel_linked_to_its_owner(
         run_id = handle.first_execution_run_id
         for notification in polled:
             assert notification.linked_to is not None
-            assert notification.linked_to.workflow_id == handle.id
+            assert notification.linked_to.business_id == handle.id
             assert notification.position.decode().startswith(f"{run_id}:")
         description = await native.describe_channel(
             address.channel, workflow_id=address.workflow_id
@@ -183,3 +185,70 @@ async def test_a_workflow_stream_notifies_the_channel_linked_to_its_owner(
             running.cancel()
         await asyncio.gather(running, return_exceptions=True)
         await provider.close()
+
+
+_released: dict[str, bool] = {}
+"""Activity ids the test has let go, read by the activity in the same process."""
+
+
+@activity.defn
+async def write_then_wait() -> str:
+    """Writes one record to the activity's own stream and lingers until released."""
+    activity_id = activity.info().activity_id
+    producer = activity.stream_handle().producer(topic=OUT)
+    await producer.append({"n": 1})
+    while not _released.get(activity_id):
+        activity.heartbeat()
+        await asyncio.sleep(0.2)
+    return activity_id
+
+
+@pytest.mark.needs_execution_server
+async def test_a_standalone_activity_stream_notifies_the_channel_linked_to_it(
+    client: Client,
+):
+    provider = NativeStreams()
+    native = await _native(client, provider)
+    activity_id = f"act-{uuid.uuid4().hex[:8]}"
+    async with new_worker(native, activities=[write_then_wait]) as worker:
+        handle = await native.start_activity(
+            write_then_wait,
+            id=activity_id,
+            task_queue=worker.task_queue,
+            start_to_close_timeout=timedelta(seconds=60),
+        )
+        try:
+            # A standalone activity is an execution of its own, so its stream
+            # notifies a channel linked to it, under the topic's name alone.
+            address = stream_channel(StreamRef.for_activity(activity_id, topic=OUT))
+            assert address == ChannelAddress(
+                "stream/out", Execution.activity(activity_id)
+            )
+            assert address.workflow_id is None
+
+            async def changes(count: int) -> list[Any]:
+                polled = await native.poll_channel(
+                    address.channel, execution=address.execution, wait=False
+                )
+                assert [n.counter for n in polled] == list(range(1, count + 1))
+                return polled
+
+            [first] = await assert_eventually(
+                lambda: changes(1), timeout=timedelta(seconds=30)
+            )
+            assert first.linked_to is not None
+            assert (first.linked_to.type, first.linked_to.business_id) == (
+                ExecutionType.ACTIVITY,
+                activity_id,
+            )
+            description = await native.describe_channel(
+                address.channel, execution=address.execution
+            )
+            assert description.kind == ChannelKind.LINKED
+            assert description.linked_to is not None
+            assert description.linked_to.business_id == activity_id
+        finally:
+            _released[activity_id] = True
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(handle.result(), 30)
+            await provider.close()

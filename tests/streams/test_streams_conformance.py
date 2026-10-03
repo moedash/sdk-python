@@ -44,7 +44,7 @@ import pytest
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowHandle
-from temporalio.common import RawValue
+from temporalio.common import Execution, ExecutionType, RawValue
 from temporalio.contrib.external_workflow_streams._wake import ChannelSupport
 from temporalio.converter import (
     DataConverter,
@@ -1301,7 +1301,10 @@ async def test_an_outside_producer_wakes_the_reader_through_its_linked_channel(
     assert _subscribed(events) == [], "the owner is the listener by construction"
     notified = _notified(events)
     assert notified, "no Workflow Task was scheduled with a notification"
-    assert {n.linked_to.workflow_id for n in notified} == {handle.id}
+    owners = {Execution.from_proto(n.linked_to) for n in notified}
+    assert {(owner.type, owner.business_id) for owner in owners} == {
+        (ExecutionType.WORKFLOW, handle.id)
+    }
     assert len({n.channel for n in notified}) == 1
 
 

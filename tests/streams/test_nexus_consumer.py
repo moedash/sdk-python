@@ -39,6 +39,7 @@ from temporalio.api.operatorservice.v1 import (
     DeleteNexusEndpointRequest,
 )
 from temporalio.client import Callback, ChannelAddress, Client, stream_channel
+from temporalio.common import Execution
 from temporalio.contrib.external_workflow_streams._wake import (
     channel_for as external_channel_for,
 )
@@ -96,23 +97,23 @@ class _ClientStandIn:
     def __init__(self, store: MemoryStreams) -> None:
         self._store = store
         self.data_converter = temporalio.converter.DataConverter.default
-        self.registered: list[tuple[str, Callback, str | None]] = []
-        self.unregistered: list[tuple[str, str, str | None]] = []
+        self.registered: list[tuple[str, Callback, Execution | None]] = []
+        self.unregistered: list[tuple[str, str, Execution | None]] = []
 
     def get_stream_handle(self, ref: StreamRef) -> Any:
         # The memory store opens a handle without a client.
         return open_ref(self._store, _as_client(None), ref)
 
     async def register_channel_listener(
-        self, channel: str, callback: Callback, *, workflow_id: str | None = None
+        self, channel: str, callback: Callback, *, execution: Execution | None = None
     ) -> str:
-        self.registered.append((channel, callback, workflow_id))
+        self.registered.append((channel, callback, execution))
         return f"listener-{len(self.registered)}"
 
     async def unregister_channel_listener(
-        self, channel: str, listener_id: str, *, workflow_id: str | None = None
+        self, channel: str, listener_id: str, *, execution: Execution | None = None
     ) -> None:
-        self.unregistered.append((channel, listener_id, workflow_id))
+        self.unregistered.append((channel, listener_id, execution))
 
 
 @dataclass
@@ -245,13 +246,15 @@ def test_the_default_rule_is_the_servers_naming_of_a_streams_channel():
         ChannelAddress("stream/s-1", None)
     )
     assert stream_channel(StreamRef.for_workflow("wf", topic="t")) == ChannelAddress(
-        "stream/t", "wf"
+        "stream/t", Execution.workflow("wf")
     )
     assert stream_channel(
         StreamRef.for_activity("act", workflow_id="wf", topic="t")
-    ) == ChannelAddress("stream/act/t", "wf")
+    ) == ChannelAddress("stream/act/t", Execution.workflow("wf"))
+    # A standalone activity is an execution of its own, so its stream's
+    # channel is linked to it.
     assert stream_channel(StreamRef.for_activity("act", topic="t")) == (
-        ChannelAddress("stream/act/t", None)
+        ChannelAddress("stream/t", Execution.activity("act"))
     )
 
 
@@ -292,15 +295,16 @@ async def test_an_owned_stream_registers_on_the_owners_linked_channel(
     result = await operation.start(_start_context(), ref)
     assert isinstance(result, nexusrpc.handler.StartOperationResultAsync)
     state = operation.state(result.token)
+    owner = Execution.workflow("wf-1")
     assert state is not None and (state.channel, state.owner) == (
         "stream/values",
-        "wf-1",
+        owner,
     )
     assert [(channel, owner) for channel, _, owner in client.registered] == [
-        ("stream/values", "wf-1")
+        ("stream/values", owner)
     ]
     await operation.close()
-    assert client.unregistered == [("stream/values", "listener-1", "wf-1")]
+    assert client.unregistered == [("stream/values", "listener-1", owner)]
     assert posted == []
 
 
