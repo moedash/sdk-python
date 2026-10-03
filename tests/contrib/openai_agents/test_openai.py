@@ -1431,8 +1431,16 @@ async def assert_status_retry_behavior(status: int, client: Client, should_retry
                 import httpx
             raise APIStatusError(
                 message="Something went wrong.",
-                response=httpx.Response(
-                    status_code=status, request=httpx.Request("GET", url="")
+                # Under the latest dependency set openai carries its own httpx
+                # as `httpx2`, so the parameter's `Response` is a different
+                # class from the one built here and the two are not assignable.
+                # Only the annotation differs; openai reads the object the same
+                # way either way.
+                response=cast(
+                    Any,
+                    httpx.Response(
+                        status_code=status, request=httpx.Request("GET", url="")
+                    ),
                 ),
                 body=None,
             )
