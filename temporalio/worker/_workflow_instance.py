@@ -336,6 +336,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._extern_functions = det.extern_functions
         self._external_stream_runtime = det.external_stream_runtime
         self._external_streams_configured = det.external_streams_configured
+        # Installed on this object, before the Workflow's constructor runs, so a
+        # ``@workflow.init`` constructor can publish and subscribe. Per-Run state
+        # must share the Run's lifetime, which this object has and a module global
+        # would not.
+        if (
+            self._external_stream_runtime is not None
+            and self._external_streams_configured
+        ):
+            from temporalio.contrib.external_workflow_streams._api import (
+                _install_runtime,
+            )
+
+            _install_runtime(self, self._external_stream_runtime)
         self._pending_replay_finish: Any = None
         """A marker replay whose last segment the activation's own drain serves.
 
@@ -3363,20 +3376,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             workflow_instance = self._defn.cls(*self._workflow_input.args)
         else:
             workflow_instance = self._defn.cls()
-
-        # Hand the workflow object its External Stream handle. It goes on the
-        # object rather than in a module global because per-Run state must share
-        # the Run's lifetime exactly -- a global would outlive an evicted Run and
-        # hand its wait ids to the next one.
-        if (
-            self._external_stream_runtime is not None
-            and self._external_streams_configured
-        ):
-            from temporalio.contrib.external_workflow_streams._api import (
-                _install_runtime,
-            )
-
-            _install_runtime(workflow_instance, self._external_stream_runtime)
 
         if self._defn.versioning_behavior:
             self._versioning_behavior = self._defn.versioning_behavior
