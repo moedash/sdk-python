@@ -67,27 +67,20 @@ def pytest_collection_modifyitems(
             item.add_marker(skip)
 
 
-#: The channel the probe describes. Nobody writes to it.
-_PROBE_CHANNEL = "external-stream/probe"
-
-
 async def server_channel_support(client: Any) -> Any:
-    """Which channel kinds the server serves, asked through the client's own calls.
+    """What the server offers a stream's readers, as the Worker would find it.
 
-    ``None`` when it serves no channels, otherwise :attr:`ChannelKind.LINKED`
-    or :attr:`ChannelKind.INDEPENDENT`. The linked kind shows only on a running
-    workflow, so one is started on a task queue nobody polls and asked about.
+    The linked kind shows only on a running workflow, so one is started on a
+    task queue nobody polls and asked about; the probe is the Worker's own.
     """
-    from temporalio.client import ChannelKind
-    from temporalio.service import RPCError, RPCStatusCode
+    from temporalio.contrib.external_workflow_streams._wake import (
+        ChannelSupport,
+        channel_support,
+        server_has_channels,
+    )
 
-    try:
-        await client.describe_channel(_PROBE_CHANNEL)
-    except RPCError as err:
-        if err.status == RPCStatusCode.UNIMPLEMENTED:
-            return None
-        if err.status != RPCStatusCode.NOT_FOUND:
-            raise
+    if not await server_has_channels(client):
+        return ChannelSupport.NONE
     probe = uuid.uuid4().hex
     handle = await client.start_workflow(
         "ChannelSupportProbe",
@@ -95,20 +88,9 @@ async def server_channel_support(client: Any) -> Any:
         task_queue=f"nobody-polls-{probe}",
     )
     try:
-        description = await client.describe_channel(
-            _PROBE_CHANNEL, workflow_id=handle.id
-        )
-    except RPCError as err:
-        # A server with only independent channels ignores the owner and has
-        # never seen the name.
-        if err.status == RPCStatusCode.NOT_FOUND:
-            return ChannelKind.INDEPENDENT
-        raise
+        return await channel_support(client, handle.id)
     finally:
         await handle.terminate()
-    if description.kind is ChannelKind.LINKED:
-        return ChannelKind.LINKED
-    return ChannelKind.INDEPENDENT
 
 
 @pytest.fixture(autouse=True)

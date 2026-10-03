@@ -3,7 +3,10 @@
 The workflow instance is driven with activations directly, the way Core
 drives it, because the dev server this chain tests against does not accept
 the subscribe command. The live cases at the end need a server that does and
-skip otherwise; the ones on the linked kind need a server with it.
+skip otherwise; the ones on the linked kind need a server with it. The
+external-stream runtime's own subscriptions go through the same instance
+behind a gate, which is driven here too, and are covered beside the stream
+tests as well.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -37,12 +41,15 @@ from temporalio.client import (
 from temporalio.client._client import _channel_execution
 from temporalio.client._impl import _channel_owner
 from temporalio.common import Execution, ExecutionType
+from temporalio.contrib.external_workflow_streams._wake import ChannelAddress
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker._workflow_instance import (
     UnsandboxedWorkflowRunner,
     WorkflowInstance,
     WorkflowInstanceDetails,
+    _WorkflowLogicFlag,
 )
+from temporalio.workflow._context import _Runtime
 from tests.contrib.external_workflow_streams.conftest import server_channel_support
 from tests.helpers import assert_eventually, new_worker
 
@@ -56,6 +63,8 @@ WorkflowActivationCompletion = (
 Notification = temporalio.api.notification.v1.Notification
 ExecutionProto = temporalio.api.common.v1.Execution
 WORKFLOW_TYPE = temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW
+INDEPENDENT = _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS
+LINKED = _WorkflowLogicFlag.LINKED_NOTIFICATION_CHANNELS
 
 
 def _linked_to(notification: workflow.Notification) -> dict[str, Any] | None:
@@ -160,6 +169,21 @@ class BothKinds:
         return seen
 
 
+@workflow.defn
+class ListenOnStream:
+    """Asks the run to listen for a stream the way the stream runtime does."""
+
+    @workflow.run
+    async def run(self, channel: str, owner: str) -> bool:
+        instance: Any = _Runtime.current()
+        return instance.subscribe_stream_channel(
+            ChannelAddress(
+                channel=channel,
+                execution=Execution.workflow(owner) if owner else None,
+            )
+        )
+
+
 async def _drain(handle: workflow.ChannelSubscription) -> dict[str, Any]:
     """What a closed handle still gives: the queue, then the end, then the refusal."""
     drained = [notification.counter async for notification in handle]
@@ -234,10 +258,13 @@ class Resubscribe:
         return {"counter": notification.counter, **(await _drain(first))}
 
 
-def _instance(workflow_class: type) -> WorkflowInstance:
+def _instance(
+    workflow_class: type, flags: Iterable[_WorkflowLogicFlag] = ()
+) -> WorkflowInstance:
     """Build an instance the way the worker does, without a worker.
 
     Needs a running event loop, since the constructor puts the runtime on it.
+    ``flags`` are the lang flags the Worker would default on from its probe.
     """
     defn = workflow._Definition.must_from_class(workflow_class)
     now = datetime.now(timezone.utc)
@@ -280,11 +307,21 @@ def _instance(workflow_class: type) -> WorkflowInstance:
             patch_activation_callback=None,
             last_completion_result=temporalio.api.common.v1.Payloads(),
             last_failure=None,
+            default_workflow_logic_flags=frozenset(flags),
         )
     )
 
 
-def _start(workflow_class: type, *args: Any) -> WorkflowActivation:
+def _start(
+    workflow_class: type,
+    *args: Any,
+    recorded_flags: Iterable[_WorkflowLogicFlag] = (),
+) -> WorkflowActivation:
+    """The run's first activation.
+
+    With ``recorded_flags`` it is a replay, and those are the flags History
+    says the live run used.
+    """
     job = WorkflowActivationJob()
     init = job.initialize_workflow
     init.workflow_type = workflow._Definition.must_from_class(workflow_class).name or ""
@@ -292,7 +329,13 @@ def _start(workflow_class: type, *args: Any) -> WorkflowActivation:
     init.arguments.extend(
         temporalio.converter.PayloadConverter.default.to_payloads(args)
     )
-    return WorkflowActivation(run_id="run", jobs=[job])
+    recorded = [int(flag) for flag in recorded_flags]
+    return WorkflowActivation(
+        run_id="run",
+        jobs=[job],
+        is_replaying=bool(recorded),
+        available_internal_flags=recorded,
+    )
 
 
 def _notified(*notifications: Notification) -> WorkflowActivation:
@@ -456,6 +499,76 @@ async def test_a_linked_notification_nobody_asked_for_is_dropped():
     completion = instance.activate(_notified(_linked("other", 9)))
     assert completion.HasField("successful")
     assert not _completed(completion)
+
+
+def _used_flags(completion: WorkflowActivationCompletion) -> set[int]:
+    assert completion.HasField("successful"), completion.failed.failure.message
+    return set(completion.successful.used_internal_flags)
+
+
+async def test_a_stream_the_run_owns_listens_on_its_linked_channel_without_a_command():
+    """The three-way probe's answer, recorded on the first task as two flags."""
+    instance = _instance(ListenOnStream, flags=[INDEPENDENT, LINKED])
+    completion = instance.activate(_start(ListenOnStream, "external-stream/x", "wf"))
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
+    assert _used_flags(completion) == {int(INDEPENDENT), int(LINKED)}
+
+
+async def test_a_stream_with_another_owner_is_listened_on_by_report_on_a_linked_server():
+    """No command of its own either way: the run's channel report, built from
+    the stream runtime's open readers on every completion, is what Core
+    subscribes from. See ``test_channel_report`` for the report itself."""
+    # Both built before either runs: a completed run leaves no loop to build on.
+    another_owner = _instance(ListenOnStream, flags=[INDEPENDENT, LINKED])
+    no_owner = _instance(ListenOnStream, flags=[INDEPENDENT, LINKED])
+    completion = another_owner.activate(
+        _start(ListenOnStream, "external-stream/x", "other")
+    )
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
+    # A stream nobody owns does the same.
+    completion = no_owner.activate(_start(ListenOnStream, "standalone/x", ""))
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
+
+
+async def test_a_server_with_only_independent_channels_listens_by_report():
+    instance = _instance(ListenOnStream, flags=[INDEPENDENT])
+    completion = instance.activate(_start(ListenOnStream, "external-stream/x", "wf"))
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
+    assert _used_flags(completion) == {int(INDEPENDENT)}
+
+
+async def test_a_server_without_channels_leaves_the_run_to_the_signal():
+    instance = _instance(ListenOnStream)
+    completion = instance.activate(_start(ListenOnStream, "external-stream/x", "wf"))
+    assert _result(completion) is False
+    assert _subscribed(completion) == []
+    assert _used_flags(completion) == set()
+
+
+async def test_a_replay_takes_the_path_the_live_run_recorded():
+    without_channels = _instance(ListenOnStream)
+    with_linked = _instance(ListenOnStream, flags=[INDEPENDENT, LINKED])
+    # Replayed on a Worker that found no channels: the flags come from History.
+    completion = without_channels.activate(
+        _start(
+            ListenOnStream,
+            "external-stream/x",
+            "wf",
+            recorded_flags=[INDEPENDENT, LINKED],
+        )
+    )
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
+    # And a live run on a linked server replays the independent path it took.
+    completion = with_linked.activate(
+        _start(ListenOnStream, "external-stream/x", "wf", recorded_flags=[INDEPENDENT])
+    )
+    assert _result(completion) is True
+    assert _subscribed(completion) == []
 
 
 # --- ending a subscription ----------------------------------------------------
@@ -696,7 +809,9 @@ async def _answer(response: Any) -> Any:
 
 
 async def _require_linked(client: Client) -> None:
-    if await server_channel_support(client) is not ChannelKind.LINKED:
+    from temporalio.contrib.external_workflow_streams._wake import ChannelSupport
+
+    if await server_channel_support(client) is not ChannelSupport.LINKED:
         pytest.skip("the server does not serve channels linked to a workflow")
 
 

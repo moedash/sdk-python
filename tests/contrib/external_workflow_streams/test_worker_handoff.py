@@ -138,7 +138,11 @@ class LeftWithNoOpenTaskWorkflow:
 
 @pytest.fixture
 def backend() -> MemoryStreamBackend:
-    return MemoryStreamBackend()
+    backend = MemoryStreamBackend()
+    # These cases read the reserved Signal's envelope, so the transport is
+    # pinned to it rather than left to step down from a server that has more.
+    backend.wake_transport = "signal"
+    return backend
 
 
 async def history(handle: Any) -> list[Any]:
