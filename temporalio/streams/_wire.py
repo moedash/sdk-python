@@ -118,7 +118,7 @@ class RecordDecoder:
         self._result_type = result_type
         self._previous = after
         self._warn = warn
-        self._attempts = AttemptTracker()
+        self._attempts = AttemptTracker(warn)
 
     def decode(self, cursor: Cursor, wire: WireRecord) -> list[StreamRecord[Any]]:
         """The records to yield for one stored record, in order."""
