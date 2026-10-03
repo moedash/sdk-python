@@ -15,10 +15,21 @@ so nobody mistakes it for evidence:
   handle only decides which run's close ends a read.
 - It learns that a workflow closed by describing it, so a handle opened
   without a client reads until the caller closes it.
+- An activity's own streams are keyed by the activity, not by its run. A
+  standalone activity's read ends when describing it shows a terminal
+  status. A workflow's activity is described through its workflow: the read
+  ends once the activity has been seen pending and is no longer, or the
+  workflow closed, so a read opened after the activity already finished
+  waits for the workflow.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the
   oldest ones, which stands in for a store's retention in tests.
-- It does not host standalone streams; both standalone calls raise
-  :class:`temporalio.streams.StreamUnsupportedError`.
+- A standalone stream lives here with its policy and a sealed flag.
+  ``retention``, ``max_records`` and ``max_bytes`` are applied when a record
+  is appended, so a stream nobody writes to keeps records past their
+  retention. A read on it ends when it is sealed and the tail delivered, and
+  a read, ``latest`` or ``producer`` on a stream id that does not exist
+  raises :class:`temporalio.streams.StreamNotFoundError` at the call rather
+  than waiting for the stream to be created.
 - The outside path encodes and decodes bodies through the client's data
   converter, codec and external storage included, and fingerprints a retry
   over the converted bytes first. The workflow half has no client, so a
@@ -35,7 +46,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
 
@@ -43,13 +56,14 @@ from google.protobuf.message import DecodeError
 
 import temporalio.converter
 from temporalio import workflow
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import ActivityExecutionStatus, Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._body import content_fingerprint, decode_body, encode_body
 from temporalio.streams._errors import (
+    StreamClosedError,
     StreamCursorError,
+    StreamNotFoundError,
     StreamProducerError,
-    StreamUnsupportedError,
 )
 from temporalio.streams._ids import topic_key
 from temporalio.streams._provider import ReadSource, WriteSink
@@ -87,15 +101,45 @@ def _wake(future: asyncio.Future[None]) -> None:
         future.set_result(None)
 
 
+@dataclass(frozen=True)
+class _Policy:
+    """What a standalone stream retains, applied as records are appended."""
+
+    retention: timedelta | None = None
+    max_records: int | None = None
+    max_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.retention is not None and self.retention <= timedelta(0):
+            raise ValueError("retention must be positive")
+        if self.max_records is not None and self.max_records <= 0:
+            raise ValueError("max_records must be positive")
+        if self.max_bytes is not None and self.max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+
+class _Standalone:
+    """One standalone stream: its policy, its seal and its topics."""
+
+    def __init__(self, policy: _Policy) -> None:
+        self.policy = policy
+        self.sealed = False
+        self.topics: dict[str, _Topic] = {}
+
+
 class _Topic:
     """One topic's records, and the waiters parked on its tail."""
 
-    def __init__(self) -> None:
+    def __init__(self, policy: _Policy | None = None, *, sealed: bool = False) -> None:
+        self.policy = policy
+        self.sealed = sealed
         # The retained records, the first of which sits at offset ``base``.
         # Offsets are never reused, so a cursor keeps naming the same record
         # after truncation drops the ones before it.
         self.base = 0
         self.records: list[bytes] = []
+        # When each retained record landed, for a retention policy.
+        self.stamps: list[float] = []
         # Dedupe identity is (producer#attempt, first sequence of the append),
         # the same pair the storage providers use, mapped to where the batch
         # landed and a digest of what it held, so a repeat answers with the
@@ -126,7 +170,10 @@ class _Topic:
         Raises:
             StreamProducerError: ``(writer, sequence)`` is held with different
                 content.
+            StreamClosedError: The stream was sealed.
         """
+        if self.sealed:
+            raise StreamClosedError("the stream is closed and takes no more records")
         key = (writer or "", sequence)
         bodies = [wire.SerializeToString(deterministic=True) for wire in wires]
         if content is None:
@@ -142,13 +189,43 @@ class _Topic:
                     )
                 return first, count
         first = self.head
+        now = time.time()
         self.records.extend(bodies)
+        self.stamps.extend([now] * len(bodies))
         if writer is not None:
             self.seen[key] = (first, len(wires), content)
+        self._apply_policy(now)
+        self._wake_waiters()
+        return first, len(wires)
+
+    def _wake_waiters(self) -> None:
         waiters, self._waiters = self._waiters, []
         for loop, future in waiters:
             loop.call_soon_threadsafe(_wake, future)
-        return first, len(wires)
+
+    def _apply_policy(self, now: float) -> None:
+        policy = self.policy
+        if policy is None:
+            return
+        drop = 0
+        if policy.max_records is not None:
+            drop = max(drop, len(self.records) - policy.max_records)
+        if policy.max_bytes is not None:
+            held = sum(len(record) for record in self.records)
+            while drop < len(self.records) and held > policy.max_bytes:
+                held -= len(self.records[drop])
+                drop += 1
+        if policy.retention is not None:
+            floor = now - policy.retention.total_seconds()
+            while drop < len(self.records) and self.stamps[drop] < floor:
+                drop += 1
+        if drop:
+            self._drop(drop)
+
+    def seal(self) -> None:
+        """Take no more records, and let parked readers see the end."""
+        self.sealed = True
+        self._wake_waiters()
 
     @property
     def head(self) -> int:
@@ -161,9 +238,12 @@ class _Topic:
 
     def truncate(self, keep: int) -> None:
         """Drop all but the newest ``keep`` records."""
-        drop = max(0, len(self.records) - keep)
-        self.base += drop
-        del self.records[:drop]
+        self._drop(max(0, len(self.records) - keep))
+
+    def _drop(self, count: int) -> None:
+        self.base += count
+        del self.records[:count]
+        del self.stamps[:count]
 
     async def wait_past(self, offset: int, timeout: float | None) -> None:
         """Wait until a record exists at ``offset``, or ``timeout`` passes."""
@@ -358,20 +438,31 @@ class MemoryProducer(Generic[T]):
 
 
 class MemoryStreamHandle:
-    """One workflow's stream from outside, with the shared reader rules."""
+    """One owner's stream from outside, with the shared reader rules.
+
+    The owner is ``workflow_id``'s workflow, or with ``activity_id`` an
+    activity: a standalone one without ``workflow_id``, or one that workflow
+    scheduled. With ``stream_id`` the handle is on a standalone stream, which
+    has no owner.
+    """
 
     def __init__(
         self,
         streams: MemoryStreams,
         client: Client | None,
-        workflow_id: str,
+        workflow_id: str | None,
         run_id: str | None,
+        activity_id: str | None = None,
+        stream_id: str | None = None,
     ) -> None:
-        """Address ``workflow_id``'s topics in ``streams``."""
+        """Address the owner's topics in ``streams``."""
         self._streams = streams
         self._client = client
         self._workflow_id = workflow_id
         self._run_id = run_id
+        self._activity_id = activity_id
+        self._stream_id = stream_id
+        self._seen_pending = False
         self._converter = (
             client.data_converter
             if client is not None
@@ -386,14 +477,15 @@ class MemoryStreamHandle:
         last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` from where the read starts until the workflow closes.
+        """Yield records on ``topic`` from where the read starts until the owner closes.
 
         ``END`` and ``last=`` are resolved by this call, against what the
-        topic holds when it is made.
+        topic holds when it is made. On a standalone stream the read ends
+        once the stream is sealed and the tail delivered.
         """
         check_read_start(after, last)
         name, result_type = resolve_topic(topic, result_type)
-        store = self._streams._topic(self._workflow_id, name)
+        store = self._store(name)
         # Parsed here so a foreign cursor fails this call, not the first
         # iteration of the generator.
         start = self._streams._start(store, after, last)
@@ -444,21 +536,50 @@ class MemoryStreamHandle:
                     else self._streams._poll.total_seconds(),
                 )
 
+    def _store(self, topic: str) -> _Topic:
+        if self._stream_id is not None:
+            return self._streams._standalone_topic(self._stream_id, topic)
+        if self._activity_id is not None:
+            return self._streams._activity_topic(
+                self._workflow_id, self._activity_id, topic
+            )
+        assert self._workflow_id is not None
+        return self._streams._topic(self._workflow_id, topic)
+
     async def _closed(self) -> bool:
+        if self._stream_id is not None:
+            return self._streams._standalone_stream(self._stream_id).sealed
         if self._client is None:
             return False
-        handle = self._client.get_workflow_handle(
-            self._workflow_id, run_id=self._run_id
-        )
         try:
-            description = await handle.describe()
+            if self._activity_id is not None and self._workflow_id is None:
+                activity = await self._client.get_activity_handle(
+                    self._activity_id, run_id=self._run_id
+                ).describe()
+                return activity.status != ActivityExecutionStatus.RUNNING
+            assert self._workflow_id is not None
+            description = await self._client.get_workflow_handle(
+                self._workflow_id, run_id=self._run_id
+            ).describe()
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
-                # A producer may write before the workflow exists; there is
+                # A producer may write before the owner exists; there is
                 # nothing to follow yet, so keep waiting.
                 return False
             raise
         status = description.status
+        if self._activity_id is not None:
+            pending = any(
+                info.activity_id == self._activity_id
+                for info in description.raw_description.pending_activities
+            )
+            if pending:
+                self._seen_pending = True
+            elif self._seen_pending:
+                return True
+            # The activity's streams are not the workflow's chain: a run that
+            # continued as new took its activities with it.
+            return status is not None and status != WorkflowExecutionStatus.RUNNING
         if status is None or status == WorkflowExecutionStatus.RUNNING:
             return False
         # Following the chain, a run that continued as new is not the end:
@@ -470,7 +591,7 @@ class MemoryStreamHandle:
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest record on ``topic``, for following from now."""
         name, _ = resolve_topic(topic)
-        head = self._streams._topic(self._workflow_id, name).head
+        head = self._store(name).head
         return mint_cursor(_PROVIDER, str(head - 1)) if head else BEGINNING
 
     def producer(
@@ -482,22 +603,34 @@ class MemoryStreamHandle:
     ) -> MemoryProducer[Any]:
         """A producer on ``topic``; inside an activity its identity is the activity's."""
         name, _ = resolve_topic(topic)
-        store = self._streams._topic(self._workflow_id, name)
+        store = self._store(name)
         producer_id, attempt = producer_identity(producer_id, attempt)
         return MemoryProducer(store, self._converter, name, producer_id, attempt)
 
     def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
-        """A ref to ``topic`` of this workflow's stream, pinned as this handle is."""
+        """A ref to ``topic`` of this owner's stream, pinned as this handle is."""
+        if self._stream_id is not None:
+            return StreamRef.for_standalone(self._stream_id, topic=topic)
+        if self._activity_id is not None:
+            return StreamRef.for_activity(
+                self._activity_id,
+                workflow_id=self._workflow_id,
+                run_id=self._run_id,
+                topic=topic,
+            )
+        assert self._workflow_id is not None
         return StreamRef.for_workflow(
             self._workflow_id, run_id=self._run_id, topic=topic
         )
 
     async def close(self) -> None:
-        """Refuse: a workflow's stream ends with the workflow, not by a caller."""
-        raise ValueError(
-            "only a standalone stream can be closed; this handle is on a workflow's "
-            "stream, which ends when the workflow does"
-        )
+        """Seal a standalone stream. An owned stream ends with its owner, not by a caller."""
+        if self._stream_id is None:
+            raise ValueError(
+                "only a standalone stream can be closed; this handle is on an owned "
+                "stream, which ends when its workflow or activity does"
+            )
+        self._streams._seal(self._stream_id)
 
 
 class MemoryStreams(ProviderPlugin):
@@ -519,10 +652,14 @@ class MemoryStreams(ProviderPlugin):
         """
         self._poll = poll_interval
         self._topics: dict[str, _Topic] = {}
+        self._activity_topics: dict[tuple[str | None, str, str], _Topic] = {}
+        self._standalone: dict[str, _Standalone] = {}
 
     def reset(self) -> None:
-        """Drop every topic. For tests."""
+        """Drop every topic and every standalone stream. For tests."""
         self._topics.clear()
+        self._activity_topics.clear()
+        self._standalone.clear()
 
     def truncate(self, workflow_id: str, topic: str, *, keep: int) -> None:
         """Drop all but the newest ``keep`` records of a topic. For tests.
@@ -548,6 +685,21 @@ class MemoryStreams(ProviderPlugin):
         """
         return MemoryStreamHandle(self, client, workflow_id, run_id)
 
+    def get_activity_stream_handle(
+        self,
+        client: Client | None,
+        activity_id: str,
+        *,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+    ) -> MemoryStreamHandle:
+        """A handle on the topics ``activity_id`` owns, apart from any workflow's.
+
+        As on :meth:`get_stream_handle`, ``client`` may be ``None``, and then
+        a read waits until the caller closes it.
+        """
+        return MemoryStreamHandle(self, client, workflow_id, run_id, activity_id)
+
     async def create_standalone_stream(
         self,
         client: Client | None,
@@ -557,26 +709,38 @@ class MemoryStreams(ProviderPlugin):
         max_records: int | None = None,
         max_bytes: int | None = None,
     ) -> MemoryStreamHandle:
-        """Refuse: this provider keeps no stream without an owner.
+        """Create the standalone stream ``stream_id``, or find it with the same policy.
+
+        The policy is applied on every append to any of the stream's topics.
+        ``client`` may be ``None``, as on the other handles.
 
         Raises:
-            StreamUnsupportedError: Always.
+            ValueError: ``stream_id`` is empty, a bound is not positive, or
+                the stream exists with a different policy.
         """
-        raise StreamUnsupportedError(
-            "the memory provider does not host standalone streams"
-        )
+        if not stream_id:
+            raise ValueError("stream_id must not be empty")
+        policy = _Policy(retention, max_records, max_bytes)
+        existing = self._standalone.get(stream_id)
+        if existing is None:
+            self._standalone[stream_id] = _Standalone(policy)
+        elif existing.policy != policy:
+            raise ValueError(
+                f"standalone stream {stream_id!r} exists with policy "
+                f"{existing.policy}, not {policy}"
+            )
+        return MemoryStreamHandle(self, client, None, None, stream_id=stream_id)
 
     def get_standalone_stream_handle(
         self, client: Client | None, stream_id: str
     ) -> MemoryStreamHandle:
-        """Refuse: this provider keeps no stream without an owner.
+        """A handle on the standalone stream ``stream_id``.
 
-        Raises:
-            StreamUnsupportedError: Always.
+        Nothing is checked here: a ``read``, ``latest`` or ``producer`` on a
+        stream that was never created raises
+        :class:`temporalio.streams.StreamNotFoundError` at the call.
         """
-        raise StreamUnsupportedError(
-            "the memory provider does not host standalone streams"
-        )
+        return MemoryStreamHandle(self, client, None, None, stream_id=stream_id)
 
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection."""
@@ -589,6 +753,43 @@ class MemoryStreams(ProviderPlugin):
         if found is None:
             found = self._topics[key] = _Topic()
         return found
+
+    def _activity_topic(
+        self, workflow_id: str | None, activity_id: str, topic: str
+    ) -> _Topic:
+        # Kept apart from the workflow topics, so no workflow id can name an
+        # activity's stream.
+        if not topic:
+            raise ValueError("topic must not be empty")
+        key = (workflow_id, activity_id, topic)
+        found = self._activity_topics.get(key)
+        if found is None:
+            found = self._activity_topics[key] = _Topic()
+        return found
+
+    def _standalone_stream(self, stream_id: str) -> _Standalone:
+        stream = self._standalone.get(stream_id)
+        if stream is None:
+            raise StreamNotFoundError(
+                f"standalone stream {stream_id!r} does not exist; create it with "
+                "client.create_stream"
+            )
+        return stream
+
+    def _standalone_topic(self, stream_id: str, topic: str) -> _Topic:
+        stream = self._standalone_stream(stream_id)
+        if not topic:
+            raise ValueError("topic must not be empty")
+        found = stream.topics.get(topic)
+        if found is None:
+            found = stream.topics[topic] = _Topic(stream.policy, sealed=stream.sealed)
+        return found
+
+    def _seal(self, stream_id: str) -> None:
+        stream = self._standalone_stream(stream_id)
+        stream.sealed = True
+        for store in stream.topics.values():
+            store.seal()
 
     def _start(self, store: _Topic, after: Cursor, last: int | None) -> int:
         """The offset a read starts at, resolved against what ``store`` holds now."""
