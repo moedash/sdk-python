@@ -3,7 +3,8 @@
 The conformance suite covers the outside surface when ``STREAMS_LIVE=redis``.
 This module runs the interface loop inside a workflow over the staged commit,
 lets a read end with the workflow, shares a topic between an outside producer
-and the workflow, queries a completed run, which replays it, and seeds a
+and the workflow, queries a completed run, which replays it, trims by
+retention and shows what a replay and a read past the trim do, and seeds a
 workflow reader from a cursor. All need a dev server (``TEMPORAL_ADDRESS``)
 and a Redis (``TEMPORAL_TEST_REDIS_URL`` or ``AI198_REDIS_URL``). The worker
 keeps a warm cache because the transport holds the task open between records.
@@ -15,6 +16,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -38,6 +40,7 @@ from temporalio.streams import (
     END,
     Cursor,
     RecordKind,
+    StreamCursorError,
     StreamProducerError,
 )
 from temporalio.streams._wire import to_wire
@@ -250,6 +253,130 @@ async def _log_length(
         return await store.xlen(by_input)
     finally:
         await store.aclose()
+
+
+async def _trim_everything(
+    streams: RedisStreams, client: Client, workflow_id: str, topic: str
+) -> None:
+    """What retention elsewhere, or an operator, does to a topic's output key."""
+    import redis.asyncio
+
+    backend = streams._require_backend()
+    chain = await _chain(client, workflow_id)
+    store = redis.asyncio.from_url(redis_url())
+    try:
+        await store.xtrim(
+            backend.stream_key(
+                chain.stream_key(topic, direction=StreamDirection.OUTPUT)
+            ),
+            maxlen=0,
+            approximate=False,
+        )
+    finally:
+        await store.aclose()
+
+
+async def test_a_replay_past_the_retention_window_fails_loudly(live_client: Client):
+    # Six entries per key: the loop's four input records stay while it runs,
+    # and six more appends afterwards push them out.
+    streams = RedisStreams(
+        url=redis_url(), key_prefix=f"streams-redis-{uuid.uuid4().hex}", max_len=6
+    )
+    workflow_id = f"streams-redis-retention-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[ContractLoop],
+            plugins=[streams],
+            max_cached_workflows=100,
+        ):
+            handle = await live_client.start_workflow(
+                ContractLoop.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+            )
+            stream = streams.get_stream_handle(live_client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+            await producer.append({"n": 1}, {"n": 2}, {"n": 3})
+            await producer.finish()
+            assert len(await handle.result()) == 4
+            before = await take(stream.read(topic=INPUTS), 4, 60)
+        history = await handle.fetch_history()
+        assert await _log_length(streams, live_client, workflow_id, INPUTS.name) == 4
+
+        # Inside the window the recorded ranges read back and the replay passes.
+        await Replayer(workflows=[ContractLoop], plugins=[streams]).replay_workflow(
+            history
+        )
+
+        late = stream.producer(topic=INPUTS, producer_id="late", attempt=1)
+        cursors = [await late.append({"n": n}) for n in range(10, 16)]
+        assert await _log_length(streams, live_client, workflow_id, INPUTS.name) == 6
+
+        # The recorded input ranges are gone, and the replay says so rather
+        # than delivering fewer records.
+        with pytest.raises(Exception) as failure:
+            await Replayer(workflows=[ContractLoop], plugins=[streams]).replay_workflow(
+                history
+            )
+        # The task fails under the transport's integrity row: its type, the
+        # external storage cause, and a message that names the window.
+        message = str(failure.value)
+        assert "StreamIntegrityError" in message and "ExternalStorageFailure" in message
+        assert "past the redis provider's retention (" in message
+        assert "max_len=6)" in message
+
+        # An outside cursor below the trim is refused, not resumed from the
+        # first retained record.
+        with pytest.raises(StreamCursorError, match="retention has trimmed"):
+            await take(stream.read(topic=INPUTS, after=before[0].cursor), 1, 10)
+
+        # Inside the window a read still works and lands where append said.
+        records = [r async for r in stream.read(topic=INPUTS, after=cursors[1])]
+        assert [r.value for r in records] == [{"n": n} for n in range(12, 16)]
+        assert [r.cursor for r in records] == cursors[2:]
+    finally:
+        await streams.close()
+
+
+async def test_retention_by_age_trims_older_entries(live_client: Client):
+    streams = RedisStreams(
+        url=redis_url(),
+        key_prefix=f"streams-redis-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+    )
+    workflow_id = f"streams-redis-age-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[StreamHost],
+            plugins=[streams],
+        ):
+            handle = await live_client.start_workflow(
+                StreamHost.run, id=workflow_id, task_queue=f"tq-{workflow_id}"
+            )
+            stream = streams.get_stream_handle(live_client, workflow_id)
+            producer = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
+            first = await producer.append({"n": 1})
+            await producer.append({"n": 2})
+            await asyncio.sleep(0.6)
+            # The append that crosses the window is what trims the two before it.
+            third = await producer.append({"n": 3})
+            assert (
+                await _log_length(streams, live_client, workflow_id, INPUTS.name) == 1
+            )
+            assert await stream.latest(topic=INPUTS) == third
+            with pytest.raises(StreamCursorError, match="retention has trimmed"):
+                await take(stream.read(topic=INPUTS, after=first), 1, 10)
+
+            # A fully trimmed topic answers the way an empty one does.
+            await _trim_everything(streams, live_client, workflow_id, INPUTS.name)
+            assert await stream.latest(topic=INPUTS) == BEGINNING
+            await handle.signal(StreamHost.release)
+            await handle.result()
+            assert [r async for r in stream.read(topic=INPUTS)] == []
+    finally:
+        await streams.close()
 
 
 @workflow.defn
@@ -560,6 +687,45 @@ async def test_a_committed_stage_is_released_in_the_order_it_was_staged(
             {"n": 10},
             {"n": 11},
         ]
+
+
+async def test_a_batch_the_window_cannot_hold_is_refused_at_the_stage(
+    live_client: Client,
+):
+    # max_len at or below a task's batch trims the stage before its commit, and
+    # the commit then fails on a missing record for as long as the task retries.
+    streams = RedisStreams(
+        url=redis_url(), key_prefix=f"streams-redis-{uuid.uuid4().hex}", max_len=2
+    )
+    workflow_id = f"streams-redis-window-{uuid.uuid4().hex}"
+    try:
+        async with Worker(
+            live_client,
+            task_queue=f"tq-{workflow_id}",
+            workflows=[StreamHost],
+            plugins=[streams],
+        ) as worker:
+            handle = await live_client.start_workflow(
+                StreamHost.run, id=workflow_id, task_queue=worker.task_queue
+            )
+            run_id = handle.first_execution_run_id or ""
+            with pytest.raises(ValueError, match="has to exceed the largest batch"):
+                await _stage_one(
+                    streams,
+                    live_client,
+                    workflow_id,
+                    run_id,
+                    INPUTS.name,
+                    [{"n": 1}, {"n": 2}],
+                )
+            # One below the window still stages.
+            await _stage_one(
+                streams, live_client, workflow_id, run_id, INPUTS.name, [{"n": 1}]
+            )
+            await handle.signal(StreamHost.release)
+            await handle.result()
+    finally:
+        await streams.close()
 
 
 async def test_a_producer_record_lands_once_however_often_it_is_sent(
