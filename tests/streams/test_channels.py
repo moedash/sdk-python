@@ -740,7 +740,6 @@ async def test_the_client_addresses_a_linked_channel_by_execution(
 
 
 @pytest.mark.needs_channel_server
-@pytest.mark.needs_channel_core
 async def test_a_workflow_receives_a_client_notification(client: Client):
     channel = f"orders-{uuid.uuid4()}"
     worker = new_worker(client, ReceiveOne)
@@ -884,7 +883,6 @@ async def _stop(handle: Any, worker: Any, running: asyncio.Task[None]) -> None:
 
 
 @pytest.mark.needs_linked_server
-@pytest.mark.needs_linked_core
 async def test_a_workflow_receives_a_notification_on_its_linked_channel(
     client: Client,
 ):
@@ -1030,7 +1028,6 @@ async def test_a_linked_channel_names_its_owner_as_an_execution(client: Client):
 
 
 @pytest.mark.needs_linked_server
-@pytest.mark.needs_linked_core
 async def test_a_linked_channel_is_polled_by_workflow_id(client: Client):
     channel = f"orders-{uuid.uuid4()}"
     worker = new_worker(client, CountLinked)
@@ -1110,7 +1107,6 @@ async def _one_event(handle: Any, event_type: Any) -> int:
 
 
 @pytest.mark.needs_describe_server
-@pytest.mark.needs_channel_core
 async def test_a_description_lists_an_independent_subscription(client: Client):
     channel = f"orders-{uuid.uuid4()}"
     worker = new_worker(client, CountToTwo)
@@ -1222,7 +1218,6 @@ async def test_a_description_lists_a_linked_channel_once_it_holds_state(
 
 
 @pytest.mark.needs_unsubscribe_server
-@pytest.mark.needs_unsubscribe_core
 async def test_a_workflow_unsubscribes_and_a_later_notify_wakes_nothing(
     client: Client,
 ):

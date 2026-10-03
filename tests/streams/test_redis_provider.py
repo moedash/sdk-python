@@ -23,12 +23,7 @@ from temporalio.contrib.external_workflow_streams._record import Offset
 from temporalio.contrib.external_workflow_streams._redis import RedisStreamBackend
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.streams import (
-    BEGINNING,
-    Cursor,
-    StreamCursorError,
-    StreamError,
-)
+from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
 from temporalio.streams.providers import redis as redis_provider
 from temporalio.streams.providers.redis import (
     DEFAULT_RETENTION,

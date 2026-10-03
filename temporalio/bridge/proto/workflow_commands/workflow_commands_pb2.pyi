@@ -111,10 +111,10 @@ class WorkflowCommand(google.protobuf.message.Message):
     EXTERNAL_STREAM_FINALIZED_FIELD_NUMBER: builtins.int
     WORKFLOW_OUTPUT_STREAM_COMMIT_FIELD_NUMBER: builtins.int
     WORKFLOW_OUTPUT_STREAM_BUFFERED_FIELD_NUMBER: builtins.int
-    SUBSCRIBE_STREAM_FIELD_NUMBER: builtins.int
-    APPEND_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     SUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
     UNSUBSCRIBE_NOTIFICATION_CHANNEL_FIELD_NUMBER: builtins.int
+    SUBSCRIBE_STREAM_FIELD_NUMBER: builtins.int
+    APPEND_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     WORKFLOW_STREAM_CHANNELS_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
@@ -205,20 +205,18 @@ class WorkflowCommand(google.protobuf.message.Message):
         self,
     ) -> global___WorkflowOutputStreamBuffered: ...
     @property
-    def subscribe_stream(self) -> global___SubscribeStream:
-        """The two numbers below are shared with the native stream tree, which
+    def subscribe_notification_channel(self) -> global___SubscribeNotificationChannel:
+        """The numbers below are shared with the native stream tree, which
         leaves 23 to 28 to the commands above, and must not be reused.
         """
-    @property
-    def append_stream_records(self) -> global___AppendStreamRecords: ...
-    @property
-    def subscribe_notification_channel(
-        self,
-    ) -> global___SubscribeNotificationChannel: ...
     @property
     def unsubscribe_notification_channel(
         self,
     ) -> global___UnsubscribeNotificationChannel: ...
+    @property
+    def subscribe_stream(self) -> global___SubscribeStream: ...
+    @property
+    def append_stream_records(self) -> global___AppendStreamRecords: ...
     @property
     def workflow_stream_channels(self) -> global___WorkflowStreamChannels: ...
     def __init__(
@@ -266,12 +264,12 @@ class WorkflowCommand(google.protobuf.message.Message):
         workflow_output_stream_commit: global___WorkflowOutputStreamCommit | None = ...,
         workflow_output_stream_buffered: global___WorkflowOutputStreamBuffered
         | None = ...,
-        subscribe_stream: global___SubscribeStream | None = ...,
-        append_stream_records: global___AppendStreamRecords | None = ...,
         subscribe_notification_channel: global___SubscribeNotificationChannel
         | None = ...,
         unsubscribe_notification_channel: global___UnsubscribeNotificationChannel
         | None = ...,
+        subscribe_stream: global___SubscribeStream | None = ...,
+        append_stream_records: global___AppendStreamRecords | None = ...,
         workflow_stream_channels: global___WorkflowStreamChannels | None = ...,
     ) -> None: ...
     def HasField(
@@ -458,10 +456,10 @@ class WorkflowCommand(google.protobuf.message.Message):
             "external_stream_finalized",
             "workflow_output_stream_commit",
             "workflow_output_stream_buffered",
-            "subscribe_stream",
-            "append_stream_records",
             "subscribe_notification_channel",
             "unsubscribe_notification_channel",
+            "subscribe_stream",
+            "append_stream_records",
             "workflow_stream_channels",
         ]
         | None

@@ -59,6 +59,8 @@ class WorkflowActivation(google.protobuf.message.Message):
     * Patches are expected to apply to the entire activation
     * Signal and update handlers should be invoked before workflow routines are iterated. That is to
      say before the users' main workflow function and anything spawned by it is allowed to continue.
+    * Channel notifications are input from outside the workflow, like signals, so they go with
+     them and ahead of the stream ranges among the other jobs.
     * Local activities resolutions go after other normal jobs because while *not* replaying, they
      will always take longer than anything else that produces an immediate job (which is
      effectively instant). When *replaying* we need to scan ahead for LA markers so that we can
@@ -253,8 +255,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     PREPARE_EXTERNAL_STREAM_PARK_FIELD_NUMBER: builtins.int
     REPLAY_EXTERNAL_STREAMS_FIELD_NUMBER: builtins.int
     FINALIZE_EXTERNAL_STREAMS_FIELD_NUMBER: builtins.int
-    DELIVER_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     NOTIFICATIONS_RECEIVED_FIELD_NUMBER: builtins.int
+    DELIVER_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -329,15 +331,15 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         Runs no user code.
         """
     @property
-    def deliver_stream_records(self) -> global___DeliverStreamRecords:
-        """The number below is shared with the native stream tree, which leaves 17
+    def notifications_received(self) -> global___NotificationsReceived:
+        """The numbers below are shared with the native stream tree, which leaves 17
         to 20 to the jobs above, and must not be reused.
 
-        A range of a stream the workflow subscribed to.
+        Notifications from the channels the workflow subscribed to.
         """
     @property
-    def notifications_received(self) -> global___NotificationsReceived:
-        """Notifications from the channels the workflow subscribed to."""
+    def deliver_stream_records(self) -> global___DeliverStreamRecords:
+        """A range of a stream the workflow subscribed to."""
     @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
@@ -370,8 +372,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         prepare_external_stream_park: global___PrepareExternalStreamPark | None = ...,
         replay_external_streams: global___ReplayExternalStreams | None = ...,
         finalize_external_streams: global___FinalizeExternalStreams | None = ...,
-        deliver_stream_records: global___DeliverStreamRecords | None = ...,
         notifications_received: global___NotificationsReceived | None = ...,
+        deliver_stream_records: global___DeliverStreamRecords | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -499,8 +501,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "prepare_external_stream_park",
             "replay_external_streams",
             "finalize_external_streams",
-            "deliver_stream_records",
             "notifications_received",
+            "deliver_stream_records",
             "remove_from_cache",
         ]
         | None

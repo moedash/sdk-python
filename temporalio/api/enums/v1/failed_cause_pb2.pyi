@@ -188,31 +188,31 @@ class _WorkflowTaskFailedCauseEnumTypeWrapper(
         _WorkflowTaskFailedCause.ValueType
     )  # 40
     """A workflow task failed because the request exceeded a size limit."""
-    WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
-        _WorkflowTaskFailedCause.ValueType
-    )  # 41
-    """A workflow task completed with an invalid AppendStreamRecords command."""
-    WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
-        _WorkflowTaskFailedCause.ValueType
-    )  # 42
-    """A workflow task completed with an invalid SubscribeStream command."""
-    WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
-        _WorkflowTaskFailedCause.ValueType
-    )  # 43
-    """A workflow task could not be started because a stream range it consumed and recorded in
-    History can no longer be served, for example after truncation or because it exceeds the
-    replay bound. Check the workflow task failure message for more information.
-    """
     WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
         _WorkflowTaskFailedCause.ValueType
-    )  # 44
+    )  # 41
     """A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
     subscription or listener limit.
     """
     WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
         _WorkflowTaskFailedCause.ValueType
-    )  # 45
+    )  # 42
     """An UnsubscribeNotificationChannel command named an empty or too-long channel."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 43
+    """A workflow task completed with an invalid AppendStreamRecords command."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 44
+    """A workflow task completed with an invalid SubscribeStream command."""
+    WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 45
+    """A workflow task could not be started because a stream range it consumed and recorded in
+    History can no longer be served, for example after truncation or because it exceeds the
+    replay bound. Check the workflow task failure message for more information.
+    """
 
 class WorkflowTaskFailedCause(
     _WorkflowTaskFailedCause, metaclass=_WorkflowTaskFailedCauseEnumTypeWrapper
@@ -371,31 +371,31 @@ WORKFLOW_TASK_FAILED_CAUSE_WORKFLOW_PAUSE_REQUESTED_BEFORE_TASK_STARTED: (
 """A workflow task is failed because the workflow is paused before the task is started."""
 WORKFLOW_TASK_FAILED_CAUSE_REQUEST_TOO_LARGE: WorkflowTaskFailedCause.ValueType  # 40
 """A workflow task failed because the request exceeded a size limit."""
-WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
-    WorkflowTaskFailedCause.ValueType
-)  # 41
-"""A workflow task completed with an invalid AppendStreamRecords command."""
-WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
-    WorkflowTaskFailedCause.ValueType
-)  # 42
-"""A workflow task completed with an invalid SubscribeStream command."""
-WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
-    WorkflowTaskFailedCause.ValueType
-)  # 43
-"""A workflow task could not be started because a stream range it consumed and recorded in
-History can no longer be served, for example after truncation or because it exceeds the
-replay bound. Check the workflow task failure message for more information.
-"""
 WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
     WorkflowTaskFailedCause.ValueType
-)  # 44
+)  # 41
 """A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
 subscription or listener limit.
 """
 WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
     WorkflowTaskFailedCause.ValueType
-)  # 45
+)  # 42
 """An UnsubscribeNotificationChannel command named an empty or too-long channel."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 43
+"""A workflow task completed with an invalid AppendStreamRecords command."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 44
+"""A workflow task completed with an invalid SubscribeStream command."""
+WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
+    WorkflowTaskFailedCause.ValueType
+)  # 45
+"""A workflow task could not be started because a stream range it consumed and recorded in
+History can no longer be served, for example after truncation or because it exceeds the
+replay bound. Check the workflow task failure message for more information.
+"""
 global___WorkflowTaskFailedCause = WorkflowTaskFailedCause
 
 class _ActivityTaskFailedCause:

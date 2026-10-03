@@ -3646,50 +3646,6 @@ global___ActivityPropertiesModifiedExternallyEventAttributes = (
     ActivityPropertiesModifiedExternallyEventAttributes
 )
 
-class WorkflowStreamSubscribedEventAttributes(google.protobuf.message.Message):
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
-    STREAM_ID_FIELD_NUMBER: builtins.int
-    START_OFFSET_FIELD_NUMBER: builtins.int
-    workflow_task_completed_event_id: builtins.int
-    """The WorkflowTaskCompleted event of the task whose command created this
-    subscription.
-    """
-    stream_id: builtins.str
-    """The stream the Workflow subscribed to, as the command addressed it:
-    either the name of a stream this Workflow owns or the id of one in
-    another execution.
-    """
-    start_offset: builtins.int
-    """The offset the subscription actually starts from. Resolved by the server
-    when the subscription is registered and recorded here, so replay reads
-    the resolved value rather than resolving it again against a stream that
-    has since moved.
-    """
-    def __init__(
-        self,
-        *,
-        workflow_task_completed_event_id: builtins.int = ...,
-        stream_id: builtins.str = ...,
-        start_offset: builtins.int = ...,
-    ) -> None: ...
-    def ClearField(
-        self,
-        field_name: typing_extensions.Literal[
-            "start_offset",
-            b"start_offset",
-            "stream_id",
-            b"stream_id",
-            "workflow_task_completed_event_id",
-            b"workflow_task_completed_event_id",
-        ],
-    ) -> None: ...
-
-global___WorkflowStreamSubscribedEventAttributes = (
-    WorkflowStreamSubscribedEventAttributes
-)
-
 class WorkflowNotificationChannelSubscribedEventAttributes(
     google.protobuf.message.Message
 ):
@@ -3763,6 +3719,50 @@ class WorkflowNotificationChannelUnsubscribedEventAttributes(
 
 global___WorkflowNotificationChannelUnsubscribedEventAttributes = (
     WorkflowNotificationChannelUnsubscribedEventAttributes
+)
+
+class WorkflowStreamSubscribedEventAttributes(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    START_OFFSET_FIELD_NUMBER: builtins.int
+    workflow_task_completed_event_id: builtins.int
+    """The WorkflowTaskCompleted event of the task whose command created this
+    subscription.
+    """
+    stream_id: builtins.str
+    """The stream the Workflow subscribed to, as the command addressed it:
+    either the name of a stream this Workflow owns or the id of one in
+    another execution.
+    """
+    start_offset: builtins.int
+    """The offset the subscription actually starts from. Resolved by the server
+    when the subscription is registered and recorded here, so replay reads
+    the resolved value rather than resolving it again against a stream that
+    has since moved.
+    """
+    def __init__(
+        self,
+        *,
+        workflow_task_completed_event_id: builtins.int = ...,
+        stream_id: builtins.str = ...,
+        start_offset: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "start_offset",
+            b"start_offset",
+            "stream_id",
+            b"stream_id",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___WorkflowStreamSubscribedEventAttributes = (
+    WorkflowStreamSubscribedEventAttributes
 )
 
 class WorkflowStreamRecordsAppendedEventAttributes(google.protobuf.message.Message):
@@ -4675,12 +4675,12 @@ class HistoryEvent(google.protobuf.message.Message):
     WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED_EVENT_ATTRIBUTES_FIELD_NUMBER: (
         builtins.int
     )
-    WORKFLOW_STREAM_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
-    WORKFLOW_STREAM_RECORDS_APPENDED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
     WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
     WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: (
         builtins.int
     )
+    WORKFLOW_STREAM_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    WORKFLOW_STREAM_RECORDS_APPENDED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
     event_id: builtins.int
     """Monotonically increasing event number, starts at 1."""
     @property
@@ -4967,14 +4967,6 @@ class HistoryEvent(google.protobuf.message.Message):
         self,
     ) -> global___WorkflowExecutionTimeSkippingTransitionedEventAttributes: ...
     @property
-    def workflow_stream_subscribed_event_attributes(
-        self,
-    ) -> global___WorkflowStreamSubscribedEventAttributes: ...
-    @property
-    def workflow_stream_records_appended_event_attributes(
-        self,
-    ) -> global___WorkflowStreamRecordsAppendedEventAttributes: ...
-    @property
     def workflow_notification_channel_subscribed_event_attributes(
         self,
     ) -> global___WorkflowNotificationChannelSubscribedEventAttributes: ...
@@ -4982,6 +4974,14 @@ class HistoryEvent(google.protobuf.message.Message):
     def workflow_notification_channel_unsubscribed_event_attributes(
         self,
     ) -> global___WorkflowNotificationChannelUnsubscribedEventAttributes: ...
+    @property
+    def workflow_stream_subscribed_event_attributes(
+        self,
+    ) -> global___WorkflowStreamSubscribedEventAttributes: ...
+    @property
+    def workflow_stream_records_appended_event_attributes(
+        self,
+    ) -> global___WorkflowStreamRecordsAppendedEventAttributes: ...
     def __init__(
         self,
         *,
@@ -5119,13 +5119,13 @@ class HistoryEvent(google.protobuf.message.Message):
         | None = ...,
         workflow_execution_time_skipping_transitioned_event_attributes: global___WorkflowExecutionTimeSkippingTransitionedEventAttributes
         | None = ...,
-        workflow_stream_subscribed_event_attributes: global___WorkflowStreamSubscribedEventAttributes
-        | None = ...,
-        workflow_stream_records_appended_event_attributes: global___WorkflowStreamRecordsAppendedEventAttributes
-        | None = ...,
         workflow_notification_channel_subscribed_event_attributes: global___WorkflowNotificationChannelSubscribedEventAttributes
         | None = ...,
         workflow_notification_channel_unsubscribed_event_attributes: global___WorkflowNotificationChannelUnsubscribedEventAttributes
+        | None = ...,
+        workflow_stream_subscribed_event_attributes: global___WorkflowStreamSubscribedEventAttributes
+        | None = ...,
+        workflow_stream_records_appended_event_attributes: global___WorkflowStreamRecordsAppendedEventAttributes
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -5488,10 +5488,10 @@ class HistoryEvent(google.protobuf.message.Message):
             "workflow_execution_paused_event_attributes",
             "workflow_execution_unpaused_event_attributes",
             "workflow_execution_time_skipping_transitioned_event_attributes",
-            "workflow_stream_subscribed_event_attributes",
-            "workflow_stream_records_appended_event_attributes",
             "workflow_notification_channel_subscribed_event_attributes",
             "workflow_notification_channel_unsubscribed_event_attributes",
+            "workflow_stream_subscribed_event_attributes",
+            "workflow_stream_records_appended_event_attributes",
         ]
         | None
     ): ...

@@ -2,22 +2,6 @@ import pytest
 
 _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
 
-# The Core the bridge pins decides whether a workflow's subscribe command
-# reaches the server. The protos-only pin refuses it; the delivery pin that
-# the native layers move to handles it.
-PINNED_CORE_HANDLES_CHANNEL_COMMAND = True
-
-# A channel linked to a workflow needs no command, but a notification reaches
-# workflow code as the `NotificationsReceived` job Core builds from the
-# scheduled event, and the protos-only pin ignores that job. So a linked case
-# in which the workflow receives waits for the delivery pin as well; one that
-# only talks to the server from the client runs on every layer.
-PINNED_CORE_HANDLES_LINKED_CHANNEL = True
-
-# The unsubscribe is a command like the subscribe, refused by the protos-only
-# pin and matched against its event by the delivery pin.
-PINNED_CORE_HANDLES_UNSUBSCRIBE = True
-
 # A native stream lives on the server, and only the native layers carry a
 # provider that opens one; the providers here hold streams in memory or in a
 # workflow's History. A case that produces to a native stream waits for the
@@ -71,19 +55,9 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "needs_channel_core: the case needs the pinned Core to handle the "
-        "subscribe-notification-channel command",
-    )
-    config.addinivalue_line(
-        "markers",
         "needs_linked_server: the case needs a server that serves channels linked "
         "to a workflow, named with -E host:port; the case skips itself on one "
         "with only independent channels",
-    )
-    config.addinivalue_line(
-        "markers",
-        "needs_linked_core: the case needs the pinned Core to hand a linked "
-        "channel's notifications to workflow code",
     )
     config.addinivalue_line(
         "markers",
@@ -94,11 +68,6 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "needs_unsubscribe_server: the case needs a server that accepts the "
         "unsubscribe-notification-channel command, named with -E host:port",
-    )
-    config.addinivalue_line(
-        "markers",
-        "needs_unsubscribe_core: the case needs the pinned Core to handle the "
-        "unsubscribe-notification-channel command",
     )
     config.addinivalue_line(
         "markers",
@@ -135,16 +104,6 @@ def pytest_collection_modifyitems(
                 ),
             )
         )
-    if not PINNED_CORE_HANDLES_CHANNEL_COMMAND:
-        skips.append(
-            (
-                "needs_channel_core",
-                pytest.mark.skip(
-                    reason="the pinned Core refuses the subscribe command; py-05 "
-                    "pins one that handles it"
-                ),
-            )
-        )
     if config.getoption("--workflow-environment") in _ENVIRONMENTS_WITHOUT_CHANNELS:
         skips.append(
             (
@@ -152,16 +111,6 @@ def pytest_collection_modifyitems(
                 pytest.mark.skip(
                     reason="needs a server with channels linked to a workflow; "
                     "name one with -E"
-                ),
-            )
-        )
-    if not PINNED_CORE_HANDLES_LINKED_CHANNEL:
-        skips.append(
-            (
-                "needs_linked_core",
-                pytest.mark.skip(
-                    reason="the pinned Core ignores the notifications job; py-05 "
-                    "pins one that delivers it"
                 ),
             )
         )
@@ -180,16 +129,6 @@ def pytest_collection_modifyitems(
                     ),
                 )
             )
-    if not PINNED_CORE_HANDLES_UNSUBSCRIBE:
-        skips.append(
-            (
-                "needs_unsubscribe_core",
-                pytest.mark.skip(
-                    reason="the pinned Core refuses the unsubscribe command; py-05 "
-                    "pins one that handles it"
-                ),
-            )
-        )
     if not PINNED_LAYER_HOSTS_NATIVE_STREAMS:
         skips.append(
             (
