@@ -16,6 +16,7 @@ from collections.abc import Sequence
 import pytest
 
 from temporalio.api.common.v1 import Payload
+from temporalio.client import ClientConfig
 from temporalio.converter import (
     DataConverter,
     ExternalStorage,
@@ -41,6 +42,8 @@ from temporalio.streams import (
     encode_body,
 )
 from temporalio.streams._policy import AttemptTracker
+from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.worker import ReplayerConfig, WorkerConfig
 
 
 def test_record_roundtrips_through_the_wire():
@@ -112,6 +115,27 @@ def test_cursors_name_their_provider():
     assert _wire.cursor_position(Cursor("memory:42"), provider="memory") == "42"
     with pytest.raises(StreamCursorError):
         _wire.cursor_position(Cursor("redis:1700000000000-0"), provider="memory")
+
+
+def test_registering_a_provider_twice_is_refused():
+    # There is one slot on each of the three, and a user who passes a provider
+    # by hand and a provider plugin, or two provider plugins, meant both.
+    first, second = MemoryStreams(), MemoryStreams()
+    with pytest.raises(ValueError, match="already registered"):
+        second.configure_client(ClientConfig(stream_provider=first))  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="already registered"):
+        second.configure_worker(WorkerConfig(stream_provider=first))  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="already registered"):
+        second.configure_replayer(ReplayerConfig(stream_provider=first))  # type: ignore[typeddict-item]
+
+
+def test_registering_the_same_provider_twice_is_fine():
+    # A worker built from a client that already carries the plugin configures
+    # it again with the same object, which is not a conflict.
+    provider = MemoryStreams()
+    config = provider.configure_client(ClientConfig(stream_provider=provider))  # type: ignore[typeddict-item]
+    assert config.get("stream_provider") is provider
+    assert provider.configure_client(ClientConfig()).get("stream_provider") is provider  # type: ignore[typeddict-item]
 
 
 class _HoldEverything(StorageDriver):
