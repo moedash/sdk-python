@@ -28,13 +28,13 @@ this structure exists to remove.
 Three cursors, and conflating them is how a speculative read becomes a durable
 claim:
 
-===================  ===================  ===========  ==================
-Cursor               Advances on          Owner        Survives eviction
-===================  ===================  ===========  ==================
-``committed``        marker commit only   the marker   yes
-``delivery``         hand-off to workflow the instance no
-``prefetch``         buffering            the manager  no
-===================  ===================  ===========  ==================
+=============  ====================  ============  =================
+Cursor         Advances on           Owner         Survives eviction
+=============  ====================  ============  =================
+``committed``  marker commit only    the marker    yes
+``delivery``   hand-off to workflow  the instance  no
+``prefetch``   buffering             the manager   no
+=============  ====================  ============  =================
 
 ``prefetch`` is speculative: reading a record is not consuming it, and consuming
 it is not committing it. The manager may only move it *backwards* to
@@ -227,7 +227,7 @@ spending Core's deadlock timeout. Well inside that timeout, because waiting this
 out is only the first thing the activation then has to do.
 
 Holds an activation takes *itself* are deliberately not bounded. Those are the
-same backend exposure the park handshake already has -- `install_park_intent`
+same backend exposure the park handshake already has -- ``install_park_intent``
 can hang exactly as a removal can -- so a bound there would move the wait rather
 than remove it.
 
@@ -316,7 +316,7 @@ class Subscription:
     _has_room: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _watcher: asyncio.Task[None] | None = field(default=None, repr=False)
     _cancelled: bool = field(default=False, repr=False)
-    #: Bumped whenever every speculative read is discarded. A `read_after`
+    #: Bumped whenever every speculative read is discarded. A ``read_after``
     #: already in flight started from the cursor being discarded, so its records
     #: are speculative too; the watcher compares this across the await and drops
     #: them rather than appending them on top of the reset -- which would put the
@@ -747,7 +747,7 @@ class StreamSubscriptionManager:
         self._pending_wake_runs: dict[str, _PendingWake] = {}
         self._activation_sequences: dict[str, int] = {}
         #: Wakes the shutdown sweep could not get acknowledged. Reported through
-        #: `external_stream_shutdown_wake_failed`; kept here so a test can tell
+        #: ``external_stream_shutdown_wake_failed``; kept here so a test can tell
         #: "no wake was needed" from "a wake was needed and lost".
         self.shutdown_wake_failures = 0
         self._buffer_size = buffer_size
@@ -780,7 +780,7 @@ class StreamSubscriptionManager:
         #: Strong references to the in-flight registration-time reconciliations.
         self._reconciliations: set[asyncio.Task[None]] = set()
         #: Removals this manager decided on and did not get confirmed, per Run
-        #: and then per `(stream key, wait_id)`. The durable half of the intent
+        #: and then per ``(stream key, wait_id)``. The durable half of the intent
         #: invariant: a removal that failed is a claim about the *backend*, and
         #: recording it anywhere that a close or an eviction takes away is the
         #: same as not recording it at all. Drained under `_park_lock`.
@@ -858,7 +858,7 @@ class StreamSubscriptionManager:
     def _start_watcher(self, subscription: Subscription) -> None:
         """Starts a watcher, and reconciles the park state it inherited.
 
-        Both on the manager's own loop, because both are `create_task` calls and
+        Both on the manager's own loop, because both are ``create_task`` calls and
         `register` runs on the Workflow executor thread.
         """
         if subscription._cancelled or subscription._watcher is not None:
@@ -886,10 +886,10 @@ class StreamSubscriptionManager:
         Registration is where a Worker learns such an intent exists, and it is
         also the moment its status is unambiguous. A subscription is registered
         by user Workflow code running, and no user code runs inside a park
-        (`wft-lifecycle.md`), so an intent found here belongs to a park that is
+        (``wft-lifecycle.md``), so an intent found here belongs to a park that is
         over: the Core that confirmed it has either moved on or gone with the
         Worker that held it. What leaving it costs is the invariant's whole
-        point -- `current_park_generation` keeps answering a generation Core has
+        point -- ``current_park_generation`` keeps answering a generation Core has
         discarded, every producer wake names that generation and Core discards
         it as stale, and because a parked wake's request ID ignores sender
         identity the second such wake is byte-identical to the first and the
@@ -1379,7 +1379,7 @@ class StreamSubscriptionManager:
 
         A stale intent does not only leak. While it was installed every wake for
         this stream named the generation behind it -- the producer reads
-        `current_park_generation`, and so does the Worker's own sender -- and
+        ``current_park_generation``, and so does the Worker's own sender -- and
         Core discards a non-zero generation that is not the park it is holding.
         A record that arrived in that window was therefore announced to nobody,
         and *removing the intent does not announce it*: `_report_ready` counted
@@ -1390,12 +1390,12 @@ class StreamSubscriptionManager:
         create a Workflow Task.
 
         Both outcomes that clear the key announce, and that is why the provider
-        contract does not answer with a Boolean. `ABSENT` is not "someone else's
+        contract does not answer with a Boolean. ``ABSENT`` is not "someone else's
         intent is in the way", it is "the intent this entry named is gone" --
         which is what a retry sees after the reply to a delete that in fact
         succeeded was lost, and what one cleanup owner sees after another
         finished the job. Reading that as a mismatch would leave the record the
-        intent silenced silent for good. `MISMATCH` announces nothing: an intent
+        intent silenced silent for good. ``MISMATCH`` announces nothing: an intent
         is still installed there, the suppression it causes has not ended, and it
         belongs to a park this entry knows nothing about.
 
@@ -1428,7 +1428,7 @@ class StreamSubscriptionManager:
         """Serializes one Run's park-intent work on the manager's loop.
 
         The install/recheck handshake, the resolve, and the reconciliation above
-        all read-then-write the same `(stream key, wait_id)` objects, and the
+        all read-then-write the same ``(stream key, wait_id)`` objects, and the
         reconciliation is scheduled from another thread, so their interleaving
         is not otherwise constrained. Without this, a reconciliation that
         overlapped a confirming park could remove the intent that park had just
@@ -1493,7 +1493,7 @@ class StreamSubscriptionManager:
         Workflow Task whose data had already arrived.
 
         Called from the Workflow thread at activation completion, so the work is
-        hopped onto the manager's loop: `create_task` is not thread-safe, and a
+        hopped onto the manager's loop: ``create_task`` is not thread-safe, and a
         task created from the Workflow executor thread is silently never
         scheduled -- indistinguishable from a stream that never delivers.
         """
@@ -1803,7 +1803,7 @@ class StreamSubscriptionManager:
         leave this method. The watcher calls it in its loop, so an exception
         escaping ends that watcher for good -- the subscription stays registered,
         its buffer keeps its records, and nothing ever announces them again.
-        `_rearm_ready` also launches it with `create_task`, where an exception
+        `_rearm_ready` also launches it with ``create_task``, where an exception
         becomes a task result nobody retrieves and the failure is not even
         logged.
         """
@@ -1917,7 +1917,7 @@ class StreamSubscriptionManager:
         Returns the result the retries ended on, so the caller can act on it. A
         Boolean would answer only "was it announced", and the four
         non-``Accepted`` answers are not interchangeable: they differ in what
-        happens to the watcher, and `RunNotFound` in particular requires the
+        happens to the watcher, and ``RunNotFound`` in particular requires the
         watcher to be torn down. Discarding them left that teardown unreachable
         from here.
 
@@ -1927,7 +1927,7 @@ class StreamSubscriptionManager:
         Workflow consuming happily, and a wake owed at the end of that costs one
         empty Workflow Task rather than a silent stall.
 
-        `RunNotFound` ends the retries rather than using them up. It is the one
+        ``RunNotFound`` ends the retries rather than using them up. It is the one
         answer that cannot change back: the Run is gone from this Worker, so a
         further report can only be answered the same way, and each attempt costs a
         delay before the wake this record still needs.
@@ -1967,7 +1967,7 @@ class StreamSubscriptionManager:
         is waiting on and aborts a legitimate park, which then runs again on the
         next idle timeout and aborts again; and an intent installed for a wait
         outside the set is an intent with no park behind it, which is exactly
-        what `backend-contract.md` forbids leaving in a backend.
+        what ``backend-contract.md`` forbids leaving in a backend.
 
         The order is what closes the append/park race: a producer appends its
         record *before* it observes the park generation, so an append is either
@@ -2328,7 +2328,7 @@ class StreamSubscriptionManager:
         behind for good.
 
         And it is not confined to the closed wait. A stale intent keeps
-        `parked_wait_ids` non-empty, which suppresses the unparked-wake fallback
+        ``parked_wait_ids`` non-empty, which suppresses the unparked-wake fallback
         for the **whole stream**: with no live wait parked, the producer sends
         only the dead generation, Core discards it as stale, and dedup silences
         every later publish -- so live waits across the Continue-As-New chain
@@ -2684,7 +2684,7 @@ class StreamSubscriptionManager:
         Counting the failure is deliberately **not** done here for the
         cancellation case. The grace period expiring cancels this coroutine
         wherever it is, `_send_owed_wake` re-raises `CancelledError` by design,
-        and no `except` here could both record the failure and leave the
+        and no ``except`` here could both record the failure and leave the
         cancellation intact for the subscriptions after this one -- which are not
         reached either. The subscription stays in the unaccounted set instead and
         :meth:`_account_unswept` counts it, which covers being cancelled and
