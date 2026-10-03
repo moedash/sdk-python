@@ -47,6 +47,7 @@ import temporalio.activity
 import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.api.sdk.v1
+import temporalio.api.stream.v1
 import temporalio.bridge.proto.activity_result
 import temporalio.bridge.proto.child_workflow
 import temporalio.bridge.proto.common
@@ -58,7 +59,9 @@ import temporalio.common
 import temporalio.converter
 import temporalio.exceptions
 import temporalio.nexus.system
+import temporalio.streams
 import temporalio.workflow
+import temporalio.workflow._streams
 from temporalio.converter import StorageDriverStoreContext, StorageDriverWorkflowInfo
 from temporalio.converter._payload_converter import (
     _TemporalTransferTypePayloadConverter,
@@ -93,6 +96,13 @@ from ._interceptor import (
 )
 
 logger = logging.getLogger(__name__)
+
+QUERY_HANDLER_NOT_FOUND = "expected but not found"
+"""The phrase a query for an unregistered handler comes back with.
+
+A caller that has to recognise the condition has only the failure message to
+go on, so it matches this constant rather than a copy of the sentence.
+"""
 
 # Set to true to log all cases where we're ignoring things during delete
 LOG_IGNORE_DURING_DELETE = False
@@ -184,6 +194,7 @@ class WorkflowInstanceDetails:
     default_workflow_logic_flags: frozenset[_WorkflowLogicFlag] = field(
         default_factory=lambda: _DEFAULT_ENABLED_WORKFLOW_LOGIC_FLAGS
     )
+    stream_provider: temporalio.streams.StreamProvider | None = None
 
 
 class WorkflowInstance(ABC):
@@ -274,6 +285,168 @@ _Context: TypeAlias = dict[str, Any]
 _ExceptionHandler: TypeAlias = Callable[[asyncio.AbstractEventLoop, _Context], Any]
 
 
+# Match the server's per-batch limits. A record over its limit is refused where
+# it is published, because a rejected command would be reissued on every
+# replay; a task's records are split into commands that fit the batch limits.
+#
+# Copied rather than learned: the activation does not carry them and the
+# server does not report them, so this is a second copy of a number somebody
+# else owns. If the server lowers one, or makes it per namespace, the split
+# here stops fitting and the command is rejected on every replay, which is
+# the failure the split exists to avoid. Carrying them on the activation is
+# what would fix that, and it needs a Core and server change.
+_STREAM_CONTINUITY_REMEDY = (
+    "This fails the Workflow Task and will keep failing it, because the range "
+    "is recorded as consumed and will not be sent again. Reset the workflow to "
+    "before the subscription to start its stream reading over, or terminate it "
+    "if its output is no longer wanted."
+)
+
+_MAX_STREAM_RECORDS_PER_BATCH = 1000
+_MAX_STREAM_RECORD_BYTES = 1 << 20
+_MAX_STREAM_BATCH_BYTES = 2 << 20
+
+
+def _stream_batches(
+    records: Sequence[temporalio.api.stream.v1.StreamRecord],
+) -> Iterator[list[temporalio.api.stream.v1.StreamRecord]]:
+    """Split one task's records for a stream into batches the server accepts."""
+    batch: list[temporalio.api.stream.v1.StreamRecord] = []
+    size = 0
+    for record in records:
+        record_size = record.ByteSize()
+        if batch and (
+            len(batch) >= _MAX_STREAM_RECORDS_PER_BATCH
+            or size + record_size > _MAX_STREAM_BATCH_BYTES
+        ):
+            yield batch
+            batch, size = [], 0
+        batch.append(record)
+        size += record_size
+    if batch:
+        yield batch
+
+
+def _is_completion_command(
+    command: temporalio.bridge.proto.workflow_commands.WorkflowCommand,
+) -> bool:
+    return (
+        command.HasField("complete_workflow_execution")
+        or command.HasField("continue_as_new_workflow_execution")
+        or command.HasField("fail_workflow_execution")
+        or command.HasField("cancel_workflow_execution")
+    )
+
+
+class _StreamBuffer:
+    """Holds the stream ranges delivered to a workflow so far.
+
+    Delivery is driven by the server, not by whether workflow code happens to be
+    reading. A range arrives once, is recorded in History as consumed, and is
+    never sent again, so anything not yet read has to be kept here rather than
+    dropped.
+    """
+
+    def __init__(self, stream_id: str = "") -> None:
+        self._stream_id = stream_id
+        self._records: list[temporalio.workflow._DeliveredStreamRecord] = []
+        self._waiters: list[asyncio.Future] = []
+        # Where the next range has to start. Unknown until the first one
+        # arrives, because a subscription may start wherever the stream is and
+        # the server is the one that resolves that.
+        self._next_offset: int | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Whether workflow code has said it wants no more of this stream."""
+        return self._closed
+
+    def close(self) -> None:
+        """Stop keeping what arrives, and let go of what is held. Idempotent.
+
+        There is no unsubscribe command, so the server keeps delivering for
+        the life of the run. Holding those records would grow the instance
+        without bound for a reader nobody will read again. Dropping them is
+        replay-safe because the close happens at the same point of the same
+        workflow code every time, so the same ranges are dropped; continuity
+        is still tracked, so a range that repeats or skips is still caught.
+        """
+        self._closed = True
+        self._records = []
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def extend(
+        self,
+        records: Sequence[temporalio.api.stream.v1.StreamRecord],
+        from_offset: int = 0,
+        to_offset: int | None = None,
+    ) -> None:
+        if to_offset is None:
+            to_offset = from_offset + len(records)
+        # A range is recorded as consumed once and never resent, so one that
+        # repeats, skips or mis-sizes would hand the workflow duplicate or
+        # shifted records with nothing to say so. Failing the task is what
+        # makes the fault visible.
+        if to_offset - from_offset != len(records):
+            raise RuntimeError(
+                f"stream {self._stream_id!r} delivered {len(records)} records "
+                f"for offsets [{from_offset}, {to_offset}). {_STREAM_CONTINUITY_REMEDY}"
+            )
+        if self._next_offset is not None and from_offset != self._next_offset:
+            raise RuntimeError(
+                f"stream {self._stream_id!r} delivered offsets [{from_offset}, "
+                f"{to_offset}) but the last range ended at {self._next_offset}. "
+                f"{_STREAM_CONTINUITY_REMEDY}"
+            )
+        self._next_offset = to_offset
+        # An empty range still counts as a delivery, but there is nothing to
+        # hand a reader, so only a non-empty one wakes anyone. A closed buffer
+        # counts the range and keeps nothing: continuity is still checked
+        # above, and nobody is left to read what it held.
+        if not records or self._closed:
+            return
+        # Offsets are dense inside a delivered range and the range arrives in
+        # order, so counting from its start is the position rather than an
+        # estimate of it. The per-record field is not on the activation, and a
+        # reader that has to resume elsewhere needs a position it can name.
+        for index, record in enumerate(records):
+            # Copied so the buffer outlives the activation that carried it.
+            kept = temporalio.api.stream.v1.StreamRecord()
+            kept.CopyFrom(record)
+            self._records.append(
+                temporalio.workflow._DeliveredStreamRecord(
+                    record=kept, offset=from_offset + index
+                )
+            )
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def take(self) -> list[temporalio.workflow._DeliveredStreamRecord]:
+        taken, self._records = self._records, []
+        return taken
+
+    def put_back(
+        self, records: Sequence[temporalio.workflow._DeliveredStreamRecord]
+    ) -> None:
+        """Return an unread tail to the front of the buffer."""
+        self._records[:0] = records
+
+    def wait_future(self) -> asyncio.Future:
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self._waiters.append(fut)
+        return fut
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+
 class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     WorkflowInstance, temporalio.workflow._Runtime, asyncio.AbstractEventLoop
 ):
@@ -303,6 +476,18 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             det.worker_level_failure_exception_types
         )
         self._patch_activation_callback = det.patch_activation_callback
+        self._stream_provider = det.stream_provider
+        self._streams: temporalio.workflow._streams._WorkflowStreams | None = None
+        # Keyed by channel name; one subscription per channel per run
+        self._channel_subscriptions: dict[
+            str, temporalio.workflow.ChannelSubscription
+        ] = {}
+        # The channels linked to this workflow, keyed by name as well. No
+        # command: the owner is the listener by construction, so the map only
+        # routes a notification carrying ``linked_to`` to its handle.
+        self._linked_channel_subscriptions: dict[
+            str, temporalio.workflow.ChannelSubscription
+        ] = {}
         self._default_workflow_logic_flags = det.default_workflow_logic_flags
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
@@ -401,6 +586,16 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             str, list[temporalio.bridge.proto.workflow_activation.SignalWorkflow]
         ] = {}
 
+        # Stream ranges delivered to this workflow, keyed by stream id. Ranges
+        # arrive whether or not anything is reading yet, because the server has
+        # already recorded them as consumed and will not send them again.
+        self._stream_buffers: dict[str, _StreamBuffer] = {}
+        # Records this task's publishes append, by stream, until the task
+        # completes and they become commands.
+        self._stream_appends: dict[
+            str, list[temporalio.api.stream.v1.StreamRecord]
+        ] = {}
+
         # When we evict, we have to mark the workflow as deleting so we don't
         # add any commands and we swallow exceptions on tear down
         self._deleting = False
@@ -461,6 +656,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             temporalio.bridge.proto.workflow_completion.WorkflowActivationCompletion()
         )
         self._current_completion.successful.SetInParent()
+        # A failed task's publishes never became commands, so nothing carries
+        # over into this one.
+        self._stream_appends = {}
 
         self._current_activation_error: Exception | None = None
         self._deployment_version_for_current_task = (
@@ -552,6 +750,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     )
                 activation_err = None
 
+        if activation_err is None and not self._deleting:
+            self._flush_stream_appends()
+
         # Apply versioning behavior if one was established
         if self._versioning_behavior:
             self._current_completion.successful.versioning_behavior = (
@@ -616,6 +817,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     ) -> None:
         if job.HasField("cancel_workflow"):
             self._apply_cancel_workflow(job.cancel_workflow)
+        elif job.HasField("deliver_stream_records"):
+            self._apply_deliver_stream_records(job.deliver_stream_records)
         elif job.HasField("do_update"):
             self._apply_do_update(job.do_update)
         elif job.HasField("fire_timer"):
@@ -624,6 +827,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._apply_query_workflow(job.query_workflow)
         elif job.HasField("notify_has_patch"):
             self._apply_notify_has_patch(job.notify_has_patch)
+        elif job.HasField("notifications_received"):
+            self._apply_notifications_received(job.notifications_received)
         elif job.HasField("remove_from_cache"):
             self._apply_remove_from_cache(job.remove_from_cache)
         elif job.HasField("resolve_activity"):
@@ -819,7 +1024,8 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                     if not defn:
                         known_queries = sorted([k for k in self._queries.keys() if k])
                         raise RuntimeError(
-                            f"Query handler for '{job.query_type}' expected but not found, "
+                            f"Query handler for '{job.query_type}' "
+                            f"{QUERY_HANDLER_NOT_FOUND}, "
                             f"known queries: [{' '.join(known_queries)}]"
                         )
 
@@ -864,6 +1070,28 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
         # Schedule it
         self.create_task(run_query(), name=f"query: {job.query_type}")
+
+    def _apply_notifications_received(
+        self, job: temporalio.bridge.proto.workflow_activation.NotificationsReceived
+    ) -> None:
+        for proto in job.notifications:
+            # A name may be open as both kinds; the kind the server stamped
+            # on the notification picks the handle.
+            if proto.HasField("linked_to"):
+                subscription = self._linked_channel_subscriptions.get(proto.channel)
+            else:
+                subscription = self._channel_subscriptions.get(proto.channel)
+            if subscription is None:
+                # The server fans out to whatever listened at the time, so a
+                # channel this run never asked for is not the workflow's
+                # concern.
+                logger.debug(
+                    "Dropping a notification on channel %r, which this run does "
+                    "not listen on",
+                    proto.channel,
+                )
+                continue
+            subscription._deliver(temporalio.workflow.Notification._from_proto(proto))
 
     def _apply_notify_has_patch(
         self, job: temporalio.bridge.proto.workflow_activation.NotifyHasPatch
@@ -1144,6 +1372,19 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         else:
             fut.set_result(None)
 
+    def _apply_deliver_stream_records(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.DeliverStreamRecords,
+    ) -> None:
+        buffer = self._stream_buffers.get(job.stream_id)
+        if buffer is None:
+            # Nothing subscribed. The range is already recorded as consumed and
+            # will not be sent again, so buffering it is the only way a
+            # subscription made later in the same task still sees it.
+            buffer = _StreamBuffer(job.stream_id)
+            self._stream_buffers[job.stream_id] = buffer
+        buffer.extend(job.records, job.from_offset, job.to_offset)
+
     def _apply_signal_workflow(
         self, job: temporalio.bridge.proto.workflow_activation.SignalWorkflow
     ) -> None:
@@ -1310,6 +1551,85 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
     def get_info(self) -> temporalio.workflow.Info:
         return self._info
 
+    def workflow_subscribe_stream(
+        self,
+        stream_name_or_id: str,
+        start: temporalio.api.stream.v1.StreamStartPosition,
+    ) -> None:
+        # Reissued on every replay, so the buffer has to exist before the first
+        # range arrives and the command has to be harmless the second time. A
+        # repeat subscription leaves the server-side cursor where it is.
+        self._stream_buffers.setdefault(
+            stream_name_or_id, _StreamBuffer(stream_name_or_id)
+        )
+        command = self._add_command()
+        command.subscribe_stream.stream_name_or_id = stream_name_or_id
+        command.subscribe_stream.start_position.CopyFrom(start)
+
+    def workflow_append_stream_records(
+        self,
+        stream_name: str,
+        records: Sequence[temporalio.api.stream.v1.StreamRecord],
+    ) -> None:
+        self._assert_not_read_only("append stream records")
+        if not records:
+            raise ValueError("append_stream_records needs at least one record")
+        kept: list[temporalio.api.stream.v1.StreamRecord] = []
+        for record in records:
+            if record.ByteSize() > _MAX_STREAM_RECORD_BYTES:
+                raise ValueError(
+                    f"a stream record is limited to {_MAX_STREAM_RECORD_BYTES} "
+                    f"bytes, got {record.ByteSize()}"
+                )
+            copy = temporalio.api.stream.v1.StreamRecord()
+            copy.CopyFrom(record)
+            # The workflow is the producer here, whatever the caller set.
+            copy.producer_id = ""
+            kept.append(copy)
+        # Held until the task completes, so a task's publishes on one stream
+        # become one command and one History event however many there were.
+        self._stream_appends.setdefault(stream_name, []).extend(kept)
+
+    def _flush_stream_appends(self) -> None:
+        appends, self._stream_appends = self._stream_appends, {}
+        if not appends:
+            return
+        commands = self._current_completion.successful.commands
+        # Ahead of any command that ends the run, because the server accepts
+        # nothing after one of those.
+        insert_at = len(commands)
+        for index, command in enumerate(commands):
+            if _is_completion_command(command):
+                insert_at = index
+                break
+        for stream_name, records in appends.items():
+            for batch in _stream_batches(records):
+                command = temporalio.bridge.proto.workflow_commands.WorkflowCommand()
+                command.append_stream_records.stream_name = stream_name
+                command.append_stream_records.records.extend(batch)
+                commands.insert(insert_at, command)
+                insert_at += 1
+
+    def workflow_close_stream_records(self, stream_id: str) -> None:
+        self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id)).close()
+
+    async def workflow_read_stream_records(
+        self, stream_id: str, max_records: int
+    ) -> list[temporalio.workflow._DeliveredStreamRecord]:
+        # Ranges arrive on Workflow Tasks, and a query activation carries none,
+        # so without this the read waits on a future nothing can resolve and the
+        # query times out with nothing to say why.
+        self._assert_not_read_only("read stream")
+        buffer = self._stream_buffers.setdefault(stream_id, _StreamBuffer(stream_id))
+        while not len(buffer) and not buffer.closed:
+            await buffer.wait_future()
+        taken = buffer.take()
+        if max_records and len(taken) > max_records:
+            # Put the tail back rather than dropping it: nothing will resend it.
+            buffer.put_back(taken[max_records:])
+            taken = taken[:max_records]
+        return taken
+
     def workflow_get_current_history_length(self) -> int:
         return self._current_history_length
 
@@ -1357,6 +1677,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
     def workflow_is_continue_as_new_suggested(self) -> bool:
         return self._continue_as_new_suggested
+
+    def workflow_is_evicting(self) -> bool:
+        return self._deleting
 
     def workflow_is_target_worker_deployment_version_changed(self) -> bool:
         return self._target_worker_deployment_version_changed
@@ -1809,6 +2132,49 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 event_groups=event_groups,
             )
         )
+
+    def workflow_streams(self) -> temporalio.workflow._streams._WorkflowStreams:
+        if self._streams is None:
+            if self._stream_provider is None:
+                raise RuntimeError(
+                    "no stream provider is configured on this worker; pass one with "
+                    "Worker(plugins=[provider]) or stream_provider="
+                )
+            # The workflow half is made per instance, so whatever it keeps
+            # dies with the instance the way handlers do.
+            self._streams = temporalio.workflow._streams._WorkflowStreams(
+                self._stream_provider.workflow_provider()
+            )
+        return self._streams
+
+    def workflow_subscribe_channel(
+        self, channel: str
+    ) -> temporalio.workflow.ChannelSubscription:
+        existing = self._channel_subscriptions.get(channel)
+        if existing is not None:
+            return existing
+        command = self._add_command()
+        command.subscribe_notification_channel.channel = channel
+        subscription = temporalio.workflow.ChannelSubscription(channel)
+        self._channel_subscriptions[channel] = subscription
+        return subscription
+
+    def workflow_unsubscribe_channel(self, channel: str) -> None:
+        command = self._add_command()
+        command.unsubscribe_notification_channel.channel = channel
+        # Out of the map before the next activation: the server may still hand
+        # this run a notification it folded onto a task ahead of the command.
+        self._channel_subscriptions.pop(channel, None)
+
+    def workflow_linked_channel(
+        self, channel: str
+    ) -> temporalio.workflow.ChannelSubscription:
+        existing = self._linked_channel_subscriptions.get(channel)
+        if existing is not None:
+            return existing
+        subscription = temporalio.workflow.ChannelSubscription(channel, linked=True)
+        self._linked_channel_subscriptions[channel] = subscription
+        return subscription
 
     def workflow_time_ns(self) -> int:
         return self._time_ns

@@ -37,6 +37,82 @@ to include examples, links to docs, or any other relevant information.
   worker-side factories registered with `StrandsPlugin(sandboxes=...)`.
 
 - Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
+- **Experimental**: notification channels. Requires a server that serves notification channels.
+  - `Client.notify_channel`, `poll_channel`, `describe_channel`, `register_channel_listener` and
+    `unregister_channel_listener` reach a named channel on the server. The channel is either
+    independent or linked to an execution, which `execution=` (`temporalio.common.Execution`) or
+    the `workflow_id=` shorthand names.
+  - A workflow subscribes with `workflow.subscribe_channel(name)`, reads a channel linked to it with
+    `workflow.linked_channel(name)` and ends a subscription with `unsubscribe()`. Notifications
+    arrive with the workflow's tasks. `WorkflowExecutionDescription.channel_subscriptions` lists
+    the channels a run listens on.
+- **Experimental**: `temporalio.streams` defines one stream interface a workflow
+  can read, decide on, and write. A provider is registered once as a plugin,
+  `Client.connect(plugins=[provider])`, and workers built from that client
+  inherit it; each context then asks for its stream the same way:
+  `workflow.stream_reader()` and `workflow.stream_writer()` in workflow code,
+  `activity.stream_handle()` in an activity, and `client.get_stream_handle()`
+  anywhere a client is held. A topic is a typed definition,
+  `streams.topic("inputs", Token)`, shared by workflow, activity and client
+  code; a plain string names a topic decided at runtime, and a call that names
+  no topic addresses the default topic, `streams.DEFAULT_TOPIC` (`"output"`,
+  the server's default stream name). The record on the wire
+  is `temporal.api.stream.v1.StreamRecord` on every provider. A stream is
+  handed to another process as a `streams.StreamRef`, plain data naming the
+  owner and the topic, which `client.get_stream_handle(ref)` and
+  `activity.stream_handle(ref)` open; `client.create_stream(stream_id, ...)`
+  creates a standalone stream with a retention policy, and its handle's
+  `close()` seals it. A provider runs record bodies through the client's data
+  converter, so a payload codec and external storage apply to them.
+  `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
+  reference provider the conformance tests run against.
+- **Experimental**: server-side streams. A workflow publishes to a stream it
+  owns with a command the server applies in its Workflow Task's commit, and
+  reads the ranges the server delivers on its Workflow Tasks, through
+  `temporalio.workflow.append_stream_records`, `subscribe_stream` and
+  `read_stream_records`. `temporalio.client_stream` and
+  `temporalio.contrib.server_streams` reach the same stream from outside a
+  workflow, and `temporalio.streams.providers.native.NativeStreams` puts it
+  behind the shared stream interface with one owned stream per topic. Requires
+  a server that serves the stream service. `Replayer(stream_client=)` replays a
+  workflow that read such a stream while the server still holds it: History
+  records only the offsets each task consumed, so the replayer fetches the
+  records from the stream service and hands them to the replay with the
+  history. A range the stream no longer holds fails the replay with
+  `StreamNotFoundError`. A handle without a run id follows a workflow reset as
+  it follows a continue-as-new, reading the reset run from the floor its stream
+  reports, and the replayer fetches the ranges recorded before a reset point
+  from the run the workflow was reset from. For offline replay,
+  `Replayer.fetch_stream_slices(client, history)` attaches the records to a
+  `WorkflowHistory` while the stream is retained, `to_json()` and `from_json()`
+  carry them as `streamSlices` beside the events, and a history that carries
+  them replays with no server.
+- **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
+  serves the stream interface over the shipped Workflow Streams transport as a
+  worker plugin, so a workflow reads and publishes through
+  `temporalio.contrib.workflow_streams` without naming it. Records are the
+  `StreamRecord` proto inside the shipped item payload, and a handle without a
+  run id follows continue-as-new run by run and a reset into the run reset to.
+  An outside publish is an Update that answers with the batch's position and
+  refuses a conflicting repeat, falling back to the shipped Signal on a
+  workflow whose worker predates it. A workflow's activity keeps its own
+  streams in the workflow's log under `activity/<id>/<name>`.
+- **Experimental**: `temporalio.streams.providers.nexus.NexusStreams` puts one
+  Nexus endpoint in front of a storage provider, so a caller reaches a stream
+  through the endpoint and never names the store, and
+  `TemporalStreamsHandler` serves that endpoint by fronting the provider's own
+  handles. Its contract is defined in `temporal_streams.nexusrpc.yaml` and the
+  bindings are generated from it; a record crosses as the serialized
+  `StreamRecord` proto, and both operations address a stream by a `StreamRef`
+  naming its owner (a workflow, an activity or a standalone stream) and topic,
+  which the handler maps onto the store's accessor for that owner. Configure
+  the front with `data_converter=` to run a payload codec on the caller side,
+  so records are encoded before they leave the process.
+- **Experimental**: `temporalio.streams.providers.nexus.stream_consumer_operation` builds an
+  asynchronous Nexus operation that consumes a stream. It registers a callback listener on the
+  stream's notification channel, reads on each delivery and completes when the stream closes.
+  `temporalio.streams.providers.nexus_consumer_service` hosts it on its own and needs the
+  `streams-nexus` extra.
 
 ### Changed
 

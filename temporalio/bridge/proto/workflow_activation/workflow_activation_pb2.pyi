@@ -19,8 +19,11 @@ import google.protobuf.message
 import google.protobuf.timestamp_pb2
 
 import temporalio.api.common.v1.message_pb2
+import temporalio.api.enums.v1.failed_cause_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.bridge.proto.activity_result.activity_result_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
@@ -44,7 +47,7 @@ class WorkflowActivation(google.protobuf.message.Message):
     1. init workflow
     2. patches
     3. random-seed-updates
-    4. signals/updates
+    4. signals/updates/channel notifications
     5. all others
     6. local activity resolutions
     7. queries
@@ -54,6 +57,8 @@ class WorkflowActivation(google.protobuf.message.Message):
     * Patches are expected to apply to the entire activation
     * Signal and update handlers should be invoked before workflow routines are iterated. That is to
      say before the users' main workflow function and anything spawned by it is allowed to continue.
+    * Channel notifications are input from outside the workflow, like signals, so they go with
+     them and ahead of the stream ranges among the other jobs.
     * Local activities resolutions go after other normal jobs because while *not* replaying, they
      will always take longer than anything else that produces an immediate job (which is
      effectively instant). When *replaying* we need to scan ahead for LA markers so that we can
@@ -235,6 +240,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     DO_UPDATE_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    NOTIFICATIONS_RECEIVED_FIELD_NUMBER: builtins.int
+    DELIVER_STREAM_RECORDS_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -295,6 +302,17 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     def resolve_nexus_operation(self) -> global___ResolveNexusOperation:
         """A nexus operation resolved."""
     @property
+    def notifications_received(self) -> global___NotificationsReceived:
+        """17 to 20 are taken by the external stream jobs, which are developed
+        alongside this one and share this message. The numbers below are fixed
+        with that family and must not be reused.
+
+        Notifications from the channels the workflow subscribed to.
+        """
+    @property
+    def deliver_stream_records(self) -> global___DeliverStreamRecords:
+        """A range of a stream the workflow subscribed to."""
+    @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
         cache after performing the activation. It is guaranteed that this will be the only job
@@ -322,6 +340,8 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         do_update: global___DoUpdate | None = ...,
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
+        notifications_received: global___NotificationsReceived | None = ...,
+        deliver_stream_records: global___DeliverStreamRecords | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -329,12 +349,16 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
+            "deliver_stream_records",
+            b"deliver_stream_records",
             "do_update",
             b"do_update",
             "fire_timer",
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
+            "notifications_received",
+            b"notifications_received",
             "notify_has_patch",
             b"notify_has_patch",
             "query_workflow",
@@ -368,12 +392,16 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "cancel_workflow",
             b"cancel_workflow",
+            "deliver_stream_records",
+            b"deliver_stream_records",
             "do_update",
             b"do_update",
             "fire_timer",
             b"fire_timer",
             "initialize_workflow",
             b"initialize_workflow",
+            "notifications_received",
+            b"notifications_received",
             "notify_has_patch",
             b"notify_has_patch",
             "query_workflow",
@@ -421,12 +449,102 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "do_update",
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
+            "notifications_received",
+            "deliver_stream_records",
             "remove_from_cache",
         ]
         | None
     ): ...
 
 global___WorkflowActivationJob = WorkflowActivationJob
+
+class NotificationsReceived(google.protobuf.message.Message):
+    """Hand a workflow the notifications the server folded for its channels.
+
+    They come from the scheduled event of the Workflow Task this activation
+    belongs to. History is the record, so a replay yields the same job with the
+    same notifications at the same point.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]: ...
+    def __init__(
+        self,
+        *,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
+    ) -> None: ...
+
+global___NotificationsReceived = NotificationsReceived
+
+class DeliverStreamRecords(google.protobuf.message.Message):
+    """Hand a workflow the next range of a stream it subscribed to.
+
+    The range is delivered once, on the task the server decided it belongs to,
+    and the offsets it covered are recorded in History rather than the payloads.
+    On replay the server re-supplies the same range by reading the stream again,
+    so this job appears at the same point with the same contents both times.
+
+    An empty range is still delivered: a task where the subscription saw nothing
+    is a fact replay has to reproduce, not an absence of one.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    FROM_OFFSET_FIELD_NUMBER: builtins.int
+    TO_OFFSET_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """Id of the stream this range came from."""
+    from_offset: builtins.int
+    """Inclusive."""
+    to_offset: builtins.int
+    """Exclusive. Equal to from_offset when the subscription saw nothing."""
+    @property
+    def records(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamRecord
+    ]: ...
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        from_offset: builtins.int = ...,
+        to_offset: builtins.int = ...,
+        records: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamRecord
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "from_offset",
+            b"from_offset",
+            "records",
+            b"records",
+            "stream_id",
+            b"stream_id",
+            "to_offset",
+            b"to_offset",
+        ],
+    ) -> None: ...
+
+global___DeliverStreamRecords = DeliverStreamRecords
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""
@@ -1182,6 +1300,7 @@ class ResolveSignalExternalWorkflow(google.protobuf.message.Message):
 
     SEQ_FIELD_NUMBER: builtins.int
     FAILURE_FIELD_NUMBER: builtins.int
+    CAUSE_FIELD_NUMBER: builtins.int
     seq: builtins.int
     """Sequence number as provided by lang in the corresponding SignalExternalWorkflowExecution
     command
@@ -1191,18 +1310,25 @@ class ResolveSignalExternalWorkflow(google.protobuf.message.Message):
         """If populated, this signal either failed to be sent or was cancelled depending on failure
         type / info.
         """
+    cause: temporalio.api.enums.v1.failed_cause_pb2.SignalExternalWorkflowExecutionFailedCause.ValueType
+    """The server-reported cause when the signal failed. Unspecified when the signal succeeded or
+    was cancelled before being sent.
+    """
     def __init__(
         self,
         *,
         seq: builtins.int = ...,
         failure: temporalio.api.failure.v1.message_pb2.Failure | None = ...,
+        cause: temporalio.api.enums.v1.failed_cause_pb2.SignalExternalWorkflowExecutionFailedCause.ValueType = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["failure", b"failure"]
     ) -> builtins.bool: ...
     def ClearField(
         self,
-        field_name: typing_extensions.Literal["failure", b"failure", "seq", b"seq"],
+        field_name: typing_extensions.Literal[
+            "cause", b"cause", "failure", b"failure", "seq", b"seq"
+        ],
     ) -> None: ...
 
 global___ResolveSignalExternalWorkflow = ResolveSignalExternalWorkflow
@@ -1212,27 +1338,31 @@ class ResolveRequestCancelExternalWorkflow(google.protobuf.message.Message):
 
     SEQ_FIELD_NUMBER: builtins.int
     FAILURE_FIELD_NUMBER: builtins.int
+    CAUSE_FIELD_NUMBER: builtins.int
     seq: builtins.int
     """Sequence number as provided by lang in the corresponding
     RequestCancelExternalWorkflowExecution command
     """
     @property
     def failure(self) -> temporalio.api.failure.v1.message_pb2.Failure:
-        """If populated, this signal either failed to be sent or was cancelled depending on failure
-        type / info.
-        """
+        """If populated, the cancellation request failed."""
+    cause: temporalio.api.enums.v1.failed_cause_pb2.CancelExternalWorkflowExecutionFailedCause.ValueType
+    """The server-reported cause when the cancellation request failed."""
     def __init__(
         self,
         *,
         seq: builtins.int = ...,
         failure: temporalio.api.failure.v1.message_pb2.Failure | None = ...,
+        cause: temporalio.api.enums.v1.failed_cause_pb2.CancelExternalWorkflowExecutionFailedCause.ValueType = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["failure", b"failure"]
     ) -> builtins.bool: ...
     def ClearField(
         self,
-        field_name: typing_extensions.Literal["failure", b"failure", "seq", b"seq"],
+        field_name: typing_extensions.Literal[
+            "cause", b"cause", "failure", b"failure", "seq", b"seq"
+        ],
     ) -> None: ...
 
 global___ResolveRequestCancelExternalWorkflow = ResolveRequestCancelExternalWorkflow
