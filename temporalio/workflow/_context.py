@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ._event_groups import EventGroup
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
     from ._nexus import NexusOperationCancellationType, NexusOperationHandle
+    from ._streams import _WorkflowStreams
     from ._workflow_ops import (
         ChildWorkflowCancellationType,
         ChildWorkflowHandle,
@@ -354,6 +355,16 @@ class _Runtime(ABC):
     def workflow_is_continue_as_new_suggested(self) -> bool: ...
 
     @abstractmethod
+    def workflow_is_evicting(self) -> bool:
+        """Whether this instance is being dropped from the cache rather than ending.
+
+        Eviction cancels the primary task the way a workflow cancellation
+        does, so anything that runs on the way out has to be able to tell the
+        two apart. Instance state must not be touched while this is true.
+        """
+        ...
+
+    @abstractmethod
     def workflow_is_target_worker_deployment_version_changed(self) -> bool: ...
 
     @abstractmethod
@@ -498,6 +509,9 @@ class _Runtime(ABC):
         summary: str | None,
         event_groups: Sequence[EventGroup] | None = None,
     ) -> NexusOperationHandle[OutputT]: ...
+
+    @abstractmethod
+    def workflow_streams(self) -> _WorkflowStreams: ...
 
     @abstractmethod
     def workflow_time_ns(self) -> int: ...
