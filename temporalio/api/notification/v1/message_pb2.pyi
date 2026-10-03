@@ -38,8 +38,8 @@ class _ChannelKindEnumTypeWrapper(
     workflows and callbacks listen to it.
     """
     CHANNEL_KIND_LINKED: _ChannelKind.ValueType  # 2
-    """Kept in one workflow's state, keyed by namespace, workflow id and
-    channel name. The owning workflow is its listener by construction.
+    """Kept in one execution's state, keyed by namespace, execution and
+    channel name. The owning execution is its listener by construction.
     """
 
 class ChannelKind(_ChannelKind, metaclass=_ChannelKindEnumTypeWrapper):
@@ -51,8 +51,8 @@ CHANNEL_KIND_INDEPENDENT: ChannelKind.ValueType  # 1
 workflows and callbacks listen to it.
 """
 CHANNEL_KIND_LINKED: ChannelKind.ValueType  # 2
-"""Kept in one workflow's state, keyed by namespace, workflow id and
-channel name. The owning workflow is its listener by construction.
+"""Kept in one execution's state, keyed by namespace, execution and
+channel name. The owning execution is its listener by construction.
 """
 global___ChannelKind = ChannelKind
 
@@ -112,11 +112,14 @@ class Notification(google.protobuf.message.Message):
         builtins.str, temporalio.api.common.v1.message_pb2.Payload
     ]:
         """Details for the listener, such as which topic moved. Bounded in size and
-        carried as payloads, so a codec applies as to any payload.
+        carried as payloads, so a codec applies as to any payload. This is state,
+        not a log: a fold keeps the latest notification only, so a writer puts
+        here what is true at `position`, such as which topic moved or a close
+        flag, never something a consumer must see once per write.
         """
     @property
-    def linked_to(self) -> temporalio.api.common.v1.message_pb2.WorkflowExecution:
-        """Set for a channel linked to a workflow: the owner and the run that
+    def linked_to(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """Set for a channel linked to an execution: the owner and the run that
         received the notification. Empty for an independent channel. A listener
         that holds both kinds routes the notification by it.
         (-- api-linter: core::0140::prepositions=disabled
@@ -132,7 +135,7 @@ class Notification(google.protobuf.message.Message):
             builtins.str, temporalio.api.common.v1.message_pb2.Payload
         ]
         | None = ...,
-        linked_to: temporalio.api.common.v1.message_pb2.WorkflowExecution | None = ...,
+        linked_to: temporalio.api.common.v1.message_pb2.Execution | None = ...,
     ) -> None: ...
     def HasField(
         self, field_name: typing_extensions.Literal["linked_to", b"linked_to"]
