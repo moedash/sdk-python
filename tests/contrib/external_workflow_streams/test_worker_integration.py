@@ -18,6 +18,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,7 +26,7 @@ import temporalio.api.common.v1
 import temporalio.api.enums.v1
 import temporalio.converter
 from temporalio import workflow
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHandle
 from temporalio.contrib.external_workflow_streams._backend import StreamKey
 from temporalio.contrib.external_workflow_streams._errors import (
     METRIC_DECODE,
@@ -38,14 +39,17 @@ from temporalio.contrib.external_workflow_streams._record import (
     StreamRecord,
 )
 from temporalio.contrib.external_workflow_streams._wake import (
+    ChannelSupport,
     WakeRequest,
+    channel_for,
     send_wake_signal,
     wake_request_id,
 )
 from temporalio.runtime import MetricBuffer, Runtime, TelemetryConfig
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
+from tests.contrib.external_workflow_streams.conftest import server_channel_support
 from tests.contrib.external_workflow_streams.memory_backend import MemoryStreamBackend
 
 with workflow.unsafe.imports_passed_through():
@@ -421,6 +425,9 @@ async def test_an_append_with_no_open_task_wakes_the_workflow(
     `NoOpenWorkflowTask` and sending the Signal is what makes the delivery
     reliable rather than incidental.
     """
+    # The Signal is the mechanism under test, so it is asked for outright: on
+    # a server with channels, "auto" would leave no Signal.
+    backend.wake_transport = "signal"
     task_queue = f"tq-{uuid.uuid4()}"
     async with Worker(
         client,
@@ -1696,3 +1703,133 @@ async def test_each_failure_row_is_reported_as_its_own(
         f"the {row} failure incremented {sorted(counted)} rather than only "
         f"{metric}; an alert on one row must not be diluted by another"
     )
+
+
+@pytest.mark.needs_channel_server
+async def test_an_outside_producer_wakes_the_reader_through_the_channel(
+    client: Client, backend: MemoryStreamBackend
+) -> None:
+    """The channel path end to end: subscribe by command, notify, wake, replay.
+
+    The same shape as the Signal case, with the backend asking for the channel
+    outright so a fallback fails the History checks below instead of passing
+    quietly. The Run subscribes to the stream's channel on the task that opens
+    the reader, the watcher notifies that channel when no task is open, and the
+    task the server schedules carries the notification. History then holds the
+    subscription event and no Signal, and a cold replay of it emits the
+    subscribe command where the live run did.
+    """
+    support = await server_channel_support(client)
+    if support is ChannelSupport.NONE:
+        pytest.skip("the server does not implement notification channels")
+    if support is ChannelSupport.LINKED:
+        pytest.skip("a workflow-owned stream listens on its linked channel there")
+    handle, key = await _consume_two_through_the_channel(client, backend)
+    events = [e async for e in handle.fetch_history_events()]
+    assert _signalled(events) == [], (
+        "a Signal woke the reader, so the channel was not the transport"
+    )
+    assert _subscribed(events) == [channel_for(key).channel]
+    notified = _notified(events)
+    assert notified, "no Workflow Task was scheduled with a notification"
+    assert {n.channel for n in notified} == {channel_for(key).channel}
+    assert not any(n.HasField("linked_to") for n in notified)
+
+    result = await Replayer(
+        workflows=[TimerThenConsumeWorkflow], external_stream_backend=backend
+    ).replay_workflow(await handle.fetch_history())
+    assert result.replay_failure is None, f"replay failed: {result.replay_failure}"
+
+
+@pytest.mark.needs_linked_server
+async def test_an_outside_producer_wakes_the_reader_through_its_linked_channel(
+    client: Client, backend: MemoryStreamBackend
+) -> None:
+    """The linked kind end to end: no command, notify the owner, wake, replay.
+
+    The stream's channel lives in the reading workflow's own state, so the
+    run subscribes to nothing: the task that opens the reader carries no
+    command, the watcher notifies the channel by the owner's id, and the task
+    the server schedules carries a notification naming the owner. History then
+    holds neither a Signal nor a subscription event, and a cold replay takes
+    the same path from the recorded flags.
+    """
+    if await server_channel_support(client) is not ChannelSupport.LINKED:
+        pytest.skip("the server does not serve channels linked to a workflow")
+    handle, key = await _consume_two_through_the_channel(client, backend)
+    events = [e async for e in handle.fetch_history_events()]
+    assert _signalled(events) == [], (
+        "a Signal woke the reader, so the channel was not the transport"
+    )
+    assert _subscribed(events) == [], "the owner is the listener by construction"
+    notified = _notified(events)
+    assert notified, "no Workflow Task was scheduled with a notification"
+    assert {n.channel for n in notified} == {channel_for(key).channel}
+    assert {(n.linked_to.type, n.linked_to.business_id) for n in notified} == {
+        (temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW, handle.id)
+    }
+
+    result = await Replayer(
+        workflows=[TimerThenConsumeWorkflow], external_stream_backend=backend
+    ).replay_workflow(await handle.fetch_history())
+    assert result.replay_failure is None, f"replay failed: {result.replay_failure}"
+
+
+async def _consume_two_through_the_channel(
+    client: Client, backend: MemoryStreamBackend
+) -> tuple[WorkflowHandle, StreamKey]:
+    """Runs the timer-then-consume shape with the channel asked for outright.
+
+    The channel rather than ``auto``, so a step down to the Signal fails the
+    History checks of the caller instead of passing quietly.
+    """
+    backend.wake_transport = "channel"
+    task_queue = f"tq-{uuid.uuid4()}"
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[TimerThenConsumeWorkflow],
+        external_stream_backend=backend,
+    ):
+        handle = await client.start_workflow(
+            TimerThenConsumeWorkflow.run,
+            id=f"wf-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        description = await handle.describe()
+        key = StreamKey(
+            client.namespace,
+            handle.id,
+            description.raw_description.workflow_execution_info.first_run_id,
+            "tokens",
+        )
+        await asyncio.sleep(1)
+        await publish(backend, key, ["first"])
+        await asyncio.sleep(1)
+        await publish(backend, key, ["second"])
+
+        assert await asyncio.wait_for(handle.result(), 60) == ["first", "second"]
+    return handle, key
+
+
+def _signalled(events: Sequence[Any]) -> list[Any]:
+    return [
+        e for e in events if e.HasField("workflow_execution_signaled_event_attributes")
+    ]
+
+
+def _subscribed(events: Sequence[Any]) -> list[str]:
+    return [
+        e.workflow_notification_channel_subscribed_event_attributes.channel
+        for e in events
+        if e.HasField("workflow_notification_channel_subscribed_event_attributes")
+    ]
+
+
+def _notified(events: Sequence[Any]) -> list[Any]:
+    return [
+        notification
+        for e in events
+        if e.HasField("workflow_task_scheduled_event_attributes")
+        for notification in e.workflow_task_scheduled_event_attributes.notifications
+    ]
