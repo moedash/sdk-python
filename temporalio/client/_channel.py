@@ -10,6 +10,7 @@ from enum import IntEnum
 import temporalio.api.notification.v1
 import temporalio.api.workflow.v1
 import temporalio.common
+from temporalio.streams._ref import StreamRef
 from temporalio.workflow import Notification
 
 from ._callback import Callback
@@ -20,7 +21,11 @@ __all__ = [
     "ChannelKind",
     "ChannelListener",
     "ChannelSubscriptionInfo",
+    "stream_channel",
 ]
+
+STREAM_CHANNEL_PREFIX = "stream/"
+"""The first segment of the channel a native stream notifies."""
 
 
 class ChannelKind(IntEnum):
@@ -226,3 +231,42 @@ class ChannelAddress:
         ):
             return self.execution.business_id
         return None
+
+
+def stream_channel(ref: StreamRef) -> ChannelAddress:
+    """The channel a native stream notifies on every append and on its close.
+
+    The server derives the name from the stream's identity, and this helper
+    derives the same one, so a client polls or registers a callback without
+    asking. A stream a workflow owns notifies ``stream/<topic>`` linked to the
+    owning workflow. A stream an activity owns notifies
+    ``stream/<activity id>/<topic>`` linked to the workflow that scheduled
+    the activity, or ``stream/<topic>`` linked to the activity execution
+    itself when the activity is a standalone one. A standalone stream notifies
+    the independent channel ``stream/<stream id>``, whatever the topic, since
+    its topics share one stream on the server. The address names the owner
+    without a run, so it reaches the owner's current run.
+
+    Each change arrives as one notification: the stream's change sequence as
+    the counter, the head after the change as the position, and ``closed``
+    set in the metadata on the close.
+    """
+    if ref.kind == "workflow":
+        assert ref.workflow_id is not None
+        return ChannelAddress(
+            STREAM_CHANNEL_PREFIX + ref.topic,
+            temporalio.common.Execution.workflow(ref.workflow_id),
+        )
+    if ref.kind == "activity":
+        assert ref.activity_id is not None
+        if not ref.workflow_id:
+            return ChannelAddress(
+                STREAM_CHANNEL_PREFIX + ref.topic,
+                temporalio.common.Execution.activity(ref.activity_id),
+            )
+        return ChannelAddress(
+            f"{STREAM_CHANNEL_PREFIX}{ref.activity_id}/{ref.topic}",
+            temporalio.common.Execution.workflow(ref.workflow_id),
+        )
+    assert ref.stream_id is not None
+    return ChannelAddress(STREAM_CHANNEL_PREFIX + ref.stream_id, None)

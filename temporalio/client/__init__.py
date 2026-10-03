@@ -70,6 +70,7 @@ from ._channel import (
     ChannelKind,
     ChannelListener,
     ChannelSubscriptionInfo,
+    stream_channel,
 )
 from ._client import (
     Client,
@@ -373,6 +374,7 @@ __all__ = [
     "ChannelListener",
     "ChannelAddress",
     "ChannelSubscriptionInfo",
+    "stream_channel",
     "_ClientImpl",
     "_apply_headers",
     "_decode_user_metadata",
