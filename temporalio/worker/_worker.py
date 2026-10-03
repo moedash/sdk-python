@@ -579,6 +579,9 @@ class Worker:
                 != HeaderCodecBehavior.NO_CODEC,
                 max_workflow_task_external_storage_concurrency=max_workflow_task_external_storage_concurrency,
                 stream_provider=stream_provider,
+                stream_client=(
+                    config["client"] if stream_provider is not None else None  # type: ignore[reportTypedDictNotRequiredAccess]
+                ),
             )
 
         tuner = config.get("tuner")
