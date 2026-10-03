@@ -36,8 +36,9 @@ from typing import Any
 
 import pytest
 
+from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHandle
 from temporalio.common import RawValue
 from temporalio.converter import (
     DataConverter,
@@ -68,7 +69,10 @@ from temporalio.streams import (
     topic,
 )
 from temporalio.streams._ref import open_ref
+from temporalio.streams.providers import workflow_streams
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
+from tests.helpers import new_worker
 
 # Defined once and shared by every case, the way an application shares them
 # between its workflow, its activities and its backend.
@@ -90,8 +94,13 @@ class ProviderCase:
     """``append()`` returns where the records landed."""
     detects_divergent_retries: bool = True
     """``append()`` compares a repeat's content with what it already holds."""
+    encodes_bodies: bool = True
+    """The outside path runs each body through the client's data converter, so a
+    client with a converter of its own reads and writes another's records."""
     host: Callable[[str], Awaitable[None]] | None = None
     """Starts the workflow that owns ``workflow_id``'s stream, when a store needs one."""
+    task_queue: str | None = None
+    """Where the setup's worker runs the workflows below, when it has one."""
     truncate: Callable[[str, str, int], Awaitable[None]] | None = None
     """Drops all but the newest records of a workflow's topic, standing in
     for retention, or ``None`` when the provider offers no way to."""
@@ -246,13 +255,98 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
     provider.reset()
 
 
+@workflow.defn
+class TruncatingStreamHost:
+    """A stream host whose log an update can truncate, the way a workflow's retention would."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.update
+    def truncate(self, topic: str, keep: int) -> None:
+        stream = workflow_streams._instance().stream  # pyright: ignore[reportPrivateUsage]
+        stream.truncate(workflow_streams.start_offset(stream, topic, keep))
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._released)
+
+
+@workflow.defn
+class DefaultTopicAnswer:
+    """Reads one value on its default topic and answers on the same topic."""
+
+    @workflow.run
+    async def run(self) -> None:
+        reader = workflow.stream_reader(result_type=dict)
+        async for value in reader.values():
+            workflow.stream_writer().publish({"answer": value["n"] * 2})
+            reader.close()
+
+
+async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
+    # No STREAMS_LIVE gate: the store is the workflow's own History, which the
+    # test environment's server provides.
+    provider = WorkflowStreamsProvider(poll_cooldown=timedelta(milliseconds=20))
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
+    hosts: dict[str, WorkflowHandle[Any, Any]] = {}
+    async with new_worker(client, TruncatingStreamHost, DefaultTopicAnswer) as worker:
+
+        async def host(workflow_id: str) -> None:
+            if workflow_id not in hosts:
+                hosts[workflow_id] = await client.start_workflow(
+                    TruncatingStreamHost.run,
+                    id=workflow_id,
+                    task_queue=worker.task_queue,
+                )
+
+        async def truncate(workflow_id: str, topic: str, keep: int) -> None:
+            await hosts[workflow_id].execute_update(
+                TruncatingStreamHost.truncate, args=[topic, keep]
+            )
+
+        # A publish is an Update, so the workflow answers with the position
+        # and refuses a divergent repeat: both capabilities hold here. Bodies
+        # meet the codec and external storage at the transport's envelope,
+        # which the worker's converter has to match, so a case whose client
+        # carries a converter of its own is skipped; see the provider's
+        # module docstring.
+        yield ProviderCase(
+            "workflow_streams",
+            provider,
+            client,
+            encodes_bodies=False,
+            host=host,
+            task_queue=worker.task_queue,
+            truncate=truncate,
+            # Every log is a running workflow's state; a stream with no owner
+            # has no workflow to live in, so neither of its policies exists.
+            hosts_standalone_streams=False,
+            bounds_standalone_bytes=False,
+            trims_open_stream_by_age=False,
+            refuses_appends_past_byte_cap=False,
+        )
+        for handle in hosts.values():
+            await handle.terminate()
+
+
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
-    "memory": _memory_case
+    "memory": _memory_case,
+    "workflow_streams": _workflow_streams_case,
 }
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
     "detects_divergent_retries": lambda case: case.detects_divergent_retries,
+    "encodes_bodies": lambda case: case.encodes_bodies,
     "truncates": lambda case: case.truncate is not None,
     "hosts_standalone_streams": lambda case: case.hosts_standalone_streams,
 }
@@ -482,6 +576,29 @@ async def test_naming_no_topic_addresses_the_default_topic(case: ProviderCase):
     assert await stream.latest(topic=DEFAULT_TOPIC) == records[0].cursor
 
 
+async def test_a_workflow_answers_on_its_default_topic(case: ProviderCase):
+    if case.client is None or case.task_queue is None:
+        pytest.skip(
+            f"the {case.name} setup runs no worker; test_streams_workflow covers "
+            "its workflow half"
+        )
+    workflow_id = new_workflow_id()
+    handle = await case.client.start_workflow(
+        DefaultTopicAnswer.run, id=workflow_id, task_queue=case.task_queue
+    )
+    stream = case.client.get_stream_handle(workflow_id)
+    await stream.producer(producer_id="client", attempt=1).append({"n": 21})
+    await handle.result()
+
+    # The outside producer and the workflow, each naming no topic, meet on
+    # one topic that a reader naming none sees in order.
+    records = await take(stream.read(), 2, timeout=30.0)
+    assert [(r.topic, r.producer_id, r.value) for r in records] == [
+        (DEFAULT_TOPIC, "client", {"n": 21}),
+        (DEFAULT_TOPIC, "", {"answer": 42}),
+    ]
+
+
 async def test_cursor_resumes_where_it_points(case: ProviderCase):
     workflow_id = new_workflow_id()
     stream = await case.open(workflow_id)
@@ -643,8 +760,10 @@ async def test_beginning_starts_at_the_oldest_record_still_held(case: ProviderCa
     assert [r.value for r in records] == [{"n": 3}, {"n": 4}]
     newest = await take(stream.read(topic=OUT, last=3), 2)
     assert [r.value for r in newest] == [{"n": 3}, {"n": 4}]
+    # A cursor below the floor is refused. A provider that needs a round trip
+    # to know says so on the first step rather than on the call.
     with pytest.raises(StreamCursorError):
-        stream.read(topic=OUT, after=before[0].cursor)
+        await take(stream.read(topic=OUT, after=before[0].cursor), 1)
 
 
 async def test_a_read_start_names_one_place(case: ProviderCase):
@@ -694,6 +813,7 @@ async def test_an_owned_stream_cannot_be_closed_by_a_handle(case: ProviderCase):
         await stream.close()
 
 
+@pytest.mark.encodes_bodies
 async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
     case: ProviderCase, client: Client
 ):
@@ -721,6 +841,7 @@ async def test_a_body_above_the_threshold_is_offloaded_and_read_back(
 
 
 @pytest.mark.detects_divergent_retries
+@pytest.mark.encodes_bodies
 async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     case: ProviderCase, client: Client
 ):
