@@ -779,7 +779,7 @@ async def test_a_repeat_under_one_identity_with_other_bytes_writes_nothing(
             {"n": 1}
         )
         other = stream.producer(topic=INPUTS, producer_id="model", attempt=1)
-        with pytest.raises(StreamProducerError, match="sequence 0"):
+        with pytest.raises(StreamProducerError, match="sequence 1"):
             await other.append({"n": 99})
         # The refusal wrote nothing.
         assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 1
@@ -806,13 +806,13 @@ async def test_an_identity_claimed_with_other_bytes_refuses_the_first_append(
         chain = await _chain(live_client, workflow_id)
         key = chain.stream_key(INPUTS.name, direction=StreamDirection.OUTPUT)
         await backend._client.hset(
-            backend._idempotency_key(key), "model#1/0", "1-0|" + "0" * 64
+            backend._idempotency_key(key), "model#1/1", "1-0|" + "0" * 64
         )
 
         producer = provider.get_stream_handle(live_client, workflow_id).producer(
             topic=INPUTS, producer_id="model", attempt=1
         )
-        with pytest.raises(StreamProducerError, match="sequence 0"):
+        with pytest.raises(StreamProducerError, match="sequence 1"):
             await producer.append({"n": 1})
 
         assert await _log_length(provider, live_client, workflow_id, INPUTS.name) == 0
