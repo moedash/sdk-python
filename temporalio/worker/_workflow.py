@@ -1492,7 +1492,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     position=position,
                     position_counter=position_counter,
                     channel=address.channel,
-                    channel_workflow_id=address.workflow_id,
+                    channel_execution=address.execution,
                 ),
                 transport=wake_transport_of(subscription.backend),
             )

@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 import temporalio.api.common.v1
+import temporalio.api.enums.v1
 import temporalio.api.notification.v1
 import temporalio.api.workflowservice.v1
 import temporalio.bridge.proto.workflow_activation
@@ -30,7 +31,9 @@ import temporalio.converter
 from temporalio import workflow
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Callback, ChannelKind, Client
+from temporalio.client._client import _channel_execution
 from temporalio.client._impl import _channel_owner
+from temporalio.common import Execution, ExecutionType
 from temporalio.contrib.external_workflow_streams._wake import ChannelAddress
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker._workflow_instance import (
@@ -51,16 +54,18 @@ WorkflowActivationCompletion = (
     temporalio.bridge.proto.workflow_completion.WorkflowActivationCompletion
 )
 Notification = temporalio.api.notification.v1.Notification
-WorkflowExecution = temporalio.api.common.v1.WorkflowExecution
+ExecutionProto = temporalio.api.common.v1.Execution
+WORKFLOW_TYPE = temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW
 INDEPENDENT = _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS
 LINKED = _WorkflowLogicFlag.LINKED_NOTIFICATION_CHANNELS
 
 
-def _linked_to(notification: workflow.Notification) -> dict[str, str] | None:
+def _linked_to(notification: workflow.Notification) -> dict[str, Any] | None:
     if notification.linked_to is None:
         return None
     return {
-        "workflow_id": notification.linked_to.workflow_id,
+        "type": notification.linked_to.type.name,
+        "business_id": notification.linked_to.business_id,
         "run_id": notification.linked_to.run_id,
     }
 
@@ -156,7 +161,10 @@ class ListenOnStream:
     async def run(self, channel: str, owner: str) -> bool:
         instance: Any = _Runtime.current()
         return instance.subscribe_stream_channel(
-            ChannelAddress(channel=channel, workflow_id=owner)
+            ChannelAddress(
+                channel=channel,
+                execution=Execution.workflow(owner) if owner else None,
+            )
         )
 
 
@@ -329,7 +337,7 @@ def _linked(channel: str, counter: int, run_id: str = "run") -> Notification:
     return Notification(
         channel=channel,
         counter=counter,
-        linked_to=WorkflowExecution(workflow_id="wf", run_id=run_id),
+        linked_to=ExecutionProto(type=WORKFLOW_TYPE, business_id="wf", run_id=run_id),
     )
 
 
@@ -342,7 +350,7 @@ async def test_a_linked_channel_issues_no_command_and_gets_its_notification():
     assert _result(completion) == {
         "channel": "orders",
         "counter": 7,
-        "linked_to": {"workflow_id": "wf", "run_id": "run"},
+        "linked_to": {"type": "WORKFLOW", "business_id": "wf", "run_id": "run"},
     }
 
 
@@ -443,21 +451,39 @@ async def test_a_replay_takes_the_path_the_live_run_recorded():
     assert _subscribed(completion) == []
 
 
-def test_a_channel_call_names_the_workflow_it_is_linked_to():
-    assert _channel_owner(None, None) is None
-    owner = _channel_owner("wf", None)
-    assert owner is not None
-    assert (owner.workflow_id, owner.run_id) == ("wf", "")
-    owner = _channel_owner("wf", "run")
-    assert owner is not None
-    assert (owner.workflow_id, owner.run_id) == ("wf", "run")
+def test_a_channel_call_names_the_execution_it_is_linked_to():
+    # The short form names a workflow. The long form names any execution.
+    assert _channel_execution(None, None, None) is None
+    assert _channel_execution(None, "wf", None) == Execution.workflow("wf")
+    assert _channel_execution(None, "wf", "run") == Execution.workflow("wf", "run")
+    activity = Execution.activity("act")
+    assert _channel_execution(activity, None, None) is activity
     with pytest.raises(ValueError, match="workflow_id"):
-        _channel_owner(None, "run")
+        _channel_execution(None, None, "run")
+    with pytest.raises(ValueError, match="not both"):
+        _channel_execution(activity, "wf", None)
+    with pytest.raises(ValueError, match="not both"):
+        _channel_execution(activity, None, "run")
     # Unset, the request addresses the independent channel of that name.
     request = temporalio.api.workflowservice.v1.DescribeChannelRequest(
-        channel="c", workflow_execution=_channel_owner(None, None)
+        channel="c", execution=_channel_owner(None)
     )
-    assert not request.HasField("workflow_execution")
+    assert not request.HasField("execution")
+    owner = _channel_owner(Execution.workflow("wf"))
+    assert owner is not None
+    assert (owner.type, owner.business_id, owner.run_id) == (WORKFLOW_TYPE, "wf", "")
+    owner = _channel_owner(Execution.workflow("wf", "run"))
+    assert owner is not None
+    assert (owner.type, owner.business_id, owner.run_id) == (
+        WORKFLOW_TYPE,
+        "wf",
+        "run",
+    )
+    assert Execution.from_proto(owner) == Execution.workflow("wf", "run")
+    assert Execution.from_proto(_channel_owner(activity)) == activity  # type: ignore[arg-type]
+    assert Execution.from_proto(ExecutionProto(business_id="x")) == Execution(
+        ExecutionType.UNSPECIFIED, "x"
+    )
 
 
 async def test_the_client_describes_a_linked_channel_by_its_owner(
@@ -469,7 +495,9 @@ async def test_the_client_describes_a_linked_channel_by_its_owner(
         described.append(request)
         return temporalio.api.workflowservice.v1.DescribeChannelResponse(
             kind=temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED,
-            linked_to=WorkflowExecution(workflow_id="wf", run_id="run"),
+            linked_to=ExecutionProto(
+                type=WORKFLOW_TYPE, business_id="wf", run_id="run"
+            ),
             latest=_linked("orders", 3),
         )
 
@@ -479,13 +507,23 @@ async def test_the_client_describes_a_linked_channel_by_its_owner(
     )
     [request] = described
     assert request.channel == "orders"
-    assert request.workflow_execution.workflow_id == "wf"
-    assert request.workflow_execution.run_id == "run"
+    assert request.execution.type == WORKFLOW_TYPE
+    assert request.execution.business_id == "wf"
+    assert request.execution.run_id == "run"
     assert description.kind is ChannelKind.LINKED
-    assert description.linked_to is not None
-    assert description.linked_to.workflow_id == "wf"
+    assert description.linked_to == Execution.workflow("wf", "run")
     assert description.latest is not None
-    assert _linked_to(description.latest) == {"workflow_id": "wf", "run_id": "run"}
+    assert _linked_to(description.latest) == {
+        "type": "WORKFLOW",
+        "business_id": "wf",
+        "run_id": "run",
+    }
+    # The long form carries any execution as given.
+    activity = Execution.activity("act", "run-2")
+    await client.describe_channel("orders", execution=activity)
+    assert Execution.from_proto(described[-1].execution) == activity
+    with pytest.raises(ValueError, match="not both"):
+        await client.describe_channel("orders", execution=activity, workflow_id="wf")
     # A server that predates the kinds reports none.
     monkeypatch.setattr(
         client.workflow_service,
@@ -528,7 +566,8 @@ async def test_a_workflow_receives_a_notification_on_its_linked_channel(client: 
         description = await client.describe_channel(channel, workflow_id=handle.id)
         assert description.kind is ChannelKind.LINKED
         assert description.linked_to is not None
-        assert description.linked_to.workflow_id == handle.id
+        assert description.linked_to.type is ExecutionType.WORKFLOW
+        assert description.linked_to.business_id == handle.id
         assert description.listeners == []
         assert description.latest is None
         await client.notify_channel(
@@ -538,7 +577,8 @@ async def test_a_workflow_receives_a_notification_on_its_linked_channel(client: 
         assert (result["channel"], result["counter"]) == (channel, 1)
         # The owner and the run that received it, so a listener holding both
         # kinds under one name can route it.
-        assert result["linked_to"]["workflow_id"] == handle.id
+        assert result["linked_to"]["type"] == "WORKFLOW"
+        assert result["linked_to"]["business_id"] == handle.id
         assert result["linked_to"]["run_id"]
         events = [event.event_type async for event in handle.fetch_history_events()]
         assert (

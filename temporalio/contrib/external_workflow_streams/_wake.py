@@ -39,6 +39,7 @@ from urllib.parse import quote
 import temporalio.api.common.v1
 import temporalio.api.notification.v1
 import temporalio.api.workflowservice.v1
+import temporalio.common
 import temporalio.service
 from temporalio.bridge.proto.external_stream.external_stream_pb2 import WakeSignal
 from temporalio.contrib.external_workflow_streams._record import Offset
@@ -85,33 +86,37 @@ name that happens to look like a stream's.
 class ChannelAddress:
     """Where a stream's notifications go.
 
-    A channel linked to a workflow lives in that workflow's state and is
-    addressed by the channel name and the workflow id; the workflow is its
-    listener by construction. An independent channel is addressed by name
-    alone and listened on by command.
+    A channel linked to an execution lives in that execution's state and is
+    addressed by the channel name and the execution, which is its listener
+    by construction. An independent channel is addressed by name alone and
+    listened on by command.
     """
 
     channel: str
     """The channel name, see :func:`channel_for`."""
 
-    workflow_id: str = ""
-    """The workflow the channel is linked to, or empty for an independent channel.
+    execution: temporalio.common.Execution | None = None
+    """The execution the channel is linked to, or ``None`` for an independent channel.
 
-    The chain's id without a run, so the server resolves the chain's current
-    run the way it does for a Signal and a continue-as-new successor is
-    reached by the same address.
+    A workflow is named by the chain's id without a run, so the server
+    resolves the chain's current run the way it does for a Signal and a
+    continue-as-new successor is reached by the same address.
     """
 
     @property
     def linked(self) -> bool:
-        """Whether the channel is linked to a workflow."""
-        return bool(self.workflow_id)
+        """Whether the channel is linked to an execution."""
+        return self.execution is not None
 
-    def execution(self) -> temporalio.api.common.v1.WorkflowExecution | None:
-        """The ``workflow_execution`` a channel call carries, or none."""
-        if not self.workflow_id:
+    @property
+    def workflow_id(self) -> str | None:
+        """The workflow the channel is linked to, when the owner is one."""
+        if (
+            self.execution is None
+            or self.execution.type is not temporalio.common.ExecutionType.WORKFLOW
+        ):
             return None
-        return temporalio.api.common.v1.WorkflowExecution(workflow_id=self.workflow_id)
+        return self.execution.business_id
 
 
 def channel_for(key: StreamKey) -> ChannelAddress:
@@ -140,7 +145,14 @@ def channel_for(key: StreamKey) -> ChannelAddress:
             key.stream_name,
         )
     )
-    return ChannelAddress(channel=channel, workflow_id=key.workflow_id)
+    return ChannelAddress(
+        channel=channel,
+        execution=(
+            temporalio.common.Execution.workflow(key.workflow_id)
+            if key.workflow_id
+            else None
+        ),
+    )
 
 
 WAKE_SIGNAL_NAME = "__temporal_external_stream_wake"
@@ -228,8 +240,8 @@ class WakeRequest:
     transport then wakes by Signal. Not part of the request ID: the ID names
     the wake, and the channel is only where it is delivered.
     """
-    channel_workflow_id: str = ""
-    """The workflow the channel is linked to, empty for an independent channel.
+    channel_execution: temporalio.common.Execution | None = None
+    """The execution the channel is linked to, ``None`` for an independent channel.
 
     Set with ``channel`` for a workflow-owned stream, so the notification
     addresses the owner's linked channel on a server that has the kind.
@@ -238,9 +250,7 @@ class WakeRequest:
     @property
     def channel_address(self) -> ChannelAddress:
         """The channel and its owner as one address."""
-        return ChannelAddress(
-            channel=self.channel, workflow_id=self.channel_workflow_id
-        )
+        return ChannelAddress(channel=self.channel, execution=self.channel_execution)
 
     @property
     def is_unparked(self) -> bool:
@@ -451,7 +461,9 @@ async def _describe_probe(
         namespace=client.namespace, channel=PROBE_CHANNEL
     )
     if workflow_id:
-        request.workflow_execution.workflow_id = workflow_id
+        request.execution.CopyFrom(
+            temporalio.common.Execution.workflow(workflow_id).to_proto()
+        )
     try:
         return await call(request)
     except temporalio.service.RPCError as err:
@@ -582,8 +594,8 @@ def build_notify_request(
         identity=identity,
         request_id=wake_request_id(request),
     )
-    if request.channel_workflow_id:
-        notify.workflow_execution.workflow_id = request.channel_workflow_id
+    if request.channel_execution is not None:
+        notify.execution.CopyFrom(request.channel_execution.to_proto())
     return notify
 
 
@@ -690,5 +702,5 @@ def wake_request_for(
         position=position,
         position_counter=position_counter,
         channel=address.channel,
-        channel_workflow_id=address.workflow_id,
+        channel_execution=address.execution,
     )

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
 
-import temporalio.api.common.v1
 import temporalio.api.notification.v1
+import temporalio.common
 from temporalio.workflow import Notification
 
 from ._callback import Callback
@@ -37,10 +37,11 @@ class ChannelKind(IntEnum):
     """
 
     LINKED = int(temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED)
-    """Kept in one workflow's state, keyed by namespace, workflow id and name.
+    """Kept in one execution's state, keyed by namespace, execution and name.
 
-    The owning workflow is its listener by construction; a call reaches it
-    with the ``workflow_id`` argument.
+    The owning execution, a workflow or a standalone activity, is its listener
+    by construction. A call reaches it with the ``execution`` argument, or
+    with ``workflow_id`` for a workflow.
     """
 
 
@@ -110,12 +111,12 @@ class ChannelDescription:
     kind: ChannelKind = ChannelKind.UNSPECIFIED
     """Which kind of channel this is.
 
-    A linked channel of a running workflow exists by construction, so a
-    describe with ``workflow_id`` answers :attr:`ChannelKind.LINKED` with no
+    A linked channel of a running execution exists by construction, so a
+    describe with ``execution`` answers :attr:`ChannelKind.LINKED` with no
     listeners and nothing retained for a name nobody has notified yet.
     """
 
-    linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
+    linked_to: temporalio.common.Execution | None = None
     """The owner of a linked channel and the run that holds it.
 
     ``None`` for an independent channel.
