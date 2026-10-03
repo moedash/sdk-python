@@ -1787,9 +1787,7 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
                 notification=notification,
                 identity=self._client.identity,
                 request_id=str(uuid.uuid4()),
-                execution=_channel_owner(
-                    input.execution, input.workflow_id, input.run_id
-                ),
+                execution=_channel_owner(input.execution),
             ),
             retry=True,
             metadata=input.rpc_metadata,
@@ -1805,7 +1803,7 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
             channel=input.channel,
             after_counter=input.after_counter,
             max_notifications=input.max_notifications,
-            execution=_channel_owner(input.execution, input.workflow_id, input.run_id),
+            execution=_channel_owner(input.execution),
         )
         if input.wait is not None:
             req.wait.FromTimedelta(input.wait)
@@ -1819,9 +1817,7 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
             temporalio.api.workflowservice.v1.DescribeChannelRequest(
                 namespace=self._client.namespace,
                 channel=input.channel,
-                execution=_channel_owner(
-                    input.execution, input.workflow_id, input.run_id
-                ),
+                execution=_channel_owner(input.execution),
             ),
             retry=True,
             metadata=input.rpc_metadata,
@@ -1859,9 +1855,7 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
                 ),
                 request_id=str(uuid.uuid4()),
                 identity=self._client.identity,
-                execution=_channel_owner(
-                    input.execution, input.workflow_id, input.run_id
-                ),
+                execution=_channel_owner(input.execution),
             ),
             retry=True,
             metadata=input.rpc_metadata,
@@ -1878,9 +1872,7 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
                 channel=input.channel,
                 listener_id=input.listener_id,
                 identity=self._client.identity,
-                execution=_channel_owner(
-                    input.execution, input.workflow_id, input.run_id
-                ),
+                execution=_channel_owner(input.execution),
             ),
             retry=True,
             metadata=input.rpc_metadata,
@@ -1927,20 +1919,6 @@ class _ClientImpl(OutboundInterceptor):  # pyright: ignore[reportUnusedClass]
 
 def _channel_owner(
     execution: temporalio.common.Execution | None,
-    workflow_id: str | None,
-    run_id: str | None,
 ) -> temporalio.api.common.v1.Execution | None:
-    """The execution a channel call addresses, or ``None`` for an independent channel.
-
-    ``workflow_id`` and ``run_id`` are the shorthand for a workflow owner, so
-    they do not combine with ``execution``.
-    """
-    if execution is not None:
-        if workflow_id is not None or run_id is not None:
-            raise ValueError("pass execution or workflow_id, not both")
-        return execution.to_proto()
-    if workflow_id is None:
-        if run_id is not None:
-            raise ValueError("run_id needs workflow_id")
-        return None
-    return temporalio.common.Execution.workflow(workflow_id, run_id).to_proto()
+    """The owner on the wire, or ``None`` for an independent channel."""
+    return None if execution is None else execution.to_proto()
