@@ -37,6 +37,7 @@ from temporalio.contrib.external_workflow_streams._errors import (
 from temporalio.contrib.external_workflow_streams._record import (
     Cursor,
     Offset,
+    StartAtTail,
     StreamRecord,
 )
 from temporalio.types import AnyType
@@ -97,6 +98,7 @@ class ExternalStreamRuntime(Protocol):
         stream_key: StreamKey,
         idle_timeout: timedelta,
         start_cursor: Cursor | None = None,
+        start_at_tail: StartAtTail | None = None,
     ) -> None:
         """Registers a wait with the Worker's subscription manager.
 
@@ -278,7 +280,10 @@ class ExternalStreamTopic(Generic[AnyType]):
     options: ExternalStreamOptions
 
     def subscribe(
-        self, *, start_cursor: Cursor | None = None
+        self,
+        *,
+        start_cursor: Cursor | None = None,
+        start_at_tail: StartAtTail | None = None,
     ) -> ExternalStreamSubscription[AnyType]:
         """Starts a new subscription and returns its async iterator.
 
@@ -297,6 +302,11 @@ class ExternalStreamTopic(Generic[AnyType]):
                 ``BEGINNING`` on a first execution. A boundary the Workflow
                 names is recorded in the marker's header like the restored one,
                 so it must be derived deterministically: replay names it again.
+            start_at_tail: Start at the stream's tail instead, or at its newest
+                ``last`` records. The Worker resolves the boundary against the
+                store after this Workflow Task and records it with the
+                subscription, so replay starts where the live run did rather
+                than asking the store again. Exclusive with ``start_cursor``.
         """
         state = _run_state()
         if state.runtime is None:
@@ -313,6 +323,8 @@ class ExternalStreamTopic(Generic[AnyType]):
         start: dict[str, Any] = (
             {} if start_cursor is None else {"start_cursor": start_cursor}
         )
+        if start_at_tail is not None:
+            start["start_at_tail"] = start_at_tail
         state.runtime.register(
             wait_id=wait_id,
             stream_key=stream_key,

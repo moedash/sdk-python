@@ -75,10 +75,14 @@ class FakeRuntime:
         stream_key: StreamKey,
         idle_timeout: timedelta,
         start_cursor: Cursor | None = None,
+        start_at_tail: Any = None,
     ) -> None:
         self.registrations.append((wait_id, stream_key))
         self.idle_timeouts[wait_id] = idle_timeout
-        self.start_cursors[wait_id] = start_cursor
+        # A tail start stands in for the cursor the Worker would resolve.
+        self.start_cursors[wait_id] = (
+            start_cursor if start_at_tail is None else start_at_tail
+        )
 
     def drain(self, wait_id: int, max_records: int | None = None) -> list[StreamRecord]:
         buffered = self.buffers.get(wait_id, [])

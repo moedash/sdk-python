@@ -104,6 +104,7 @@ def test_supported_entry_points_are_public() -> None:
         "PrecedingWriteFailedError",
         "RecordKind",
         "RedisStreamBackend",
+        "StartAtTail",
         "StreamBackend",
         "StreamDecodeError",
         "StreamError",
