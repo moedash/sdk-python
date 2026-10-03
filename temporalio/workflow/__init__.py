@@ -57,7 +57,12 @@ from ._asyncio import (
     as_completed,
     wait,
 )
-from ._channels import Notification
+from ._channels import (
+    ChannelSubscription,
+    Notification,
+    linked_channel,
+    subscribe_channel,
+)
 from ._context import (
     Info,
     ParentInfo,
@@ -259,7 +264,10 @@ __all__ = [
     "SandboxImportNotificationPolicy",
     "logger",
     "unsafe",
+    "ChannelSubscription",
     "Notification",
+    "linked_channel",
+    "subscribe_channel",
     "ChildWorkflowCancellationType",
     "ChildWorkflowConfig",
     "ChildWorkflowHandle",

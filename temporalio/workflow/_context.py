@@ -22,6 +22,7 @@ from ._exceptions import _NotInWorkflowEventLoopError
 
 if TYPE_CHECKING:
     from ._activities import ActivityCancellationType, ActivityHandle
+    from ._channels import ChannelSubscription
     from ._event_groups import EventGroup
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
     from ._nexus import NexusOperationCancellationType, NexusOperationHandle
@@ -498,6 +499,21 @@ class _Runtime(ABC):
         summary: str | None,
         event_groups: Sequence[EventGroup] | None = None,
     ) -> NexusOperationHandle[OutputT]: ...
+
+    @abstractmethod
+    def workflow_subscribe_channel(self, channel: str) -> ChannelSubscription: ...
+
+    @abstractmethod
+    def workflow_unsubscribe_channel(self, channel: str) -> None:
+        """Record the unsubscribe command for ``channel`` and forget its handle.
+
+        Called once per subscription, by the handle that owns it, so a late
+        notification for the channel finds no handle and is dropped.
+        """
+        ...
+
+    @abstractmethod
+    def workflow_linked_channel(self, channel: str) -> ChannelSubscription: ...
 
     @abstractmethod
     def workflow_time_ns(self) -> int: ...
