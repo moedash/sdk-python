@@ -704,9 +704,6 @@ async def test_a_finalization_that_cannot_be_answered_writes_no_marker(
             "no marker committed the first record, so there is no previous "
             "marker for the retry to replay from",
         )
-        before = markers(await history(handle))
-        committed_before = committed_boundary(before[-1], wait_id=1)
-        marker_before = marker_bytes(before[-1])
 
         # Fed from here, and each record is *followed* to the Workflow rather
         # than merely published on a schedule. The precondition this case needs
@@ -760,6 +757,13 @@ async def test_a_finalization_that_cannot_be_answered_writes_no_marker(
             "task is retained for RETENTION_IDLE_TIMEOUT, which every step "
             "since the last delivery is expected to fit inside"
         )
+
+        # Read here rather than at the first marker: every Workflow Task that
+        # closes between the two commits its own marker, and the claim this
+        # case makes is about the one task that is open right now.
+        before = markers(await history(handle))
+        committed_before = committed_boundary(before[-1], wait_id=1)
+        marker_before = marker_bytes(before[-1])
 
         # The Run's entry disappears underneath the finalization, exactly once.
         original = workflow_worker_impl._handle_external_stream_jobs
