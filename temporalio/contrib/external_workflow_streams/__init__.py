@@ -100,6 +100,7 @@ from temporalio.contrib.external_workflow_streams._record import (
     Offset,
     OffsetComparator,
     RecordKind,
+    StartAtTail,
     StreamRecord,
 )
 from temporalio.contrib.external_workflow_streams._wake import WakeRequest
@@ -128,6 +129,7 @@ __all__ = [
     "ExternalStreamProducerTopic",
     "ExternalStreamSubscription",
     "ExternalStreamTopic",
+    "StartAtTail",
     "IdempotencyKey",
     "Offset",
     "OffsetComparator",

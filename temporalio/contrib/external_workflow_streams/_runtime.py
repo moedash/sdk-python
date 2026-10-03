@@ -88,6 +88,7 @@ from temporalio.contrib.external_workflow_streams._record import (
     BEGINNING,
     Cursor,
     RecordKind,
+    StartAtTail,
     StreamRecord,
 )
 from temporalio.contrib.external_workflow_streams._replay import ReplayPlan
@@ -200,6 +201,14 @@ class _SubscriptionState:
     generation: int = 0
     """Increments each time this wait re-enters the blocked state."""
 
+    start_pending: bool = False
+    """The start is a tail the Worker has yet to resolve against the store.
+
+    Until it does, the cursors hold ``BEGINNING`` as a placeholder, no watcher
+    runs, and the binding stays out of every header and bindings frame, so the
+    marker never records the placeholder as where this wait began.
+    """
+
     announced: bool = False
     """Whether the *current* annotation has carried this subscription's binding.
 
@@ -291,6 +300,9 @@ class WorkflowStreamRuntime:
         #: would give replay whatever the stream holds now (ADR-022).
         self._continuation = continuation
         self._subscriptions: dict[int, _SubscriptionState] = {}
+        #: Tail starts registered in the activation under way, resolved by the
+        #: Worker once it returns. See :meth:`resolve_pending_starts`.
+        self._pending_starts: dict[int, StartAtTail] = {}
         #: Where the *current* annotation begins, per wait. Captured when the
         #: annotation begins rather than when its header is first needed --
         #: lazily reading the delivery cursor would let a record delivered
@@ -604,7 +616,7 @@ class WorkflowStreamRuntime:
         late = {
             wait_id: self._binding(state)
             for wait_id, state in sorted(self._subscriptions.items())
-            if not state.announced
+            if not state.announced and not state.start_pending
         }
         if late and self._accumulator is not None:
             # Only with an accumulator: without one the header is about to carry
@@ -1134,13 +1146,16 @@ class WorkflowStreamRuntime:
         stream_key: StreamKey,
         idle_timeout: timedelta | None = None,
         start_cursor: Cursor | None = None,
+        start_at_tail: StartAtTail | None = None,
     ) -> None:
         """Registers a wait with the Worker's manager. Non-blocking, no I/O.
 
         The start cursor defaults to what the predecessor Run committed for this
         ``wait_id``, so a chain resumes where it left off without the Workflow
         code saying anything about it -- and a first execution gets ``BEGINNING``
-        from the same path.
+        from the same path. A ``start_at_tail`` is resolved by the Worker after
+        this activation and recorded with the subscription; on replay the
+        recorded boundary is taken from the marker and the store is not asked.
 
         Raises:
             ExternalStreamCapacityError: This subscription set cannot be recorded
@@ -1161,7 +1176,20 @@ class WorkflowStreamRuntime:
                 "external streams are not configured on this Worker; pass "
                 "external_stream_backend=... to the Worker"
             )
-        if start_cursor is None:
+        if start_at_tail is not None and start_cursor is not None:
+            raise ValueError(
+                "a subscription starts at a cursor or at the tail, not at both"
+            )
+        pending = False
+        if start_at_tail is not None:
+            recorded = (self._replay_bindings or {}).get(wait_id)
+            if recorded is not None:
+                # The live run resolved it and the marker carries the answer.
+                start_cursor = recorded.start_cursor
+            else:
+                pending = True
+                start_cursor = BEGINNING
+        elif start_cursor is None:
             start_cursor = self.restored_start(wait_id, stream_key.stream_name)
         if self._replay_bindings is not None:
             # A subscription made while a marker is being replayed -- which is
@@ -1179,6 +1207,7 @@ class WorkflowStreamRuntime:
             delivery_cursor=start_cursor,
             consumption_cursor=start_cursor,
             idle_timeout=idle_timeout or self._default_idle_timeout,
+            start_pending=pending,
         )
         self._subscriptions[wait_id] = state
         # A subscription created part-way through an annotation begins at its
@@ -1194,15 +1223,56 @@ class WorkflowStreamRuntime:
             del self._annotation_start[wait_id]
             raise
         self._update_reserve()
-        self._manager.register(
-            run_id=self._run_id,
-            wait_id=wait_id,
-            stream_key=stream_key,
-            start_cursor=start_cursor,
-        )
+        if pending:
+            assert start_at_tail is not None
+            self._pending_starts[wait_id] = start_at_tail
+        else:
+            self._manager.register(
+                run_id=self._run_id,
+                wait_id=wait_id,
+                stream_key=stream_key,
+                start_cursor=start_cursor,
+            )
         # A registration alone is replay-visible: it is what puts the stream in
         # the annotation header, without which replay cannot start.
         self._observed_this_activation = True
+
+    async def resolve_pending_starts(self) -> None:
+        """Resolves every tail start the activation just finished registered.
+
+        On the Worker's loop, between the activation and its completion. The
+        Workflow thread can do no I/O, and the boundary has to be fixed before
+        anything is delivered on the wait, so the marker records it beside the
+        subscription and replay reads it there instead of asking the store,
+        which by then holds something else.
+        """
+        if not self._pending_starts:
+            return
+        backend = self._backend
+        if backend is None:
+            raise RuntimeError(
+                "external streams are not configured on this Worker; pass "
+                "external_stream_backend=... to the Worker"
+            )
+        pending, self._pending_starts = self._pending_starts, {}
+        for wait_id, tail in pending.items():
+            state = self._subscriptions.get(wait_id)
+            if state is None or not state.start_pending:
+                continue
+            cursor = await backend.tail_cursor(state.stream_key, before_last=tail.last)
+            state.start_cursor = cursor
+            state.delivery_cursor = cursor
+            state.consumption_cursor = cursor
+            state.start_pending = False
+            self._annotation_start[wait_id] = cursor
+            self._check_annotation_capacity(wait_id)
+            self._update_reserve()
+            self._manager.register(
+                run_id=self._run_id,
+                wait_id=wait_id,
+                stream_key=state.stream_key,
+                start_cursor=cursor,
+            )
 
     def drain(self, wait_id: int, max_records: int | None = None) -> list[StreamRecord]:
         """Pops buffered records. Performs no I/O and never blocks.
@@ -2026,7 +2096,7 @@ class WorkflowStreamRuntime:
         late = {
             wait_id: state
             for wait_id, state in sorted(self._subscriptions.items())
-            if not state.announced
+            if not state.announced and not state.start_pending
         }
         if not late:
             return
@@ -2053,11 +2123,13 @@ class WorkflowStreamRuntime:
         wrong store for all the others.
         """
         for state in self._subscriptions.values():
-            state.announced = True
+            if not state.start_pending:
+                state.announced = True
         return AnnotationHeader(
             streams={
                 wait_id: self._binding(state)
                 for wait_id, state in sorted(self._subscriptions.items())
+                if not state.start_pending
             },
         )
 
@@ -2072,6 +2144,7 @@ class WorkflowStreamRuntime:
             streams={
                 wait_id: self._binding(state)
                 for wait_id, state in sorted(self._subscriptions.items())
+                if not state.start_pending
             },
         )
 
