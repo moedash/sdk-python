@@ -18,6 +18,7 @@ from typing import (
     Generic,
     TypeAlias,
     TypeVar,
+    cast,
     get_origin,
     get_type_hints,
     overload,
@@ -106,6 +107,63 @@ class RetryPolicy:
                 )
         if self.maximum_attempts < 0:
             raise ValueError("Maximum attempts cannot be negative")
+
+
+class ExecutionType(IntEnum):
+    """What kind of execution an :class:`Execution` names.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    UNSPECIFIED = int(temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_UNSPECIFIED)
+    WORKFLOW = int(temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW)
+    ACTIVITY = int(temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_ACTIVITY)
+    """A standalone activity, one started by a client rather than a workflow."""
+
+
+@dataclass(frozen=True)
+class Execution:
+    """One execution in a namespace: a workflow or a standalone activity.
+
+    ``business_id`` is the id the caller chose, the workflow id or the
+    activity id. ``run_id`` pins one run of it. Unset, a call reaches the
+    current run of a workflow chain, as a Signal does.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    type: ExecutionType
+    business_id: str
+    run_id: str | None = None
+
+    @classmethod
+    def workflow(cls, workflow_id: str, run_id: str | None = None) -> Execution:
+        """A workflow execution."""
+        return cls(ExecutionType.WORKFLOW, workflow_id, run_id)
+
+    @classmethod
+    def activity(cls, activity_id: str, run_id: str | None = None) -> Execution:
+        """A standalone activity execution."""
+        return cls(ExecutionType.ACTIVITY, activity_id, run_id)
+
+    def to_proto(self) -> temporalio.api.common.v1.Execution:
+        """This execution as the API names it."""
+        return temporalio.api.common.v1.Execution(
+            type=cast(
+                "temporalio.api.enums.v1.ExecutionType.ValueType", int(self.type)
+            ),
+            business_id=self.business_id,
+            run_id=self.run_id or "",
+        )
+
+    @staticmethod
+    def from_proto(proto: temporalio.api.common.v1.Execution) -> Execution:
+        """From the API's form. An empty run id reads as unset."""
+        return Execution(
+            ExecutionType(proto.type), proto.business_id, proto.run_id or None
+        )
 
 
 class WorkflowIDReusePolicy(IntEnum):
