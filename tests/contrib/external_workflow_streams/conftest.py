@@ -12,6 +12,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -60,6 +61,50 @@ def pytest_collection_modifyitems(
     for item in items:
         if any(item.get_closest_marker(marker) for marker in _CHANNEL_SERVER_MARKERS):
             item.add_marker(skip)
+
+
+#: The channel the probe describes. Nobody writes to it.
+_PROBE_CHANNEL = "external-stream/probe"
+
+
+async def server_channel_support(client: Any) -> Any:
+    """Which channel kinds the server serves, asked through the client's own calls.
+
+    ``None`` when it serves no channels, otherwise :attr:`ChannelKind.LINKED`
+    or :attr:`ChannelKind.INDEPENDENT`. The linked kind shows only on a running
+    workflow, so one is started on a task queue nobody polls and asked about.
+    """
+    from temporalio.client import ChannelKind
+    from temporalio.service import RPCError, RPCStatusCode
+
+    try:
+        await client.describe_channel(_PROBE_CHANNEL)
+    except RPCError as err:
+        if err.status == RPCStatusCode.UNIMPLEMENTED:
+            return None
+        if err.status != RPCStatusCode.NOT_FOUND:
+            raise
+    probe = uuid.uuid4().hex
+    handle = await client.start_workflow(
+        "ChannelSupportProbe",
+        id=f"channel-support-probe-{probe}",
+        task_queue=f"nobody-polls-{probe}",
+    )
+    try:
+        description = await client.describe_channel(
+            _PROBE_CHANNEL, workflow_id=handle.id
+        )
+    except RPCError as err:
+        # A server with only independent channels ignores the owner and has
+        # never seen the name.
+        if err.status == RPCStatusCode.NOT_FOUND:
+            return ChannelKind.INDEPENDENT
+        raise
+    finally:
+        await handle.terminate()
+    if description.kind is ChannelKind.LINKED:
+        return ChannelKind.LINKED
+    return ChannelKind.INDEPENDENT
 
 
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379"
