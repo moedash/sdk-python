@@ -37,6 +37,11 @@ to include examples, links to docs, or any other relevant information.
   worker-side factories registered with `StrandsPlugin(sandboxes=...)`.
 
 - Added the `temporalio.contrib.gcp.cloud_run.id` module with the `CloudRunIdPlugin` client plugin to set the worker identity on Cloud Run.
+- **Experimental**: notification channels. Requires a server that serves notification channels.
+  - `Client.notify_channel`, `poll_channel`, `describe_channel`, `register_channel_listener` and
+    `unregister_channel_listener` reach a named channel on the server. The channel is either
+    independent or linked to an execution, which `execution=` (`temporalio.common.Execution`) or
+    the `workflow_id=` shorthand names.
 
 ### Changed
 
