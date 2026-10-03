@@ -3051,9 +3051,7 @@ class Client:
                 metadata=metadata,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                execution=execution,
+                execution=_channel_execution(execution, workflow_id, run_id),
             )
         )
 
@@ -3112,9 +3110,7 @@ class Client:
                 max_notifications=max_notifications,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                execution=execution,
+                execution=_channel_execution(execution, workflow_id, run_id),
             )
         )
 
@@ -3154,9 +3150,7 @@ class Client:
                 channel=channel,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                execution=execution,
+                execution=_channel_execution(execution, workflow_id, run_id),
             )
         )
 
@@ -3203,9 +3197,7 @@ class Client:
                 callback=callback,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                execution=execution,
+                execution=_channel_execution(execution, workflow_id, run_id),
             )
         )
 
@@ -3244,9 +3236,7 @@ class Client:
                 listener_id=listener_id,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                execution=execution,
+                execution=_channel_execution(execution, workflow_id, run_id),
             )
         )
 
@@ -3442,3 +3432,24 @@ class ClientConfig(TypedDict, total=False):
     ]
     header_codec_behavior: Required[HeaderCodecBehavior]
     stream_provider: temporalio.streams.StreamProvider | None
+
+
+def _channel_execution(
+    execution: temporalio.common.Execution | None,
+    workflow_id: str | None,
+    run_id: str | None,
+) -> temporalio.common.Execution | None:
+    """The owner a channel call names, by ``execution`` or by the workflow id shorthand.
+
+    The two spellings do not combine, and a run id needs its workflow id.
+    ``None`` names the independent channel.
+    """
+    if execution is not None:
+        if workflow_id is not None or run_id is not None:
+            raise ValueError("pass execution or workflow_id, not both")
+        return execution
+    if workflow_id is None:
+        if run_id is not None:
+            raise ValueError("run_id needs workflow_id")
+        return None
+    return temporalio.common.Execution.workflow(workflow_id, run_id)
