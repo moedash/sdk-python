@@ -20,7 +20,6 @@ import pytest
 import pytest_asyncio
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.contrib.external_workflow_streams._annotation import decode_annotation
@@ -215,7 +214,10 @@ def test_with_options_timeouts_reach_the_reduction_through_the_public_api(
         """Stands in for the Workflow object the per-Run state hangs off."""
 
     instance = Instance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: instance,
+    )
     runtime = make_runtime(manager, backend, idle=timedelta(seconds=1))
     _install_runtime(instance, runtime)  # type: ignore[arg-type]
 
@@ -518,7 +520,10 @@ class FakeInstance:
 @pytest.fixture
 def fake_runtime(monkeypatch: pytest.MonkeyPatch) -> FakeRuntime:
     instance = FakeInstance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: instance,
+    )
     runtime = FakeRuntime()
     _install_runtime(instance, runtime)  # type: ignore[arg-type]
     return runtime
@@ -802,7 +807,10 @@ def public_api_runtime(
         pass
 
     instance = Instance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: instance,
+    )
     runtime = make_runtime(manager, backend)
     _install_runtime(instance, runtime)  # type: ignore[arg-type]
     return runtime
