@@ -12,6 +12,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -19,6 +20,77 @@ import pytest_asyncio
 #: Asking for either of these is what gives a case a running server. A case
 #: that asks for neither never observes a clock, so no environment can fail it.
 _SERVER_FIXTURES = frozenset({"client", "env"})
+
+#: The environments whose server the suite starts for itself. None of them
+#: accepts the subscribe-notification-channel command.
+_ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "needs_channel_server: the case needs a server that serves notification "
+        "channels, named with -E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_linked_server: the case needs a server that serves channels linked "
+        "to a workflow, named with -E host:port; the case skips itself on one "
+        "with only independent channels",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_unsubscribe_server: the case needs a server that accepts the "
+        "unsubscribe-notification-channel command, named with -E host:port; an "
+        "older channel server fails the Workflow Task that carries it",
+    )
+
+
+#: The markers naming a server capability the suite's own servers lack.
+_CHANNEL_SERVER_MARKERS = (
+    "needs_channel_server",
+    "needs_linked_server",
+    "needs_unsubscribe_server",
+)
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--workflow-environment") not in _ENVIRONMENTS_WITHOUT_CHANNELS:
+        return
+    skip = pytest.mark.skip(
+        reason="needs a server that serves notification channels; name one with -E"
+    )
+    for item in items:
+        if any(item.get_closest_marker(marker) for marker in _CHANNEL_SERVER_MARKERS):
+            item.add_marker(skip)
+
+
+async def server_channel_support(client: Any) -> Any:
+    """What the server offers a stream's readers, as the Worker would find it.
+
+    The linked kind shows only on a running workflow, so one is started on a
+    task queue nobody polls and asked about; the probe is the Worker's own.
+    """
+    from temporalio.contrib.external_workflow_streams._wake import (
+        ChannelSupport,
+        channel_support,
+        server_has_channels,
+    )
+
+    if not await server_has_channels(client):
+        return ChannelSupport.NONE
+    probe = uuid.uuid4().hex
+    handle = await client.start_workflow(
+        "ChannelSupportProbe",
+        id=f"channel-support-probe-{probe}",
+        task_queue=f"nobody-polls-{probe}",
+    )
+    try:
+        return await channel_support(client, handle.id)
+    finally:
+        await handle.terminate()
 
 
 @pytest.fixture(autouse=True)
