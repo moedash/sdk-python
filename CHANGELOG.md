@@ -52,7 +52,12 @@ to include examples, links to docs, or any other relevant information.
   `close()` seals it. A provider runs record bodies through the client's data
   converter, so a payload codec and external storage apply to them.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
-  reference provider the conformance tests run against.
+  reference provider the conformance tests run against, and
+  `temporalio.streams.providers.redis.RedisStreams` serves the same interface
+  over External Workflow Streams, with one Redis log per topic that the workflow
+  and outside readers share.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
 
 - Added experimental External Workflow Streams in
   `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
