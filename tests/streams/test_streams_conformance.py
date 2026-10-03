@@ -77,6 +77,7 @@ from temporalio.streams import (
 from temporalio.streams._ref import open_ref
 from temporalio.streams.providers import workflow_streams
 from temporalio.streams.providers.memory import MemoryStreams
+from temporalio.streams.providers.redis import RedisStreams
 from temporalio.streams.providers.workflow_streams import WorkflowStreamsProvider
 from temporalio.testing import WorkflowEnvironment
 from tests.contrib.external_workflow_streams.conftest import server_channel_support
@@ -270,6 +271,22 @@ async def _memory_case(_client: Client) -> AsyncIterator[ProviderCase]:
 
 
 @workflow.defn
+class StreamHost:
+    """Owns a stream and lingers, so outside code has a running workflow to address."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._released)
+
+
+@workflow.defn
 class TruncatingStreamHost:
     """A stream host whose log an update can truncate, the way a workflow's retention would."""
 
@@ -352,10 +369,61 @@ async def _workflow_streams_case(client: Client) -> AsyncIterator[ProviderCase]:
             await handle.terminate()
 
 
+async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
+    # The store is a Redis the test environment does not start; the server
+    # is the environment's own unless TEMPORAL_ADDRESS names another.
+    address = os.environ.get("TEMPORAL_ADDRESS")
+    if address:
+        client = await Client.connect(
+            address, namespace=os.environ.get("TEMPORAL_NAMESPACE", "default")
+        )
+    provider = RedisStreams(
+        url=os.environ.get("TEMPORAL_TEST_REDIS_URL")
+        or os.environ.get("AI198_REDIS_URL", "redis://127.0.0.1:6379"),
+        # A prefix per setup, because the store keeps what earlier runs wrote.
+        key_prefix=f"streams-conformance-{uuid.uuid4().hex}",
+    )
+    # Registered once, on the client: the host's worker inherits it and the
+    # cases open handles through client.get_stream_handle.
+    config = client.config()
+    config["plugins"] = [provider]
+    client = Client(**config)
+    hosts: dict[str, WorkflowHandle[Any, Any]] = {}
+    async with new_worker(client, StreamHost, DefaultTopicAnswer) as worker:
+
+        async def host(workflow_id: str) -> None:
+            if workflow_id not in hosts:
+                hosts[workflow_id] = await client.start_workflow(
+                    StreamHost.run, id=workflow_id, task_queue=worker.task_queue
+                )
+
+        yield ProviderCase(
+            "redis",
+            provider,
+            client,
+            host=host,
+            task_queue=worker.task_queue,
+            # Every stream this provider keeps belongs to a workflow.
+            hosts_standalone_streams=False,
+            # An outside append notifies the stream's channel, addressed to
+            # the workflow that owns the stream; the reader's run is
+            # subscribed to it when the task that opened the read ends where
+            # the server has no linked kind, and listens by construction
+            # where it has.
+            wakes_by_notification=True,
+            wakes_by_linked_notification=True,
+        )
+        for handle in hosts.values():
+            await handle.terminate()
+    await provider.close()
+
+
 SETUPS: dict[str, Callable[[Client], AsyncIterator[ProviderCase]]] = {
     "memory": _memory_case,
     "workflow_streams": _workflow_streams_case,
 }
+if os.environ.get("STREAMS_LIVE") == "redis":
+    SETUPS["redis"] = _redis_case
 
 _CAPABILITIES = {
     "reports_positions": lambda case: case.reports_positions,
