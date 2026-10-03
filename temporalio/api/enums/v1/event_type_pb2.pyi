@@ -216,6 +216,15 @@ class _EventTypeEnumTypeWrapper(
     """An event that indicates that the previously paused workflow execution has been unpaused."""
     EVENT_TYPE_WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED: _EventType.ValueType  # 60
     """An event that indicates time skipping advanced time or was disabled automatically after a bound was reached."""
+    EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED: _EventType.ValueType  # 61
+    """A Workflow became a listener of a notification channel for its run.
+    The notifications themselves ride the WorkflowTaskScheduled event.
+    """
+    EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED: _EventType.ValueType  # 62
+    """A Workflow stopped listening on a notification channel for its run.
+    Recorded for every UnsubscribeNotificationChannel command, including one
+    naming a channel the run was not subscribed to.
+    """
 
 class EventType(_EventType, metaclass=_EventTypeEnumTypeWrapper):
     """Whenever this list of events is changed do change the function shouldBufferEvent in mutableStateBuilder.go to make sure to do the correct event ordering"""
@@ -408,4 +417,13 @@ EVENT_TYPE_WORKFLOW_EXECUTION_UNPAUSED: EventType.ValueType  # 59
 """An event that indicates that the previously paused workflow execution has been unpaused."""
 EVENT_TYPE_WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED: EventType.ValueType  # 60
 """An event that indicates time skipping advanced time or was disabled automatically after a bound was reached."""
+EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED: EventType.ValueType  # 61
+"""A Workflow became a listener of a notification channel for its run.
+The notifications themselves ride the WorkflowTaskScheduled event.
+"""
+EVENT_TYPE_WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED: EventType.ValueType  # 62
+"""A Workflow stopped listening on a notification channel for its run.
+Recorded for every UnsubscribeNotificationChannel command, including one
+naming a channel the run was not subscribed to.
+"""
 global___EventType = EventType

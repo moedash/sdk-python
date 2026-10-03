@@ -191,6 +191,15 @@ impl ClientRef {
                         describe_batch_operation
                     )
                 }
+                "describe_channel" => {
+                    rpc_call!(
+                        connection,
+                        call,
+                        WorkflowService,
+                        workflow_service,
+                        describe_channel
+                    )
+                }
                 "describe_deployment" => {
                     rpc_call!(
                         connection,
@@ -524,6 +533,15 @@ impl ClientRef {
                         list_workflow_rules
                     )
                 }
+                "notify_channel" => {
+                    rpc_call!(
+                        connection,
+                        call,
+                        WorkflowService,
+                        workflow_service,
+                        notify_channel
+                    )
+                }
                 "patch_schedule" => {
                     rpc_call!(
                         connection,
@@ -576,6 +594,15 @@ impl ClientRef {
                         WorkflowService,
                         workflow_service,
                         poll_activity_task_queue
+                    )
+                }
+                "poll_channel" => {
+                    rpc_call!(
+                        connection,
+                        call,
+                        WorkflowService,
+                        workflow_service,
+                        poll_channel
                     )
                 }
                 "poll_nexus_operation_execution" => {
@@ -657,6 +684,15 @@ impl ClientRef {
                         WorkflowService,
                         workflow_service,
                         record_worker_heartbeat
+                    )
+                }
+                "register_channel_listener" => {
+                    rpc_call!(
+                        connection,
+                        call,
+                        WorkflowService,
+                        workflow_service,
+                        register_channel_listener
                     )
                 }
                 "register_namespace" => {
@@ -1008,6 +1044,15 @@ impl ClientRef {
                         WorkflowService,
                         workflow_service,
                         unpause_workflow_execution
+                    )
+                }
+                "unregister_channel_listener" => {
+                    rpc_call!(
+                        connection,
+                        call,
+                        WorkflowService,
+                        workflow_service,
+                        unregister_channel_listener
                     )
                 }
                 "update_activity_execution_options" => {
