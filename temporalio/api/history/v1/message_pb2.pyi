@@ -20,6 +20,7 @@ import temporalio.api.enums.v1.failed_cause_pb2
 import temporalio.api.enums.v1.update_pb2
 import temporalio.api.enums.v1.workflow_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
 import temporalio.api.sdk.v1.event_group_marker_pb2
 import temporalio.api.sdk.v1.task_complete_metadata_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
@@ -852,6 +853,7 @@ class WorkflowTaskScheduledEventAttributes(google.protobuf.message.Message):
     TASK_QUEUE_FIELD_NUMBER: builtins.int
     START_TO_CLOSE_TIMEOUT_FIELD_NUMBER: builtins.int
     ATTEMPT_FIELD_NUMBER: builtins.int
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
     @property
     def task_queue(self) -> temporalio.api.taskqueue.v1.message_pb2.TaskQueue:
         """The task queue this workflow task was enqueued in, which could be a normal or sticky queue"""
@@ -864,12 +866,26 @@ class WorkflowTaskScheduledEventAttributes(google.protobuf.message.Message):
         """
     attempt: builtins.int
     """Starting at 1, how many attempts there have been to complete this task"""
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]:
+        """Notifications for channels this Workflow listens to, folded per channel
+        since the last task was scheduled. In History so a Workflow may act on
+        them deterministically and replay sees the same.
+        """
     def __init__(
         self,
         *,
         task_queue: temporalio.api.taskqueue.v1.message_pb2.TaskQueue | None = ...,
         start_to_close_timeout: google.protobuf.duration_pb2.Duration | None = ...,
         attempt: builtins.int = ...,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -885,6 +901,8 @@ class WorkflowTaskScheduledEventAttributes(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "attempt",
             b"attempt",
+            "notifications",
+            b"notifications",
             "start_to_close_timeout",
             b"start_to_close_timeout",
             "task_queue",
@@ -3603,6 +3621,81 @@ global___ActivityPropertiesModifiedExternallyEventAttributes = (
     ActivityPropertiesModifiedExternallyEventAttributes
 )
 
+class WorkflowNotificationChannelSubscribedEventAttributes(
+    google.protobuf.message.Message
+):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    workflow_task_completed_event_id: builtins.int
+    """The WorkflowTaskCompleted event of the task whose command created this
+    subscription.
+    """
+    channel: builtins.str
+    """The channel the Workflow listens on for the rest of this run."""
+    def __init__(
+        self,
+        *,
+        workflow_task_completed_event_id: builtins.int = ...,
+        channel: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel",
+            b"channel",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___WorkflowNotificationChannelSubscribedEventAttributes = (
+    WorkflowNotificationChannelSubscribedEventAttributes
+)
+
+class WorkflowNotificationChannelUnsubscribedEventAttributes(
+    google.protobuf.message.Message
+):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    SUBSCRIBED_EVENT_ID_FIELD_NUMBER: builtins.int
+    workflow_task_completed_event_id: builtins.int
+    """The WorkflowTaskCompleted event of the task whose command ended this
+    subscription.
+    """
+    channel: builtins.str
+    """The channel the Workflow stopped listening on."""
+    subscribed_event_id: builtins.int
+    """The WorkflowNotificationChannelSubscribed event that recorded the
+    subscription this command ended. Zero when the run held no subscription
+    for the channel.
+    """
+    def __init__(
+        self,
+        *,
+        workflow_task_completed_event_id: builtins.int = ...,
+        channel: builtins.str = ...,
+        subscribed_event_id: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel",
+            b"channel",
+            "subscribed_event_id",
+            b"subscribed_event_id",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___WorkflowNotificationChannelUnsubscribedEventAttributes = (
+    WorkflowNotificationChannelUnsubscribedEventAttributes
+)
+
 class WorkflowExecutionUpdateAcceptedEventAttributes(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -4460,6 +4553,10 @@ class HistoryEvent(google.protobuf.message.Message):
     WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED_EVENT_ATTRIBUTES_FIELD_NUMBER: (
         builtins.int
     )
+    WORKFLOW_NOTIFICATION_CHANNEL_SUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: builtins.int
+    WORKFLOW_NOTIFICATION_CHANNEL_UNSUBSCRIBED_EVENT_ATTRIBUTES_FIELD_NUMBER: (
+        builtins.int
+    )
     event_id: builtins.int
     """Monotonically increasing event number, starts at 1."""
     @property
@@ -4745,6 +4842,14 @@ class HistoryEvent(google.protobuf.message.Message):
     def workflow_execution_time_skipping_transitioned_event_attributes(
         self,
     ) -> global___WorkflowExecutionTimeSkippingTransitionedEventAttributes: ...
+    @property
+    def workflow_notification_channel_subscribed_event_attributes(
+        self,
+    ) -> global___WorkflowNotificationChannelSubscribedEventAttributes: ...
+    @property
+    def workflow_notification_channel_unsubscribed_event_attributes(
+        self,
+    ) -> global___WorkflowNotificationChannelUnsubscribedEventAttributes: ...
     def __init__(
         self,
         *,
@@ -4882,6 +4987,10 @@ class HistoryEvent(google.protobuf.message.Message):
         | None = ...,
         workflow_execution_time_skipping_transitioned_event_attributes: global___WorkflowExecutionTimeSkippingTransitionedEventAttributes
         | None = ...,
+        workflow_notification_channel_subscribed_event_attributes: global___WorkflowNotificationChannelSubscribedEventAttributes
+        | None = ...,
+        workflow_notification_channel_unsubscribed_event_attributes: global___WorkflowNotificationChannelUnsubscribedEventAttributes
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -5000,6 +5109,10 @@ class HistoryEvent(google.protobuf.message.Message):
             b"workflow_execution_update_completed_event_attributes",
             "workflow_execution_update_rejected_event_attributes",
             b"workflow_execution_update_rejected_event_attributes",
+            "workflow_notification_channel_subscribed_event_attributes",
+            b"workflow_notification_channel_subscribed_event_attributes",
+            "workflow_notification_channel_unsubscribed_event_attributes",
+            b"workflow_notification_channel_unsubscribed_event_attributes",
             "workflow_properties_modified_event_attributes",
             b"workflow_properties_modified_event_attributes",
             "workflow_properties_modified_externally_event_attributes",
@@ -5147,6 +5260,10 @@ class HistoryEvent(google.protobuf.message.Message):
             b"workflow_execution_update_completed_event_attributes",
             "workflow_execution_update_rejected_event_attributes",
             b"workflow_execution_update_rejected_event_attributes",
+            "workflow_notification_channel_subscribed_event_attributes",
+            b"workflow_notification_channel_subscribed_event_attributes",
+            "workflow_notification_channel_unsubscribed_event_attributes",
+            b"workflow_notification_channel_unsubscribed_event_attributes",
             "workflow_properties_modified_event_attributes",
             b"workflow_properties_modified_event_attributes",
             "workflow_properties_modified_externally_event_attributes",
@@ -5227,6 +5344,8 @@ class HistoryEvent(google.protobuf.message.Message):
             "workflow_execution_paused_event_attributes",
             "workflow_execution_unpaused_event_attributes",
             "workflow_execution_time_skipping_transitioned_event_attributes",
+            "workflow_notification_channel_subscribed_event_attributes",
+            "workflow_notification_channel_unsubscribed_event_attributes",
         ]
         | None
     ): ...

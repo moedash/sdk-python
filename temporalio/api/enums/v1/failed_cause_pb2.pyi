@@ -188,6 +188,16 @@ class _WorkflowTaskFailedCauseEnumTypeWrapper(
         _WorkflowTaskFailedCause.ValueType
     )  # 40
     """A workflow task failed because the request exceeded a size limit."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 41
+    """A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
+    subscription or listener limit.
+    """
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 42
+    """An UnsubscribeNotificationChannel command named an empty or too-long channel."""
 
 class WorkflowTaskFailedCause(
     _WorkflowTaskFailedCause, metaclass=_WorkflowTaskFailedCauseEnumTypeWrapper
@@ -346,6 +356,16 @@ WORKFLOW_TASK_FAILED_CAUSE_WORKFLOW_PAUSE_REQUESTED_BEFORE_TASK_STARTED: (
 """A workflow task is failed because the workflow is paused before the task is started."""
 WORKFLOW_TASK_FAILED_CAUSE_REQUEST_TOO_LARGE: WorkflowTaskFailedCause.ValueType  # 40
 """A workflow task failed because the request exceeded a size limit."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 41
+"""A SubscribeNotificationChannel command named an empty or too-long channel, or hit a
+subscription or listener limit.
+"""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 42
+"""An UnsubscribeNotificationChannel command named an empty or too-long channel."""
 global___WorkflowTaskFailedCause = WorkflowTaskFailedCause
 
 class _StartChildWorkflowExecutionFailedCause:
