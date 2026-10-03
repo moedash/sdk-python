@@ -54,19 +54,40 @@ The mapping, in one place:
 - A workflow's streams are keyed by the chain's first run, so a handle
   follows continue-as-new by construction and ``run_id`` only decides whose
   close ends a read.
+- An activity's own streams are one Redis stream per topic, keyed by the
+  namespace, the workflow id, empty for a standalone activity, the run the
+  activity execution belongs to, and the activity id. The run is the
+  workflow's for a workflow's activity and the activity's own for a
+  standalone one, so a retry writes to the same stream, which a reader sees
+  as ``SUPERSEDED``, and an id started again, in a new run, starts a new
+  one, as it does on the server-side provider. Inside the activity the run
+  is in its info; a handle opened outside without one describes the owner
+  and takes its current run. The owner is one key component joined with
+  ``/``, a character the chain keys percent-encode out of every id, so no
+  chain key and no key derived from one can name an activity's stream.
+  There is no input stream, because no workflow reads these, and no
+  staging, because an activity's append is visible as soon as the store
+  accepts it. A read ends when the owner is terminal and the retained tail
+  is delivered: a standalone activity is described directly, and a
+  workflow's activity through its workflow, whose close ends the read, as
+  does the activity leaving the pending set once its stream exists. An
+  activity that never wrote has no stream, so a read on it waits for the
+  workflow. Nothing gates an append after that, so a late attempt still
+  lands, and a read that has ended does not see it.
 - A task's publishes are staged as one batch. The transport's own per-task
   batch limits are lifted for this provider, because a synchronous publish
   cannot wait for the worker to stage a full batch; a batch it cannot stage
   fails the task.
 - Retention is trimming, with no consumer floor. By default a record older
   than :data:`DEFAULT_RETENTION`, seven days, is trimmed by the next append
-  the provider makes to its key, whatever any reader has reached;
-  ``retention=None`` turns the age trim off, and ``max_len`` adds a count cap
-  that is off by default. A replay that reaches a recorded range the trim
-  removed fails its Workflow Task, an outside cursor below the trim is
-  refused, and a fully trimmed topic reads as empty. A run that has to replay
-  cold after seven days of consuming fails, so a long-lived consumer
-  continues as new inside the window, or is configured with a longer one.
+  the provider makes to its key, an activity's stream included, whatever any
+  reader has reached; ``retention=None`` turns the age trim off, and
+  ``max_len`` adds a count cap that is off by default. A replay that reaches
+  a recorded range the trim removed fails its Workflow Task, an outside
+  cursor below the trim is refused, and a fully trimmed topic reads as
+  empty. A run that has to replay cold after seven days of consuming fails,
+  so a long-lived consumer continues as new inside the window, or is
+  configured with a longer one.
 
 - Every record carries the SHA-256 of its converted body under
   ``temporal.io/content-hash``, stamped before the payload codec runs, and the
@@ -96,15 +117,16 @@ import logging
 import re
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Final, Generic, TypeVar, get_args
+from urllib.parse import quote
 
 from google.protobuf.message import DecodeError
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import ActivityExecutionStatus, Client, WorkflowExecutionStatus
 from temporalio.contrib.external_workflow_streams import (
     AFTER,
     AppendConflictError,
@@ -161,6 +183,8 @@ from temporalio.contrib.external_workflow_streams._redis import (
 )
 from temporalio.contrib.external_workflow_streams._wake import WakeTransport
 from temporalio.converter import (
+    ActivitySerializationContext,
+    SerializationContext,
     WorkflowSerializationContext,
 )
 from temporalio.service import RPCError, RPCStatusCode
@@ -412,7 +436,7 @@ return {'ok', id}
 
 
 class _LogAppend:
-    """One record on a topic's log, in one Redis call."""
+    """One record on one log, a topic's or an activity's, in one Redis call."""
 
     def __init__(self, backend: RedisStreamBackend) -> None:
         """Bind to ``backend``'s client."""
@@ -434,6 +458,97 @@ class _LogAppend:
         return Offset(_text(placed))
 
 
+def _prefix(backend: Any) -> str:
+    """The key prefix ``backend`` writes under, for keys the provider derives itself."""
+    return backend._key_prefix
+
+
+@dataclass(frozen=True)
+class _ActivityOwner:
+    """The activity whose streams a handle addresses, and where Redis keeps them.
+
+    ``workflow_id`` is ``None`` for a standalone activity. ``run_id`` is the
+    workflow's run for a workflow's activity and the activity's own run for a
+    standalone one. It is part of the key, so an activity execution's streams
+    are its own and an id started again in a new run starts new ones, and it
+    decides whose close ends a read. ``None`` means the run is not known yet:
+    a handle opened outside without one asks the server for the current run
+    before it touches a key.
+    """
+
+    namespace: str
+    workflow_id: str | None
+    activity_id: str
+    run_id: str | None
+
+    def key(self, key_prefix: str, topic: str) -> str:
+        """The Redis stream holding ``topic`` of this activity's streams."""
+        if self.run_id is None:
+            raise RuntimeError(f"the run of {self} was not resolved before its key")
+        # The chain keys percent-encode every id, so none of their components
+        # holds a "/", and a component built around one can never equal a
+        # chain key or a key derived from one.
+        namespace = quote(self.namespace, safe="")
+        owner = f"activity/{quote(self.workflow_id or '', safe='')}/"
+        owner += f"{quote(self.run_id, safe='')}/{quote(self.activity_id, safe='')}"
+        return f"{key_prefix}:{namespace}:{owner}:{quote(topic, safe='')}"
+
+    def context(self) -> SerializationContext:
+        """What the owner's payloads are coded under.
+
+        A workflow's activity writes the workflow's data, as it does on the
+        workflow's own topics; a standalone activity has no workflow, so its
+        own identity is the context.
+        """
+        if self.workflow_id is not None:
+            return WorkflowSerializationContext(
+                namespace=self.namespace, workflow_id=self.workflow_id
+            )
+        return ActivitySerializationContext(
+            namespace=self.namespace,
+            activity_id=self.activity_id,
+            activity_type=None,
+            activity_task_queue=None,
+            workflow_id=None,
+            workflow_type=None,
+            is_local=False,
+        )
+
+    def __str__(self) -> str:
+        """The owner, for messages."""
+        if self.workflow_id is None:
+            return f"activity {self.activity_id!r}"
+        return f"activity {self.activity_id!r} of workflow {self.workflow_id!r}"
+
+
+async def _resolve_owner(client: Client, owner: _ActivityOwner) -> _ActivityOwner:
+    """``owner`` with its run known, or ``StreamNotFoundError`` when the server does not know it.
+
+    One describe: it says whether the owner exists and, for a handle opened
+    without a run, which run is current. A standalone activity is described
+    itself; a workflow's activity is described through its workflow, because
+    the server does not describe it on its own.
+    """
+    try:
+        if owner.workflow_id is None:
+            described = await client.get_activity_handle(
+                owner.activity_id, run_id=owner.run_id
+            ).describe()
+            run_id = owner.run_id or described.activity_run_id
+        else:
+            description = await client.get_workflow_handle(
+                owner.workflow_id, run_id=owner.run_id
+            ).describe()
+            run_id = owner.run_id or description.run_id
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            raise StreamNotFoundError(f"{owner} was not found") from error
+        raise
+    if not run_id:
+        raise StreamNotFoundError(f"the server reports no run for {owner}")
+    return replace(owner, run_id=run_id)
+
+
 async def _retained(client: Any, name: str, offset: Offset) -> bool:
     """Whether the record at ``offset`` on the stream ``name`` survived trimming.
 
@@ -449,6 +564,14 @@ async def _retained(client: Any, name: str, offset: Offset) -> bool:
     if first:
         return _entry_id(first[0]) <= wanted
     return wanted > _entry_id(info["last-generated-id"])
+
+
+async def _newest(store: Any, name: str) -> Cursor:
+    """The cursor of the newest entry of the log ``name``, or ``BEGINNING``."""
+    newest: Any = await store.xrevrange(name, "+", "-", count=1)
+    if not newest:
+        return BEGINNING
+    return mint_cursor(_PROVIDER, _text(newest[0][0]))
 
 
 def _is_staged(fields: Any) -> bool:
@@ -877,11 +1000,13 @@ class RedisProducer(Generic[T]):
         topic: str,
         producer_id: str,
         attempt: int,
+        owner: _ActivityOwner | None = None,
     ) -> None:
-        """Bind this producer to ``topic`` of the chain."""
+        """Bind this producer to ``topic`` of the chain or of ``owner``."""
         self._streams = streams
         self._client = client
         self._workflow_id = workflow_id
+        self._owner = owner
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
@@ -963,6 +1088,17 @@ class RedisProducer(Generic[T]):
             return
         backend = self._streams._require_backend()
         self._append = _LogAppend(backend)
+        if self._owner is not None:
+            # No transport producer to bind and no one to wake: an activity's
+            # stream has no workflow reader and no chain to check the key against.
+            # Inside the activity the run is known and nothing is described.
+            if self._owner.run_id is None:
+                self._owner = await _resolve_owner(self._client, self._owner)
+            self._name = self._owner.key(_prefix(backend), self._topic)
+            self._codec = StreamPayloadCodec(
+                self._client.data_converter.with_context(self._owner.context()), bytes
+            )
+            return
         assert self._workflow_id is not None
         chain = await _chain(self._client, self._workflow_id)
         try:
@@ -1030,7 +1166,8 @@ class RedisProducer(Generic[T]):
             last = await self._append.write(
                 name=self._name, record=staged, digest=digest
             )
-        await self._wake(last)
+        if self._owner is None:
+            await self._wake(last)
         return last
 
     async def _wake(self, position: Offset | None) -> None:
@@ -1102,7 +1239,14 @@ class RedisProducer(Generic[T]):
 
 
 class RedisStreamHandle:
-    """One workflow's topics from outside, over the transport's output streams."""
+    """One owner's topics from outside.
+
+    The owner is ``workflow_id``'s workflow, whose topic logs are read through
+    the transport's output read so a staged batch is a barrier until its task
+    settles, or with ``activity_id`` an activity, read from the stream the
+    provider keeps for it: a standalone activity without ``workflow_id``, or
+    an activity that workflow scheduled.
+    """
 
     def __init__(
         self,
@@ -1110,19 +1254,30 @@ class RedisStreamHandle:
         client: Client,
         workflow_id: str | None,
         run_id: str | None,
+        activity_id: str | None = None,
     ) -> None:
-        """Address the workflow's topics; ``run_id`` decides whose close ends a read."""
+        """Address the owner's topics; ``run_id`` decides whose close ends a read."""
         self._streams = streams
         self._client = client
         self._workflow_id = workflow_id
         self._run_id = run_id
-        if workflow_id is None:
-            raise ValueError("a stream handle needs a workflow_id")
-        converter = client.data_converter.with_context(
-            WorkflowSerializationContext(
-                namespace=client.namespace, workflow_id=workflow_id
+        self._owner: _ActivityOwner | None = None
+        converter = client.data_converter
+        if activity_id is not None:
+            self._owner = _ActivityOwner(
+                client.namespace, workflow_id, activity_id, run_id
             )
-        )
+            converter = converter.with_context(self._owner.context())
+        else:
+            if workflow_id is None:
+                raise ValueError(
+                    "a stream handle needs a workflow_id or an activity_id"
+                )
+            converter = converter.with_context(
+                WorkflowSerializationContext(
+                    namespace=client.namespace, workflow_id=workflow_id
+                )
+            )
         self._converter = client.data_converter.payload_converter
         self._codec: StreamPayloadCodec[bytes] = StreamPayloadCodec(converter, bytes)
 
@@ -1134,11 +1289,12 @@ class RedisStreamHandle:
         last: int | None = None,
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
-        """Yield records on ``topic`` from where the read starts until the workflow closes.
+        """Yield records on ``topic`` from where the read starts until the owner closes.
 
-        That is the chain, or the pinned run. ``END`` and ``last=`` are
-        positioned against the log on the first step of the generator, since
-        this call cannot reach the store.
+        For a workflow that is the chain, or the pinned run; for an activity it is
+        the activity reaching a terminal status, learned as the module docstring
+        says. ``END`` and ``last=`` are positioned against the log on the first
+        step of the generator, since this call cannot reach the store.
 
         Two refusals and they do not land together. A cursor another provider minted,
         or one that is not a Redis entry id, is refused by this call: reading the
@@ -1158,7 +1314,115 @@ class RedisStreamHandle:
         # a foreign one fails this call, not the first iteration.
         tail = last if last is not None else (0 if after == END else None)
         position = None if tail is not None else _position(after)
+        if self._owner is not None:
+            return self._read_owned(
+                self._owner, topic, position, after, result_type, tail=tail
+            )
         return self._read(topic, position, after, result_type, tail=tail)
+
+    async def _read_owned(
+        self,
+        owner: _ActivityOwner,
+        topic: str,
+        position: Offset | None,
+        after: Cursor,
+        result_type: type | None,
+        *,
+        tail: int | None = None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        backend = self._streams._require_backend()
+        # Described on every read, so a handle without a run reads the run that
+        # is current when the read starts, and ends with it.
+        owner = await _resolve_owner(self._client, owner)
+        store = backend._client
+        name = owner.key(_prefix(backend), topic)
+        if tail is not None:
+            position = await _tail_after(store, name, tail)
+            after = (
+                BEGINNING
+                if position is None
+                else mint_cursor(_PROVIDER, position.token)
+            )
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
+        if (
+            position is not None
+            and isinstance(backend, _TopicLogBackend)
+            and not await _retained(store, name, position)
+        ):
+            # Refused rather than resumed from the first retained record,
+            # which would skip whatever the trim took in between.
+            raise StreamCursorError(
+                f"cursor {after.token!r} names a record on {topic!r} that the "
+                f"provider's retention has trimmed ({backend.describe_window()})"
+            )
+        start = _BEGINNING_SENTINEL if position is None else position.token
+        # XREAD BLOCK 0 waits forever, which is not what a zero poll asks for.
+        block = int(self._streams._poll.total_seconds() * 1000) or None
+        closed = False
+        while True:
+            found: Any = await store.xread(
+                {name: start}, count=_READ_BATCH, block=block
+            )
+            entries = found[0][1] if found else []
+            for entry_id, fields in entries:
+                placed = _to_record(entry_id, fields)
+                assert placed.offset is not None
+                start = placed.offset.token
+                if placed.kind is not TransportRecordKind.DATA:
+                    continue
+                minted = mint_cursor(_PROVIDER, placed.offset.token)
+                wire = _parse(
+                    minted, await self._codec.decode(placed.payload), logger.warning
+                )
+                if wire is None:
+                    continue
+                for record in decoder.decode(minted, wire):
+                    yield record
+            if entries:
+                continue
+            if closed:
+                return
+            # One more pass after learning the owner is terminal, so a record
+            # that landed between the read and the describe is not lost.
+            closed = await self._owner_closed(owner, store, name)
+
+    async def _owner_closed(self, owner: _ActivityOwner, store: Any, name: str) -> bool:
+        """Whether the owning activity is terminal, as far as this store can tell.
+
+        A standalone activity says so itself. The server does not describe a
+        workflow's activity, so its workflow is asked: the workflow closing ends
+        the read, and so does the activity leaving the pending set once its
+        stream exists. Before the first write there is no stream, so an
+        activity that never wrote is read until its workflow closes.
+        """
+        try:
+            if owner.workflow_id is None:
+                described = await self._client.get_activity_handle(
+                    owner.activity_id, run_id=owner.run_id
+                ).describe()
+                return described.status != ActivityExecutionStatus.RUNNING
+            description = await self._client.get_workflow_handle(
+                owner.workflow_id, run_id=owner.run_id
+            ).describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                # The owner's History is gone, so there is nothing left to follow.
+                return True
+            raise
+        status = description.status
+        if status is not None and status != WorkflowExecutionStatus.RUNNING:
+            # An activity's streams are not the chain's: a run that continued
+            # as new took its activities with it.
+            return True
+        pending = any(
+            info.activity_id == owner.activity_id
+            for info in description.raw_description.pending_activities
+        )
+        if pending:
+            return False
+        return bool(await store.exists(name))
 
     async def _read(
         self,
@@ -1292,6 +1556,9 @@ class RedisStreamHandle:
         """
         topic, _ = resolve_topic(topic)
         backend = self._streams._require_backend()
+        if self._owner is not None:
+            owner = await _resolve_owner(self._client, self._owner)
+            return await _newest(backend._client, owner.key(_prefix(backend), topic))
         assert self._workflow_id is not None
         chain = await _chain(self._client, self._workflow_id)
         try:
@@ -1307,6 +1574,13 @@ class RedisStreamHandle:
 
     def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
         """A ref to ``topic`` of this owner's stream, pinned as this handle is."""
+        if self._owner is not None:
+            return StreamRef.for_activity(
+                self._owner.activity_id,
+                workflow_id=self._owner.workflow_id,
+                run_id=self._owner.run_id,
+                topic=topic,
+            )
         assert self._workflow_id is not None
         return StreamRef.for_workflow(
             self._workflow_id, run_id=self._run_id, topic=topic
@@ -1336,6 +1610,7 @@ class RedisStreamHandle:
             topic,
             producer_id,
             attempt,
+            owner=self._owner,
         )
 
 
@@ -1472,14 +1747,20 @@ class RedisStreams(ProviderPlugin):
         workflow_id: str | None = None,
         run_id: str | None = None,
     ) -> RedisStreamHandle:
-        """Refuse: this provider keeps no stream an activity owns.
+        """A handle on the topics ``activity_id`` owns, apart from any workflow's.
 
-        Raises:
-            StreamUnsupportedError: Always.
+        Without ``workflow_id`` the activity is a standalone one and ``run_id``
+        names its run; with one it is that workflow's activity and ``run_id``
+        names the workflow's run. The streams are keyed by that run, so a
+        retry writes to the same ones and a reader sees the attempt change as
+        ``SUPERSEDED``, while an id started again in a new run starts new
+        ones. Without ``run_id`` each read, ``latest()`` and the first append
+        of a producer describe the owner and take the run current at that
+        moment. A read ends when the activity is terminal and the retained
+        tail is delivered; the store has no gate on an append after that, so
+        a late attempt still lands, and a read that has ended does not see it.
         """
-        raise StreamUnsupportedError(
-            "the redis provider does not host activity streams"
-        )
+        return RedisStreamHandle(self, client, workflow_id, run_id, activity_id)
 
     async def create_standalone_stream(
         self,
