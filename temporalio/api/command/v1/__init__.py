@@ -16,6 +16,8 @@ from .message_pb2 import (
     SignalExternalWorkflowExecutionCommandAttributes,
     StartChildWorkflowExecutionCommandAttributes,
     StartTimerCommandAttributes,
+    SubscribeNotificationChannelCommandAttributes,
+    UnsubscribeNotificationChannelCommandAttributes,
     UpsertWorkflowSearchAttributesCommandAttributes,
 )
 
@@ -37,5 +39,7 @@ __all__ = [
     "SignalExternalWorkflowExecutionCommandAttributes",
     "StartChildWorkflowExecutionCommandAttributes",
     "StartTimerCommandAttributes",
+    "SubscribeNotificationChannelCommandAttributes",
+    "UnsubscribeNotificationChannelCommandAttributes",
     "UpsertWorkflowSearchAttributesCommandAttributes",
 ]
