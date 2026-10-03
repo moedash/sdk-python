@@ -6,7 +6,7 @@ _ENVIRONMENTS_WITHOUT_CHANNELS = ("local", "time-skipping", "envconfig")
 # provider that opens one; the providers here hold streams in memory or in a
 # workflow's History. A case that produces to a native stream waits for the
 # layer with that provider.
-PINNED_LAYER_HOSTS_NATIVE_STREAMS = False
+PINNED_LAYER_HOSTS_NATIVE_STREAMS = True
 
 
 def pytest_configure(config: pytest.Config) -> None:
