@@ -21,6 +21,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
 from temporalio.streams.providers import redis as redis_provider
 from temporalio.streams.providers.redis import (
+    DEFAULT_RETENTION,
     RedisProducer,
     RedisStreams,
     _drive,
@@ -218,13 +219,41 @@ def test_a_publish_that_would_wait_fails_loudly():
     asyncio.run(run())
 
 
+def test_retention_options_are_checked_at_construction():
+    with pytest.raises(ValueError, match="retention"):
+        RedisStreams(retention=timedelta(0))
+    with pytest.raises(ValueError, match="max_len"):
+        RedisStreams(max_len=0)
+    RedisStreams(retention=timedelta(hours=1), max_len=10)
+
+
 async def test_a_client_the_caller_opened_gets_the_providers_layout_and_stays_open():
-    # The layout is the provider's whichever connection it runs on, and
-    # closing the provider does not close a caller's client.
+    # The layout and the trims are the provider's whichever connection it
+    # runs on, and closing the provider does not close a caller's client.
     client = _NoRedis()
-    provider = RedisStreams(client=client)
+    provider = RedisStreams(client=client, max_len=10)
     backend = provider._require_backend()
     assert backend._client is client
+    assert backend.describe_window() == f"retention={DEFAULT_RETENTION}, max_len=10"
     await provider.close()
     assert provider._require_backend() is not backend
     assert provider._require_backend()._client is client
+
+
+async def test_the_default_window_is_an_age_and_can_be_turned_off():
+    # Nothing is trimmed on a topic nobody appends to, so the default has to
+    # be a window that every append applies; a count cap would refuse a task
+    # whose batch does not fit under it, so that one stays off.
+    provider = RedisStreams()
+    try:
+        backend = provider._require_backend()
+        assert backend._retention == DEFAULT_RETENTION == timedelta(days=7)
+        assert backend._max_len is None
+        assert backend.describe_window() == f"retention={DEFAULT_RETENTION}"
+    finally:
+        await provider.close()
+    unbounded = RedisStreams(retention=None)
+    try:
+        assert unbounded._require_backend().describe_window() == "no retention"
+    finally:
+        await unbounded.close()
