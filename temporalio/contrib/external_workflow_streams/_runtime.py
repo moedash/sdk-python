@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
 import temporalio.api.common.v1
+import temporalio.api.notification.v1
 import temporalio.converter
 import temporalio.workflow
 from temporalio.contrib.external_workflow_streams._annotation import (
@@ -337,6 +338,10 @@ class WorkflowStreamRuntime:
         #: because the two halves are in different modules and a second map
         #: would mean the side that resolves is never the side that registered.
         self._pending: dict[int, asyncio.Future[None]] = {}
+        #: Per channel, the latest notification a Workflow Task of this Run was
+        #: woken with. Positions only, never records: the reads that follow a
+        #: notification come from the Worker's watcher.
+        self._notifications: dict[str, temporalio.api.notification.v1.Notification] = {}
         #: Non-``None`` only while a recorded segment is being delivered.
         self._replay_ready: list[tuple[int, StreamRecord]] | None = None
         #: The bindings of the marker currently being replayed. Non-``None``
@@ -1496,6 +1501,26 @@ class WorkflowStreamRuntime:
         """Drops every waiting future, as eviction requires."""
         self._pending.clear()
 
+    def notifications_received(
+        self, notifications: Iterable[temporalio.api.notification.v1.Notification]
+    ) -> None:
+        """Notes the notifications a Workflow Task's scheduled event carried.
+
+        Core resumes the parked waits for them; this side only remembers where
+        each channel's store stood, keeping the highest counter per channel the
+        way the server folds. Read from History, so a replay notes the same.
+        """
+        for notification in notifications:
+            known = self._notifications.get(notification.channel)
+            if known is None or notification.counter >= known.counter:
+                self._notifications[notification.channel] = notification
+
+    def latest_notification(
+        self, channel: str
+    ) -> temporalio.api.notification.v1.Notification | None:
+        """The latest notification this Run was woken with on ``channel``."""
+        return self._notifications.get(channel)
+
     # --- recording what Workflow code observed -------------------------------
 
     def record_delivery(self, wait_id: int, record: StreamRecord) -> None:
@@ -2109,6 +2134,21 @@ class WorkflowStreamRuntime:
         for state in blocked[1:]:
             reduced = min(reduced, state.idle_timeout)
         return reduced
+
+    def listened_stream_keys(self) -> list[StreamKey]:
+        """The stream of every reader still open, in ``wait_id`` order.
+
+        What the run's channel report is built from. A reader that has not
+        blocked yet is open: records appended before its first iteration have
+        to wake the run as much as later ones. A closed reader has left, so its
+        stream is not listened on even though its state is kept for replay and
+        for the Continue-As-New cursor.
+        """
+        return [
+            state.stream_key
+            for _, state in sorted(self._subscriptions.items())
+            if not state.closed
+        ]
 
     # --- teardown -------------------------------------------------------------
 

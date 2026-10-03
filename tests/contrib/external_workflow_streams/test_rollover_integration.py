@@ -183,7 +183,11 @@ class RolloverThenPauseWorkflow:
 
 @pytest.fixture
 def backend() -> MemoryStreamBackend:
-    return MemoryStreamBackend()
+    backend = MemoryStreamBackend()
+    # These cases count the reserved Signal itself, so the transport is pinned
+    # to it rather than left to step down from a server that has more.
+    backend.wake_transport = "signal"
+    return backend
 
 
 async def stream_key_for(client: Client, handle: Any) -> StreamKey:

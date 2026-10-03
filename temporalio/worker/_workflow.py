@@ -156,8 +156,15 @@ def _try_buffer_external_output(
         and commands[0].HasField("external_stream_park_result")
         and commands[0].external_stream_park_result.HasField("became_ready")
     )
+    # The channel report rides every completion and asks nothing of the
+    # server, so it does not make a quiescent completion anything else.
     quiescent = "workflow_stream_quiescent" in variants and all(
-        variant in ("workflow_stream_progress", "workflow_stream_quiescent")
+        variant
+        in (
+            "workflow_stream_progress",
+            "workflow_stream_quiescent",
+            "workflow_stream_channels",
+        )
         for variant in variants
     )
     if not became_ready and not quiescent:
@@ -299,6 +306,10 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
 
         self._stream_metrics = StreamMetrics.create(metric_meter)
         self._external_stream_manager: Any = None
+        #: How the Runs this Worker builds listen for their streams: by the
+        #: linked channel, the independent channel or the Signal. ``None``
+        #: until the server has been asked.
+        self._channel_support: Any = None
 
         self._workflow_failure_exception_types = workflow_failure_exception_types
         self._patch_activation_callback = patch_activation_callback
@@ -531,6 +542,8 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
 
         if self._external_stream_manager is not None:
             self._external_stream_manager.note_workflow_task_started(act.run_id)
+        if self._external_streams_configured and self._channel_support is None:
+            await self._decide_channel_subscriptions(act)
 
         # Build default success completion (e.g. remove-job-only activations)
         completion = (
@@ -1452,9 +1465,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         )
 
     async def _send_external_stream_wake(self, subscription: Any) -> None:
-        """Sends the reserved wake Signal for a subscription that owes one.
+        """Sends the wake a subscription owes, over the backend's wake transport.
 
-        Addressed to the Workflow ID with no Run ID, so it lands on the current
+        Addressed to the chain rather than to a Run, so it lands on the current
         Run of the chain -- which may already be a successor by the time this
         runs.
 
@@ -1483,7 +1496,10 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         """
         from temporalio.contrib.external_workflow_streams._wake import (
             WakeRequest,
-            send_wake_signal,
+            channel_for,
+            send_wake,
+            wake_position,
+            wake_transport_of,
         )
 
         if self._client is None:
@@ -1508,8 +1524,16 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         generation = (
             await self._stream_manager().wake_park_generation(subscription) or 0
         )
+        # The furthest record this Worker has read, which is the record the
+        # Run has not consumed yet. A cleanup wake has no subscription left to
+        # have read anything.
+        read = getattr(subscription, "prefetch_cursor", None)
+        position, position_counter = wake_position(
+            subscription.backend, read.offset if read is not None else None
+        )
+        address = channel_for(key)
         try:
-            await send_wake_signal(
+            await send_wake(
                 self._client,
                 WakeRequest(
                     namespace=key.namespace,
@@ -1527,7 +1551,12 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     # completed one. The manager coalesces reports until Core
                     # accepts that cycle's successful task completion.
                     wake_counter=subscription.wake_counter,
+                    position=position,
+                    position_counter=position_counter,
+                    channel=address.channel,
+                    channel_execution=address.execution,
                 ),
+                transport=wake_transport_of(subscription.backend),
             )
         except Exception:
             logger.exception(
@@ -1536,6 +1565,59 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 subscription.wait_id,
             )
             raise
+
+    async def _decide_channel_subscriptions(
+        self, act: temporalio.bridge.proto.workflow_activation.WorkflowActivation
+    ) -> None:
+        """Decides how the readers listen, from what the server offers.
+
+        Decided once per Worker and before the Run is built, because the
+        decision is a pair of lang flags the Run reads at construction: one
+        for the independent channel and its subscribe command, one for the
+        channel linked to the stream's owner, which needs no command. The
+        linked kind shows only on a running workflow, so the probe asks about
+        the workflow whose first task this is. A probe that cannot tell, or an
+        activation without a start to name a workflow, leaves the question
+        open for the next activation; the Runs built meanwhile do not
+        subscribe, and their records still arrive by the Signal.
+        """
+        from temporalio.contrib.external_workflow_streams._wake import (
+            ChannelSupport,
+            channel_support,
+        )
+
+        if self._client is None:
+            self._channel_support = ChannelSupport.NONE
+            return
+        workflow_id = next(
+            (
+                job.initialize_workflow.workflow_id
+                for job in act.jobs
+                if job.HasField("initialize_workflow")
+            ),
+            None,
+        )
+        if not workflow_id:
+            return
+        try:
+            answer = await channel_support(self._client, workflow_id)
+        except Exception:
+            logger.warning(
+                "Could not ask the server whether it has notification channels",
+                exc_info=True,
+            )
+            return
+        if answer is None:
+            return
+        self._channel_support = answer
+        self._set_default_workflow_logic_flag(
+            _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS,
+            enabled=answer is not ChannelSupport.NONE,
+        )
+        self._set_default_workflow_logic_flag(
+            _WorkflowLogicFlag.LINKED_NOTIFICATION_CHANNELS,
+            enabled=answer is ChannelSupport.LINKED,
+        )
 
     def _create_external_stream_runtime(
         self,

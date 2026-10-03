@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import (
     Awaitable,
     Callable,
+    Collection,
     Coroutine,
     Generator,
     Iterable,
@@ -373,13 +374,28 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         self._channel_subscriptions: dict[
             str, temporalio.workflow.ChannelSubscription
         ] = {}
-        # The channels linked to this workflow, keyed by name as well. No
-        # command: the owner is the listener by construction, so the map only
-        # routes a notification carrying ``linked_to`` to its handle.
+        self._default_workflow_logic_flags = det.default_workflow_logic_flags
+        self._subscribed_channels: set[str] = set()
+        #: The channels linked to this workflow that the run listens on. No
+        #: command: the owner is the listener by construction, so the set only
+        #: tells a notification carrying ``linked_to`` from one nobody asked for.
+        self._linked_channels: set[str] = set()
         self._linked_channel_subscriptions: dict[
             str, temporalio.workflow.ChannelSubscription
         ] = {}
-        self._default_workflow_logic_flags = det.default_workflow_logic_flags
+        #: The gate's answers for this run, taken on the first stream
+        #: subscription and kept until continue-as-new; see
+        #: ``subscribe_stream_channel``.
+        self._stream_channels_enabled: bool | None = None
+        self._stream_channels_linked = False
+        #: Whether a stream reader has been opened on a server with channels.
+        #: From then on every completion reports the channels the run
+        #: listens on, the empty set included, and Core keeps the server's
+        #: subscriptions in step with the report.
+        self._stream_channels_reporting = False
+        #: The last report, so a notification on a channel the readers
+        #: listen on is told from one nobody asked for.
+        self._stream_channels: list[str] = []
         self._primary_task: asyncio.Task[None] | None = None
         self._cancel_primary_task_pending = False
         self._time_ns = 0
@@ -591,6 +607,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 if job.HasField("notify_has_patch"):
                     job_sets[0].append(job)
                 elif job.HasField("signal_workflow") or job.HasField("do_update"):
+                    job_sets[1].append(job)
+                elif job.HasField("notifications_received"):
+                    # Ordered with the Signals, where Core puts them: what a
+                    # task was woken for is known before anything it resolves.
                     job_sets[1].append(job)
                 elif job.HasField("replay_external_streams"):
                     replay_jobs.append(job)
@@ -999,6 +1019,172 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
         if self._external_stream_runtime is not None:
             self._external_stream_runtime.resolve_all_pending()
 
+    def _apply_notifications_received(
+        self,
+        job: temporalio.bridge.proto.workflow_activation.NotificationsReceived,
+    ) -> None:
+        """Hands the notifications this Workflow Task was woken with to their takers.
+
+        A notification names the channel it came over and, for a channel
+        linked to this workflow, the owner in ``linked_to``; a public
+        subscription of the matching kind gets it in arrival order. The
+        external-stream runtime only notes the latest position per channel,
+        whichever kind carried it: Core resolves the parked waits itself when
+        it hands over this job, live and on replay alike, and the resolve job
+        follows this one in the same activation, so resuming here as well
+        would wake every wait twice for one task.
+        """
+        for proto in job.notifications:
+            if proto.HasField("linked_to"):
+                subscriptions = self._linked_channel_subscriptions
+                listened: Collection[str] = self._linked_channels
+            else:
+                subscriptions = self._channel_subscriptions
+                listened = self._subscribed_channels.union(self._stream_channels)
+            subscription = subscriptions.get(proto.channel)
+            if subscription is not None:
+                subscription._deliver(
+                    temporalio.workflow.Notification._from_proto(proto)
+                )
+            elif proto.channel not in listened:
+                # The server fans out to whatever listened at the time, so a
+                # channel this run never asked for is not the workflow's
+                # concern.
+                logger.debug(
+                    "Dropping a notification on channel %r, which this run does "
+                    "not listen on",
+                    proto.channel,
+                )
+        if self._external_stream_runtime is not None:
+            self._external_stream_runtime.notifications_received(job.notifications)
+
+    def workflow_subscribe_channel(
+        self, channel: str
+    ) -> temporalio.workflow.ChannelSubscription:
+        existing = self._channel_subscriptions.get(channel)
+        if existing is not None:
+            return existing
+        self._issue_channel_subscription(channel)
+        subscription = temporalio.workflow.ChannelSubscription(channel)
+        self._channel_subscriptions[channel] = subscription
+        return subscription
+
+    def workflow_unsubscribe_channel(self, channel: str) -> None:
+        command = self._add_command()
+        command.unsubscribe_notification_channel.channel = channel
+        # Out of the map before the next activation: the server may still hand
+        # this run a notification it folded onto a task ahead of the command.
+        self._channel_subscriptions.pop(channel, None)
+        # Out of the once-per-run set too, so a later subscribe reaches the
+        # server again instead of being folded into the one it left.
+        self._subscribed_channels.discard(channel)
+
+    def workflow_linked_channel(
+        self, channel: str
+    ) -> temporalio.workflow.ChannelSubscription:
+        existing = self._linked_channel_subscriptions.get(channel)
+        if existing is not None:
+            return existing
+        self._linked_channels.add(channel)
+        subscription = temporalio.workflow.ChannelSubscription(channel, linked=True)
+        self._linked_channel_subscriptions[channel] = subscription
+        return subscription
+
+    def subscribe_stream_channel(self, address: Any) -> bool:
+        """Makes this run a listener of an external stream's channel, when it can.
+
+        The external-stream runtime's entry, gated where the public
+        :py:func:`temporalio.workflow.subscribe_channel` is not: a reader opens
+        on whatever server the Worker talks to, and a server without channels
+        fails a Workflow Task that carries a subscription. The Worker asks the
+        server once and the answer becomes two lang flags, read here on the
+        run's first stream subscription and kept until continue-as-new, so a
+        replay takes the path the live run took.
+
+        No command is issued here. The subscribe command is server-bound, so
+        a completion carrying it cannot be retained, and the task that opens
+        a reader is the one that should stay open and park. Instead every
+        completion from now on reports the channels of the open readers in
+        ``WorkflowStreamChannels``, and Core subscribes the new ones on the
+        completion that ends the task, after the progress marker, and
+        unsubscribes the ones whose readers have gone; see
+        :meth:`_report_stream_channels`.
+
+        With the linked kind a stream owned by this workflow is not reported
+        at all: its channel lives in this run's state and the run is its
+        listener by construction. A stream with another owner, or no owner,
+        listens on the independent channel of its name.
+
+        Returns whether the run listens on the channel after this call.
+        """
+        channel: str = address.channel
+        if channel in self._linked_channels:
+            return True
+        if self._read_only:
+            return False
+        if self._stream_channels_enabled is None:
+            self._stream_channels_enabled = self._workflow_logic_flag_enabled(
+                _WorkflowLogicFlag.SUBSCRIBE_NOTIFICATION_CHANNELS
+            )
+            if self._stream_channels_enabled:
+                self._stream_channels_linked = self._workflow_logic_flag_enabled(
+                    _WorkflowLogicFlag.LINKED_NOTIFICATION_CHANNELS
+                )
+        if not self._stream_channels_enabled:
+            return False
+        self._stream_channels_reporting = True
+        if (
+            self._stream_channels_linked
+            and address.workflow_id == self._info.workflow_id
+        ):
+            self._linked_channels.add(channel)
+        return True
+
+    def _stream_channel_name(self, stream_key: Any) -> str | None:
+        """The channel an open reader's stream is listened on.
+
+        ``None`` for a stream this run is the listener of by construction.
+        """
+        from temporalio.contrib.external_workflow_streams._wake import channel_for
+
+        address = channel_for(stream_key)
+        if (
+            self._stream_channels_linked
+            and address.workflow_id == self._info.workflow_id
+        ):
+            return None
+        return address.channel
+
+    def _report_stream_channels(self, runtime: Any) -> None:
+        """Puts the complete set of channels the open readers listen on in the
+        completion.
+
+        Emitted on every completion once a reader has been opened on a server
+        with channels, the empty set included: Core treats an absent report as
+        unchanged, and only the latest report counts, so a reader opened and
+        closed inside one task is never subscribed. The order is the readers'
+        ``wait_id`` order with repeats dropped, which replay reproduces, and
+        Core issues the subscribes in it.
+        """
+        channels: list[str] = []
+        for stream_key in runtime.listened_stream_keys():
+            channel = self._stream_channel_name(stream_key)
+            if channel is not None and channel not in channels:
+                channels.append(channel)
+        self._stream_channels = channels
+        self._add_command().workflow_stream_channels.channels.extend(channels)
+
+    def _issue_channel_subscription(self, channel: str) -> None:
+        """Emits the subscribe command once per channel per run.
+
+        A second command for one channel would only record a second event, so
+        the public subscription and the stream runtime share this set.
+        """
+        if channel in self._subscribed_channels:
+            return
+        self._subscribed_channels.add(channel)
+        self._add_command().subscribe_notification_channel.channel = channel
+
     def _apply_replay_external_streams(
         self,
         job: temporalio.bridge.proto.workflow_activation.ReplayExternalStreams,
@@ -1276,28 +1462,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
 
         # Schedule it
         self.create_task(run_query(), name=f"query: {job.query_type}")
-
-    def _apply_notifications_received(
-        self, job: temporalio.bridge.proto.workflow_activation.NotificationsReceived
-    ) -> None:
-        for proto in job.notifications:
-            # A name may be open as both kinds; the kind the server stamped
-            # on the notification picks the handle.
-            if proto.HasField("linked_to"):
-                subscription = self._linked_channel_subscriptions.get(proto.channel)
-            else:
-                subscription = self._channel_subscriptions.get(proto.channel)
-            if subscription is None:
-                # The server fans out to whatever listened at the time, so a
-                # channel this run never asked for is not the workflow's
-                # concern.
-                logger.debug(
-                    "Dropping a notification on channel %r, which this run does "
-                    "not listen on",
-                    proto.channel,
-                )
-                continue
-            subscription._deliver(temporalio.workflow.Notification._from_proto(proto))
 
     def _apply_notify_has_patch(
         self, job: temporalio.bridge.proto.workflow_activation.NotifyHasPatch
@@ -2267,35 +2431,6 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             )
         return self._streams
 
-    def workflow_subscribe_channel(
-        self, channel: str
-    ) -> temporalio.workflow.ChannelSubscription:
-        existing = self._channel_subscriptions.get(channel)
-        if existing is not None:
-            return existing
-        command = self._add_command()
-        command.subscribe_notification_channel.channel = channel
-        subscription = temporalio.workflow.ChannelSubscription(channel)
-        self._channel_subscriptions[channel] = subscription
-        return subscription
-
-    def workflow_unsubscribe_channel(self, channel: str) -> None:
-        command = self._add_command()
-        command.unsubscribe_notification_channel.channel = channel
-        # Out of the map before the next activation: the server may still hand
-        # this run a notification it folded onto a task ahead of the command.
-        self._channel_subscriptions.pop(channel, None)
-
-    def workflow_linked_channel(
-        self, channel: str
-    ) -> temporalio.workflow.ChannelSubscription:
-        existing = self._linked_channel_subscriptions.get(channel)
-        if existing is not None:
-            return existing
-        subscription = temporalio.workflow.ChannelSubscription(channel, linked=True)
-        self._linked_channel_subscriptions[channel] = subscription
-        return subscription
-
     def workflow_time_ns(self) -> int:
         return self._time_ns
 
@@ -3065,6 +3200,13 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
                 # command must precede every command whose value could depend on
                 # the consumed data.
                 commands.insert(0, progress)
+
+        # Whether or not anything is blocked, and on replay too: the report
+        # is what Core derives the server's subscriptions from, and a task
+        # that read a record and then scheduled an activity leaves with no
+        # snapshot but still with readers to keep listening for.
+        if self._stream_channels_reporting:
+            self._report_stream_channels(runtime)
 
         if not snapshot:
             return
@@ -4931,6 +5073,17 @@ class _WorkflowLogicFlag(IntEnum):
 
     RAISE_ON_CANCELLING_COMPLETED_ACTIVITY = 1
     PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH = 2
+    # Whether the run reports the channels its external-stream readers listen
+    # on, for Core to subscribe it to. Set by the Worker from one probe of the
+    # server; a run reads it on its first stream subscription and keeps that
+    # answer until continue-as-new. Numbered away from the values upstream
+    # hands out in sequence, so a flag the main SDK adds later cannot read a
+    # History written with this one.
+    SUBSCRIBE_NOTIFICATION_CHANNELS = 100
+    # Whether a stream this workflow owns listens on its linked channel, which
+    # needs no subscription, rather than on the independent one. Set with the
+    # flag above from the same probe and read with it.
+    LINKED_NOTIFICATION_CHANNELS = 101
 
 
 # TODO: Enable PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH by default after
