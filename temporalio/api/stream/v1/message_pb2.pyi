@@ -95,9 +95,13 @@ class StreamRecord(google.protobuf.message.Message):
     SEQUENCE_FIELD_NUMBER: builtins.int
     @property
     def body(self) -> temporalio.api.common.v1.message_pb2.Payload:
-        """The value the producer published, stored as sent. A stream provider
-        writes and reads it as part of the record, so applying a payload codec
-        to it is the provider's job.
+        """The value the producer published, stored as sent.
+
+        A payload codec applies on the paths this API owns: the append command on
+        RespondWorkflowTaskCompleted, and the slices on PollWorkflowTaskQueue.
+        Records a producer writes or reads through the stream service take a
+        different path, whose messages are not part of this API yet and so are
+        outside what a codec-applying proxy walks.
         """
     @property
     def metadata(
@@ -159,3 +163,199 @@ class StreamRecord(google.protobuf.message.Message):
     ) -> None: ...
 
 global___StreamRecord = StreamRecord
+
+class StreamSlice(google.protobuf.message.Message):
+    """A contiguous range of a stream delivered to a Workflow Task, along with the
+    offsets it covers. The offsets are what History records; the records
+    themselves are never written to History.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    RUN_ID_FIELD_NUMBER: builtins.int
+    FROM_OFFSET_FIELD_NUMBER: builtins.int
+    TO_OFFSET_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
+    WORKFLOW_TASK_COMPLETED_EVENT_ID_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """The stream, as the subscribing command addressed it: either the name of
+    a stream the consuming Workflow owns or the id of one in another
+    execution.
+    """
+    run_id: builtins.str
+    """Run id of the execution that owns the stream. Set on both a slice for the
+    task being started and a re-supplied one.
+    """
+    from_offset: builtins.int
+    """Inclusive.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
+    to_offset: builtins.int
+    """Exclusive. Equal to from_offset when the subscription observed nothing,
+    which is a fact replay has to reproduce rather than an absence of one.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
+    @property
+    def records(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___StreamRecord
+    ]: ...
+    workflow_task_completed_event_id: builtins.int
+    """The WorkflowTaskCompleted event whose consumed_stream_ranges recorded
+    this range. Set only when the server is re-supplying a range for a task
+    being replayed; a slice for the task now being started leaves it unset,
+    because the event closing that task does not exist yet.
+
+    Replay needs this because a Workflow Task response carries one slice set
+    while a cache miss replays every prior task, so the ranges have to be
+    matched to the events that recorded them rather than to the response.
+    """
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        run_id: builtins.str = ...,
+        from_offset: builtins.int = ...,
+        to_offset: builtins.int = ...,
+        records: collections.abc.Iterable[global___StreamRecord] | None = ...,
+        workflow_task_completed_event_id: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "from_offset",
+            b"from_offset",
+            "records",
+            b"records",
+            "run_id",
+            b"run_id",
+            "stream_id",
+            b"stream_id",
+            "to_offset",
+            b"to_offset",
+            "workflow_task_completed_event_id",
+            b"workflow_task_completed_event_id",
+        ],
+    ) -> None: ...
+
+global___StreamSlice = StreamSlice
+
+class StreamRange(google.protobuf.message.Message):
+    """The offsets a Workflow Task consumed, without the payloads. Recorded on
+    WorkflowTaskCompleted so History grows with Workflow Tasks rather than with
+    records.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    STREAM_ID_FIELD_NUMBER: builtins.int
+    FROM_OFFSET_FIELD_NUMBER: builtins.int
+    TO_OFFSET_FIELD_NUMBER: builtins.int
+    stream_id: builtins.str
+    """The stream, as the subscribing command addressed it: either the name of
+    a stream the consuming Workflow owns or the id of one in another
+    execution.
+    """
+    from_offset: builtins.int
+    """Inclusive.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
+    to_offset: builtins.int
+    """Exclusive.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "from" and "to" name a half-open offset range. --)
+    """
+    def __init__(
+        self,
+        *,
+        stream_id: builtins.str = ...,
+        from_offset: builtins.int = ...,
+        to_offset: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "from_offset",
+            b"from_offset",
+            "stream_id",
+            b"stream_id",
+            "to_offset",
+            b"to_offset",
+        ],
+    ) -> None: ...
+
+global___StreamRange = StreamRange
+
+class StreamStartPosition(google.protobuf.message.Message):
+    """Where a new subscription or read begins. The server resolves it against the
+    stream as it stands in the same transaction that registers the reader, so
+    the result does not race with appends or truncation, and records the
+    resolved absolute offset.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    OFFSET_FIELD_NUMBER: builtins.int
+    LAST_N_FIELD_NUMBER: builtins.int
+    EARLIEST_FIELD_NUMBER: builtins.int
+    TAIL_FIELD_NUMBER: builtins.int
+    offset: builtins.int
+    """Absolute and inclusive. Refused when below the stream's floor."""
+    last_n: builtins.int
+    """The last N records the stream holds, or all of them when it holds
+    fewer. Counts records of every kind. Must be positive.
+    """
+    earliest: builtins.bool
+    """The oldest record the stream still holds. Must be true."""
+    tail: builtins.bool
+    """Only records appended after registration: the stream's head offset.
+    Must be true.
+    """
+    def __init__(
+        self,
+        *,
+        offset: builtins.int = ...,
+        last_n: builtins.int = ...,
+        earliest: builtins.bool = ...,
+        tail: builtins.bool = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "earliest",
+            b"earliest",
+            "last_n",
+            b"last_n",
+            "offset",
+            b"offset",
+            "position",
+            b"position",
+            "tail",
+            b"tail",
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "earliest",
+            b"earliest",
+            "last_n",
+            b"last_n",
+            "offset",
+            b"offset",
+            "position",
+            b"position",
+            "tail",
+            b"tail",
+        ],
+    ) -> None: ...
+    def WhichOneof(
+        self, oneof_group: typing_extensions.Literal["position", b"position"]
+    ) -> typing_extensions.Literal["offset", "last_n", "earliest", "tail"] | None: ...
+
+global___StreamStartPosition = StreamStartPosition

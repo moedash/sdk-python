@@ -198,6 +198,21 @@ class _WorkflowTaskFailedCauseEnumTypeWrapper(
         _WorkflowTaskFailedCause.ValueType
     )  # 42
     """An UnsubscribeNotificationChannel command named an empty or too-long channel."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 43
+    """A workflow task completed with an invalid AppendStreamRecords command."""
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 44
+    """A workflow task completed with an invalid SubscribeStream command."""
+    WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
+        _WorkflowTaskFailedCause.ValueType
+    )  # 45
+    """A workflow task could not be started because a stream range it consumed and recorded in
+    History can no longer be served, for example after truncation or because it exceeds the
+    replay bound. Check the workflow task failure message for more information.
+    """
 
 class WorkflowTaskFailedCause(
     _WorkflowTaskFailedCause, metaclass=_WorkflowTaskFailedCauseEnumTypeWrapper
@@ -366,6 +381,21 @@ WORKFLOW_TASK_FAILED_CAUSE_BAD_UNSUBSCRIBE_NOTIFICATION_CHANNEL_ATTRIBUTES: (
     WorkflowTaskFailedCause.ValueType
 )  # 42
 """An UnsubscribeNotificationChannel command named an empty or too-long channel."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_APPEND_STREAM_RECORDS_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 43
+"""A workflow task completed with an invalid AppendStreamRecords command."""
+WORKFLOW_TASK_FAILED_CAUSE_BAD_SUBSCRIBE_STREAM_ATTRIBUTES: (
+    WorkflowTaskFailedCause.ValueType
+)  # 44
+"""A workflow task completed with an invalid SubscribeStream command."""
+WORKFLOW_TASK_FAILED_CAUSE_STREAM_RANGE_UNAVAILABLE: (
+    WorkflowTaskFailedCause.ValueType
+)  # 45
+"""A workflow task could not be started because a stream range it consumed and recorded in
+History can no longer be served, for example after truncation or because it exceeds the
+replay bound. Check the workflow task failure message for more information.
+"""
 global___WorkflowTaskFailedCause = WorkflowTaskFailedCause
 
 class _ActivityTaskFailedCause:

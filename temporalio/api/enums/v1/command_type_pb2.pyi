@@ -46,6 +46,8 @@ class _CommandTypeEnumTypeWrapper(
     COMMAND_TYPE_REQUEST_CANCEL_NEXUS_OPERATION: _CommandType.ValueType  # 18
     COMMAND_TYPE_SUBSCRIBE_NOTIFICATION_CHANNEL: _CommandType.ValueType  # 19
     COMMAND_TYPE_UNSUBSCRIBE_NOTIFICATION_CHANNEL: _CommandType.ValueType  # 20
+    COMMAND_TYPE_APPEND_STREAM_RECORDS: _CommandType.ValueType  # 21
+    COMMAND_TYPE_SUBSCRIBE_STREAM: _CommandType.ValueType  # 22
 
 class CommandType(_CommandType, metaclass=_CommandTypeEnumTypeWrapper):
     """Whenever this list of command types is changed do change the function shouldBufferEvent in mutableStateBuilder.go to make sure to do the correct event ordering."""
@@ -70,4 +72,6 @@ COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION: CommandType.ValueType  # 17
 COMMAND_TYPE_REQUEST_CANCEL_NEXUS_OPERATION: CommandType.ValueType  # 18
 COMMAND_TYPE_SUBSCRIBE_NOTIFICATION_CHANNEL: CommandType.ValueType  # 19
 COMMAND_TYPE_UNSUBSCRIBE_NOTIFICATION_CHANNEL: CommandType.ValueType  # 20
+COMMAND_TYPE_APPEND_STREAM_RECORDS: CommandType.ValueType  # 21
+COMMAND_TYPE_SUBSCRIBE_STREAM: CommandType.ValueType  # 22
 global___CommandType = CommandType
