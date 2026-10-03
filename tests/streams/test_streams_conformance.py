@@ -310,8 +310,11 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             # provider, where the case wants it at the call; its own live module
             # covers the trimmed floor.
             truncate=None,
-            # Every stream this provider keeps belongs to a workflow.
-            hosts_standalone_streams=False,
+            # A standalone stream's append script keeps a byte total per topic
+            # and trims by age on every append, so both bounds hold while the
+            # stream is open.
+            bounds_standalone_bytes=True,
+            trims_open_stream_by_age=True,
             # An outside append notifies the stream's channel, addressed to
             # the workflow that owns the stream; the reader's run is
             # subscribed to it when the task that opened the read ends where
