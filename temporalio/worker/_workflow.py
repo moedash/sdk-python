@@ -663,6 +663,11 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     raise deadlock_exc from None
 
             output_runtime = self._external_stream_runtimes.get(act.run_id)
+            if output_runtime is not None and completion.HasField("successful"):
+                # A subscription opened at a stream's tail is positioned here,
+                # off the Workflow thread and before the completion goes out, so
+                # the marker records the boundary the watcher starts from.
+                await output_runtime.resolve_pending_starts()
             if (
                 output_runtime is not None
                 and completion.HasField("successful")
