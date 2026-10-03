@@ -98,6 +98,17 @@ The mapping, in one place:
   through a codec that differs on every call is still the same append while a
   divergent one is refused. A record without a body is matched by its
   plaintext record instead.
+- A standalone stream is one more key scheme: ``standalone/<stream id>`` as the
+  owner component, a hash under it that holds the policy and the seal, and one
+  log per topic beside the hash. ``create_stream`` writes the hash once and
+  refuses a different policy for an id that has one; a handle on an id with no
+  hash raises ``StreamNotFoundError`` at its first use. Every append applies
+  the policy to the topic it wrote, ``max_records`` and ``retention`` as on the
+  other logs and ``max_bytes`` by a byte total the hash keeps per topic,
+  dropping the oldest entries until the topic fits. ``close()`` sets the seal:
+  a later append is refused with ``StreamClosedError``, the retained records
+  stay readable and a read ends once it has delivered them. Nothing in
+  Temporal knows these keys, so no tooling lists them.
 
 Keys written by the earlier layout. Before the log, a topic was two keys: the
 transport's input key, ``<prefix>:<namespace>:<workflow id>:<first run>:<topic>``
@@ -194,11 +205,11 @@ from temporalio.converter import (
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.streams._body import CONTENT_HASH_KEY, content_hash
 from temporalio.streams._errors import (
+    StreamClosedError,
     StreamCursorError,
     StreamError,
     StreamNotFoundError,
     StreamProducerError,
-    StreamUnsupportedError,
 )
 from temporalio.streams._provider import ReadSource, WriteSink
 from temporalio.streams._record import (
@@ -462,6 +473,161 @@ class _LogAppend:
         return Offset(_text(placed))
 
 
+@dataclass(frozen=True)
+class _StandaloneOwner:
+    """A stream with an id of its own and no owner, and where Redis keeps it."""
+
+    namespace: str
+    stream_id: str
+
+    def meta(self, key_prefix: str) -> str:
+        """The hash holding the stream's policy, seal and byte totals."""
+        namespace = quote(self.namespace, safe="")
+        return f"{key_prefix}:{namespace}:standalone/{quote(self.stream_id, safe='')}"
+
+    def key(self, key_prefix: str, topic: str) -> str:
+        """The log holding ``topic`` of this stream; one more component than the hash."""
+        return f"{self.meta(key_prefix)}:{quote(topic, safe='')}"
+
+    def __str__(self) -> str:
+        """The stream, for messages."""
+        return f"standalone stream {self.stream_id!r}"
+
+
+def _policy_fields(
+    retention: timedelta | None, max_records: int | None, max_bytes: int | None
+) -> list[bytes]:
+    """The policy as the hash stores it: milliseconds, counts, and blanks for none."""
+    return [
+        b""
+        if retention is None
+        else str(int(retention.total_seconds() * 1000)).encode(),
+        b"" if max_records is None else str(max_records).encode(),
+        b"" if max_bytes is None else str(max_bytes).encode(),
+    ]
+
+
+#: Create a standalone stream's hash, or say whether the one there agrees.
+_CREATE_STANDALONE_LUA: Final = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  local held = redis.call('HMGET', KEYS[1], 'retention_ms', 'max_records', 'max_bytes')
+  if held[1] == ARGV[1] and held[2] == ARGV[2] and held[3] == ARGV[3] then
+    return 'same'
+  end
+  return 'conflict'
+end
+redis.call('HSET', KEYS[1], 'retention_ms', ARGV[1], 'max_records', ARGV[2],
+  'max_bytes', ARGV[3], 'sealed', '0')
+return 'created'
+"""
+
+
+#: Append one record to a standalone stream's topic under the stream's policy.
+#:
+#: The policy lives in the hash, so the script reads it rather than being told:
+#: a sealed stream refuses, a missing one says so, and the trims apply to the
+#: topic just written. ``max_bytes`` has no Redis trim of its own, so each entry
+#: carries the size of the record it holds, the hash keeps a byte total per
+#: topic, and the oldest entries are dropped one at a time until the topic fits.
+_STANDALONE_APPEND_LUA: Final = """
+local meta = redis.call('HMGET', KEYS[3], 'sealed', 'retention_ms', 'max_records',
+  'max_bytes', ARGV[6])
+if not meta[1] then
+  return {'missing', ''}
+end
+if meta[1] == '1' then
+  return {'closed', ''}
+end
+local existing = redis.call('HGET', KEYS[2], ARGV[1])
+if existing then
+  local sep = string.find(existing, '|')
+  if string.sub(existing, sep + 1) ~= ARGV[2] then
+    return {'conflict', ''}
+  end
+  return {'ok', string.sub(existing, 1, sep - 1)}
+end
+local id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 7))
+redis.call('HSET', KEYS[2], ARGV[1], id .. '|' .. ARGV[2])
+local total = tonumber(meta[5] or '0') + tonumber(ARGV[4])
+local floor = nil
+if meta[2] ~= '' then
+  floor = tonumber(ARGV[3]) - tonumber(meta[2])
+end
+while true do
+  local entries = redis.call('XRANGE', KEYS[1], '-', '+', 'COUNT', 1)
+  if #entries == 0 then break end
+  local entry = entries[1]
+  local drop = false
+  if meta[3] ~= '' and redis.call('XLEN', KEYS[1]) > tonumber(meta[3]) then drop = true end
+  if meta[4] ~= '' and total > tonumber(meta[4]) then drop = true end
+  if floor and tonumber(string.match(entry[1], '^(%d+)')) < floor then drop = true end
+  if not drop then break end
+  local size = 0
+  local fields = entry[2]
+  for i = 1, #fields, 2 do
+    if fields[i] == ARGV[5] then size = tonumber(fields[i + 1]) end
+  end
+  redis.call('XDEL', KEYS[1], entry[1])
+  total = total - size
+end
+redis.call('HSET', KEYS[3], ARGV[6], total)
+return {'ok', id}
+"""
+
+
+#: The entry field holding the size a standalone stream's policy counts: the
+#: serialized record, as the memory provider measures it, not the stored payload
+#: with its envelope.
+_SIZE_FIELD: Final = b"__size"
+
+
+class _StandaloneAppend:
+    """One record on a standalone stream's topic, under its policy, in one call."""
+
+    def __init__(self, backend: RedisStreamBackend, owner: _StandaloneOwner) -> None:
+        """Bind to ``backend``'s client and ``owner``'s hash."""
+        self._owner = owner
+        self._meta = owner.meta(_prefix(backend))
+        self._script = backend._client.register_script(_STANDALONE_APPEND_LUA)
+
+    async def write(
+        self, *, name: str, topic: str, record: TransportRecord, digest: str, size: int
+    ) -> Offset:
+        """Append ``record`` to the log ``name`` and return where it landed.
+
+        ``size`` is what the stream's ``max_bytes`` counts for this record.
+
+        Raises:
+            StreamNotFoundError: The stream was never created.
+            StreamClosedError: The stream is sealed.
+            AppendConflictError: The identity is held with a different digest.
+        """
+        outcome, placed = await self._script(
+            keys=[name, f"{name}:idem", self._meta],
+            args=[
+                str(record.idempotency_key).encode(),
+                digest.encode(),
+                str(int(time.time() * 1000)).encode(),
+                str(size).encode(),
+                _SIZE_FIELD,
+                f"bytes:{quote(topic, safe='')}".encode(),
+                *_fields_args(record),
+                _SIZE_FIELD,
+                str(size).encode(),
+            ],
+        )
+        result = _text(outcome)
+        if result == "missing":
+            raise StreamNotFoundError(f"{self._owner} was not found")
+        if result == "closed":
+            raise StreamClosedError(
+                f"{self._owner} is closed and takes no more records"
+            )
+        if result == "conflict":
+            raise AppendConflictError(record.idempotency_key)
+        return Offset(_text(placed))
+
+
 def _prefix(backend: Any) -> str:
     """The key prefix ``backend`` writes under, for keys the provider derives itself."""
     return backend._key_prefix
@@ -568,6 +734,17 @@ async def _retained(client: Any, name: str, offset: Offset) -> bool:
     if first:
         return _entry_id(first[0]) <= wanted
     return wanted > _entry_id(info["last-generated-id"])
+
+
+async def _require_standalone(store: Any, meta: str, owner: _StandaloneOwner) -> None:
+    """Raise ``StreamNotFoundError`` unless ``owner``'s hash exists."""
+    if not await store.exists(meta):
+        raise StreamNotFoundError(f"{owner} was not found")
+
+
+async def _sealed(store: Any, meta: str) -> bool:
+    """Whether the standalone stream behind ``meta`` is sealed."""
+    return _text(await store.hget(meta, "sealed") or b"0") == "1"
 
 
 async def _newest(store: Any, name: str) -> Cursor:
@@ -1003,12 +1180,14 @@ class RedisProducer(Generic[T]):
         producer_id: str,
         attempt: int,
         owner: _ActivityOwner | None = None,
+        standalone: _StandaloneOwner | None = None,
     ) -> None:
-        """Bind this producer to ``topic`` of the chain or of ``owner``."""
+        """Bind this producer to ``topic`` of the chain, of ``owner`` or of ``standalone``."""
         self._streams = streams
         self._client = client
         self._workflow_id = workflow_id
         self._owner = owner
+        self._standalone = standalone
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
@@ -1018,7 +1197,7 @@ class RedisProducer(Generic[T]):
         self._sequence = 1
         self._last = BEGINNING
         self._input: Any = None
-        self._append: _LogAppend | None = None
+        self._append: _LogAppend | _StandaloneAppend | None = None
         self._name: str | None = None
         self._codec: StreamPayloadCodec[bytes] | None = None
 
@@ -1091,6 +1270,13 @@ class RedisProducer(Generic[T]):
         if self._codec is not None:
             return
         backend = self._streams._require_backend()
+        if self._standalone is not None:
+            # No owner to code under and no one to wake: a standalone stream
+            # is read from outside only, and its hash says whether it exists.
+            self._name = self._standalone.key(_prefix(backend), self._topic)
+            self._append = _StandaloneAppend(backend, self._standalone)
+            self._codec = StreamPayloadCodec(self._client.data_converter, bytes)
+            return
         self._append = _LogAppend(backend)
         if self._owner is not None:
             # No transport producer to bind and no one to wake: an activity's
@@ -1167,10 +1353,19 @@ class RedisProducer(Generic[T]):
                 producer_session_id=self._session,
                 sequence=self._sequence + index,
             )
-            last = await self._append.write(
-                name=self._name, record=staged, digest=digest
-            )
-        if self._owner is None:
+            if isinstance(self._append, _StandaloneAppend):
+                last = await self._append.write(
+                    name=self._name,
+                    topic=self._topic,
+                    record=staged,
+                    digest=digest,
+                    size=record.ByteSize(),
+                )
+            else:
+                last = await self._append.write(
+                    name=self._name, record=staged, digest=digest
+                )
+        if self._owner is None and self._standalone is None:
             await self._wake(last)
         return last
 
@@ -1247,9 +1442,10 @@ class RedisStreamHandle:
 
     The owner is ``workflow_id``'s workflow, whose topic logs are read through
     the transport's output read so a staged batch is a barrier until its task
-    settles, or with ``activity_id`` an activity, read from the stream the
-    provider keeps for it: a standalone activity without ``workflow_id``, or
-    an activity that workflow scheduled.
+    settles; with ``activity_id`` an activity, read from the stream the
+    provider keeps for it, a standalone activity without ``workflow_id`` or an
+    activity that workflow scheduled; or with ``stream_id`` a standalone
+    stream, read from the logs under its hash until it is sealed.
     """
 
     def __init__(
@@ -1259,6 +1455,8 @@ class RedisStreamHandle:
         workflow_id: str | None,
         run_id: str | None,
         activity_id: str | None = None,
+        *,
+        stream_id: str | None = None,
     ) -> None:
         """Address the owner's topics; ``run_id`` decides whose close ends a read."""
         self._streams = streams
@@ -1266,8 +1464,12 @@ class RedisStreamHandle:
         self._workflow_id = workflow_id
         self._run_id = run_id
         self._owner: _ActivityOwner | None = None
+        self._standalone: _StandaloneOwner | None = None
         converter = client.data_converter
-        if activity_id is not None:
+        if stream_id is not None:
+            # No owner, so nothing to code the bodies under.
+            self._standalone = _StandaloneOwner(client.namespace, stream_id)
+        elif activity_id is not None:
             self._owner = _ActivityOwner(
                 client.namespace, workflow_id, activity_id, run_id
             )
@@ -1275,7 +1477,7 @@ class RedisStreamHandle:
         else:
             if workflow_id is None:
                 raise ValueError(
-                    "a stream handle needs a workflow_id or an activity_id"
+                    "a stream handle needs a workflow_id, an activity_id or a stream_id"
                 )
             converter = converter.with_context(
                 WorkflowSerializationContext(
@@ -1318,11 +1520,75 @@ class RedisStreamHandle:
         # a foreign one fails this call, not the first iteration.
         tail = last if last is not None else (0 if after == END else None)
         position = None if tail is not None else _position(after)
+        if self._standalone is not None:
+            return self._read_standalone(
+                self._standalone, topic, position, after, result_type, tail=tail
+            )
         if self._owner is not None:
             return self._read_owned(
                 self._owner, topic, position, after, result_type, tail=tail
             )
         return self._read(topic, position, after, result_type, tail=tail)
+
+    async def _read_standalone(
+        self,
+        owner: _StandaloneOwner,
+        topic: str,
+        position: Offset | None,
+        after: Cursor,
+        result_type: type | None,
+        *,
+        tail: int | None = None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        backend = self._streams._require_backend()
+        store = backend._client
+        meta = owner.meta(_prefix(backend))
+        await _require_standalone(store, meta, owner)
+        name = owner.key(_prefix(backend), topic)
+        if tail is not None:
+            position = await _tail_after(store, name, tail)
+            after = (
+                BEGINNING
+                if position is None
+                else mint_cursor(_PROVIDER, position.token)
+            )
+        decoder = RecordDecoder(
+            self._converter, result_type, after=after, warn=logger.warning
+        )
+        if position is not None and not await _retained(store, name, position):
+            raise StreamCursorError(
+                f"cursor {after.token!r} names a record on {topic!r} that the "
+                f"stream's policy has dropped"
+            )
+        start = _BEGINNING_SENTINEL if position is None else position.token
+        block = int(self._streams._poll.total_seconds() * 1000) or None
+        closed = False
+        while True:
+            found: Any = await store.xread(
+                {name: start}, count=_READ_BATCH, block=block
+            )
+            entries = found[0][1] if found else []
+            for entry_id, fields in entries:
+                placed = _to_record(entry_id, fields)
+                assert placed.offset is not None
+                start = placed.offset.token
+                if placed.kind is not TransportRecordKind.DATA:
+                    continue
+                minted = mint_cursor(_PROVIDER, placed.offset.token)
+                wire = _parse(
+                    minted, await self._codec.decode(placed.payload), logger.warning
+                )
+                if wire is None:
+                    continue
+                for record in decoder.decode(minted, wire):
+                    yield record
+            if entries:
+                continue
+            if closed:
+                return
+            # One more pass after learning of the seal, so a record that landed
+            # between the read and the seal is not lost.
+            closed = await _sealed(store, meta)
 
     async def _read_owned(
         self,
@@ -1560,6 +1826,15 @@ class RedisStreamHandle:
         """
         topic, _ = resolve_topic(topic)
         backend = self._streams._require_backend()
+        if self._standalone is not None:
+            await _require_standalone(
+                backend._client,
+                self._standalone.meta(_prefix(backend)),
+                self._standalone,
+            )
+            return await _newest(
+                backend._client, self._standalone.key(_prefix(backend), topic)
+            )
         if self._owner is not None:
             owner = await _resolve_owner(self._client, self._owner)
             return await _newest(backend._client, owner.key(_prefix(backend), topic))
@@ -1578,6 +1853,8 @@ class RedisStreamHandle:
 
     def ref(self, *, topic: str | StreamTopic[Any] | None = None) -> StreamRef:
         """A ref to ``topic`` of this owner's stream, pinned as this handle is."""
+        if self._standalone is not None:
+            return StreamRef.for_standalone(self._standalone.stream_id, topic=topic)
         if self._owner is not None:
             return StreamRef.for_activity(
                 self._owner.activity_id,
@@ -1591,11 +1868,25 @@ class RedisStreamHandle:
         )
 
     async def close(self) -> None:
-        """Refuse: an owned stream ends with its owner, not by a caller."""
-        raise ValueError(
-            "only a standalone stream can be closed; this handle is on an owned "
-            "stream, which ends when its workflow or activity does"
-        )
+        """Seal a standalone stream. An owned stream ends with its owner, not by a caller.
+
+        The seal is a flag in the stream's hash that every append reads, so a
+        later append is refused with ``StreamClosedError`` and a read ends once
+        it has delivered the retained tail. Idempotent.
+
+        Raises:
+            ValueError: This handle is on a workflow's or an activity's stream.
+            StreamNotFoundError: The stream was never created.
+        """
+        if self._standalone is None:
+            raise ValueError(
+                "only a standalone stream can be closed; this handle is on an owned "
+                "stream, which ends when its workflow or activity does"
+            )
+        backend = self._streams._require_backend()
+        meta = self._standalone.meta(_prefix(backend))
+        await _require_standalone(backend._client, meta, self._standalone)
+        await backend._client.hset(meta, "sealed", "1")
 
     def producer(
         self,
@@ -1615,6 +1906,7 @@ class RedisStreamHandle:
             producer_id,
             attempt,
             owner=self._owner,
+            standalone=self._standalone,
         )
 
 
@@ -1775,26 +2067,49 @@ class RedisStreams(ProviderPlugin):
         max_records: int | None = None,
         max_bytes: int | None = None,
     ) -> RedisStreamHandle:
-        """Refuse: this provider keeps no stream without an owner.
+        """Create the standalone stream ``stream_id``, or find it with the same policy.
+
+        The policy is written once into the stream's hash and applied on every
+        append to any of its topics. ``retention`` left unset takes this
+        provider's default window; the other two bounds are off unless set.
 
         Raises:
-            StreamUnsupportedError: Always.
+            ValueError: ``stream_id`` is empty, a bound is not positive, or
+                the stream exists with a different policy.
         """
-        raise StreamUnsupportedError(
-            "the redis provider does not host standalone streams"
+        if not stream_id:
+            raise ValueError("stream_id must not be empty")
+        if retention is not None and retention <= timedelta(0):
+            raise ValueError("retention must be positive")
+        if max_records is not None and max_records <= 0:
+            raise ValueError("max_records must be positive")
+        if max_bytes is not None and max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        backend = self._require_backend()
+        owner = _StandaloneOwner(client.namespace, stream_id)
+        policy = _policy_fields(
+            self._retention if retention is None else retention, max_records, max_bytes
         )
+        outcome = await backend._client.register_script(_CREATE_STANDALONE_LUA)(
+            keys=[owner.meta(_prefix(backend))], args=policy
+        )
+        if _text(outcome) == "conflict":
+            raise ValueError(
+                f"{owner} exists with another policy; a policy is set when the "
+                "stream is created and does not change"
+            )
+        return RedisStreamHandle(self, client, None, None, stream_id=stream_id)
 
     def get_standalone_stream_handle(
         self, client: Client, stream_id: str
     ) -> RedisStreamHandle:
-        """Refuse: this provider keeps no stream without an owner.
+        """A handle on the standalone stream ``stream_id``.
 
-        Raises:
-            StreamUnsupportedError: Always.
+        Nothing is checked here: a ``read``, ``latest``, ``producer`` or
+        ``close`` on a stream that was never created raises
+        :class:`temporalio.streams.StreamNotFoundError` when it is used.
         """
-        raise StreamUnsupportedError(
-            "the redis provider does not host standalone streams"
-        )
+        return RedisStreamHandle(self, client, None, None, stream_id=stream_id)
 
     async def close(self) -> None:
         """Release the Redis connection this provider opened; a caller's stays open."""
