@@ -322,10 +322,13 @@ class WorkflowStreamProvider(Protocol):
         ...
 
     def on_workflow_start(self) -> None:
-        """Called before the workflow function runs.
+        """Called before the workflow function runs, and before the first task's handlers.
 
-        A provider that serves outside readers through handlers on the
-        workflow registers them here, before the first task completes.
+        After the workflow's own ``__init__`` and before any Signal or Update
+        of the first task is handled, which the SDK does ahead of the
+        workflow function. A provider that serves outside readers through
+        handlers on the workflow registers them here, so an Update that
+        arrives with the first task finds them.
         """
         ...
 

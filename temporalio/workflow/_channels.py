@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 import temporalio.api.common.v1
 import temporalio.api.notification.v1
+import temporalio.common
 from temporalio.workflow._context import _Runtime
 
 __all__ = [
@@ -60,8 +61,8 @@ class Notification:
     converter :py:func:`temporalio.workflow.payload_converter` returns.
     """
 
-    linked_to: temporalio.api.common.v1.WorkflowExecution | None = None
-    """The workflow a linked channel belongs to, and the run that received this.
+    linked_to: temporalio.common.Execution | None = None
+    """The execution a linked channel belongs to, and the run that received this.
 
     ``None`` for a notification from an independent channel. A workflow that
     holds both kinds of handle on one name gets a notification on the handle
@@ -78,7 +79,11 @@ class Notification:
             position=proto.position,
             counter=proto.counter,
             metadata=dict(proto.metadata.items()),
-            linked_to=proto.linked_to if proto.HasField("linked_to") else None,
+            linked_to=(
+                temporalio.common.Execution.from_proto(proto.linked_to)
+                if proto.HasField("linked_to")
+                else None
+            ),
         )
 
 
