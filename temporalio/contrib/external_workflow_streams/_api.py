@@ -37,6 +37,7 @@ from temporalio.contrib.external_workflow_streams._errors import (
 from temporalio.contrib.external_workflow_streams._record import (
     StreamRecord,
 )
+from temporalio.contrib.external_workflow_streams._wake import channel_for
 from temporalio.types import AnyType
 
 __all__ = [
@@ -307,6 +308,14 @@ class ExternalStreamTopic(Generic[AnyType]):
             # the reduction and every set parks after one second.
             idle_timeout=self.options.idle_timeout,
         )
+        # The channel the stream's writers notify. Asked of the SDK's object for
+        # the Run rather than of the stream runtime, because the answer is part
+        # of the Run's completion and completions are the Run's to emit; it
+        # also decides, from the server it talks to, whether the Run is the
+        # channel's listener already or has to be subscribed.
+        subscribe = getattr(_run_holder(), "subscribe_stream_channel", None)
+        if subscribe is not None:
+            subscribe(channel_for(stream_key))
         # Registering a wait is not blocking on one. The quiescent snapshot is a
         # request to Core to retain the Workflow Task and, once the idle timer
         # expires, to park it; a subscription Workflow code has not begun
