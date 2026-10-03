@@ -27,7 +27,6 @@ from typing import Any, cast
 import pytest
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio.contrib.external_workflow_streams import _runtime as _runtime_module
 from temporalio.contrib.external_workflow_streams._annotation import (
     MAX_ANNOTATION_BYTES,
@@ -73,7 +72,10 @@ class FakeInstance:
 @pytest.fixture
 def workflow_instance(monkeypatch: pytest.MonkeyPatch) -> FakeInstance:
     instance = FakeInstance()
-    monkeypatch.setattr(temporalio.workflow, "instance", lambda: instance)
+    monkeypatch.setattr(
+        "temporalio.contrib.external_workflow_streams._api._run_holder",
+        lambda: instance,
+    )
     return instance
 
 
