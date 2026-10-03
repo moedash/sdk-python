@@ -56,7 +56,9 @@ to include examples, links to docs, or any other relevant information.
   `close()` seals it. A provider runs record bodies through the client's data
   converter, so a payload codec and external storage apply to them.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
-  reference provider the conformance tests run against.
+  reference provider the conformance tests run against, and
+  `temporalio.streams.providers.redis.RedisStreams` serves the same interface
+  over External Workflow Streams, one topic as an input and an output stream.
 - **Experimental**: `temporalio.streams.providers.workflow_streams.WorkflowStreamsProvider`
   serves the stream interface over the shipped Workflow Streams transport as a
   worker plugin, so a workflow reads and publishes through
@@ -78,6 +80,8 @@ to include examples, links to docs, or any other relevant information.
   which the handler maps onto the store's accessor for that owner. Configure
   the front with `data_converter=` to run a payload codec on the caller side,
   so records are encoded before they leave the process.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
 - Added experimental External Workflow Streams in
   `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
   stored in a configured external backend instead of Temporal History, with a
