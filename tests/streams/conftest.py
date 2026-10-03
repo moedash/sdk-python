@@ -107,14 +107,14 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "needs_native_provider: the case needs a provider that opens native streams "
-        "on the server, which only the native layers carry",
-    )
-    config.addinivalue_line(
-        "markers",
         "needs_execution_server: the case needs a server that addresses a linked "
         "channel by execution, a standalone activity's included, named with "
         "-E host:port",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_native_provider: the case needs a provider that opens native streams "
+        "on the server, which only the native layers carry",
     )
 
 
