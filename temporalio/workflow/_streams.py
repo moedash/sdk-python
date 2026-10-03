@@ -251,8 +251,11 @@ def stream_reader(
     to whichever loop pulls first; such a call may pass no ``after``, no
     ``last`` and no different type. Adding a reader on a new topic is a new command, so
     gate it with :func:`temporalio.workflow.patched` as you would a timer. A
-    reader in a successor run starts a new subscription: nothing crosses
-    continue-as-new implicitly.
+    reader in a successor run starts a new subscription. Whether it picks up
+    where the predecessor left off is the provider's: the Redis provider
+    resumes an ``after=BEGINNING`` reader where the predecessor committed,
+    because its transport carries that boundary across continue-as-new, and
+    the memory provider starts it at ``after``.
 
     Args:
         topic: The topic, relative to this workflow's stream. Omit it for
