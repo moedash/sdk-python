@@ -4,19 +4,108 @@ isort:skip_file
 """
 
 import builtins
+import collections.abc
 import sys
+import typing
 
 import google.protobuf.descriptor
 import google.protobuf.duration_pb2
+import google.protobuf.internal.containers
+import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 import google.protobuf.timestamp_pb2
 
-if sys.version_info >= (3, 8):
+if sys.version_info >= (3, 10):
     import typing as typing_extensions
 else:
     import typing_extensions
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
+
+class _ParkReason:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _ParkReasonEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_ParkReason.ValueType],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    PARK_REASON_UNSPECIFIED: _ParkReason.ValueType  # 0
+    PARK_REASON_IDLE: _ParkReason.ValueType  # 1
+    """The global quiescence timer expired with no record on any active wait."""
+    PARK_REASON_ALL_WRITE_FENCED: _ParkReason.ValueType  # 2
+    """Every active wait in the quiescent snapshot reached a write fence with no later record
+    immediately available, so the idle delay was bypassed.
+    """
+    PARK_REASON_SHUTDOWN: _ParkReason.ValueType  # 3
+    """The Worker is shutting down or the Run is being evicted while a Workflow Task is open."""
+    PARK_REASON_ROLLOVER: _ParkReason.ValueType  # 4
+    """The Workflow Task rollover deadline expired. Core decided this one, so the terminal came
+    back through FinalizeExternalStreams.
+    """
+    PARK_REASON_BUDGET_ROLLOVER: _ParkReason.ValueType  # 5
+    """The annotation reached its byte budget high-water mark and lang asked for a rollover. Unlike
+    PARK_REASON_ROLLOVER this needs no finalization round trip: the triggering
+    WorkflowStreamProgress already carried the terminal.
+    """
+    PARK_REASON_COMMANDS_PRODUCED: _ParkReason.ValueType  # 6
+    """The completion carried server-bound commands (timer, activity, child workflow, signal), so
+    the Workflow Task completed normally with subscriptions left active and unparked.
+    """
+    PARK_REASON_WORKFLOW_COMPLETED: _ParkReason.ValueType  # 7
+    """The completion carried a terminal command -- complete, fail, cancel, or continue-as-new."""
+    PARK_REASON_TASK_COMPLETED: _ParkReason.ValueType  # 8
+    """The Workflow Task completed normally with nothing else to report: records were consumed and
+    no stream wait remained pending. Distinct from PARK_REASON_COMMANDS_PRODUCED so the marker
+    says which of the two it actually was rather than implying commands that never existed.
+    """
+    PARK_REASON_OUTPUT_LATENCY: _ParkReason.ValueType  # 9
+    """The Workflow Task's output visibility deadline expired."""
+    PARK_REASON_OUTPUT_CAPACITY: _ParkReason.ValueType  # 10
+    """The staged output reached its deterministic record or logical-byte capacity."""
+
+class ParkReason(_ParkReason, metaclass=_ParkReasonEnumTypeWrapper):
+    """Why a Workflow Task holding external stream waits ended. Core knows the reason on every
+    completion path -- it either decided the boundary itself or was told -- which is why this
+    lives here, in the Core-readable marker envelope, and is deliberately *not* duplicated inside
+    the opaque replay annotation where a second copy could disagree with this one.
+    """
+
+PARK_REASON_UNSPECIFIED: ParkReason.ValueType  # 0
+PARK_REASON_IDLE: ParkReason.ValueType  # 1
+"""The global quiescence timer expired with no record on any active wait."""
+PARK_REASON_ALL_WRITE_FENCED: ParkReason.ValueType  # 2
+"""Every active wait in the quiescent snapshot reached a write fence with no later record
+immediately available, so the idle delay was bypassed.
+"""
+PARK_REASON_SHUTDOWN: ParkReason.ValueType  # 3
+"""The Worker is shutting down or the Run is being evicted while a Workflow Task is open."""
+PARK_REASON_ROLLOVER: ParkReason.ValueType  # 4
+"""The Workflow Task rollover deadline expired. Core decided this one, so the terminal came
+back through FinalizeExternalStreams.
+"""
+PARK_REASON_BUDGET_ROLLOVER: ParkReason.ValueType  # 5
+"""The annotation reached its byte budget high-water mark and lang asked for a rollover. Unlike
+PARK_REASON_ROLLOVER this needs no finalization round trip: the triggering
+WorkflowStreamProgress already carried the terminal.
+"""
+PARK_REASON_COMMANDS_PRODUCED: ParkReason.ValueType  # 6
+"""The completion carried server-bound commands (timer, activity, child workflow, signal), so
+the Workflow Task completed normally with subscriptions left active and unparked.
+"""
+PARK_REASON_WORKFLOW_COMPLETED: ParkReason.ValueType  # 7
+"""The completion carried a terminal command -- complete, fail, cancel, or continue-as-new."""
+PARK_REASON_TASK_COMPLETED: ParkReason.ValueType  # 8
+"""The Workflow Task completed normally with nothing else to report: records were consumed and
+no stream wait remained pending. Distinct from PARK_REASON_COMMANDS_PRODUCED so the marker
+says which of the two it actually was rather than implying commands that never existed.
+"""
+PARK_REASON_OUTPUT_LATENCY: ParkReason.ValueType  # 9
+"""The Workflow Task's output visibility deadline expired."""
+PARK_REASON_OUTPUT_CAPACITY: ParkReason.ValueType  # 10
+"""The staged output reached its deterministic record or logical-byte capacity."""
+global___ParkReason = ParkReason
 
 class LocalActivityMarkerData(google.protobuf.message.Message):
     """This file defines data that Core might write externally. The first motivating case being
@@ -122,3 +211,246 @@ class PatchedMarkerData(google.protobuf.message.Message):
     ) -> None: ...
 
 global___PatchedMarkerData = PatchedMarkerData
+
+class ExternalStreamMarkerData(google.protobuf.message.Message):
+    """What Core writes into a marker for a Workflow Task that consumed external streams. Exactly one
+    of these is written per Workflow Task, however many progress reports that task carried.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    SCHEMA_VERSION_FIELD_NUMBER: builtins.int
+    QUIESCENCE_GENERATION_FIELD_NUMBER: builtins.int
+    WAITS_FIELD_NUMBER: builtins.int
+    REPLAY_ANNOTATION_FIELD_NUMBER: builtins.int
+    TERMINAL_BOUNDARY_FIELD_NUMBER: builtins.int
+    OUTPUT_FIELD_NUMBER: builtins.int
+    schema_version: builtins.int
+    quiescence_generation: builtins.int
+    """Identifies the complete blocked snapshot this marker closes."""
+    @property
+    def waits(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___ExternalWaitMarker
+    ]: ...
+    replay_annotation: builtins.bytes
+    """The accumulated replay annotation, opaque to Core. Core appends each observation delta to
+    this and never parses any of it.
+    """
+    terminal_boundary: global___ParkReason.ValueType
+    @property
+    def output(self) -> global___ExternalOutputStreamManifest:
+        """The output staged for this Workflow Task, if any. Output shares this marker with input so
+        replay has one activation-segment schedule and never drains the Workflow event loop twice.
+        """
+    def __init__(
+        self,
+        *,
+        schema_version: builtins.int = ...,
+        quiescence_generation: builtins.int = ...,
+        waits: collections.abc.Iterable[global___ExternalWaitMarker] | None = ...,
+        replay_annotation: builtins.bytes = ...,
+        terminal_boundary: global___ParkReason.ValueType = ...,
+        output: global___ExternalOutputStreamManifest | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["output", b"output"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "output",
+            b"output",
+            "quiescence_generation",
+            b"quiescence_generation",
+            "replay_annotation",
+            b"replay_annotation",
+            "schema_version",
+            b"schema_version",
+            "terminal_boundary",
+            b"terminal_boundary",
+            "waits",
+            b"waits",
+        ],
+    ) -> None: ...
+
+global___ExternalStreamMarkerData = ExternalStreamMarkerData
+
+class ExternalWaitMarker(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WAIT_ID_FIELD_NUMBER: builtins.int
+    GENERATION_FIELD_NUMBER: builtins.int
+    wait_id: builtins.int
+    generation: builtins.int
+    def __init__(
+        self,
+        *,
+        wait_id: builtins.int = ...,
+        generation: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "generation", b"generation", "wait_id", b"wait_id"
+        ],
+    ) -> None: ...
+
+global___ExternalWaitMarker = ExternalWaitMarker
+
+class ExternalOutputStreamManifest(google.protobuf.message.Message):
+    """Compact proof of the externally staged output belonging to one Workflow Task.
+
+    This message contains no record payloads. The stage token identifies the immutable pending
+    batch in the provider, while the remaining fields let replay validate the deterministic logical
+    output and let a cold reader reconcile the pending batch against History.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    SCHEMA_VERSION_FIELD_NUMBER: builtins.int
+    FINGERPRINT_VERSION_FIELD_NUMBER: builtins.int
+    STAGE_TOKEN_FIELD_NUMBER: builtins.int
+    HISTORY_FLOOR_EVENT_ID_FIELD_NUMBER: builtins.int
+    RUN_ID_FIELD_NUMBER: builtins.int
+    TOPICS_FIELD_NUMBER: builtins.int
+    SEGMENTS_FIELD_NUMBER: builtins.int
+    PROVIDER_ID_FIELD_NUMBER: builtins.int
+    PROVIDER_FORMAT_VERSION_FIELD_NUMBER: builtins.int
+    schema_version: builtins.int
+    fingerprint_version: builtins.int
+    stage_token: builtins.str
+    history_floor_event_id: builtins.int
+    """The event immediately preceding this Workflow Task's WorkflowTaskScheduled event in the
+    ordered History view used to build its activation.
+    """
+    run_id: builtins.str
+    @property
+    def topics(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___ExternalOutputTopicManifest
+    ]: ...
+    @property
+    def segments(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___ExternalOutputSegmentManifest
+    ]:
+        """One entry per live activation segment, including segments which published no output."""
+    provider_id: builtins.str
+    """Stable configured provider binding. Reconciliation refuses to interpret the batch through a
+    different provider or provider wire format.
+    """
+    provider_format_version: builtins.int
+    def __init__(
+        self,
+        *,
+        schema_version: builtins.int = ...,
+        fingerprint_version: builtins.int = ...,
+        stage_token: builtins.str = ...,
+        history_floor_event_id: builtins.int = ...,
+        run_id: builtins.str = ...,
+        topics: collections.abc.Iterable[global___ExternalOutputTopicManifest]
+        | None = ...,
+        segments: collections.abc.Iterable[global___ExternalOutputSegmentManifest]
+        | None = ...,
+        provider_id: builtins.str = ...,
+        provider_format_version: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "fingerprint_version",
+            b"fingerprint_version",
+            "history_floor_event_id",
+            b"history_floor_event_id",
+            "provider_format_version",
+            b"provider_format_version",
+            "provider_id",
+            b"provider_id",
+            "run_id",
+            b"run_id",
+            "schema_version",
+            b"schema_version",
+            "segments",
+            b"segments",
+            "stage_token",
+            b"stage_token",
+            "topics",
+            b"topics",
+        ],
+    ) -> None: ...
+
+global___ExternalOutputStreamManifest = ExternalOutputStreamManifest
+
+class ExternalOutputTopicManifest(google.protobuf.message.Message):
+    """Logical, pre-codec identity of one topic sub-batch."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOPIC_FIELD_NUMBER: builtins.int
+    RECORD_COUNT_FIELD_NUMBER: builtins.int
+    LOGICAL_BYTE_COUNT_FIELD_NUMBER: builtins.int
+    LOGICAL_FINGERPRINT_FIELD_NUMBER: builtins.int
+    FINISHED_FIELD_NUMBER: builtins.int
+    topic: builtins.str
+    record_count: builtins.int
+    logical_byte_count: builtins.int
+    logical_fingerprint: builtins.bytes
+    finished: builtins.bool
+    def __init__(
+        self,
+        *,
+        topic: builtins.str = ...,
+        record_count: builtins.int = ...,
+        logical_byte_count: builtins.int = ...,
+        logical_fingerprint: builtins.bytes = ...,
+        finished: builtins.bool = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "finished",
+            b"finished",
+            "logical_byte_count",
+            b"logical_byte_count",
+            "logical_fingerprint",
+            b"logical_fingerprint",
+            "record_count",
+            b"record_count",
+            "topic",
+            b"topic",
+        ],
+    ) -> None: ...
+
+global___ExternalOutputTopicManifest = ExternalOutputTopicManifest
+
+class ExternalOutputSegmentManifest(google.protobuf.message.Message):
+    """Record counts for one activation segment. Entries correspond positionally to `topics` in the
+    enclosing ExternalOutputStreamManifest, retaining empty segments without repeating topic names.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    RECORD_COUNTS_BY_TOPIC_FIELD_NUMBER: builtins.int
+    @property
+    def record_counts_by_topic(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[
+        builtins.int
+    ]: ...
+    def __init__(
+        self,
+        *,
+        record_counts_by_topic: collections.abc.Iterable[builtins.int] | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "record_counts_by_topic", b"record_counts_by_topic"
+        ],
+    ) -> None: ...
+
+global___ExternalOutputSegmentManifest = ExternalOutputSegmentManifest

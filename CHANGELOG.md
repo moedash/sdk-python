@@ -65,7 +65,10 @@ to include examples, links to docs, or any other relevant information.
   `close()` seals it. A provider runs record bodies through the client's data
   converter, so a payload codec and external storage apply to them.
   `temporalio.streams.providers.memory.MemoryStreams` is the in-memory
-  reference provider the conformance tests run against.
+  reference provider the conformance tests run against, and
+  `temporalio.streams.providers.redis.RedisStreams` serves the same interface
+  over External Workflow Streams, with one Redis log per topic that the workflow
+  and outside readers share.
 - **Experimental**: server-side streams. A workflow publishes to a stream it
   owns with a command the server applies in its Workflow Task's commit, and
   reads the ranges the server delivers on its Workflow Tasks, through
@@ -113,6 +116,20 @@ to include examples, links to docs, or any other relevant information.
   stream's notification channel, reads on each delivery and completes when the stream closes.
   `temporalio.streams.providers.nexus_consumer_service` hosts it on its own and needs the
   `streams-nexus` extra.
+- `ExternalStreamSubscription.records()` yields each value with the provider
+  offset it was read from, for a reader that has to name where it got to.
+- Added experimental External Workflow Streams in
+  `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
+  stored in a configured external backend instead of Temporal History, with a
+  Redis Streams provider included. Workflows subscribe with `external_stream`,
+  external processes publish with `ExternalStreamProducer`, and Workers are
+  configured with `external_stream_backend`.
+- Added the output direction for External Workflow Streams.
+  Workflows publish with `external_output_stream`, Activities and external
+  processes use `ExternalOutputStreamProducer`, and external consumers resume
+  through `ExternalOutputStreamClient`. Workflow output is staged outside
+  History and becomes readable only after its compact Workflow Task marker is
+  committed.
 
 ### Changed
 
@@ -128,6 +145,18 @@ to include examples, links to docs, or any other relevant information.
 
 ### Fixed
 
+- Preserve empty activations in the shared External Workflow Streams input and
+  output replay schedule. Workflows that read input, publish decisions, and
+  schedule Activities now reproduce that schedule during replay. Inconsistent
+  prerelease markers are rejected explicitly rather than guessing where omitted
+  activations belonged.
+- Resume external input waits when cold replay encounters a wake in an already
+  loaded History page, including Workers with workflow caching disabled.
+- Avoid an unnecessary output replacement Workflow Task after stream input has
+  resumed the Workflow and it is waiting on an Activity or timer.
+- Keep an incomplete retained external stream task alive when workflow caching
+  is disabled; evict it after its normal task boundary instead of repeatedly
+  interrupting input readiness with shutdown markers.
 - `GoogleAdkPlugin` now passes the optional `anthropic`, `litellm`, and `openai` SDKs through
   the workflow sandbox.
 - `contrib.deepagents`: prevent duplicate input messages after continue-as-new.
