@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import (
     TYPE_CHECKING,
     Any,
+    Literal,
     NoReturn,
     overload,
 )
@@ -29,9 +30,11 @@ import temporalio.bridge.proto
 import temporalio.bridge.proto.activity_task
 import temporalio.common
 import temporalio.converter
+import temporalio.streams
 from temporalio.converter._payload_converter import (
     _TemporalTransferTypePayloadConverter,
 )
+from temporalio.streams._ref import open_ref
 
 from .types import CallableType
 
@@ -209,6 +212,7 @@ class _Context:
     runtime_metric_meter: temporalio.common.MetricMeter | None
     client: Client | None
     cancellation_details: _ActivityCancellationDetailsHolder
+    stream_provider: temporalio.streams.StreamProvider | None = None
     _logger_details: Mapping[str, Any] | None = None
     _payload_converter: temporalio.converter.PayloadConverter | None = None
     _metric_meter: temporalio.common.MetricMeter | None = None
@@ -296,6 +300,132 @@ def client() -> Client:
             "client when creating ActivityEnvironment."
         )
     return client
+
+
+@overload
+def stream_handle(
+    workflow_id: temporalio.streams.StreamRef,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.RefHandle: ...
+
+
+@overload
+def stream_handle(
+    workflow_id: str | None = None,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.StreamHandle: ...
+
+
+def stream_handle(
+    workflow_id: str | temporalio.streams.StreamRef | None = None,
+    *,
+    run_id: str | None = None,
+    scope: Literal["workflow", "activity"] | None = None,
+) -> temporalio.streams.StreamHandle:
+    """Return a stream handle from the provider the worker was given.
+
+    A :py:class:`temporalio.streams.StreamRef` in place of ``workflow_id``,
+    such as one this activity received as an argument, opens the stream it
+    names, whatever owns it, and takes no other argument; the handle's calls
+    that name no topic then address a topic the ref names.
+
+    Which stream a call with no ``workflow_id`` reaches is decided by where
+    the activity runs, never by what exists:
+
+    - In an activity a workflow scheduled, it is that workflow's stream,
+      pinned to the run the activity belongs to.
+    - In a standalone activity, it is the activity's own stream.
+    - ``scope="activity"`` gives an activity a workflow scheduled its own
+      streams instead, apart from the workflow's. ``scope="workflow"`` asks
+      for the workflow explicitly, and a standalone activity has none.
+
+    The rule is static because a stream is created by its first write, so a
+    rule that looked for one would send attempt 1 to the workflow and a retry
+    to the stream attempt 1 created. An activity's own streams are one per
+    activity execution, not per attempt: a retry writes to the same stream,
+    under a new attempt, and they end when the activity reaches a terminal
+    status.
+
+    Name a ``workflow_id`` to address another workflow; ``run_id`` then pins
+    the handle to one run and its absence follows the execution chain. A
+    ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+    :py:data:`temporalio.streams.END` or at the last ``N`` records with
+    ``last=N``. See :py:mod:`temporalio.streams`.
+
+    Like :py:func:`client`, this is only available in ``async def``
+    activities.
+
+    Args:
+        workflow_id: Another workflow whose stream to address, or a
+            :py:class:`temporalio.streams.StreamRef` naming the stream.
+        run_id: The run of ``workflow_id`` to pin to.
+        scope: ``"activity"`` for this activity's own streams,
+            ``"workflow"`` for its workflow's. Without it the rule above
+            decides.
+
+    Returns:
+        :py:class:`temporalio.streams.StreamHandle` for use in the current
+        activity.
+
+    Raises:
+        RuntimeError: When the client is not available, which is what a
+            ``def`` activity gets, or when ``scope="workflow"`` is asked of
+            an activity that belongs to no workflow.
+        temporalio.streams.StreamUnsupportedError: The worker has no stream
+            provider, or its provider cannot hold a stream an activity owns.
+            Register one with ``Client.connect(plugins=[provider])`` or
+            ``Worker(plugins=[provider])``.
+        ValueError: ``run_id`` was given without ``workflow_id``,
+            ``scope="activity"`` with one, or a ref with either.
+    """
+    context = _Context.current()
+    provider = context.stream_provider
+    if provider is None:
+        raise temporalio.streams.StreamUnsupportedError(
+            "no stream provider is configured on this worker; register one with "
+            "Client.connect(plugins=[provider]) or Worker(plugins=[provider])"
+        )
+    if isinstance(workflow_id, temporalio.streams.StreamRef):
+        if run_id is not None or scope is not None:
+            raise ValueError(
+                "a StreamRef names the stream in full, so it takes no run_id or scope"
+            )
+        return open_ref(provider, client(), workflow_id)
+    if workflow_id is not None:
+        if scope == "activity":
+            raise ValueError(
+                "scope='activity' addresses this activity's own streams, so it takes "
+                "no workflow_id"
+            )
+        return provider.get_stream_handle(client(), workflow_id, run_id=run_id)
+    if run_id is not None:
+        raise ValueError("run_id needs a workflow_id")
+    info = context.info()
+    if scope is None:
+        scope = "workflow" if info.in_workflow else "activity"
+    if scope == "workflow":
+        if info.workflow_id is None:
+            raise RuntimeError(
+                "this activity belongs to no workflow, so name the workflow_id to "
+                "address, or leave scope unset for the activity's own streams"
+            )
+        return provider.get_stream_handle(
+            client(), info.workflow_id, run_id=info.workflow_run_id
+        )
+    if info.workflow_id is not None:
+        return provider.get_activity_stream_handle(
+            client(),
+            info.activity_id,
+            workflow_id=info.workflow_id,
+            run_id=info.workflow_run_id,
+        )
+    return provider.get_activity_stream_handle(
+        client(), info.activity_id, run_id=info.activity_run_id
+    )
 
 
 def in_activity() -> bool:

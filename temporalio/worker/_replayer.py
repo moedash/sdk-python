@@ -18,6 +18,7 @@ import temporalio.bridge.worker
 import temporalio.client
 import temporalio.converter
 import temporalio.runtime
+import temporalio.streams
 import temporalio.worker
 import temporalio.workflow
 
@@ -58,13 +59,14 @@ class Replayer:
         disable_safe_workflow_eviction: bool = False,
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
         external_stream_backend: Any | None = None,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> None:
         """Create a replayer to replay workflows from history.
 
         See :py:meth:`temporalio.worker.Worker.__init__` for a description of
         most of the arguments. Most of the same arguments need to be passed to
         the replayer that were passed to the worker when the workflow originally
-        ran.
+        ran, ``stream_provider`` included when the workflow used streams.
 
         Note, unlike the worker, for the replayer the workflow_task_executor
         will default to a new thread pool executor with no max_workers set that
@@ -96,6 +98,7 @@ class Replayer:
             disable_safe_workflow_eviction=disable_safe_workflow_eviction,
             header_codec_behavior=header_codec_behavior,
             external_stream_backend=external_stream_backend,
+            stream_provider=stream_provider,
         )
         self._initial_config = self._config.copy()
         self._default_workflow_logic_flags = set(_DEFAULT_ENABLED_WORKFLOW_LOGIC_FLAGS)
@@ -298,6 +301,7 @@ class Replayer:
                 default_workflow_logic_flags=frozenset(
                     self._default_workflow_logic_flags
                 ),
+                stream_provider=self._config.get("stream_provider"),
             )
             external_storage = data_converter.external_storage
             storage_driver_types = (
@@ -445,6 +449,7 @@ class ReplayerConfig(TypedDict, total=False):
     disable_safe_workflow_eviction: bool
     header_codec_behavior: HeaderCodecBehavior
     external_stream_backend: Any | None
+    stream_provider: temporalio.streams.StreamProvider | None
 
 
 @dataclass(frozen=True)

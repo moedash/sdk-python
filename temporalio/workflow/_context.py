@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ._channels import ChannelSubscription
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
     from ._nexus import NexusOperationCancellationType, NexusOperationHandle
+    from ._streams import _WorkflowStreams
     from ._workflow_ops import (
         ChildWorkflowCancellationType,
         ChildWorkflowHandle,
@@ -475,6 +476,9 @@ class _Runtime(ABC):
         headers: Mapping[str, str] | None,
         summary: str | None,
     ) -> NexusOperationHandle[OutputT]: ...
+
+    @abstractmethod
+    def workflow_streams(self) -> _WorkflowStreams: ...
 
     @abstractmethod
     def workflow_subscribe_channel(self, channel: str) -> ChannelSubscription: ...
