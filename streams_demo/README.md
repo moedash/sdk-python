@@ -51,22 +51,22 @@ provider it is configured with. Workers still configure a storage provider,
 because workflow reads and writes ride the Workflow Task.
 
 ```python
-front = NexusStreams(endpoint=endpoint_id)
+front = NexusStreams(endpoint="streams-e2e")
 stream = front.get_stream_handle(client, workflow_id)
 producer = stream.producer(topic="inputs", producer_id="model", attempt=1)
 ```
 
-The endpoint has to exist and route to the handler worker's task queue, and
-the provider takes its id rather than its name:
+The endpoint has to exist and route to the handler worker's task queue. The
+provider takes its name and resolves it to the id through the client:
 
 ```sh
 temporal operator nexus endpoint create --name streams-e2e \
     --target-task-queue streams-handlers-e2e
-temporal operator nexus endpoint get --name streams-e2e -o json | jq -r .id
 ```
 
 See `tests/streams/test_nexus_provider.py` for the handler worker, and
-`examples/streams/run.py nexus --endpoint <id>` for the whole loop behind it.
+`examples/streams/run.py nexus --endpoint streams-e2e --http http://<host>:<http-port>`
+for the whole loop behind it.
 
 The conformance suite runs the same expectations on every provider:
 `pytest tests/streams/` (memory and Workflow Streams on the test server), plus

@@ -3,14 +3,15 @@ r"""Run the same agent on whichever provider is configured.
     python -m examples.streams.run workflow_streams
     python -m examples.streams.run redis     --redis redis://127.0.0.1:6379
     python -m examples.streams.run native    --address 127.0.0.1:7333
-    python -m examples.streams.run nexus     --endpoint <endpoint-id>
+    python -m examples.streams.run nexus     --endpoint streams-e2e \
+        --http http://127.0.0.1:7243
 
 The Nexus mode needs an endpoint that routes to the handler worker's task
-queue, and the flag takes the endpoint's id, not its name::
+queue. The flag takes the endpoint's name, which the front resolves to its id
+through the client, and ``--http`` is the server's HTTP address as a full URL::
 
     temporal operator nexus endpoint create --name streams-e2e \
         --target-task-queue streams-handlers-e2e
-    temporal operator nexus endpoint get --name streams-e2e -o json | jq -r .id
 
 The provider is registered once, on the client, and that is the only
 provider-specific line here. The workers inherit it, the Activity reaches its
@@ -42,7 +43,7 @@ async def main() -> None:
     parser.add_argument(
         "--endpoint",
         default="",
-        help="nexus endpoint id, not its name; see streams_demo/README.md",
+        help="nexus endpoint name; see streams_demo/README.md",
     )
     parser.add_argument("--http", default="http://127.0.0.1:7243")
     parser.add_argument(
@@ -61,7 +62,7 @@ async def main() -> None:
     # Checked before any provider exists, so a missing flag is a usage error
     # rather than a traceback with a provider left open.
     if args.provider == "nexus" and not args.endpoint:
-        parser.error("nexus needs --endpoint <endpoint-id>")
+        parser.error("nexus needs --endpoint <endpoint-name>")
 
     store = args.behind if args.provider == "nexus" else args.provider
     provider = _setup.make_provider(store, args)
