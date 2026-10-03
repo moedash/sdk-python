@@ -335,6 +335,66 @@ class NexusOperationCancellationState(IntEnum):
     """Cancellation request is blocked, eg: by circuit breaker."""
 
 
+class ExecutionType(IntEnum):
+    """What kind of execution an :py:class:`Execution` names.
+
+    .. warning::
+       This API is experimental and unstable.
+
+    See :py:class:`temporalio.api.enums.v1.ExecutionType`.
+    """
+
+    UNSPECIFIED = int(temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_UNSPECIFIED)
+    WORKFLOW = int(temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW)
+    ACTIVITY = int(temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_ACTIVITY)
+    """A standalone activity."""
+
+
+@dataclass(frozen=True)
+class Execution:
+    """One execution in a namespace: a workflow or a standalone activity.
+
+    Where a call can address either kind, this names which one and by what id.
+    The id is the business id the caller chose, a workflow id or an activity
+    id, with an optional run id below it.
+
+    .. warning::
+       This API is experimental and unstable.
+    """
+
+    type: ExecutionType
+    """Which kind of execution ``business_id`` names."""
+
+    business_id: str
+    """The workflow id or the activity id."""
+
+    run_id: str | None = None
+    """A run of the execution. ``None`` means its current run."""
+
+    @classmethod
+    def workflow(cls, workflow_id: str, run_id: str | None = None) -> Execution:
+        """A workflow execution by its id and, optionally, a run."""
+        return cls(ExecutionType.WORKFLOW, workflow_id, run_id)
+
+    @classmethod
+    def activity(cls, activity_id: str, run_id: str | None = None) -> Execution:
+        """A standalone activity execution by its id and, optionally, a run."""
+        return cls(ExecutionType.ACTIVITY, activity_id, run_id)
+
+    def to_proto(self) -> temporalio.api.common.v1.Execution:
+        """The protobuf form of this execution."""
+        return temporalio.api.common.v1.Execution(
+            type=temporalio.api.enums.v1.ExecutionType.ValueType(int(self.type)),
+            business_id=self.business_id,
+            run_id=self.run_id or "",
+        )
+
+    @classmethod
+    def from_proto(cls, proto: temporalio.api.common.v1.Execution) -> Execution:
+        """The execution a protobuf names. An empty run id becomes ``None``."""
+        return cls(ExecutionType(proto.type), proto.business_id, proto.run_id or None)
+
+
 class QueryRejectCondition(IntEnum):
     """Whether a query should be rejected in certain conditions.
 

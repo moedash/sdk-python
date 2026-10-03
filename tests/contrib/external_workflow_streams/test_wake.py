@@ -22,6 +22,7 @@ from datetime import timedelta
 import pytest
 
 import temporalio.api.common.v1
+import temporalio.api.enums.v1
 import temporalio.api.notification.v1
 import temporalio.api.workflowservice.v1
 import temporalio.bridge
@@ -30,6 +31,7 @@ import temporalio.service
 from temporalio import workflow
 from temporalio.bridge.proto.external_stream.external_stream_pb2 import WakeSignal
 from temporalio.client import Client
+from temporalio.common import Execution
 from temporalio.contrib.external_workflow_streams._backend import (
     AppendConflictError,
     ParkIntent,
@@ -1870,17 +1872,20 @@ class ChannelServiceClient(RecordingClient):
         self.described.append(request)
         if self.describe_status is not None:
             raise _rpc_error(self.describe_status)
-        if self.linked and request.HasField("workflow_execution"):
+        if self.linked and request.HasField("execution"):
             return temporalio.api.workflowservice.v1.DescribeChannelResponse(
                 kind=temporalio.api.notification.v1.ChannelKind.CHANNEL_KIND_LINKED,
-                linked_to=temporalio.api.common.v1.WorkflowExecution(
-                    workflow_id=request.workflow_execution.workflow_id, run_id="run"
+                linked_to=temporalio.api.common.v1.Execution(
+                    type=request.execution.type,
+                    business_id=request.execution.business_id,
+                    run_id="run",
                 ),
             )
         return temporalio.api.workflowservice.v1.DescribeChannelResponse()
 
 
 TOKENS_CHANNEL = channel_for(CHAIN.stream_key("tokens")).channel
+WORKFLOW_TYPE = temporalio.api.enums.v1.ExecutionType.EXECUTION_TYPE_WORKFLOW
 
 
 def channel_request(**overrides) -> WakeRequest:  # type: ignore[no-untyped-def]
@@ -2064,14 +2069,17 @@ def test_the_channel_is_linked_to_the_streams_workflow() -> None:
     """A stream key names a chain, so its channel is the owner's, by id alone."""
     address = channel_for(StreamKey("ns", "wf-1", "first-run-1", "tokens"))
 
-    assert address.workflow_id == "wf-1"
     assert address.linked
-    execution = address.execution()
-    assert execution is not None
-    assert execution.workflow_id == "wf-1" and execution.run_id == ""
+    # The chain's id without a run, so the current run is the one reached.
+    assert address.execution == Execution.workflow("wf-1", run_id=None)
+    assert address.workflow_id == "wf-1"
     # A channel without an owner is addressed by name alone.
     independent = ChannelAddress(channel="orders")
-    assert not independent.linked and independent.execution() is None
+    assert not independent.linked
+    assert independent.execution is None and independent.workflow_id is None
+    # An owner that is not a workflow has no workflow id to give.
+    owned = ChannelAddress(channel="orders", execution=Execution.activity("act"))
+    assert owned.linked and owned.workflow_id is None
 
 
 def test_the_channel_tells_the_two_directions_apart() -> None:
@@ -2097,7 +2105,7 @@ def test_the_request_composed_for_a_chain_names_its_channel() -> None:
     )
 
     assert composed.channel == TOKENS_CHANNEL
-    assert composed.channel_workflow_id == "wf-1"
+    assert composed.channel_execution == Execution.workflow("wf-1")
     assert composed.channel_address == channel_for(CHAIN.stream_key("tokens"))
 
 
@@ -2245,8 +2253,9 @@ async def test_the_probe_finds_the_linked_kind_on_a_running_workflow() -> None:
     [described] = client.described
     assert described.namespace == "ns"
     assert described.channel == PROBE_CHANNEL
-    assert described.workflow_execution.workflow_id == "wf-1"
-    assert described.workflow_execution.run_id == ""
+    assert described.execution.type == WORKFLOW_TYPE
+    assert described.execution.business_id == "wf-1"
+    assert described.execution.run_id == ""
 
 
 @pytest.mark.asyncio
@@ -2298,8 +2307,9 @@ async def test_a_producer_notifies_the_channel_of_the_stream_it_appended_to() ->
     [notify] = client.notified
     assert notify.notification.channel == channel_for(topic.stream_key).channel
     # The owner rides along, so a server with linked channels delivers to it.
-    assert notify.workflow_execution.workflow_id == "wf-1"
-    assert notify.workflow_execution.run_id == ""
+    assert notify.execution.type == WORKFLOW_TYPE
+    assert notify.execution.business_id == "wf-1"
+    assert notify.execution.run_id == ""
     assert client.sent == []
 
 
