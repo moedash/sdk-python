@@ -16,5 +16,5 @@ tags
 /.claude
 tmpclaude-*
 
-# Output of a streams_demo run, written next to the script.
+# Demo run output, written per provider; the numbers live in the doc.
 streams_demo/results-*/
