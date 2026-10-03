@@ -33,6 +33,7 @@ import temporalio.client
 import temporalio.common
 import temporalio.converter
 import temporalio.exceptions
+import temporalio.streams
 from temporalio.converter import (
     StorageDriverActivityInfo,
     StorageDriverStoreContext,
@@ -63,9 +64,11 @@ class _ActivityWorker:
         metric_meter: temporalio.common.MetricMeter,
         client: temporalio.client.Client,
         encode_headers: bool,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> None:
         self._bridge_worker = bridge_worker
         self._task_queue = task_queue
+        self._stream_provider = stream_provider
         self._activity_executor = activity_executor
         self._shared_state_manager = shared_state_manager
         self._running_activities: dict[bytes, _RunningActivity] = {}
@@ -666,6 +669,10 @@ class _ActivityWorker:
                 runtime_metric_meter=None if sync_non_threaded else self._metric_meter,
                 client=self._client if not running_activity.sync else None,
                 cancellation_details=running_activity.cancellation_details,
+                stream_provider=(
+                    self._stream_provider if not running_activity.sync else None
+                ),
+                sync=running_activity.sync,
             )
         )
         temporalio.activity.logger.debug("Starting activity")
@@ -942,6 +949,7 @@ def _execute_sync_activity(
             runtime_metric_meter=runtime_metric_meter,
             client=None,
             cancellation_details=cancellation_details,
+            sync=True,
         )
     )
     if not cancel_thread_raiser:

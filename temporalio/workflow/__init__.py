@@ -57,7 +57,13 @@ from ._asyncio import (
     as_completed,
     wait,
 )
-from ._context import (
+from ._channels import (
+    ChannelSubscription,
+    Notification,
+    linked_channel,
+    subscribe_channel,
+)
+from ._context import (  # noqa: F401
     Info,
     ParentInfo,
     RootInfo,
@@ -96,6 +102,21 @@ from ._context import (
     uuid4,
     uuid7,
     wait_condition,
+)
+from ._context import (
+    _append_stream_records as _append_stream_records,
+)
+from ._context import (
+    _close_stream_records as _close_stream_records,
+)
+from ._context import (
+    _DeliveredStreamRecord as _DeliveredStreamRecord,
+)
+from ._context import (
+    _read_stream_records as _read_stream_records,
+)
+from ._context import (
+    _subscribe_stream as _subscribe_stream,
 )
 from ._definition import (
     DynamicWorkflowConfig,
@@ -150,6 +171,12 @@ from ._sandbox import (
     _sandbox_unrestricted,
     logger,
     unsafe,
+)
+from ._streams import (
+    StreamReader,
+    StreamWriter,
+    stream_reader,
+    stream_writer,
 )
 from ._workflow_ops import (
     ChildWorkflowCancellationType,
@@ -258,6 +285,14 @@ __all__ = [
     "SandboxImportNotificationPolicy",
     "logger",
     "unsafe",
+    "ChannelSubscription",
+    "Notification",
+    "linked_channel",
+    "subscribe_channel",
+    "StreamReader",
+    "StreamWriter",
+    "stream_reader",
+    "stream_writer",
     "ChildWorkflowCancellationType",
     "ChildWorkflowConfig",
     "ChildWorkflowHandle",
