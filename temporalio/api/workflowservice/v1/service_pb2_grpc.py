@@ -143,6 +143,31 @@ class WorkflowServiceStub(object):
             request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionRequest.SerializeToString,
             response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionResponse.FromString,
         )
+        self.NotifyChannel = channel.unary_unary(
+            "/temporal.api.workflowservice.v1.WorkflowService/NotifyChannel",
+            request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.NotifyChannelRequest.SerializeToString,
+            response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.NotifyChannelResponse.FromString,
+        )
+        self.RegisterChannelListener = channel.unary_unary(
+            "/temporal.api.workflowservice.v1.WorkflowService/RegisterChannelListener",
+            request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.RegisterChannelListenerRequest.SerializeToString,
+            response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.RegisterChannelListenerResponse.FromString,
+        )
+        self.UnregisterChannelListener = channel.unary_unary(
+            "/temporal.api.workflowservice.v1.WorkflowService/UnregisterChannelListener",
+            request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.UnregisterChannelListenerRequest.SerializeToString,
+            response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.UnregisterChannelListenerResponse.FromString,
+        )
+        self.PollChannel = channel.unary_unary(
+            "/temporal.api.workflowservice.v1.WorkflowService/PollChannel",
+            request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.PollChannelRequest.SerializeToString,
+            response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.PollChannelResponse.FromString,
+        )
+        self.DescribeChannel = channel.unary_unary(
+            "/temporal.api.workflowservice.v1.WorkflowService/DescribeChannel",
+            request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.DescribeChannelRequest.SerializeToString,
+            response_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.DescribeChannelResponse.FromString,
+        )
         self.SignalWithStartWorkflowExecution = channel.unary_unary(
             "/temporal.api.workflowservice.v1.WorkflowService/SignalWithStartWorkflowExecution",
             request_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWithStartWorkflowExecutionRequest.SerializeToString,
@@ -932,6 +957,53 @@ class WorkflowServiceServicer(object):
 
         This results in a `WORKFLOW_EXECUTION_SIGNALED` event recorded in the history and a workflow
         task being created for the execution.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def NotifyChannel(self, request, context):
+        """NotifyChannel tells every listener of a channel that a source they consume
+        has moved. The writer names no addressee and never learns who listens. The
+        server wakes each listener: a Workflow with a Workflow Task, a callback by
+        invoking it. Nothing goes to History except the notifications a woken
+        Workflow Task carries on its scheduled event.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def RegisterChannelListener(self, request, context):
+        """RegisterChannelListener registers a callback as a listener of a channel. A
+        Workflow registers itself with the `SubscribeNotificationChannel` command
+        instead.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def UnregisterChannelListener(self, request, context):
+        """UnregisterChannelListener removes a listener from a channel.
+
+        (-- api-linter: core::0136::http-method=disabled
+        aip.dev/not-precedent: Removing a listener is a delete of that listener. --)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def PollChannel(self, request, context):
+        """PollChannel is a long poll for clients. It returns the retained
+        notifications of a channel with a counter above `after_counter`, waiting
+        up to `wait` for one when none is retained yet.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def DescribeChannel(self, request, context):
+        """DescribeChannel returns the listeners of a channel and its latest
+        notification.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -2037,6 +2109,31 @@ def add_WorkflowServiceServicer_to_server(servicer, server):
             servicer.SignalWorkflowExecution,
             request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionRequest.FromString,
             response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionResponse.SerializeToString,
+        ),
+        "NotifyChannel": grpc.unary_unary_rpc_method_handler(
+            servicer.NotifyChannel,
+            request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.NotifyChannelRequest.FromString,
+            response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.NotifyChannelResponse.SerializeToString,
+        ),
+        "RegisterChannelListener": grpc.unary_unary_rpc_method_handler(
+            servicer.RegisterChannelListener,
+            request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.RegisterChannelListenerRequest.FromString,
+            response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.RegisterChannelListenerResponse.SerializeToString,
+        ),
+        "UnregisterChannelListener": grpc.unary_unary_rpc_method_handler(
+            servicer.UnregisterChannelListener,
+            request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.UnregisterChannelListenerRequest.FromString,
+            response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.UnregisterChannelListenerResponse.SerializeToString,
+        ),
+        "PollChannel": grpc.unary_unary_rpc_method_handler(
+            servicer.PollChannel,
+            request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.PollChannelRequest.FromString,
+            response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.PollChannelResponse.SerializeToString,
+        ),
+        "DescribeChannel": grpc.unary_unary_rpc_method_handler(
+            servicer.DescribeChannel,
+            request_deserializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.DescribeChannelRequest.FromString,
+            response_serializer=temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.DescribeChannelResponse.SerializeToString,
         ),
         "SignalWithStartWorkflowExecution": grpc.unary_unary_rpc_method_handler(
             servicer.SignalWithStartWorkflowExecution,
@@ -3217,6 +3314,151 @@ class WorkflowService(object):
             "/temporal.api.workflowservice.v1.WorkflowService/SignalWorkflowExecution",
             temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionRequest.SerializeToString,
             temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.SignalWorkflowExecutionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def NotifyChannel(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/temporal.api.workflowservice.v1.WorkflowService/NotifyChannel",
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.NotifyChannelRequest.SerializeToString,
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.NotifyChannelResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def RegisterChannelListener(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/temporal.api.workflowservice.v1.WorkflowService/RegisterChannelListener",
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.RegisterChannelListenerRequest.SerializeToString,
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.RegisterChannelListenerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def UnregisterChannelListener(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/temporal.api.workflowservice.v1.WorkflowService/UnregisterChannelListener",
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.UnregisterChannelListenerRequest.SerializeToString,
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.UnregisterChannelListenerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def PollChannel(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/temporal.api.workflowservice.v1.WorkflowService/PollChannel",
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.PollChannelRequest.SerializeToString,
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.PollChannelResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def DescribeChannel(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/temporal.api.workflowservice.v1.WorkflowService/DescribeChannel",
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.DescribeChannelRequest.SerializeToString,
+            temporal_dot_api_dot_workflowservice_dot_v1_dot_request__response__pb2.DescribeChannelResponse.FromString,
             options,
             channel_credentials,
             insecure,

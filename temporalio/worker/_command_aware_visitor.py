@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from temporalio.api.enums.v1.command_type_pb2 import CommandType
+from temporalio.api.stream.v1 import StreamRecord
 from temporalio.bridge._visitor import PayloadVisitor
 from temporalio.bridge._visitor_functions import VisitorFunctions
 from temporalio.bridge.proto.workflow_activation.workflow_activation_pb2 import (
@@ -26,6 +27,7 @@ from temporalio.bridge.proto.workflow_commands.workflow_commands_pb2 import (
     StartChildWorkflowExecution,
     WorkflowCommand,
 )
+from temporalio.streams._body import CONTENT_HASH_KEY
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,18 @@ class CommandAwarePayloadVisitor(PayloadVisitor):
     ) -> None:
         with current_command(CommandType.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION, o.seq):
             await super()._visit_coresdk_workflow_commands_ScheduleNexusOperation(fs, o)
+
+    async def _visit_temporal_api_stream_v1_StreamRecord(
+        self, fs: VisitorFunctions, o: StreamRecord
+    ) -> None:
+        if o.HasField("body"):
+            await self._visit_temporal_api_common_v1_Payload(fs, o.body)
+        for key, value in o.metadata.items():
+            # The declared content hash is the server's dedupe identity and is
+            # read as sent, so neither the codec nor the store may rewrite it.
+            if key == CONTENT_HASH_KEY:
+                continue
+            await self._visit_temporal_api_common_v1_Payload(fs, value)
 
     async def _visit_coresdk_workflow_commands_WorkflowCommand(
         self, fs: VisitorFunctions, o: WorkflowCommand

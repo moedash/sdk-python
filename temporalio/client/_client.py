@@ -27,6 +27,7 @@ import temporalio.common
 import temporalio.converter
 import temporalio.runtime
 import temporalio.service
+import temporalio.streams
 import temporalio.workflow
 from temporalio.service import (
     ConnectConfig,
@@ -39,6 +40,7 @@ from temporalio.service import (
     ServiceClient,
     TLSConfig,
 )
+from temporalio.streams._ref import open_ref
 
 from ..common import HeaderCodecBehavior
 from ..types import (
@@ -62,22 +64,29 @@ from ._activity import (
     AsyncActivityHandle,
     AsyncActivityIDReference,
 )
+from ._callback import Callback
+from ._channel import ChannelDescription
 from ._impl import _ClientImpl
 from ._interceptor import (
     CountActivitiesInput,
     CountNexusOperationsInput,
     CountWorkflowsInput,
     CreateScheduleInput,
+    DescribeChannelInput,
     GetWorkerBuildIdCompatibilityInput,
     GetWorkerTaskReachabilityInput,
     ListActivitiesInput,
     ListNexusOperationsInput,
     ListSchedulesInput,
     ListWorkflowsInput,
+    NotifyChannelInput,
     OutboundInterceptor,
+    PollChannelInput,
+    RegisterChannelListenerInput,
     StartActivityInput,
     StartWorkflowInput,
     StartWorkflowUpdateWithStartInput,
+    UnregisterChannelListenerInput,
     UpdateWithStartUpdateWorkflowInput,
     UpdateWorkerBuildIdCompatibilityInput,
 )
@@ -112,6 +121,9 @@ from ._workflow import (
 if TYPE_CHECKING:
     from ._interceptor import Interceptor
     from ._plugin import Plugin
+
+DEFAULT_CHANNEL_POLL_WAIT = timedelta(seconds=30)
+"""How long :py:meth:`Client.poll_channel` waits for a notification by default."""
 
 
 class Client:
@@ -155,6 +167,7 @@ class Client:
         grpc_compression: GrpcCompression = GrpcCompression.GZIP,
         payload_limits: PayloadLimitsConfig = PayloadLimitsConfig(),
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ) -> Self:
         """Connect to a Temporal server.
 
@@ -220,6 +233,11 @@ class Client:
             payload_limits: Warning thresholds for outbound payload/memo sizes. Over-threshold
                 fields are logged but still sent. Set a threshold to 0 to disable it.
             header_codec_behavior: Encoding behavior for headers sent by the client.
+            stream_provider: Experimental. The stream provider
+                :py:meth:`get_stream_handle` opens handles from, see
+                :py:mod:`temporalio.streams`. A provider that is also a
+                :py:class:`Plugin` sets this itself when passed in ``plugins``,
+                and workers built from this client inherit it.
         """
         connect_config = temporalio.service.ConnectConfig(
             target_host=target_host,
@@ -256,6 +274,7 @@ class Client:
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
             header_codec_behavior=header_codec_behavior,
             plugins=plugins,
+            stream_provider=stream_provider,
         )
 
     def __init__(
@@ -269,6 +288,7 @@ class Client:
         default_workflow_query_reject_condition: None
         | (temporalio.common.QueryRejectCondition) = None,
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
+        stream_provider: temporalio.streams.StreamProvider | None = None,
     ):
         """Create a Temporal client from a service client.
 
@@ -283,6 +303,7 @@ class Client:
             interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
             header_codec_behavior=header_codec_behavior,
+            stream_provider=stream_provider,
         )
         self._initial_config = config.copy()
 
@@ -884,6 +905,139 @@ class Client:
             result_run_id=run_id,
             first_execution_run_id=first_execution_run_id,
             result_type=result_type,
+        )
+
+    def get_stream_handle(
+        self,
+        workflow_id: str | temporalio.streams.StreamRef | None = None,
+        *,
+        run_id: str | None = None,
+        activity_id: str | None = None,
+        stream_id: str | None = None,
+    ) -> temporalio.streams.StreamHandle:
+        """Get a handle on a stream from the provider registered on this client.
+
+        Mirrors :py:meth:`get_workflow_handle`: without ``run_id`` the handle
+        follows the workflow's execution chain across continue-as-new, with
+        one it is pinned to that run. With ``activity_id`` the handle is on
+        the streams that activity owns: a standalone activity's when
+        ``workflow_id`` is left out, and ``run_id`` then pins the activity's
+        run, or an activity that ``workflow_id`` scheduled. With
+        ``stream_id`` it is on a standalone stream, one with an id of its own
+        and no owner, which :py:meth:`create_stream` made; it takes no other
+        argument. A :py:class:`temporalio.streams.StreamRef` in place of
+        ``workflow_id`` opens the stream the ref names, whatever owns it, and
+        takes no other argument either: the handle's calls that name no topic
+        then address the ref's topic. The provider is the one registered
+        with ``plugins=[provider]`` at :py:meth:`connect`, or passed as
+        ``stream_provider``. The handle's ``read``, ``latest`` and
+        ``producer`` take a topic, and without one address the owner's
+        default topic, :py:data:`temporalio.streams.DEFAULT_TOPIC`. A
+        ``read`` starts at :py:data:`temporalio.streams.BEGINNING`, at
+        :py:data:`temporalio.streams.END` or at the last ``N`` records with
+        ``last=N``, and resumes only after a cursor it was handed. See
+        :py:mod:`temporalio.streams`.
+
+        Args:
+            workflow_id: Workflow ID whose stream to get a handle to, the
+                workflow that scheduled ``activity_id``, or a
+                :py:class:`temporalio.streams.StreamRef` naming the stream.
+            run_id: Run ID to pin the handle to.
+            activity_id: Activity ID whose own streams to get a handle to.
+            stream_id: ID of the standalone stream to get a handle to.
+
+        Returns:
+            The stream handle.
+
+        Raises:
+            ValueError: No owner was named, or a ref or ``stream_id`` was
+                given together with another argument.
+            temporalio.streams.StreamUnsupportedError: No stream provider is
+                registered on this client, or it cannot hold a stream an
+                activity owns or a stream without an owner.
+        """
+        provider = self._config.get("stream_provider")
+        if provider is None:
+            raise temporalio.streams.StreamUnsupportedError(
+                "no stream provider is registered on this client; connect with "
+                "plugins=[provider]"
+            )
+        if isinstance(workflow_id, temporalio.streams.StreamRef):
+            if run_id is not None or activity_id is not None or stream_id is not None:
+                raise ValueError(
+                    "a StreamRef names the stream in full, so it takes no run_id, "
+                    "activity_id or stream_id"
+                )
+            return open_ref(provider, self, workflow_id)
+        if stream_id is not None:
+            if workflow_id is not None or run_id is not None or activity_id is not None:
+                raise ValueError(
+                    "stream_id names a standalone stream, which has no workflow_id, "
+                    "run_id or activity_id"
+                )
+            return provider.get_standalone_stream_handle(self, stream_id)
+        if activity_id is not None:
+            return provider.get_activity_stream_handle(
+                self, activity_id, workflow_id=workflow_id, run_id=run_id
+            )
+        if workflow_id is None:
+            raise ValueError(
+                "name the workflow_id, the activity_id or the stream_id to address"
+            )
+        return provider.get_stream_handle(self, workflow_id, run_id=run_id)
+
+    async def create_stream(
+        self,
+        stream_id: str,
+        *,
+        retention: timedelta | None = None,
+        max_records: int | None = None,
+        max_bytes: int | None = None,
+    ) -> temporalio.streams.StreamHandle:
+        """Create a standalone stream and get a handle on it.
+
+        A standalone stream has an id of its own and no owner, so it is
+        created here on purpose rather than by its first write, and it is
+        sealed on purpose with the handle's ``close()``, after which appends
+        are refused and the retained records stay readable. The three policy
+        arguments bound what it retains: records older than ``retention``,
+        beyond the newest ``max_records`` or past ``max_bytes`` of stored
+        records are dropped, and ``None`` leaves a bound to the provider's
+        default. Creating a stream that exists with the same policy returns a
+        handle on it, so a retried create is harmless. Another process
+        reaches the stream with ``get_stream_handle(stream_id=...)`` or with
+        the handle's ``ref()``.
+
+        Args:
+            stream_id: ID of the stream to create.
+            retention: How long a record is kept.
+            max_records: How many of the newest records are kept.
+            max_bytes: How many bytes of records are kept.
+
+        Returns:
+            A handle on the new or existing stream.
+
+        Raises:
+            ValueError: ``stream_id`` is empty, a bound is not positive, or
+                the stream exists with a different policy.
+            temporalio.streams.StreamUnsupportedError: No stream provider is
+                registered on this client, or it cannot hold a stream without
+                an owner.
+        """
+        provider = self._config.get("stream_provider")
+        if provider is None:
+            raise temporalio.streams.StreamUnsupportedError(
+                "no stream provider is registered on this client; connect with "
+                "plugins=[provider]"
+            )
+        if not stream_id:
+            raise ValueError("stream_id must not be empty")
+        return await provider.create_standalone_stream(
+            self,
+            stream_id,
+            retention=retention,
+            max_records=max_records,
+            max_bytes=max_bytes,
         )
 
     def get_workflow_handle_for(
@@ -2842,6 +2996,270 @@ class Client:
             )
         )
 
+    async def notify_channel(
+        self,
+        channel: str,
+        *,
+        position: bytes = b"",
+        counter: int = 0,
+        metadata: Mapping[str, Any] | None = None,
+        execution: temporalio.common.Execution | None = None,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> int:
+        """Notify the listeners of ``channel`` that a source they consume has moved.
+
+        A workflow listening with :py:func:`temporalio.workflow.subscribe_channel`
+        or :py:func:`temporalio.workflow.linked_channel` runs a Workflow Task
+        that carries the notification. The server folds notifications per
+        listener while one is pending, keeping the one with the highest
+        ``counter``, so a burst of writes costs a listener one task.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel. Scoped to the namespace, or to the
+                execution when one is given.
+            position: Where the source stands after the write, in the writer's
+                own terms. Opaque to the server.
+            counter: Orders notifications from this channel's writers. Derive it
+                from ``position``, since only the source can order its positions.
+            metadata: Details for the listener, such as which topic moved. Each
+                value is encoded with the client's data converter.
+            execution: Address the channel linked to this execution, a workflow
+                or a standalone activity, instead of the independent channel of
+                that name. Without a run id the call reaches the current run of
+                a workflow chain, as a Signal does.
+            workflow_id: Shorthand for ``execution`` naming a workflow. Not
+                with ``execution``.
+            run_id: With ``workflow_id``, the run of its chain to address.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Returns:
+            How many listeners the channel had when the notification arrived.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
+        """
+        return await self._impl.notify_channel(
+            NotifyChannelInput(
+                channel=channel,
+                position=position,
+                counter=counter,
+                metadata=metadata,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                execution=_channel_execution(execution, workflow_id, run_id),
+            )
+        )
+
+    async def poll_channel(
+        self,
+        channel: str,
+        *,
+        after_counter: int = 0,
+        wait: bool | timedelta = True,
+        max_notifications: int = 100,
+        execution: temporalio.common.Execution | None = None,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> list[temporalio.workflow.Notification]:
+        """Read the notifications ``channel`` retains above a counter.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel. Scoped to the namespace, or to the
+                execution when one is given.
+            after_counter: Only notifications with a counter above this one are
+                returned. Pass the highest counter seen so far to page.
+            wait: How long the server holds the call when nothing is retained
+                above ``after_counter``. ``True`` waits up to
+                :py:data:`DEFAULT_CHANNEL_POLL_WAIT`, ``False`` returns at once.
+            max_notifications: Upper bound on the notifications returned.
+            execution: Address the channel linked to this execution, a workflow
+                or a standalone activity, instead of the independent channel of
+                that name. Without a run id the call reaches the current run of
+                a workflow chain.
+            workflow_id: Shorthand for ``execution`` naming a workflow. Not
+                with ``execution``.
+            run_id: With ``workflow_id``, the run of its chain to address.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Returns:
+            The notifications, oldest first. Empty when the wait ran out.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
+        """
+        if wait is True:
+            wait_for: timedelta | None = DEFAULT_CHANNEL_POLL_WAIT
+        elif wait is False:
+            wait_for = None
+        else:
+            wait_for = wait
+        return await self._impl.poll_channel(
+            PollChannelInput(
+                channel=channel,
+                after_counter=after_counter,
+                wait=wait_for,
+                max_notifications=max_notifications,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                execution=_channel_execution(execution, workflow_id, run_id),
+            )
+        )
+
+    async def describe_channel(
+        self,
+        channel: str,
+        *,
+        execution: temporalio.common.Execution | None = None,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> ChannelDescription:
+        """Describe ``channel``: its kind, its listeners and what it retains.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel. Scoped to the namespace, or to the
+                execution when one is given.
+            execution: Describe the channel linked to this execution, a
+                workflow or a standalone activity, instead of the independent
+                channel of that name. A linked channel of a running execution
+                exists by construction, so the answer for a name nobody has
+                notified yet is a linked channel with no listeners and nothing
+                retained, not a not-found error.
+            workflow_id: Shorthand for ``execution`` naming a workflow. Not
+                with ``execution``.
+            run_id: With ``workflow_id``, the run of its chain to address.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
+        """
+        return await self._impl.describe_channel(
+            DescribeChannelInput(
+                channel=channel,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                execution=_channel_execution(execution, workflow_id, run_id),
+            )
+        )
+
+    async def register_channel_listener(
+        self,
+        channel: str,
+        callback: Callback,
+        *,
+        execution: temporalio.common.Execution | None = None,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> str:
+        """Register ``callback`` as a listener of ``channel``.
+
+        The server invokes the callback with each notification on the channel
+        until :py:meth:`unregister_channel_listener` removes it.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel. Scoped to the namespace, or to the
+                execution when one is given.
+            callback: The callback to invoke.
+            execution: Listen on the channel linked to this execution, a
+                workflow or a standalone activity, instead of the independent
+                channel of that name. The listener lives in that execution's
+                state and ends with its run.
+            workflow_id: Shorthand for ``execution`` naming a workflow. Not
+                with ``execution``.
+            run_id: With ``workflow_id``, the run of its chain to address.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Returns:
+            The listener id the server assigned.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
+        """
+        return await self._impl.register_channel_listener(
+            RegisterChannelListenerInput(
+                channel=channel,
+                callback=callback,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                execution=_channel_execution(execution, workflow_id, run_id),
+            )
+        )
+
+    async def unregister_channel_listener(
+        self,
+        channel: str,
+        listener_id: str,
+        *,
+        execution: temporalio.common.Execution | None = None,
+        workflow_id: str | None = None,
+        run_id: str | None = None,
+        rpc_metadata: Mapping[str, str | bytes] = {},
+        rpc_timeout: timedelta | None = None,
+    ) -> None:
+        """Remove a listener from ``channel``.
+
+        .. warning::
+           This API is experimental and unstable.
+
+        Args:
+            channel: Name of the channel. Scoped to the namespace, or to the
+                execution when one is given.
+            listener_id: The id :py:meth:`register_channel_listener` returned.
+            execution: The execution whose linked channel the listener is on,
+                when it was registered with one.
+            workflow_id: Shorthand for ``execution`` naming a workflow. Not
+                with ``execution``.
+            run_id: With ``workflow_id``, the run of its chain to address.
+            rpc_metadata: Headers used on the RPC call. Keys here override
+                client-level RPC metadata keys.
+            rpc_timeout: Optional RPC deadline to set for the RPC call.
+
+        Raises:
+            ValueError: Both ``execution`` and ``workflow_id`` were given, or
+                ``run_id`` without ``workflow_id``.
+        """
+        await self._impl.unregister_channel_listener(
+            UnregisterChannelListenerInput(
+                channel=channel,
+                listener_id=listener_id,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                execution=_channel_execution(execution, workflow_id, run_id),
+            )
+        )
+
     def create_nexus_client(
         self,
         service: type[NexusServiceType] | str,
@@ -3018,6 +3436,7 @@ class ClientConnectConfig(TypedDict, total=False):
     grpc_compression: GrpcCompression
     payload_limits: PayloadLimitsConfig
     header_codec_behavior: HeaderCodecBehavior
+    stream_provider: temporalio.streams.StreamProvider | None
 
 
 class ClientConfig(TypedDict, total=False):
@@ -3032,3 +3451,25 @@ class ClientConfig(TypedDict, total=False):
         temporalio.common.QueryRejectCondition | None
     ]
     header_codec_behavior: Required[HeaderCodecBehavior]
+    stream_provider: temporalio.streams.StreamProvider | None
+
+
+def _channel_execution(
+    execution: temporalio.common.Execution | None,
+    workflow_id: str | None,
+    run_id: str | None,
+) -> temporalio.common.Execution | None:
+    """The owner a channel call names, by ``execution`` or by the workflow id shorthand.
+
+    The two spellings do not combine, and a run id needs its workflow id.
+    ``None`` names the independent channel.
+    """
+    if execution is not None:
+        if workflow_id is not None or run_id is not None:
+            raise ValueError("pass execution or workflow_id, not both")
+        return execution
+    if workflow_id is None:
+        if run_id is not None:
+            raise ValueError("run_id needs workflow_id")
+        return None
+    return temporalio.common.Execution.workflow(workflow_id, run_id)

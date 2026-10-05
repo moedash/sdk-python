@@ -38,6 +38,8 @@ import temporalio.api.filter.v1.message_pb2
 import temporalio.api.history.v1.message_pb2
 import temporalio.api.namespace.v1.message_pb2
 import temporalio.api.nexus.v1.message_pb2
+import temporalio.api.nexusoperation.v1.message_pb2
+import temporalio.api.notification.v1.message_pb2
 import temporalio.api.protocol.v1.message_pb2
 import temporalio.api.query.v1.message_pb2
 import temporalio.api.replication.v1.message_pb2
@@ -46,6 +48,7 @@ import temporalio.api.schedule.v1.message_pb2
 import temporalio.api.sdk.v1.task_complete_metadata_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.sdk.v1.worker_config_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.api.version.v1.message_pb2
@@ -1278,6 +1281,7 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
     POLLER_GROUP_ID_FIELD_NUMBER: builtins.int
     POLLER_GROUP_INFOS_FIELD_NUMBER: builtins.int
     POLLER_GROUPS_INFO_FIELD_NUMBER: builtins.int
+    STREAM_SLICES_FIELD_NUMBER: builtins.int
     task_token: builtins.bytes
     """A unique identifier for this task"""
     @property
@@ -1392,6 +1396,15 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
           3. If every group has some pending polls, assign the next poll to a group randomly
             according to the weights.
         """
+    @property
+    def stream_slices(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamSlice
+    ]:
+        """Stream data attached to this task. Delivered out of band so the payloads
+        never enter History; only the offset ranges are recorded there.
+        """
     def __init__(
         self,
         *,
@@ -1426,6 +1439,10 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
         ]
         | None = ...,
         poller_groups_info: temporalio.api.taskqueue.v1.message_pb2.PollerGroupsInfo
+        | None = ...,
+        stream_slices: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamSlice
+        ]
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -1484,6 +1501,8 @@ class PollWorkflowTaskQueueResponse(google.protobuf.message.Message):
             b"started_event_id",
             "started_time",
             b"started_time",
+            "stream_slices",
+            b"stream_slices",
             "task_token",
             b"task_token",
             "workflow_execution",
@@ -2695,6 +2714,7 @@ class RespondActivityTaskFailedRequest(google.protobuf.message.Message):
     WORKER_VERSION_FIELD_NUMBER: builtins.int
     DEPLOYMENT_FIELD_NUMBER: builtins.int
     DEPLOYMENT_OPTIONS_FIELD_NUMBER: builtins.int
+    CAUSE_FIELD_NUMBER: builtins.int
     task_token: builtins.bytes
     """The task token as received in `PollActivityTaskQueueResponse`"""
     @property
@@ -2726,6 +2746,8 @@ class RespondActivityTaskFailedRequest(google.protobuf.message.Message):
         self,
     ) -> temporalio.api.deployment.v1.message_pb2.WorkerDeploymentOptions:
         """Worker deployment options that user has set in the worker."""
+    cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType
+    """Why did the task fail? When unset, the failure is treated as an unspecified activity failure."""
     def __init__(
         self,
         *,
@@ -2741,6 +2763,7 @@ class RespondActivityTaskFailedRequest(google.protobuf.message.Message):
         deployment: temporalio.api.deployment.v1.message_pb2.Deployment | None = ...,
         deployment_options: temporalio.api.deployment.v1.message_pb2.WorkerDeploymentOptions
         | None = ...,
+        cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -2760,6 +2783,8 @@ class RespondActivityTaskFailedRequest(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "cause",
+            b"cause",
             "deployment",
             b"deployment",
             "deployment_options",
@@ -2821,6 +2846,7 @@ class RespondActivityTaskFailedByIdRequest(google.protobuf.message.Message):
     IDENTITY_FIELD_NUMBER: builtins.int
     LAST_HEARTBEAT_DETAILS_FIELD_NUMBER: builtins.int
     RESOURCE_ID_FIELD_NUMBER: builtins.int
+    CAUSE_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     """Namespace of the workflow which scheduled this activity"""
     workflow_id: builtins.str
@@ -2841,6 +2867,10 @@ class RespondActivityTaskFailedByIdRequest(google.protobuf.message.Message):
         """Additional details to be stored as last activity heartbeat"""
     resource_id: builtins.str
     """Resource ID for routing. Contains "workflow:workflow_id" or "activity:activity_id" for standalone activities."""
+    cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType
+    """Why did the activity task fail? Optional; when unset the failure is treated as a normal
+    activity failure. See the type's doc for more.
+    """
     def __init__(
         self,
         *,
@@ -2853,6 +2883,7 @@ class RespondActivityTaskFailedByIdRequest(google.protobuf.message.Message):
         last_heartbeat_details: temporalio.api.common.v1.message_pb2.Payloads
         | None = ...,
         resource_id: builtins.str = ...,
+        cause: temporalio.api.enums.v1.failed_cause_pb2.ActivityTaskFailedCause.ValueType = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -2865,6 +2896,8 @@ class RespondActivityTaskFailedByIdRequest(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "activity_id",
             b"activity_id",
+            "cause",
+            b"cause",
             "failure",
             b"failure",
             "identity",
@@ -3300,6 +3333,411 @@ class SignalWorkflowExecutionResponse(google.protobuf.message.Message):
     ) -> None: ...
 
 global___SignalWorkflowExecutionResponse = SignalWorkflowExecutionResponse
+
+class NotifyChannelRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    NOTIFICATION_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    EXECUTION_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def notification(
+        self,
+    ) -> temporalio.api.notification.v1.message_pb2.Notification: ...
+    identity: builtins.str
+    """The identity of the caller, for audit, metrics and logs. It is not copied
+    into the notification. A writer that wants the consumer to see who wrote
+    puts that in the notification's `metadata`.
+    """
+    request_id: builtins.str
+    """Used to de-dupe a retried notification."""
+    @property
+    def execution(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """When set, the call addresses the channel linked to this execution.
+        `run_id` is optional and resolves to the current run of a workflow chain,
+        as a Signal does. When unset, the call addresses the independent channel
+        of that name.
+        """
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        notification: temporalio.api.notification.v1.message_pb2.Notification
+        | None = ...,
+        identity: builtins.str = ...,
+        request_id: builtins.str = ...,
+        execution: temporalio.api.common.v1.message_pb2.Execution | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "execution", b"execution", "notification", b"notification"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "execution",
+            b"execution",
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "notification",
+            b"notification",
+            "request_id",
+            b"request_id",
+        ],
+    ) -> None: ...
+
+global___NotifyChannelRequest = NotifyChannelRequest
+
+class NotifyChannelResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LISTENER_COUNT_FIELD_NUMBER: builtins.int
+    listener_count: builtins.int
+    """Listeners registered when the notification was accepted. Zero means the
+    notification was retained for pollers and woke nobody.
+    """
+    def __init__(
+        self,
+        *,
+        listener_count: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["listener_count", b"listener_count"]
+    ) -> None: ...
+
+global___NotifyChannelResponse = NotifyChannelResponse
+
+class RegisterChannelListenerRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    CALLBACK_FIELD_NUMBER: builtins.int
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    EXECUTION_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    @property
+    def callback(self) -> temporalio.api.common.v1.message_pb2.Callback:
+        """Invoked with each notification on the channel."""
+    request_id: builtins.str
+    """Used to de-dupe a retried registration."""
+    identity: builtins.str
+    """The identity of the caller, for metrics and logs."""
+    @property
+    def execution(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """When set, the call addresses the channel linked to this execution.
+        `run_id` is optional and resolves to the current run of a workflow chain,
+        as a Signal does. When unset, the call addresses the independent channel
+        of that name.
+        """
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        callback: temporalio.api.common.v1.message_pb2.Callback | None = ...,
+        request_id: builtins.str = ...,
+        identity: builtins.str = ...,
+        execution: temporalio.api.common.v1.message_pb2.Execution | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "callback", b"callback", "execution", b"execution"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "callback",
+            b"callback",
+            "channel",
+            b"channel",
+            "execution",
+            b"execution",
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "request_id",
+            b"request_id",
+        ],
+    ) -> None: ...
+
+global___RegisterChannelListenerRequest = RegisterChannelListenerRequest
+
+class RegisterChannelListenerResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LISTENER_ID_FIELD_NUMBER: builtins.int
+    listener_id: builtins.str
+    def __init__(
+        self,
+        *,
+        listener_id: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["listener_id", b"listener_id"]
+    ) -> None: ...
+
+global___RegisterChannelListenerResponse = RegisterChannelListenerResponse
+
+class UnregisterChannelListenerRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    LISTENER_ID_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    EXECUTION_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    listener_id: builtins.str
+    identity: builtins.str
+    """The identity of the caller, for metrics and logs."""
+    @property
+    def execution(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """When set, the call addresses the channel linked to this execution.
+        `run_id` is optional and resolves to the current run of a workflow chain,
+        as a Signal does. When unset, the call addresses the independent channel
+        of that name.
+        """
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        listener_id: builtins.str = ...,
+        identity: builtins.str = ...,
+        execution: temporalio.api.common.v1.message_pb2.Execution | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["execution", b"execution"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel",
+            b"channel",
+            "execution",
+            b"execution",
+            "identity",
+            b"identity",
+            "listener_id",
+            b"listener_id",
+            "namespace",
+            b"namespace",
+        ],
+    ) -> None: ...
+
+global___UnregisterChannelListenerRequest = UnregisterChannelListenerRequest
+
+class UnregisterChannelListenerResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___UnregisterChannelListenerResponse = UnregisterChannelListenerResponse
+
+class PollChannelRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    AFTER_COUNTER_FIELD_NUMBER: builtins.int
+    WAIT_FIELD_NUMBER: builtins.int
+    MAX_NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    EXECUTION_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    after_counter: builtins.int
+    """Only notifications with a counter above this one are returned.
+    (-- api-linter: core::0140::prepositions=disabled
+        aip.dev/not-precedent: "after" names the exclusive lower bound. --)
+    """
+    @property
+    def wait(self) -> google.protobuf.duration_pb2.Duration:
+        """How long to wait for a notification when none is retained above
+        `after_counter`.
+        """
+    max_notifications: builtins.int
+    """At most this many notifications are returned. Zero means the server's
+    default.
+    """
+    @property
+    def execution(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """When set, the call addresses the channel linked to this execution.
+        `run_id` is optional and resolves to the current run of a workflow chain,
+        as a Signal does. When unset, the call addresses the independent channel
+        of that name.
+        """
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        after_counter: builtins.int = ...,
+        wait: google.protobuf.duration_pb2.Duration | None = ...,
+        max_notifications: builtins.int = ...,
+        execution: temporalio.api.common.v1.message_pb2.Execution | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "execution", b"execution", "wait", b"wait"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "after_counter",
+            b"after_counter",
+            "channel",
+            b"channel",
+            "execution",
+            b"execution",
+            "max_notifications",
+            b"max_notifications",
+            "namespace",
+            b"namespace",
+            "wait",
+            b"wait",
+        ],
+    ) -> None: ...
+
+global___PollChannelRequest = PollChannelRequest
+
+class PollChannelResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NOTIFICATIONS_FIELD_NUMBER: builtins.int
+    @property
+    def notifications(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.Notification
+    ]: ...
+    def __init__(
+        self,
+        *,
+        notifications: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.Notification
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["notifications", b"notifications"]
+    ) -> None: ...
+
+global___PollChannelResponse = PollChannelResponse
+
+class DescribeChannelRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    CHANNEL_FIELD_NUMBER: builtins.int
+    EXECUTION_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    channel: builtins.str
+    @property
+    def execution(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """When set, the call addresses the channel linked to this execution.
+        `run_id` is optional and resolves to the current run of a workflow chain,
+        as a Signal does. When unset, the call addresses the independent channel
+        of that name.
+        """
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        channel: builtins.str = ...,
+        execution: temporalio.api.common.v1.message_pb2.Execution | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["execution", b"execution"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "channel", b"channel", "execution", b"execution", "namespace", b"namespace"
+        ],
+    ) -> None: ...
+
+global___DescribeChannelRequest = DescribeChannelRequest
+
+class DescribeChannelResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LISTENERS_FIELD_NUMBER: builtins.int
+    LATEST_FIELD_NUMBER: builtins.int
+    RETAINED_COUNT_FIELD_NUMBER: builtins.int
+    KIND_FIELD_NUMBER: builtins.int
+    LINKED_TO_FIELD_NUMBER: builtins.int
+    @property
+    def listeners(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.notification.v1.message_pb2.ChannelListener
+    ]: ...
+    @property
+    def latest(self) -> temporalio.api.notification.v1.message_pb2.Notification:
+        """The notification with the highest counter the channel retains."""
+    retained_count: builtins.int
+    """How many notifications the channel retains for pollers."""
+    kind: temporalio.api.notification.v1.message_pb2.ChannelKind.ValueType
+    @property
+    def linked_to(self) -> temporalio.api.common.v1.message_pb2.Execution:
+        """The owner of a linked channel and the run that holds it. Empty for an
+        independent channel.
+        (-- api-linter: core::0140::prepositions=disabled
+            aip.dev/not-precedent: "to" names the owner the channel is linked to. --)
+        """
+    def __init__(
+        self,
+        *,
+        listeners: collections.abc.Iterable[
+            temporalio.api.notification.v1.message_pb2.ChannelListener
+        ]
+        | None = ...,
+        latest: temporalio.api.notification.v1.message_pb2.Notification | None = ...,
+        retained_count: builtins.int = ...,
+        kind: temporalio.api.notification.v1.message_pb2.ChannelKind.ValueType = ...,
+        linked_to: temporalio.api.common.v1.message_pb2.Execution | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "latest", b"latest", "linked_to", b"linked_to"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "kind",
+            b"kind",
+            "latest",
+            b"latest",
+            "linked_to",
+            b"linked_to",
+            "listeners",
+            b"listeners",
+            "retained_count",
+            b"retained_count",
+        ],
+    ) -> None: ...
+
+global___DescribeChannelResponse = DescribeChannelResponse
 
 class SignalWithStartWorkflowExecutionRequest(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -4764,6 +5202,7 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
     CALLBACKS_FIELD_NUMBER: builtins.int
     PENDING_NEXUS_OPERATIONS_FIELD_NUMBER: builtins.int
     WORKFLOW_EXTENDED_INFO_FIELD_NUMBER: builtins.int
+    CHANNEL_SUBSCRIPTIONS_FIELD_NUMBER: builtins.int
     @property
     def execution_config(
         self,
@@ -4804,6 +5243,15 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
     def workflow_extended_info(
         self,
     ) -> temporalio.api.workflow.v1.message_pb2.WorkflowExecutionExtendedInfo: ...
+    @property
+    def channel_subscriptions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.workflow.v1.message_pb2.ChannelSubscriptionInfo
+    ]:
+        """The notification channels this run stands on: the independent channels it subscribed to and
+        the channels linked to it that hold any state. Empty when there are none.
+        """
     def __init__(
         self,
         *,
@@ -4831,6 +5279,10 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
         | None = ...,
         workflow_extended_info: temporalio.api.workflow.v1.message_pb2.WorkflowExecutionExtendedInfo
         | None = ...,
+        channel_subscriptions: collections.abc.Iterable[
+            temporalio.api.workflow.v1.message_pb2.ChannelSubscriptionInfo
+        ]
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -4850,6 +5302,8 @@ class DescribeWorkflowExecutionResponse(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "callbacks",
             b"callbacks",
+            "channel_subscriptions",
+            b"channel_subscriptions",
             "execution_config",
             b"execution_config",
             "pending_activities",
@@ -12543,9 +12997,12 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
     INPUT_FIELD_NUMBER: builtins.int
     ID_REUSE_POLICY_FIELD_NUMBER: builtins.int
     ID_CONFLICT_POLICY_FIELD_NUMBER: builtins.int
+    ON_CONFLICT_OPTIONS_FIELD_NUMBER: builtins.int
     SEARCH_ATTRIBUTES_FIELD_NUMBER: builtins.int
     NEXUS_HEADER_FIELD_NUMBER: builtins.int
     USER_METADATA_FIELD_NUMBER: builtins.int
+    COMPLETION_CALLBACKS_FIELD_NUMBER: builtins.int
+    LINKS_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     identity: builtins.str
     """The identity of the client who initiated this request."""
@@ -12606,6 +13063,14 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
     The default policy is NEXUS_OPERATION_ID_CONFLICT_POLICY_FAIL.
     """
     @property
+    def on_conflict_options(
+        self,
+    ) -> temporalio.api.nexusoperation.v1.message_pb2.OnConflictOptions:
+        """Defines actions to be done to the existing running standalone Nexus when the conflict policy
+        NEXUS_OPERATION_ID_CONFLICT_POLICY_USE_EXISTING is used. If not set or set to a empty object
+        (all options with default value), it will not modify the running operation.
+        """
+    @property
     def search_attributes(
         self,
     ) -> temporalio.api.common.v1.message_pb2.SearchAttributes:
@@ -12624,6 +13089,22 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """Metadata for use by user interfaces to display the fixed as-of-start summary and details of the operation."""
+    @property
+    def completion_callbacks(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.common.v1.message_pb2.Callback
+    ]:
+        """Completion callbacks to be invoked once the Nexus operation reaches a terminal state."""
+    @property
+    def links(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.common.v1.message_pb2.Link
+    ]:
+        """Links to be associated with the Nexus operation. Callbacks may also have associated links;
+        links already included with a callback should not be duplicated here.
+        """
     def __init__(
         self,
         *,
@@ -12640,10 +13121,18 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
         input: temporalio.api.common.v1.message_pb2.Payload | None = ...,
         id_reuse_policy: temporalio.api.enums.v1.nexus_pb2.NexusOperationIdReusePolicy.ValueType = ...,
         id_conflict_policy: temporalio.api.enums.v1.nexus_pb2.NexusOperationIdConflictPolicy.ValueType = ...,
+        on_conflict_options: temporalio.api.nexusoperation.v1.message_pb2.OnConflictOptions
+        | None = ...,
         search_attributes: temporalio.api.common.v1.message_pb2.SearchAttributes
         | None = ...,
         nexus_header: collections.abc.Mapping[builtins.str, builtins.str] | None = ...,
         user_metadata: temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata
+        | None = ...,
+        completion_callbacks: collections.abc.Iterable[
+            temporalio.api.common.v1.message_pb2.Callback
+        ]
+        | None = ...,
+        links: collections.abc.Iterable[temporalio.api.common.v1.message_pb2.Link]
         | None = ...,
     ) -> None: ...
     def HasField(
@@ -12651,6 +13140,8 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "input",
             b"input",
+            "on_conflict_options",
+            b"on_conflict_options",
             "schedule_to_close_timeout",
             b"schedule_to_close_timeout",
             "schedule_to_start_timeout",
@@ -12666,6 +13157,8 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "completion_callbacks",
+            b"completion_callbacks",
             "endpoint",
             b"endpoint",
             "id_conflict_policy",
@@ -12676,10 +13169,14 @@ class StartNexusOperationExecutionRequest(google.protobuf.message.Message):
             b"identity",
             "input",
             b"input",
+            "links",
+            b"links",
             "namespace",
             b"namespace",
             "nexus_header",
             b"nexus_header",
+            "on_conflict_options",
+            b"on_conflict_options",
             "operation",
             b"operation",
             "operation_id",
@@ -12791,6 +13288,7 @@ class DescribeNexusOperationExecutionResponse(google.protobuf.message.Message):
     RESULT_FIELD_NUMBER: builtins.int
     FAILURE_FIELD_NUMBER: builtins.int
     LONG_POLL_TOKEN_FIELD_NUMBER: builtins.int
+    COMPLETION_CALLBACKS_FIELD_NUMBER: builtins.int
     run_id: builtins.str
     """The run ID of the operation, useful when run_id was not specified in the request."""
     @property
@@ -12809,6 +13307,15 @@ class DescribeNexusOperationExecutionResponse(google.protobuf.message.Message):
         """The failure if the operation completed unsuccessfully."""
     long_poll_token: builtins.bytes
     """Token for follow-on long-poll requests. Absent only if the operation is complete."""
+    @property
+    def completion_callbacks(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.nexusoperation.v1.message_pb2.CallbackInfo
+    ]:
+        """Completion callbacks to be invoked once the Nexus operation reaches a terminal state.
+        They will remain in the CALLBACK_STATE_STANDBY state until the Nexus operation is finished.
+        """
     def __init__(
         self,
         *,
@@ -12819,6 +13326,10 @@ class DescribeNexusOperationExecutionResponse(google.protobuf.message.Message):
         result: temporalio.api.common.v1.message_pb2.Payload | None = ...,
         failure: temporalio.api.failure.v1.message_pb2.Failure | None = ...,
         long_poll_token: builtins.bytes = ...,
+        completion_callbacks: collections.abc.Iterable[
+            temporalio.api.nexusoperation.v1.message_pb2.CallbackInfo
+        ]
+        | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -12838,6 +13349,8 @@ class DescribeNexusOperationExecutionResponse(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "completion_callbacks",
+            b"completion_callbacks",
             "failure",
             b"failure",
             "info",
