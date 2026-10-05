@@ -467,12 +467,36 @@ class WorkflowCommand(google.protobuf.message.Message):
 
 global___WorkflowCommand = WorkflowCommand
 
+class SubscribeNotificationChannel(google.protobuf.message.Message):
+    """Subscribe this workflow to a notification channel, so the scheduled event of
+    each later Workflow Task carries the notifications folded for it.
+
+    The notifications live in History rather than arriving by a side channel, so
+    a replay reads the same ones the live run saw.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    CHANNEL_FIELD_NUMBER: builtins.int
+    channel: builtins.str
+    """Name of the channel, scoped to the namespace."""
+    def __init__(
+        self,
+        *,
+        channel: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["channel", b"channel"]
+    ) -> None: ...
+
+global___SubscribeNotificationChannel = SubscribeNotificationChannel
+
 class UnsubscribeNotificationChannel(google.protobuf.message.Message):
     """End this workflow's subscription to a notification channel. Notifications
     already recorded on a scheduled event still reach that Workflow Task.
 
-    The server records the event whether or not the run held a subscription, so
-    every command has an event to match on replay.
+    The server records an event for every unsubscribe, also one naming a channel
+    the run is not subscribed to, so replay can hold each command to its event.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -522,30 +546,6 @@ class WorkflowStreamChannels(google.protobuf.message.Message):
     ) -> None: ...
 
 global___WorkflowStreamChannels = WorkflowStreamChannels
-
-class SubscribeNotificationChannel(google.protobuf.message.Message):
-    """Subscribe this workflow to a notification channel, so the scheduled event of
-    each later Workflow Task carries the notifications folded for it.
-
-    The notifications live in History rather than arriving by a side channel, so
-    a replay reads the same ones the live run saw.
-    """
-
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    CHANNEL_FIELD_NUMBER: builtins.int
-    channel: builtins.str
-    """Name of the channel, scoped to the namespace."""
-    def __init__(
-        self,
-        *,
-        channel: builtins.str = ...,
-    ) -> None: ...
-    def ClearField(
-        self, field_name: typing_extensions.Literal["channel", b"channel"]
-    ) -> None: ...
-
-global___SubscribeNotificationChannel = SubscribeNotificationChannel
 
 class WorkflowStreamProgress(google.protobuf.message.Message):
     """Commits an observation delta for external streams.
