@@ -61,6 +61,7 @@ class Replayer:
         runtime: temporalio.runtime.Runtime | None = None,
         disable_safe_workflow_eviction: bool = False,
         header_codec_behavior: HeaderCodecBehavior = HeaderCodecBehavior.NO_CODEC,
+        external_stream_backend: Any | None = None,
         stream_provider: temporalio.streams.StreamProvider | None = None,
         stream_client: temporalio.client.Client | None = None,
     ) -> None:
@@ -99,6 +100,13 @@ class Replayer:
         will default to a new thread pool executor with no max_workers set that
         will be shared across all replay calls and never explicitly shut down.
         Users are encouraged to provide their own if needing more control.
+
+        A history containing external workflow stream markers can only be
+        replayed with the same backend configured, because replay re-reads the
+        recorded ranges from the provider. Without them the replay fails the
+        same way the original Workflow would have with no backends configured --
+        which is correct, but is a configuration error rather than a finding
+        about the history.
         """
         self._config = ReplayerConfig(
             workflows=list(workflows),
@@ -117,6 +125,7 @@ class Replayer:
             runtime=runtime,
             disable_safe_workflow_eviction=disable_safe_workflow_eviction,
             header_codec_behavior=header_codec_behavior,
+            external_stream_backend=external_stream_backend,
             stream_provider=stream_provider,
             stream_client=stream_client,
         )
@@ -338,6 +347,7 @@ class Replayer:
                 ),
                 should_enforce_versioning_behavior=False,
                 assert_local_activity_valid=lambda a: None,
+                external_stream_backend=self._config.get("external_stream_backend"),
                 encode_headers=self._config.get(
                     "header_codec_behavior", HeaderCodecBehavior.NO_CODEC
                 )
@@ -640,6 +650,7 @@ class ReplayerConfig(TypedDict, total=False):
     runtime: temporalio.runtime.Runtime | None
     disable_safe_workflow_eviction: bool
     header_codec_behavior: HeaderCodecBehavior
+    external_stream_backend: Any | None
     stream_provider: temporalio.streams.StreamProvider | None
     stream_client: temporalio.client.Client | None
 

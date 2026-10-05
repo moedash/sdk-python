@@ -1,0 +1,876 @@
+"""The Redis Streams provider (P3).
+
+Redis Streams qualifies as a backend because an entry's fields cannot be
+rewritten in place. It can be deleted by ``XDEL`` or removed by trimming --
+which is exactly the damage replay's four range checks detect -- but never
+altered, which is what makes those four checks sufficient.
+
+The two reads are **different Redis commands**, not one with a flag:
+
+- ``XRANGE first last`` is **inclusive of both endpoints**, and is the only
+  command replay may use. The marker already names the range.
+- ``XREAD BLOCK ... STREAMS key id`` returns entries **strictly after** ``id``,
+  which is exactly the exclusive-after semantics a live watch needs. It cannot
+  serve a replay read: it would silently drop the range's first record.
+
+``BEGINNING`` maps to the sentinel ``0-0`` for watching, so a consumer that has
+drained to the tail holds ``AFTER(<last id>)`` and never has to name the id of
+a record nobody has written yet.
+
+Offsets are Redis ids, compared as numeric ``(milliseconds, sequence)`` pairs.
+String comparison is wrong the moment the millisecond component changes width.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from base64 import b64decode, b64encode
+from binascii import Error as BinasciiError
+from collections.abc import Sequence
+from datetime import timedelta
+from typing import Any, ClassVar, Final
+from urllib.parse import quote
+
+from temporalio.contrib.external_workflow_streams._backend import (
+    DEFAULT_WATCH_BLOCK,
+    AppendConflictError,
+    ParkIntent,
+    ParkIntentRemoval,
+    StreamBackend,
+    StreamDirection,
+    StreamKey,
+)
+from temporalio.contrib.external_workflow_streams._errors import StreamIntegrityError
+from temporalio.contrib.external_workflow_streams._output_backend import (
+    OutputReadResult,
+    OutputStage,
+    OutputStageConflictError,
+    OutputStageManifest,
+    OutputStageNotFoundError,
+    OutputStageResolutionError,
+    OutputStageStatus,
+    OutputStreamBackend,
+    OutputStreamRecord,
+    PendingOutputBarrier,
+    StagedOutputRecord,
+)
+from temporalio.contrib.external_workflow_streams._record import (
+    AFTER,
+    BEGINNING,
+    Cursor,
+    Offset,
+    StreamRecord,
+)
+
+__all__ = ["RedisStreamBackend"]
+
+DEFAULT_URL: Final = "redis://127.0.0.1:6379"
+DEFAULT_KEY_PREFIX: Final = "temporal-external-stream"
+
+#: Redis' beginning-of-stream sentinel for `XREAD`. Not an offset: no record
+#: ever has this id, which is why `BEGINNING` is a distinct cursor form rather
+#: than ``AFTER(Offset("0-0"))``.
+_BEGINNING_SENTINEL: Final = "0-0"
+_OUTPUT_STAGE_FIELD: Final = "__tes_output_stage"
+
+
+def _parse(offset: Offset) -> tuple[int, int]:
+    """A Redis id as the ``(ms, seq)`` pair it actually is."""
+    ms, _, seq = offset.token.partition("-")
+    return int(ms), int(seq or 0)
+
+
+def _content_hash(record: StreamRecord) -> str:
+    """A stable digest of exactly what would be written.
+
+    Excludes the offset, which the provider assigns -- so a re-append of
+    identical content hashes identically rather than looking like a conflict.
+    """
+    digest = hashlib.sha256()
+    for name, value in sorted(record.to_fields().items()):
+        digest.update(name.encode())
+        digest.update(b"\x00")
+        digest.update(value)
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+#: Append-if-new-or-identical, atomically.
+#:
+#: Split across two commands without a script, a crash between ``XADD`` and the
+#: idempotency write would leave a record no retry could recognise as its own,
+#: so the retry would append a duplicate.
+_APPEND_LUA: Final = """
+local existing = redis.call('HGET', KEYS[2], ARGV[1])
+if existing then
+  local sep = string.find(existing, '|')
+  local offset = string.sub(existing, 1, sep - 1)
+  local digest = string.sub(existing, sep + 1)
+  if digest == ARGV[2] then
+    return {'reused', offset}
+  end
+  return {'conflict', ''}
+end
+local id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 3))
+redis.call('HSET', KEYS[2], ARGV[1], id .. '|' .. ARGV[2])
+return {'appended', id}
+"""
+
+
+_STAGE_OUTPUT_LUA: Final = """
+local existing = redis.call('HGET', KEYS[2], ARGV[1])
+if existing then
+  if existing ~= ARGV[2] then
+    return {'conflict', '', ''}
+  end
+  return {'reused', redis.call('HGET', KEYS[3], ARGV[1]), redis.call('HGET', KEYS[4], ARGV[1])}
+end
+local count = tonumber(ARGV[3])
+local cursor = 4
+local offsets = {}
+for i = 1, count do
+  local field_count = tonumber(ARGV[cursor])
+  cursor = cursor + 1
+  local fields = {}
+  for j = 1, field_count * 2 do
+    fields[j] = ARGV[cursor]
+    cursor = cursor + 1
+  end
+  offsets[i] = redis.call('XADD', KEYS[1], '*', unpack(fields))
+end
+local joined = table.concat(offsets, ',')
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+redis.call('HSET', KEYS[3], ARGV[1], 'pending')
+redis.call('HSET', KEYS[4], ARGV[1], joined)
+return {'staged', 'pending', joined}
+"""
+
+
+_RESOLVE_OUTPUT_LUA: Final = """
+local existing = redis.call('HGET', KEYS[1], ARGV[1])
+if not existing then
+  return {'missing', '', ''}
+end
+if existing ~= ARGV[2] then
+  return {'conflict', '', ''}
+end
+local current = redis.call('HGET', KEYS[2], ARGV[1])
+if current == ARGV[3] then
+  return {'resolved', current, redis.call('HGET', KEYS[3], ARGV[1])}
+end
+if current ~= 'pending' then
+  return {'reversed', current, redis.call('HGET', KEYS[3], ARGV[1])}
+end
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[3])
+return {'resolved', ARGV[3], redis.call('HGET', KEYS[3], ARGV[1])}
+"""
+
+
+#: Compare-and-remove one park intent, atomically. The claim belongs to the
+#: intent generation, so a successful removal retires both keys just like the
+#: unconditional operation does.
+#:
+#: Returns 1 removed, 2 nothing installed, 0 someone else's intent. The absent
+#: case is answered before the comparison, so a key this script already cleared
+#: on a call whose reply was lost does not come back as a mismatch.
+_REMOVE_PARK_INTENT_IF_MATCHES_LUA: Final = """
+local run_id = redis.call('HGET', KEYS[1], 'run_id')
+if not run_id then
+  return 2
+end
+local generation = redis.call('HGET', KEYS[1], 'generation')
+if run_id == ARGV[1] and generation == ARGV[2] then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 1
+end
+return 0
+"""
+
+
+#: The script's return values, in the order it documents them.
+_REMOVAL_OUTCOMES: Final = {
+    0: ParkIntentRemoval.MISMATCH,
+    1: ParkIntentRemoval.REMOVED,
+    2: ParkIntentRemoval.ABSENT,
+}
+
+
+class RedisStreamBackend(StreamBackend, OutputStreamBackend):
+    """Redis Streams as an external workflow stream provider."""
+
+    guarantees_immutability: ClassVar[bool | None] = True
+    """``XADD`` entries cannot be rewritten in place -- only deleted or trimmed."""
+
+    provider_id = "redis-streams"
+    provider_format_version = 1
+    supports_leased_claims = True
+
+    def __init__(
+        self,
+        *,
+        url: str = DEFAULT_URL,
+        client: Any | None = None,
+        key_prefix: str = DEFAULT_KEY_PREFIX,
+    ) -> None:
+        """Create a Redis-backed external workflow stream provider.
+
+        Args:
+            url: Connection URL, used when ``client`` is not supplied.
+            client: An existing ``redis.asyncio.Redis``. It **must** have been
+                created with ``decode_responses=False`` -- payloads are
+                arbitrary bytes, and a decoding client would corrupt them.
+            key_prefix: Prepended to every key this backend creates, so one
+                Redis can serve several deployments.
+        """
+        if client is None:
+            import redis.asyncio  # imported lazily so redis stays optional
+
+            client = redis.asyncio.from_url(url, decode_responses=False)
+        self._client = client
+        self._key_prefix = key_prefix
+        self._append_script = client.register_script(_APPEND_LUA)
+        self._stage_output_script = client.register_script(_STAGE_OUTPUT_LUA)
+        self._resolve_output_script = client.register_script(_RESOLVE_OUTPUT_LUA)
+        self._remove_park_intent_if_matches_script = client.register_script(
+            _REMOVE_PARK_INTENT_IF_MATCHES_LUA
+        )
+
+    # --- key layout ---------------------------------------------------------
+
+    def stream_key(self, key: StreamKey) -> str:
+        """The physical Redis key for one stream identity.
+
+        Injective: distinct :class:`StreamKey` values always render as distinct
+        Redis keys, because :func:`_escaped` removes the delimiter from every
+        component before they are joined. See that function for why joining the
+        raw fields is not merely untidy but a correctness failure.
+
+        An identity with no reserved character in it renders byte-identically to
+        the delimiter-joined layout this replaced, and the feature is private and
+        unreleased, so there is nothing written under the old rendering worth
+        migrating and no compatibility path here to maintain.
+        """
+        return f"{self._key_prefix}:{_escaped(key)}"
+
+    def _idempotency_key(self, key: StreamKey) -> str:
+        return f"{self.stream_key(key)}:idem"
+
+    def _intent_key(self, key: StreamKey, wait_id: int) -> str:
+        # `(stream key, wait_id)`, never the stream alone: two subscriptions to
+        # one stream are two independent waits.
+        return f"{self.stream_key(key)}:park:{wait_id}"
+
+    def _claim_key(self, key: StreamKey, wait_id: int) -> str:
+        return f"{self.stream_key(key)}:claim:{wait_id}"
+
+    def _output_manifest_key(self, key: StreamKey) -> str:
+        return f"{self.stream_key(key)}:output:manifest"
+
+    def _output_status_key(self, key: StreamKey) -> str:
+        return f"{self.stream_key(key)}:output:status"
+
+    def _output_offsets_key(self, key: StreamKey) -> str:
+        return f"{self.stream_key(key)}:output:offsets"
+
+    # --- required operations ------------------------------------------------
+
+    async def append(self, key: StreamKey, record: StreamRecord) -> StreamRecord:
+        """Append a record idempotently and return it with its Redis offset."""
+        fields = record.to_fields()
+        args: list[Any] = [
+            str(record.idempotency_key).encode(),
+            _content_hash(record).encode(),
+        ]
+        for name, value in sorted(fields.items()):
+            args.append(name.encode())
+            args.append(value)
+
+        outcome, offset = await self._append_script(
+            keys=[self.stream_key(key), self._idempotency_key(key)],
+            args=args,
+        )
+        if _text(outcome) == "conflict":
+            raise AppendConflictError(record.idempotency_key)
+        return record.placed_at(Offset(_text(offset)))
+
+    async def read_range(
+        self, key: StreamKey, first: Offset, last: Offset
+    ) -> list[StreamRecord]:
+        """Read the inclusive offset range used during replay."""
+        # redis-py's overload permits response modes that this client
+        # configuration cannot produce, so retain the runtime response shape.
+        entries: Any = await self._client.xrange(
+            self.stream_key(key), first.serialize(), last.serialize()
+        )
+        return [_to_record(entry_id, fields) for entry_id, fields in entries]
+
+    async def read_after(
+        self,
+        key: StreamKey,
+        after: Cursor,
+        *,
+        max_records: int,
+        block: timedelta | None = DEFAULT_WATCH_BLOCK,
+    ) -> list[StreamRecord]:
+        """Read up to ``max_records`` strictly after a live cursor."""
+        start = (
+            _BEGINNING_SENTINEL if after.is_beginning else after.offset.serialize()  # type: ignore[union-attr]
+        )
+        block_ms = None if block is None else int(block.total_seconds() * 1000)
+        if block_ms is not None and block_ms <= 0:
+            # `XREAD BLOCK 0` blocks *forever*, which is the opposite of what a
+            # zero timeout asks for, so a non-blocking read must omit BLOCK.
+            block_ms = None
+
+        streams: Any = await self._client.xread(
+            {self.stream_key(key): start}, count=max_records, block=block_ms
+        )
+        if not streams:
+            return []
+        _, entries = streams[0]
+        return [_to_record(entry_id, fields) for entry_id, fields in entries]
+
+    def compare_offsets(self, left: Offset, right: Offset) -> int:
+        """Compare Redis stream IDs numerically rather than lexically."""
+        a, b = _parse(left), _parse(right)
+        return (a > b) - (a < b)
+
+    # --- workflow-originated output ---------------------------------------
+
+    async def stage_output(
+        self,
+        manifest: OutputStageManifest,
+        records: Sequence[StagedOutputRecord],
+    ) -> OutputStage:
+        """Atomically append an immutable pending output sub-batch."""
+        self._validate_output_manifest(manifest)
+        if len(records) != manifest.record_count or any(
+            record.publish_index != index for index, record in enumerate(records)
+        ):
+            raise ValueError(
+                "staged output records must be contiguous from publish index zero "
+                "and match the manifest record count"
+            )
+        stage_id = _output_stage_id(manifest)
+        encoded_manifest = _encode_output_manifest(manifest)
+        args: list[Any] = [stage_id, encoded_manifest, len(records)]
+        for record in records:
+            stream_record = StreamRecord(
+                kind=record.kind,
+                payload=record.payload,
+                producer_session_id=f"stage:{manifest.stage_token}",
+                sequence=record.publish_index,
+            )
+            fields = {
+                **stream_record.to_fields(),
+                _OUTPUT_STAGE_FIELD: stage_id.encode(),
+            }
+            args.append(len(fields))
+            for name, value in sorted(fields.items()):
+                args.extend((name.encode(), value))
+        outcome, status, offsets = await self._stage_output_script(
+            keys=[
+                self.stream_key(manifest.stream_key),
+                self._output_manifest_key(manifest.stream_key),
+                self._output_status_key(manifest.stream_key),
+                self._output_offsets_key(manifest.stream_key),
+            ],
+            args=args,
+        )
+        if _text(outcome) == "conflict":
+            raise OutputStageConflictError(manifest)
+        return await self._output_stage_from_offsets(
+            manifest,
+            _output_stage_status(status),
+            _text(offsets),
+        )
+
+    async def commit_output(self, manifest: OutputStageManifest) -> OutputStage:
+        """Promote an exact pending stage, idempotently."""
+        return await self._resolve_output(manifest, OutputStageStatus.COMMITTED)
+
+    async def abort_output(self, manifest: OutputStageManifest) -> OutputStage:
+        """Skip an exact pending stage, idempotently."""
+        return await self._resolve_output(manifest, OutputStageStatus.ABORTED)
+
+    async def _resolve_output(
+        self,
+        manifest: OutputStageManifest,
+        requested: OutputStageStatus,
+    ) -> OutputStage:
+        self._validate_output_manifest(manifest)
+        outcome, current, offsets = await self._resolve_output_script(
+            keys=[
+                self._output_manifest_key(manifest.stream_key),
+                self._output_status_key(manifest.stream_key),
+                self._output_offsets_key(manifest.stream_key),
+            ],
+            args=[
+                _output_stage_id(manifest),
+                _encode_output_manifest(manifest),
+                requested.value,
+            ],
+        )
+        result = _text(outcome)
+        if result == "missing":
+            raise OutputStageNotFoundError(manifest)
+        if result == "conflict":
+            raise OutputStageConflictError(manifest)
+        if result == "reversed":
+            raise OutputStageResolutionError(
+                manifest,
+                current=_output_stage_status(current),
+                requested=requested,
+            )
+        return await self._output_stage_from_offsets(
+            manifest,
+            requested,
+            _text(offsets),
+        )
+
+    async def output_stage(self, manifest: OutputStageManifest) -> OutputStage | None:
+        """Inspect one exact staged sub-batch."""
+        self._validate_output_manifest(manifest)
+        stage_id = _output_stage_id(manifest)
+        stored, status, offsets = await _gather_redis(
+            self._client.hget(self._output_manifest_key(manifest.stream_key), stage_id),
+            self._client.hget(self._output_status_key(manifest.stream_key), stage_id),
+            self._client.hget(self._output_offsets_key(manifest.stream_key), stage_id),
+        )
+        if stored is None:
+            return None
+        if stored != _encode_output_manifest(manifest):
+            raise OutputStageConflictError(manifest)
+        if status is None or offsets is None:
+            raise StreamIntegrityError(
+                "an output stage is missing its status or offsets"
+            )
+        return await self._output_stage_from_offsets(
+            manifest,
+            _output_stage_status(status),
+            _text(offsets),
+        )
+
+    async def append_output(
+        self, key: StreamKey, record: StreamRecord
+    ) -> OutputStreamRecord:
+        """Append an immediately committed Activity/external record."""
+        self._require_output_key(key)
+        placed = await self.append(key, record)
+        assert placed.offset is not None
+        return OutputStreamRecord(placed.kind, placed.payload, placed.offset)
+
+    async def read_output_after(
+        self,
+        key: StreamKey,
+        after: Cursor,
+        *,
+        max_records: int,
+        block: timedelta | None = DEFAULT_WATCH_BLOCK,
+    ) -> OutputReadResult:
+        """Return a committed prefix without crossing a pending stage."""
+        self._require_output_key(key)
+        if max_records < 1:
+            raise ValueError("max_records must be positive")
+        cursor = after
+        first_read = True
+        committed: list[OutputStreamRecord] = []
+        while len(committed) < max_records:
+            start = (
+                _BEGINNING_SENTINEL
+                if cursor.is_beginning
+                else cursor.offset.serialize()  # type: ignore[union-attr]
+            )
+            block_for = block if first_read else timedelta(0)
+            block_ms = (
+                None if block_for is None else int(block_for.total_seconds() * 1000)
+            )
+            if block_ms is not None and block_ms <= 0:
+                block_ms = None
+            streams: Any = await self._client.xread(
+                {self.stream_key(key): start},
+                count=max(64, max_records - len(committed)),
+                block=block_ms,
+            )
+            first_read = False
+            if not streams:
+                break
+            _, entries = streams[0]
+            if not entries:
+                break
+            stage_ids = sorted(
+                {
+                    _text(fields[_OUTPUT_STAGE_FIELD.encode()])
+                    for _, fields in entries
+                    if _OUTPUT_STAGE_FIELD.encode() in fields
+                }
+            )
+            statuses = (
+                dict(
+                    zip(
+                        stage_ids,
+                        await self._client.hmget(
+                            self._output_status_key(key), list(stage_ids)
+                        ),
+                    )
+                )
+                if stage_ids
+                else {}
+            )
+            for entry_id, fields in entries:
+                offset = Offset(_text(entry_id))
+                cursor = AFTER(offset)
+                raw_stage_id = fields.get(_OUTPUT_STAGE_FIELD.encode())
+                if raw_stage_id is not None:
+                    stage_id = _text(raw_stage_id)
+                    raw_status = statuses.get(stage_id)
+                    if raw_status is None:
+                        raise StreamIntegrityError(
+                            f"output record at {offset} has no stage status"
+                        )
+                    status = _output_stage_status(raw_status)
+                    if status is OutputStageStatus.PENDING:
+                        stored = await self._client.hget(
+                            self._output_manifest_key(key), stage_id
+                        )
+                        if stored is None:
+                            raise StreamIntegrityError(
+                                f"pending output record at {offset} has no manifest"
+                            )
+                        return OutputReadResult(
+                            tuple(committed),
+                            PendingOutputBarrier(
+                                _decode_output_manifest(key, _text(stored)), offset
+                            ),
+                        )
+                    if status is OutputStageStatus.ABORTED:
+                        continue
+                record = _to_record(entry_id, fields)
+                assert record.offset is not None
+                committed.append(
+                    OutputStreamRecord(record.kind, record.payload, record.offset)
+                )
+                if len(committed) == max_records:
+                    break
+            if len(entries) < max(64, max_records - len(committed)):
+                break
+        return OutputReadResult(tuple(committed))
+
+    async def output_tail(self, key: StreamKey) -> Cursor:
+        """Return the readable boundary without moving past pending output."""
+        self._require_output_key(key)
+        cursor = BEGINNING
+        while True:
+            result = await self.read_output_after(
+                key,
+                cursor,
+                max_records=256,
+                block=timedelta(0),
+            )
+            if result.records:
+                cursor = AFTER(result.records[-1].offset)
+            if result.pending is not None or not result.records:
+                return cursor
+
+    def _validate_output_manifest(self, manifest: OutputStageManifest) -> None:
+        self._require_output_key(manifest.stream_key)
+        if manifest.provider_id != self.provider_id or (
+            manifest.provider_format_version != self.provider_format_version
+        ):
+            raise ValueError("an output manifest names a different provider format")
+
+    @staticmethod
+    def _require_output_key(key: StreamKey) -> None:
+        if key.direction is not StreamDirection.OUTPUT:
+            raise ValueError("an output operation requires an OUTPUT stream key")
+
+    async def _output_stage_from_offsets(
+        self,
+        manifest: OutputStageManifest,
+        status: OutputStageStatus,
+        encoded_offsets: str,
+    ) -> OutputStage:
+        offsets = [Offset(value) for value in encoded_offsets.split(",") if value]
+        if len(offsets) != manifest.record_count:
+            raise StreamIntegrityError(
+                "an output stage's stored offsets do not match its manifest"
+            )
+        entries: Any = await self._client.xrange(
+            self.stream_key(manifest.stream_key),
+            offsets[0].serialize(),
+            offsets[-1].serialize(),
+        )
+        by_offset = {_text(entry_id): fields for entry_id, fields in entries}
+        records = []
+        for offset in offsets:
+            fields = by_offset.get(offset.serialize())
+            if fields is None:
+                raise StreamIntegrityError(
+                    f"staged output record at {offset} is missing"
+                )
+            record = StreamRecord.from_fields(offset, fields)
+            records.append(OutputStreamRecord(record.kind, record.payload, offset))
+        return OutputStage(manifest, tuple(records), status)
+
+    # --- parking (P3b) ------------------------------------------------------
+
+    async def install_park_intent(self, key: StreamKey, intent: ParkIntent) -> None:
+        """Persist the intent for one Workflow wait to remain parked."""
+        await self._client.hset(
+            self._intent_key(key, intent.wait_id),
+            mapping={
+                b"cursor": intent.cursor.serialize().encode(),
+                b"generation": str(intent.park_generation).encode(),
+                b"run_id": intent.run_id.encode(),
+            },
+        )
+
+    async def remove_park_intent(self, key: StreamKey, wait_id: int) -> None:
+        """Remove a wait's park intent and any associated producer claim."""
+        await self._client.delete(
+            self._intent_key(key, wait_id), self._claim_key(key, wait_id)
+        )
+
+    async def remove_park_intent_if_matches(
+        self,
+        key: StreamKey,
+        wait_id: int,
+        *,
+        run_id: str,
+        park_generation: int,
+    ) -> ParkIntentRemoval:
+        """Remove a park intent only when its Run and generation still match."""
+        outcome = await self._remove_park_intent_if_matches_script(
+            keys=[self._intent_key(key, wait_id), self._claim_key(key, wait_id)],
+            args=[run_id, str(park_generation)],
+        )
+        return _REMOVAL_OUTCOMES[int(outcome)]
+
+    async def park_intent(self, key: StreamKey, wait_id: int) -> ParkIntent | None:
+        """Return the currently installed park intent for one wait, if any."""
+        stored = await self._client.hgetall(self._intent_key(key, wait_id))
+        if not stored:
+            return None
+        stored = {_text(name): value for name, value in stored.items()}
+        return ParkIntent(
+            wait_id=wait_id,
+            cursor=Cursor.deserialize(_text(stored["cursor"])),
+            park_generation=int(_text(stored["generation"])),
+            run_id=_text(stored["run_id"]),
+        )
+
+    async def recheck(self, key: StreamKey, wait_id: int) -> bool:
+        """Return whether a parked wait now has at least one available record."""
+        intent = await self.park_intent(key, wait_id)
+        if intent is None:
+            return False
+        found = await self.read_after(key, intent.cursor, max_records=1, block=None)
+        return bool(found)
+
+    async def claim_park_generation(
+        self,
+        key: StreamKey,
+        wait_id: int,
+        park_generation: int,
+        *,
+        claimant: str,
+        lease: timedelta,
+    ) -> bool:
+        """Acquire or renew the leased producer claim for one park generation."""
+        claim_key = self._claim_key(key, wait_id)
+        value = f"{park_generation}|{claimant}".encode()
+        lease_ms = max(1, int(lease.total_seconds() * 1000))
+
+        # SET NX gives exclusion; the TTL is what makes a crashed producer's
+        # claim recoverable instead of stranding the generation forever.
+        if await self._client.set(claim_key, value, nx=True, px=lease_ms):
+            return True
+
+        held = await self._client.get(claim_key)
+        if held is None:
+            # It expired between the SET and the GET -- take it.
+            return bool(await self._client.set(claim_key, value, nx=True, px=lease_ms))
+        if held == value:
+            # Renewal by the holder, which must not read as contention.
+            await self._client.pexpire(claim_key, lease_ms)
+            return True
+
+        held_generation = _text(held).split("|", 1)[0]
+        if held_generation != str(park_generation):
+            # A claim for a different generation says nothing about this one.
+            await self._client.set(claim_key, value, px=lease_ms)
+            return True
+        return False
+
+    async def parked_wait_ids(self, key: StreamKey) -> list[int]:
+        """Return all wait IDs with installed park intents for a stream."""
+        prefix = f"{self.stream_key(key)}:park:"
+        found = []
+        # SCAN rather than KEYS: this runs on the producer's hot path after every
+        # append, and KEYS blocks the whole server for the length of the keyspace.
+        #
+        # The prefix is a *literal* here, so it is escaped before the trailing
+        # `*` makes it a pattern. `_escaped` already leaves no glob character in
+        # the identity half, but the operator-supplied `key_prefix` is not
+        # escaped, and a pattern that quietly widened would enumerate another
+        # stream's intents rather than fail.
+        async for name in self._client.scan_iter(match=f"{_as_glob_literal(prefix)}*"):
+            suffix = _text(name)[len(prefix) :]
+            if suffix.isdigit():
+                found.append(int(suffix))
+        return sorted(found)
+
+    async def current_park_generation(self, key: StreamKey, wait_id: int) -> int | None:
+        """Return the currently parked generation for one wait, if any."""
+        intent = await self.park_intent(key, wait_id)
+        return None if intent is None else intent.park_generation
+
+    # --- lifecycle ----------------------------------------------------------
+
+    async def aclose(self) -> None:
+        """Close the underlying Redis client."""
+        await self._client.aclose()
+
+    async def delete_for_test(self, key: StreamKey, offset: Offset) -> None:
+        """Removes one record, standing in for trimming or retention expiry."""
+        await self._client.xdel(self.stream_key(key), offset.serialize())
+
+
+#: What Redis' glob matcher treats as more than itself. ``]`` and ``^`` are special
+#: only inside a class, but escaping them too costs nothing and keeps the rule
+#: one line long.
+_GLOB_METACHARACTERS: Final = frozenset("*?[]\\")
+
+
+def _as_glob_literal(text: str) -> str:
+    """A literal string, made safe to embed in a ``SCAN MATCH`` pattern."""
+    return "".join(
+        f"\\{character}" if character in _GLOB_METACHARACTERS else character
+        for character in text
+    )
+
+
+def _escaped(key: StreamKey) -> str:
+    r"""One stream identity as a single, unambiguous key component.
+
+    Percent-encoded per field, then joined -- **not** joined raw. A Workflow ID
+    and a stream name are user-chosen strings in which ``:`` is an ordinary
+    character, so joining the raw fields is not injective:
+
+        ("ns", "wf", r1, f"{r2}:tokens")   and   ("ns", f"wf:{r1}", r2, "tokens")
+
+    both render as ``ns:wf:r1:r2:tokens``. Two unrelated Workflows would then share
+    one stream, one idempotency hash, one park intent and one claim -- delivering
+    each other's records, and each concluding the other's claim had already taken
+    its wake. Same reasoning as ``_wake.py``'s length-prefixed request-ID material,
+    applied to a key rather than to a digest.
+
+    Percent-encoding rather than length prefixes because a key is read by humans:
+    an ordinary identity still renders verbatim in ``redis-cli``, and only a field
+    that actually contains a delimiter pays for it. It buys one property the
+    length prefix does not -- the encoded form contains no ``:``, ``*``, ``?``, ``[`` or
+    ``\``, so the derived ``:idem``, ``:park:<id>`` and ``:claim:<id>`` suffixes stay
+    unambiguous and ``parked_wait_ids``' pattern cannot be widened by a stream name.
+
+    Not reversible in practice, and not meant to be: ``key_prefix`` is
+    operator-supplied and unescaped, so only the identity half round-trips.
+    """
+    components: tuple[str, ...] = (
+        key.namespace,
+        key.workflow_id,
+        key.first_execution_run_id,
+        key.stream_name,
+    )
+    if key.direction is StreamDirection.OUTPUT:
+        # Existing input records must remain addressable under their original
+        # four-component keys. Adding a reserved fifth-component layout only
+        # for output is still injective because every user component is escaped.
+        components = (
+            key.namespace,
+            key.workflow_id,
+            key.first_execution_run_id,
+            key.direction.value,
+            key.stream_name,
+        )
+    return ":".join(quote(component, safe="") for component in components)
+
+
+def _output_stage_id(manifest: OutputStageManifest) -> str:
+    """An injective Redis hash field for one token/topic sub-batch."""
+    return f"{len(manifest.stage_token)}:{manifest.stage_token}:{manifest.sub_batch_id}"
+
+
+def _output_stage_status(value: Any) -> OutputStageStatus:
+    """Decode coordination metadata without downgrading corruption to outage."""
+    try:
+        return OutputStageStatus(_text(value))
+    except (TypeError, ValueError) as err:
+        raise StreamIntegrityError(
+            f"an output stage has an invalid stored status: {_text(value)!r}"
+        ) from err
+
+
+def _encode_output_manifest(manifest: OutputStageManifest) -> bytes:
+    """Stable immutable metadata compared by the atomic stage script."""
+    return json.dumps(
+        {
+            "provider_id": manifest.provider_id,
+            "provider_format_version": manifest.provider_format_version,
+            "stage_token": manifest.stage_token,
+            "run_id": manifest.run_id,
+            "history_floor_event_id": manifest.history_floor_event_id,
+            "sub_batch_id": manifest.sub_batch_id,
+            "fingerprint_version": manifest.fingerprint_version,
+            "fingerprint": b64encode(manifest.fingerprint).decode("ascii"),
+            "record_count": manifest.record_count,
+            "logical_byte_count": manifest.logical_byte_count,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _decode_output_manifest(
+    key: StreamKey, encoded: str | bytes
+) -> OutputStageManifest:
+    """Rebuild reconciliation metadata stored beside a pending barrier."""
+    try:
+        values = json.loads(encoded)
+        return OutputStageManifest(
+            stream_key=key,
+            provider_id=values["provider_id"],
+            provider_format_version=int(values["provider_format_version"]),
+            stage_token=values["stage_token"],
+            run_id=values["run_id"],
+            history_floor_event_id=int(values["history_floor_event_id"]),
+            sub_batch_id=int(values["sub_batch_id"]),
+            fingerprint_version=int(values["fingerprint_version"]),
+            fingerprint=b64decode(values["fingerprint"], validate=True),
+            record_count=int(values["record_count"]),
+            logical_byte_count=int(values["logical_byte_count"]),
+        )
+    except (
+        BinasciiError,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as err:
+        raise StreamIntegrityError(
+            "an output stage has invalid stored reconciliation metadata"
+        ) from err
+
+
+async def _gather_redis(*awaitables: Any) -> tuple[Any, ...]:
+    """Retain precise tuple shape for the three independent hash reads."""
+    return tuple(await asyncio.gather(*awaitables))
+
+
+def _text(value: Any) -> str:
+    return value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+
+
+def _to_record(entry_id: Any, fields: Any) -> StreamRecord:
+    return StreamRecord.from_fields(Offset(_text(entry_id)), fields)
