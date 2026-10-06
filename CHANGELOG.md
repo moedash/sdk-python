@@ -78,6 +78,18 @@ to include examples, links to docs, or any other relevant information.
   which the handler maps onto the store's accessor for that owner. Configure
   the front with `data_converter=` to run a payload codec on the caller side,
   so records are encoded before they leave the process.
+- Added experimental External Workflow Streams in
+  `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
+  stored in a configured external backend instead of Temporal History, with a
+  Redis Streams provider included. Workflows subscribe with `external_stream`,
+  external processes publish with `ExternalStreamProducer`, and Workers are
+  configured with `external_stream_backend`.
+- Added the output direction for External Workflow Streams.
+  Workflows publish with `external_output_stream`, Activities and external
+  processes use `ExternalOutputStreamProducer`, and external consumers resume
+  through `ExternalOutputStreamClient`. Workflow output is staged outside
+  History and becomes readable only after its compact Workflow Task marker is
+  committed.
 
 ### Changed
 
@@ -209,19 +221,6 @@ to include examples, links to docs, or any other relevant information.
   provider is not replay-safe.
 - Added `LoggingConfig.format` to select compact, pretty, or newline-delimited JSON output for
   Core logs written to the console.
-- Added experimental External Workflow Streams in
-  `temporalio.contrib.external_workflow_streams`. Workflow stream payloads are
-  stored in a configured external backend instead of Temporal History, with a
-  Redis Streams provider included. Workflows subscribe with `external_stream`,
-  external processes publish with `ExternalStreamProducer`, and Workers are
-  configured with `external_stream_backend`.
-
-- Added the output direction for External Workflow Streams.
-  Workflows publish with `external_output_stream`, Activities and external
-  processes use `ExternalOutputStreamProducer`, and external consumers resume
-  through `ExternalOutputStreamClient`. Workflow output is staged outside
-  History and becomes readable only after its compact Workflow Task marker is
-  committed.
 
 - Added the `Runtime(disable_environment_info=...)` option to control whether
   runtime, hosting, and platform information is included in worker heartbeats.
