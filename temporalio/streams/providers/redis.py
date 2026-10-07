@@ -58,6 +58,15 @@ The mapping, in one place:
   batch limits are lifted for this provider, because a synchronous publish
   cannot wait for the worker to stage a full batch; a batch it cannot stage
   fails the task.
+- Retention is trimming, with no consumer floor. By default a record older
+  than :data:`DEFAULT_RETENTION`, seven days, is trimmed by the next append
+  the provider makes to its key, whatever any reader has reached;
+  ``retention=None`` turns the age trim off, and ``max_len`` adds a count cap
+  that is off by default. A replay that reaches a recorded range the trim
+  removed fails its Workflow Task, an outside cursor below the trim is
+  refused, and a fully trimmed topic reads as empty. A run that has to replay
+  cold after seven days of consuming fails, so a long-lived consumer
+  continues as new inside the window, or is configured with a longer one.
 
 - Every record carries the SHA-256 of its converted body under
   ``temporal.io/content-hash``, stamped before the payload codec runs, and the
@@ -86,7 +95,7 @@ import hashlib
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any, Final, Generic, TypeVar
@@ -135,6 +144,7 @@ from temporalio.contrib.external_workflow_streams._output_backend import (
     OutputStageResolutionError,
     OutputStageStatus,
     OutputStreamRecord,
+    StagedOutputRecord,
 )
 from temporalio.contrib.external_workflow_streams._output_client import (
     _reconcile_output_stage,
@@ -180,7 +190,7 @@ from temporalio.streams._wire import (
 from temporalio.streams.providers import ProviderPlugin
 from temporalio.worker import ReplayerConfig, WorkerConfig
 
-__all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
+__all__ = ["DEFAULT_RETENTION", "RedisProducer", "RedisStreamHandle", "RedisStreams"]
 
 T = TypeVar("T")
 
@@ -191,6 +201,15 @@ _LEGACY_INPUT_PREFIX = "in:"
 _REDIS_ID = re.compile(r"\d+-\d+")
 _READ_BATCH = 256
 _STAGE_FIELD: Final = _OUTPUT_STAGE_FIELD.encode()
+
+#: How long a record is kept when the constructor is not told otherwise.
+#:
+#: An age rather than a count, because the count a topic can afford depends on
+#: its record size and the age does not, and because a count cap refuses a task
+#: whose batch does not fit under it. Seven days is long enough to replay a
+#: consumer that was evicted over a weekend and short enough that a chain
+#: nobody reads any more does not keep its records for good.
+DEFAULT_RETENTION: Final = timedelta(days=7)
 
 #: How long a wake the server refused is sent again before it is given up, and
 #: the pause between attempts. The pause is there because in the instant between
@@ -278,6 +297,21 @@ async def _tail_after(
             return None
 
 
+def _trim_floor(backend: Any) -> str:
+    retention = getattr(backend, "_retention", None)
+    if retention is None:
+        return ""
+    # The worker's clock names the floor, so a skewed worker shifts the window by
+    # its skew, the same as the backend's own trim.
+    floor = int((time.time() - retention.total_seconds()) * 1000)
+    return f"{max(floor, 0)}-0"
+
+
+def _trim_maxlen(backend: Any) -> str:
+    max_len = getattr(backend, "_max_len", None)
+    return "" if max_len is None else str(max_len)
+
+
 def _fields_args(record: TransportRecord) -> list[Any]:
     """The record's stored fields, name then value, as the append scripts take them."""
     args: list[Any] = []
@@ -287,14 +321,16 @@ def _fields_args(record: TransportRecord) -> list[Any]:
     return args
 
 
-def _append_args(record: TransportRecord, digest: str) -> list[Any]:
-    """What the log append script takes: the identity and digest, then the fields.
+def _append_args(backend: Any, record: TransportRecord, digest: str) -> list[Any]:
+    """What the log append script takes: the trims, the identity and digest, the fields.
 
     ``digest`` is the plaintext hash of what the record carries, taken before
     the payload codec ran, so a retry the codec encoded differently is still
     recognized as the same append.
     """
     return [
+        _trim_floor(backend).encode(),
+        _trim_maxlen(backend).encode(),
         str(record.idempotency_key).encode(),
         digest.encode(),
         *_fields_args(record),
@@ -321,23 +357,32 @@ def _stamp_hash(wire: WireRecord) -> None:
 
 #: Append one record to a log, or answer where it already is.
 #:
-#: The provider's own write rather than the transport's, so a retry is matched
-#: by its plaintext digest rather than by the encoded bytes. The idempotency
-#: hash is read before the log is touched, so an identity already used with a
-#: different plaintext digest refuses the record rather than writing it, and one
-#: used with the same digest answers with the original position, which is what
-#: settles a call whose answer was lost.
+#: The provider's own write rather than the transport's, so the retention trims
+#: ride along instead of costing their own round trips; they are exact for the
+#: reason the backend's own trims are. The idempotency hash is read before the
+#: log is touched, so an identity already used with a different plaintext digest
+#: refuses the record rather than writing it, and one used with the same digest
+#: answers with the original position, which is what settles a call whose answer
+#: was lost.
 _LOG_APPEND_LUA: Final = """
-local existing = redis.call('HGET', KEYS[2], ARGV[1])
+local minid = ARGV[1]
+local maxlen = ARGV[2]
+local existing = redis.call('HGET', KEYS[2], ARGV[3])
 if existing then
   local sep = string.find(existing, '|')
-  if string.sub(existing, sep + 1) ~= ARGV[2] then
+  if string.sub(existing, sep + 1) ~= ARGV[4] then
     return {'conflict', ''}
   end
   return {'ok', string.sub(existing, 1, sep - 1)}
 end
-local id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 3))
-redis.call('HSET', KEYS[2], ARGV[1], id .. '|' .. ARGV[2])
+local id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 5))
+redis.call('HSET', KEYS[2], ARGV[3], id .. '|' .. ARGV[4])
+if minid ~= '' then
+  redis.call('XTRIM', KEYS[1], 'MINID', minid)
+end
+if maxlen ~= '' then
+  redis.call('XTRIM', KEYS[1], 'MAXLEN', maxlen)
+end
 return {'ok', id}
 """
 
@@ -358,11 +403,28 @@ class _LogAppend:
         """
         outcome, placed = await self._script(
             keys=[name, f"{name}:idem"],
-            args=_append_args(record, digest),
+            args=_append_args(self._backend, record, digest),
         )
         if _text(outcome) == "conflict":
             raise AppendConflictError(record.idempotency_key)
         return Offset(_text(placed))
+
+
+async def _retained(client: Any, name: str, offset: Offset) -> bool:
+    """Whether the record at ``offset`` on the stream ``name`` survived trimming.
+
+    A record at or after the first retained entry is there. On an emptied
+    stream the last id Redis generated says whether the record ever was.
+    """
+    if not await client.exists(name):
+        # Nothing was ever written under this key, so nothing was trimmed from it.
+        return True
+    info = await client.xinfo_stream(name)
+    wanted = _entry_id(offset.token)
+    first = info.get("first-entry")
+    if first:
+        return _entry_id(first[0]) <= wanted
+    return wanted > _entry_id(info["last-generated-id"])
 
 
 def _is_staged(fields: Any) -> bool:
@@ -371,7 +433,7 @@ def _is_staged(fields: Any) -> bool:
 
 
 class _TopicLogBackend(RedisStreamBackend):
-    """The transport's Redis backend with this provider's layout.
+    """The transport's Redis backend with this provider's layout and trims.
 
     One key per topic: the transport renders a topic's input key and its
     output key apart, because the direction is part of every key it derives,
@@ -381,7 +443,25 @@ class _TopicLogBackend(RedisStreamBackend):
     a workflow never reads its own records and a recorded range replays to
     what was delivered. Reads through an output key are the outside reader's
     and see the whole log, with the stage protocol deciding what is visible.
+
+    Trims are exact rather than approximate: Redis's approximate trim drops
+    whole macro nodes only, so a stream shorter than one node, a hundred
+    entries by default, would never trim and the window would not mean what
+    it says. Only the logs are trimmed; the idempotency and stage hashes
+    beside them keep one entry per record and stage.
     """
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        key_prefix: str,
+        retention: timedelta | None,
+        max_len: int | None,
+    ) -> None:
+        super().__init__(client=client, key_prefix=key_prefix)
+        self._retention = retention
+        self._max_len = max_len
 
     def stream_key(self, key: StreamKey) -> str:
         """The topic's log, whichever direction the transport asks for."""
@@ -427,6 +507,39 @@ class _TopicLogBackend(RedisStreamBackend):
                 return records
             start = _text(entries[-1][0])
             block_ms = None
+
+    def describe_window(self) -> str:
+        """The configured window, for messages."""
+        parts = []
+        if self._retention is not None:
+            parts.append(f"retention={self._retention}")
+        if self._max_len is not None:
+            parts.append(f"max_len={self._max_len}")
+        return ", ".join(parts) or "no retention"
+
+    async def append(self, key: StreamKey, record: Any) -> Any:
+        placed = await super().append(key, record)
+        await self._trim(key)
+        return placed
+
+    async def stage_output(
+        self, manifest: OutputStageManifest, records: Sequence[StagedOutputRecord]
+    ) -> OutputStage:
+        # A stage is invisible until its task commits, and the trim has no consumer
+        # floor to hold it: a window at or below the batch takes entries out of the
+        # stage that was just written, and the commit then fails on a missing record
+        # for as long as the task retries. Flooring the trim instead would need the
+        # floor this provider deliberately does not keep, and would not hold anyway,
+        # because the trim that removes the stage is not the one that staged it.
+        if self._max_len is not None and manifest.record_count >= self._max_len:
+            raise ValueError(
+                f"this task publishes {manifest.record_count} records and max_len is "
+                f"{self._max_len}: the window has to exceed the largest batch a task "
+                "publishes, or the batch is trimmed before it commits"
+            )
+        stage = await super().stage_output(manifest, records)
+        await self._trim(manifest.stream_key)
+        return stage
 
     async def abort_output(self, manifest: OutputStageManifest) -> OutputStage:
         """Resolve the stage as aborted and take its entries out of the log.
@@ -475,6 +588,15 @@ class _TopicLogBackend(RedisStreamBackend):
     async def read_range(
         self, key: StreamKey, first: Offset, last: Offset
     ) -> list[TransportRecord]:
+        # The replay read. Said here, where the trim is known, rather than left
+        # to the range checks, which can only report the record as missing.
+        if not await self.retains(key, first):
+            raise StreamIntegrityError(
+                f"the recorded range [{first}, {last}] on topic "
+                f"{key.stream_name!r} is past the redis provider's retention "
+                f"({self.describe_window()}): the records were trimmed, so this "
+                "run cannot be replayed"
+            )
         entries: Any = await self._client.xrange(
             self.stream_key(key), first.serialize(), last.serialize()
         )
@@ -531,6 +653,22 @@ class _TopicLogBackend(RedisStreamBackend):
             }
 
         return aborted
+
+    async def retains(self, key: StreamKey, offset: Offset) -> bool:
+        """Whether the record at ``offset`` survived trimming."""
+        return await _retained(self._client, self.stream_key(key), offset)
+
+    async def _trim(self, key: StreamKey) -> None:
+        name = self.stream_key(key)
+        if self._retention is not None:
+            # The worker's clock names the floor, so a skewed worker shifts
+            # the window by its skew.
+            floor = int((time.time() - self._retention.total_seconds()) * 1000)
+            await self._client.xtrim(
+                name, minid=f"{max(floor, 0)}-0", approximate=False
+            )
+        if self._max_len is not None:
+            await self._client.xtrim(name, maxlen=self._max_len, approximate=False)
 
 
 def _drive(coroutine: Coroutine[Any, Any, None]) -> None:
@@ -678,7 +816,7 @@ def _storage_error(error: Exception, what: str) -> StreamError:
 
 def _integrity_error(error: Exception, what: str) -> StreamError:
     # Named as a loss rather than a transient read failure, because no retry brings
-    # a lost record back and the caller's next move is different.
+    # a trimmed record back and the caller's next move is different.
     return StreamNotFoundError(f"{what}: {error}")
 
 
@@ -791,7 +929,7 @@ class RedisProducer(Generic[T]):
         chain = await _chain(self._client, self._workflow_id)
         try:
             # The transport's producer is bound for its wake and its key: the
-            # append itself is the provider's, so a retry is matched by digest.
+            # append itself is the provider's, so the trims ride along with it.
             input_ = await ExternalStreamProducer.connect(
                 backend=backend,
                 workflow=chain,
@@ -843,7 +981,7 @@ class RedisProducer(Generic[T]):
             digest = _plaintext_digest(record)
             _stamp_hash(record)
             # Built here rather than handed to the transport's publish, so the
-            # digest rides along. The identity is the one the transport would
+            # trims ride along. The identity is the one the transport would
             # derive, so a record the log already holds is reused.
             staged = TransportRecord(
                 kind=TransportRecordKind.DATA,
@@ -963,8 +1101,12 @@ class RedisStreamHandle:
         positioned against the log on the first step of the generator, since
         this call cannot reach the store.
 
-        A cursor another provider minted, or one that is not a Redis entry id,
-        is refused by this call: reading the token needs nothing from the store.
+        Two refusals and they do not land together. A cursor another provider minted,
+        or one that is not a Redis entry id, is refused by this call: reading the
+        token needs nothing from the store. A well-formed cursor the retention has
+        trimmed is refused on the first step of the generator, because answering that
+        needs a round trip and this call is not a coroutine. Neither yields a record
+        first.
 
         Raises:
             ValueError: ``last`` is not positive or came with a cursor.
@@ -1003,6 +1145,17 @@ class RedisStreamHandle:
         decoder = RecordDecoder(
             self._converter, result_type, after=after, warn=logger.warning
         )
+        if (
+            position is not None
+            and isinstance(backend, _TopicLogBackend)
+            and not await backend.retains(key, position)
+        ):
+            # Refused rather than resumed from the first retained record,
+            # which would skip whatever the trim took in between.
+            raise StreamCursorError(
+                f"cursor {after.token!r} names a record on {topic!r} that the "
+                f"provider's retention has trimmed ({backend.describe_window()})"
+            )
         cursor = TRANSPORT_BEGINNING if position is None else AFTER(position)
         closed = False
         while True:
@@ -1093,7 +1246,10 @@ class RedisStreamHandle:
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """The cursor of the newest committed record on ``topic``, for following from now.
 
-        ``BEGINNING`` when the topic holds no committed record.
+        ``BEGINNING`` when the topic holds no committed record, which a topic whose
+        records retention has all trimmed answers too: the two are the same state to
+        a reader, and a read from it starts at the first record retained after it
+        rather than at the tail the caller asked to follow from.
         """
         topic, _ = resolve_topic(topic)
         backend = self._streams._require_backend()
@@ -1161,6 +1317,8 @@ class RedisStreams(ProviderPlugin):
         idle_timeout: timedelta = timedelta(seconds=1),
         client: Any | None = None,
         poll_interval: timedelta = timedelta(milliseconds=500),
+        retention: timedelta | None = DEFAULT_RETENTION,
+        max_len: int | None = None,
     ) -> None:
         """Create the provider.
 
@@ -1172,10 +1330,32 @@ class RedisStreams(ProviderPlugin):
                 holds its Workflow Task open before the worker parks it.
             client: A ``redis.asyncio.Redis`` the caller opened, with
                 ``decode_responses=False``, and closes itself; the provider
-                puts its own key layout on top of it.
+                puts its own key layout and trims on top of it.
             poll_interval: How long an outside reader that is caught up waits
                 for a record before asking whether the workflow closed.
+            retention: Trim records older than this from a topic's log on
+                every append the provider makes to it.
+                :data:`DEFAULT_RETENTION`, seven days, unless the caller says
+                otherwise; ``None`` keeps every record until ``max_len``
+                trims it, or for good when that is unset too. This is
+                retention without a consumer floor: nothing holds a record
+                for a reader that has not reached it. A workflow whose replay
+                reaches a recorded range past the window fails its Workflow
+                Task with the transport's ``StreamIntegrityError`` until the
+                window is raised, an outside ``read(after=)`` below the window
+                raises ``StreamCursorError``, and a live reader that falls
+                behind the window misses records. The floor the server-side
+                provider keeps would need a consumer registry in Redis.
+            max_len: Keep at most this many entries per key, trimmed on the
+                same appends and with the same consequences. Off unless set.
+                It must exceed the largest batch a task publishes, or a stage
+                is trimmed before its commit; a batch at or above it is
+                refused where it is staged.
         """
+        if retention is not None and retention <= timedelta(0):
+            raise ValueError("retention must be positive")
+        if max_len is not None and max_len < 1:
+            raise ValueError("max_len must be positive")
         self._url = url
         self._key_prefix = key_prefix
         self._idle_timeout = idle_timeout
@@ -1183,6 +1363,8 @@ class RedisStreams(ProviderPlugin):
         self._backend: _TopicLogBackend | None = None
         self._owned_client: Any = None
         self._poll = poll_interval
+        self._retention = retention
+        self._max_len = max_len
 
     def _require_backend(self) -> _TopicLogBackend:
         if self._backend is None:
@@ -1201,6 +1383,8 @@ class RedisStreams(ProviderPlugin):
             self._backend = _TopicLogBackend(
                 client=client,
                 key_prefix=self._key_prefix,
+                retention=self._retention,
+                max_len=self._max_len,
             )
         return self._backend
 

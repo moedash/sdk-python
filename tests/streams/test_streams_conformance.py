@@ -395,6 +395,10 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             client,
             host=host,
             task_queue=worker.task_queue,
+            # The refusal of a trimmed cursor lands on the first step on this
+            # provider, where the case wants it at the call; its own live module
+            # covers the trimmed floor.
+            truncate=None,
             # Every stream this provider keeps belongs to a workflow.
             hosts_standalone_streams=False,
         )
