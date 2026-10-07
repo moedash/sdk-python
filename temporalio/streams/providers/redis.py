@@ -47,10 +47,13 @@ The mapping, in one place:
 - Cursors are ``redis:<ms>-<seq>`` and name an entry of the topic's log, so a
   cursor a workflow reader returned seeds an outside read and the other way
   round. A reader opened without a cursor starts where the chain's
-  predecessor run committed, which is the transport's own rule. An outside
-  read positions ``END`` and ``last=N`` against the log on the first step of
-  the generator, since the call itself cannot reach the store. A workflow
-  reader starts at a cursor or at the beginning.
+  predecessor run committed, which is the transport's own rule. ``END`` and
+  ``last=N`` are positioned against the log when the read starts: outside,
+  on the first step of the generator, since the call itself cannot reach the
+  store; inside a workflow, by the worker right after the Workflow Task that
+  opened the subscription, which records the entry it resolved in the marker
+  beside the subscription, so replay and a cold start read it from History
+  and never ask the log again.
 - A workflow's streams are keyed by the chain's first run, so a handle
   follows continue-as-new by construction and ``run_id`` only decides whose
   close ends a read.
@@ -134,6 +137,7 @@ from temporalio.contrib.external_workflow_streams import (
     ChainKeyMismatchError,
     ExternalStreamProducer,
     Offset,
+    StartAtTail,
     StreamDirection,
     WakeNotAcknowledgedError,
     WorkflowChainKey,
@@ -867,14 +871,12 @@ class _RedisWorkflowProvider:
     ) -> ReadSource:
         _require_topic(topic)
         check_read_start(after, last)
+        subscribe = self._input.topic(topic, type=bytes).subscribe
         if last is not None or after == END:
             # The tail is where the log is when the worker looks, which the
-            # workflow thread cannot see.
-            raise StreamUnsupportedError(
-                "a workflow reader on the redis provider starts at a cursor or at "
-                "the beginning"
-            )
-        subscribe = self._input.topic(topic, type=bytes).subscribe
+            # workflow thread cannot see: the transport has the worker resolve
+            # it after this task and record the entry with the subscription.
+            return _RedisReadSource(subscribe(start_at_tail=StartAtTail(last or 0)))
         position = _position(after)
         # Without a position the transport resumes where the chain's
         # predecessor run committed; with one, that is where the wait starts
