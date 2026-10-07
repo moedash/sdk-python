@@ -71,7 +71,7 @@ annotation, a replay of the same records would cut the segments somewhere else
 and diverge from the live run.
 """
 
-#: Where per-Run subscription state hangs off the Workflow instance. Reserved,
+#: Where per-Run subscription state hangs off the SDK's Run object. Reserved,
 #: and deliberately not in the ``__temporal_workflow_stream*`` namespace the
 #: shipped contrib feature already owns.
 _RUN_STATE_ATTR = "__temporal_external_stream_state"
@@ -175,9 +175,11 @@ class ExternalStreamRuntime(Protocol):
 class _RunState:
     """Per-Run subscription bookkeeping.
 
-    Lives on the Workflow instance rather than in a module global, so it shares
-    the instance's lifetime exactly -- a module global would outlive an evicted
-    Run and hand its wait ids to the next one.
+    Lives on the SDK's object for the Run rather than in a module global, so it
+    shares the Run's lifetime exactly -- a module global would outlive an evicted
+    Run and hand its wait ids to the next one. Not on the user's Workflow object
+    either: that object does not exist while its ``@workflow.init`` constructor
+    runs, and a constructor may publish.
     """
 
     runtime: ExternalStreamRuntime | None = None
@@ -186,26 +188,32 @@ class _RunState:
     pending: dict[int, Any] = field(default_factory=dict)
 
 
+def _run_holder() -> Any:
+    """The object per-Run state hangs off: the SDK's runtime for the current Run."""
+    return temporalio.workflow._Runtime.current()
+
+
 def _run_state() -> _RunState:
-    instance = temporalio.workflow.instance()
-    state = getattr(instance, _RUN_STATE_ATTR, None)
+    holder = _run_holder()
+    state = getattr(holder, _RUN_STATE_ATTR, None)
     if state is None:
         state = _RunState()
-        setattr(instance, _RUN_STATE_ATTR, state)
+        setattr(holder, _RUN_STATE_ATTR, state)
     return state
 
 
 def _install_runtime(  # pyright: ignore[reportUnusedFunction]
-    instance: Any, runtime: ExternalStreamRuntime
+    holder: Any, runtime: ExternalStreamRuntime
 ) -> None:
-    """Gives a Workflow instance its handle to the Worker's manager.
+    """Gives a Run its handle to the Worker's manager.
 
-    Called by the Worker when it creates the instance.
+    Called by the Worker with its object for the Run, before the Workflow's
+    constructor runs, so a constructor can subscribe and publish.
     """
-    state = getattr(instance, _RUN_STATE_ATTR, None)
+    state = getattr(holder, _RUN_STATE_ATTR, None)
     if state is None:
         state = _RunState()
-        setattr(instance, _RUN_STATE_ATTR, state)
+        setattr(holder, _RUN_STATE_ATTR, state)
     state.runtime = runtime
 
 

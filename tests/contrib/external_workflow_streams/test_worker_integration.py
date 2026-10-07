@@ -132,6 +132,32 @@ class TimerSuppressedSubscriptionWorkflow:
             timer.cancel()
 
 
+@workflow.defn
+class SubscribeInInitWorkflow:
+    """Subscribes from its ``@workflow.init`` constructor and consumes in ``run``.
+
+    The user's object does not exist yet while the constructor runs, so per-Run
+    stream state cannot hang off it.
+    """
+
+    @workflow.init
+    def __init__(self, expected: int) -> None:
+        self._tokens = (
+            external_stream.with_options(idle_timeout=timedelta(seconds=30))
+            .topic("tokens", type=str)
+            .subscribe()
+        )
+
+    @workflow.run
+    async def run(self, expected: int) -> list[str]:
+        seen: list[str] = []
+        async for token in self._tokens:
+            seen.append(token)
+            if len(seen) >= expected:
+                break
+        return seen
+
+
 @pytest.fixture
 def backend() -> MemoryStreamBackend:
     return MemoryStreamBackend()
@@ -208,6 +234,34 @@ async def test_a_workflow_consumes_records_it_never_read_itself(
             "beta",
             "gamma",
         ]
+
+
+async def test_a_constructor_can_subscribe(
+    client: Client, backend: MemoryStreamBackend
+) -> None:
+    task_queue = f"tq-{uuid.uuid4()}"
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[SubscribeInInitWorkflow],
+        external_stream_backend=backend,
+    ):
+        handle = await client.start_workflow(
+            SubscribeInInitWorkflow.run,
+            2,
+            id=f"wf-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        description = await handle.describe()
+        key = StreamKey(
+            client.namespace,
+            handle.id,
+            description.raw_description.workflow_execution_info.first_run_id,
+            "tokens",
+        )
+        await publish(backend, key, ["alpha", "beta"])
+
+        assert await asyncio.wait_for(handle.result(), 30) == ["alpha", "beta"]
 
 
 async def test_no_stream_payload_reaches_history(
