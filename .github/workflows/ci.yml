@@ -100,6 +100,56 @@ jobs:
           npx doctoc README.md
           [[ -z $(git status --porcelain README.md) ]] || (git diff README.md; echo "README changed"; exit 1)
 
+  # The client-side (Redis) stream provider's own evidence. Its tests need a store
+  # this repo does not otherwise stand up, so without this job nothing that proves
+  # retention, cursor ownership, the staged commit or the paired producer write ever
+  # runs anywhere but a developer's machine.
+  streams-redis:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: temporalio/bridge -> target
+          key: streams-redis-${{ env.pythonLocation }}
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "23.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8
+      - run: uv tool install poethepoet
+      - run: uv sync --all-extras
+      - run: poe build-develop
+      # The dev server comes from the test environment, the store from the service
+      # above. Run serially: the cases measure real timing and share one Redis.
+      - run: uv run pytest tests/streams -p no:randomly -s
+        timeout-minutes: 20
+        env:
+          STREAMS_LIVE: redis
+          TEMPORAL_TEST_REDIS_URL: redis://127.0.0.1:6379
+          AI198_REDIS_URL: redis://127.0.0.1:6379
+      # Also without the store, so the gate itself keeps working and the memory
+      # provider's conformance run stays honest.
+      - run: uv run pytest tests/streams -p no:randomly -s
+        timeout-minutes: 10
+
   # Verify the optional FIPS build: the Rust core must link aws-lc-fips-sys
   # (aws-lc-rs FIPS mode) and must NOT link `ring` (the cargo-tree guard, ported
   # from sdk-ruby PR #466's `fips_tree` guard); then run the test suite against the

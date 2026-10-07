@@ -1,0 +1,230 @@
+"""What the Redis provider decides without a store: cursors, the sync publish, the wake."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.contrib.external_workflow_streams import (
+    StreamError as TransportStreamError,
+)
+from temporalio.contrib.external_workflow_streams import (
+    WakeNotAcknowledgedError,
+)
+from temporalio.converter import DataConverter
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.streams import BEGINNING, Cursor, StreamCursorError, StreamError
+from temporalio.streams.providers import redis as redis_provider
+from temporalio.streams.providers.redis import (
+    RedisProducer,
+    RedisStreams,
+    _drive,
+    _position,
+)
+
+
+class _ChainClient:
+    """A client whose describes of the chain answer from a script of statuses.
+
+    The last entry repeats, so a chain that stays running keeps saying so.
+    """
+
+    def __init__(self, *answers: WorkflowExecutionStatus | Exception) -> None:
+        self.data_converter = DataConverter.default
+        self.namespace = "default"
+        self._answers = list(answers)
+        self.describes = 0
+
+    def get_workflow_handle(self, _workflow_id: str, **_: Any) -> Any:
+        return self
+
+    async def describe(self) -> Any:
+        self.describes += 1
+        answer = self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return SimpleNamespace(status=answer)
+
+
+class _RefusingInput:
+    """The transport's input topic, refusing the first ``refusals`` wakes."""
+
+    def __init__(self, refusals: int, error: Exception | None = None) -> None:
+        self._refusals = refusals
+        self._error = error
+        self.calls = 0
+
+    async def wake(self) -> list[str]:
+        self.calls += 1
+        if self.calls <= self._refusals:
+            raise self._error or WakeNotAcknowledgedError(
+                "workflow operation can not be applied because workflow is closing",
+                pending=[],
+            )
+        return ["sent"]
+
+
+def _waking_producer(client: _ChainClient, wakes: _RefusingInput) -> RedisProducer[Any]:
+    producer: RedisProducer[Any] = RedisProducer(
+        RedisStreams(), cast(Any, client), "wf", "inputs", "console", 1
+    )
+    producer._input = wakes
+    return producer
+
+
+@pytest.fixture
+def quick_wake_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        redis_provider, "_WAKE_RETRY_BACKOFF", timedelta(milliseconds=10)
+    )
+    monkeypatch.setattr(
+        redis_provider, "_WAKE_RETRY_WINDOW", timedelta(milliseconds=300)
+    )
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_by_a_closing_run_is_sent_again_to_its_successor():
+    # The chain describes as running: the run that refused the wake handed over
+    # to a successor, which is where the records already are.
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(refusals=1)
+    await _waking_producer(client, wakes)._wake()
+    assert (wakes.calls, client.describes) == (2, 1)
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_refused_wake_waits_for_the_successor_to_become_current():
+    # In the instant between two runs the chain still describes as the
+    # predecessor that continued as new, and the next Signal is refused too.
+    client = _ChainClient(
+        WorkflowExecutionStatus.CONTINUED_AS_NEW, WorkflowExecutionStatus.RUNNING
+    )
+    wakes = _RefusingInput(refusals=2)
+    await _waking_producer(client, wakes)._wake()
+    assert (wakes.calls, client.describes) == (3, 2)
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+@pytest.mark.parametrize(
+    "ending",
+    [
+        WorkflowExecutionStatus.COMPLETED,
+        WorkflowExecutionStatus.FAILED,
+        WorkflowExecutionStatus.CANCELED,
+        WorkflowExecutionStatus.TERMINATED,
+        WorkflowExecutionStatus.TIMED_OUT,
+        RPCError("gone", RPCStatusCode.NOT_FOUND, b""),
+    ],
+    ids=lambda ending: getattr(ending, "name", "not found"),
+)
+async def test_a_wake_refused_by_a_finished_chain_is_the_ordinary_ending(
+    ending: WorkflowExecutionStatus | Exception,
+):
+    client = _ChainClient(ending)
+    wakes = _RefusingInput(refusals=99)
+    await _waking_producer(client, wakes)._wake()
+    assert wakes.calls == 1
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_as_closing_for_the_whole_window_is_dropped():
+    # The run is inside a Workflow Task that tried to close it while the wake
+    # sat buffered. The record is in the log, so if the run stays open its
+    # next park rechecks the log and finds it; the producer is not failed.
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(refusals=99)
+    await _waking_producer(client, wakes)._wake()
+    assert wakes.calls > 1
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_for_another_reason_for_the_whole_window_is_raised():
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(
+        refusals=99, error=WakeNotAcknowledgedError("signal rate limited", pending=[])
+    )
+    with pytest.raises(WakeNotAcknowledgedError, match="rate limited"):
+        await _waking_producer(client, wakes)._wake()
+    assert wakes.calls > 1
+
+
+@pytest.mark.usefixtures("quick_wake_retries")
+async def test_a_wake_refused_as_not_found_ends_without_a_describe():
+    # The server answers NOT_FOUND for a Signal to a chain that has ended, so
+    # nothing is left to describe.
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    refusal = WakeNotAcknowledgedError("gone", pending=[])
+    refusal.__cause__ = RPCError("gone", RPCStatusCode.NOT_FOUND, b"")
+    wakes = _RefusingInput(refusals=99, error=refusal)
+    await _waking_producer(client, wakes)._wake()
+    assert (wakes.calls, client.describes) == (1, 0)
+
+
+async def test_a_wake_the_store_could_not_send_is_a_storage_error():
+    client = _ChainClient(WorkflowExecutionStatus.RUNNING)
+    wakes = _RefusingInput(refusals=1, error=TransportStreamError("no connection"))
+    with pytest.raises(StreamError, match="could not be sent"):
+        await _waking_producer(client, wakes)._wake()
+    assert (wakes.calls, client.describes) == (1, 0)
+
+
+class _NoRedis:
+    """Enough of a Redis client to construct a backend and render its keys."""
+
+    def register_script(self, _script: str) -> None:
+        return None
+
+
+def test_cursors_name_entries_of_the_topics_one_log():
+    assert _position(BEGINNING) is None
+    position = _position(Cursor("redis:1700000000000-3"))
+    assert position is not None and position.token == "1700000000000-3"
+    # A workflow reader and an outside reader name the same log, so either
+    # side's cursor seeds the other. The form the two-key layout minted for
+    # workflow readers named an entry of the input key, which is the log now.
+    legacy = _position(Cursor("redis:in:1700000000000-3"))
+    assert legacy is not None and legacy.token == "1700000000000-3"
+    with pytest.raises(StreamCursorError):
+        _position(Cursor("memory:3"))
+    with pytest.raises(StreamCursorError):
+        _position(Cursor("redis:not-an-id"))
+    with pytest.raises(StreamCursorError):
+        _position(Cursor("redis:in:not-an-id"))
+
+
+def test_a_publish_that_completes_at_once_is_driven_to_the_end():
+    done = []
+
+    async def publish() -> None:
+        done.append(True)
+
+    _drive(publish())
+    assert done == [True]
+
+
+def test_a_publish_that_would_wait_fails_loudly():
+    async def publish() -> None:
+        await asyncio.get_running_loop().create_future()
+
+    async def run() -> None:
+        with pytest.raises(StreamError, match="batch is full"):
+            _drive(publish())
+
+    asyncio.run(run())
+
+
+async def test_a_client_the_caller_opened_gets_the_providers_layout_and_stays_open():
+    # The layout is the provider's whichever connection it runs on, and
+    # closing the provider does not close a caller's client.
+    client = _NoRedis()
+    provider = RedisStreams(client=client)
+    backend = provider._require_backend()
+    assert backend._client is client
+    await provider.close()
+    assert provider._require_backend() is not backend
+    assert provider._require_backend()._client is client
