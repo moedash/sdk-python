@@ -10,6 +10,7 @@ import pytest
 from temporalio.api.common.v1 import Payload
 from temporalio.common import RawValue
 from temporalio.contrib.streams import (
+    BEGINNING,
     CONTENT_HASH_KEY,
     Cursor,
     RecordKind,
@@ -23,8 +24,6 @@ from temporalio.contrib.streams._policy import AttemptTracker
 from temporalio.contrib.streams._wire import RecordDecoder, from_wire, to_wire
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.converter import DataConverter, PayloadCodec
-
-BEGINNING = Cursor("")
 
 
 def test_a_record_round_trips_through_the_wire():
