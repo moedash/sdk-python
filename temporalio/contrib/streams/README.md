@@ -106,3 +106,4 @@ Both samples run in full in `tests/contrib/streams/samples/`.
 
 - [Redis provider: guarantees and setup](docs/redis-guarantees.md)
 - [Stream wire contract](docs/wire-contract.md)
+- [Moving from Workflow Streams](docs/migration.md)
