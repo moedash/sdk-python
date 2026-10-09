@@ -8,7 +8,40 @@ Workflow's Activities and clients, append to it, and outside readers consume
 it from a cursor. Records live in a store the application runs, reached
 through a provider, and never pass through Temporal or its History.
 
+The contract:
+
+1. **A new attempt supersedes the old one.** When a reader sees the first
+   record of a producer's newer attempt, it yields a
+   :attr:`RecordKind.SUPERSEDED` record first. No store holds that record,
+   so every provider reports a retry the same way.
+
 The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.contrib.streams.proto.v1`, with the user's value in ``body``
 as an ordinary payload.
 """
+
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
+    content_fingerprint,
+    content_hash,
+    decode_body,
+    encode_body,
+)
+from temporalio.contrib.streams._record import (
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    Supersession,
+)
+
+__all__ = [
+    "CONTENT_HASH_KEY",
+    "Cursor",
+    "RecordKind",
+    "StreamRecord",
+    "Supersession",
+    "content_fingerprint",
+    "content_hash",
+    "decode_body",
+    "encode_body",
+]
