@@ -57,6 +57,7 @@ from temporalio.bridge.proto.workflow_activation import WorkflowActivation
 from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.contrib.streams._body import content_fingerprint, encode_body
+from temporalio.contrib.streams._errors import StreamError
 from temporalio.contrib.streams._record import RecordKind
 from temporalio.contrib.streams._wire import WireRecord
 
@@ -72,6 +73,23 @@ _SCHEMA_VERSION = 1
 _FINGERPRINT_VERSION = 1
 _PROVIDER_FORMAT_VERSION = 1
 _SETTLED_TOKENS = 10_000
+
+MANIFEST_BUDGET_BYTES = 48 * 1024
+"""The largest manifest one publishing completion may produce.
+
+Core refuses a manifest over 64 KiB by failing the Workflow Task, again on
+every retry, and it takes one commit per completion. A publish that would
+take the completion's manifest past this budget is refused at the call
+instead, which leaves room under Core's limit for the fields this bound
+estimates.
+"""
+
+# Upper bounds, in bytes, on what the manifest spends: once per completion
+# (versions, stage token, floor, run id, provider id, the segment's header),
+# and per topic (its entry, counts, fingerprint and segment count) on top of
+# the topic name itself.
+_MANIFEST_FIXED_BYTES = 512
+_MANIFEST_TOPIC_BYTES = 72
 
 
 @dataclass(frozen=True)
@@ -126,6 +144,8 @@ class _RunOutput:
         self.run_id = run_id
         self.first_run_id = first_run_id
         self.pending: list[WireRecord] = []
+        self.pending_topics: set[str] = set()
+        self.manifest_bound = _MANIFEST_FIXED_BYTES
         self.staged: list[_Stage] = []
         self.replayed: deque[ExternalOutputStreamManifest] = deque()
         self.proven: list[_Stage] = []
@@ -135,8 +155,33 @@ class _RunOutput:
         self.settling = asyncio.Lock()
 
     def publish(self, records: Sequence[WireRecord]) -> None:
-        """Buffer records the running Workflow published, on its thread."""
+        """Buffer records the running Workflow published, on its thread.
+
+        Raises:
+            StreamError: The records would take this completion's manifest
+                past :data:`MANIFEST_BUDGET_BYTES`. Nothing is buffered.
+        """
+        new_topics = {record.topic for record in records} - self.pending_topics
+        bound = self.manifest_bound + sum(
+            _MANIFEST_TOPIC_BYTES + len(topic.encode()) for topic in new_topics
+        )
+        if bound > MANIFEST_BUDGET_BYTES:
+            raise StreamError(
+                f"publishing to {sorted(new_topics)!r} would take this Workflow "
+                f"Task's stream manifest past {MANIFEST_BUDGET_BYTES} bytes, with "
+                f"{len(self.pending_topics)} topics already published in this "
+                "activation; spread the topics across Workflow Tasks"
+            )
         self.pending.extend(records)
+        self.pending_topics |= new_topics
+        self.manifest_bound = bound
+
+    def take_pending(self) -> list[WireRecord]:
+        """What the activation published, leaving the buffer empty."""
+        records, self.pending = self.pending, []
+        self.pending_topics = set()
+        self.manifest_bound = _MANIFEST_FIXED_BYTES
+        return records
 
 
 class _Decision(Enum):
@@ -351,7 +396,7 @@ class OutputCoordinator:
             )
         if not run.pending:
             return
-        records, run.pending = run.pending, []
+        records = run.take_pending()
         floor = act.history_floor_event_id
         if act.is_replaying:
             self._recommit(act, completion, run, records)
@@ -435,7 +480,7 @@ class OutputCoordinator:
         """Drop what a failed activation published; nothing of it is staged."""
         run = self._runs.get(run_id)
         if run is not None:
-            run.pending.clear()
+            run.take_pending()
 
     async def after_completion(self, run_id: str) -> None:
         """Promote the run's stages that History now shows as committed.
