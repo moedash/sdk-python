@@ -16,6 +16,8 @@ from temporalio.common import RawValue
 from temporalio.contrib.streams import (
     BEGINNING,
     CONTENT_HASH_KEY,
+    DEFAULT_TOPIC,
+    END,
     Cursor,
     RecordKind,
     StreamClosedError,
@@ -25,17 +27,44 @@ from temporalio.contrib.streams import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRef,
+    StreamTopic,
     StreamUnsupportedError,
     Supersession,
     content_fingerprint,
     content_hash,
     decode_body,
     encode_body,
+    resolve_topic,
+    topic,
+)
+from temporalio.contrib.streams._cursor import (
+    cursor_position,
+    mint_cursor,
+    stream_hash,
 )
 from temporalio.contrib.streams._policy import AttemptTracker
 from temporalio.contrib.streams._wire import RecordDecoder, from_wire, to_wire
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.converter import DataConverter, PayloadCodec
+
+OUT = topic("out", dict)
+
+
+def test_a_definition_carries_its_name_and_type():
+    assert OUT == StreamTopic("out", dict)
+    assert resolve_topic(OUT) == ("out", dict)
+    assert resolve_topic("free", int) == ("free", int)
+    assert resolve_topic(None) == (DEFAULT_TOPIC, None)
+
+
+def test_topic_mistakes_are_value_errors():
+    with pytest.raises(ValueError):
+        topic("")
+    with pytest.raises(ValueError):
+        resolve_topic("")
+    with pytest.raises(ValueError, match="already carries its type"):
+        resolve_topic(OUT, dict)
 
 
 def test_every_condition_is_a_stream_error():
@@ -55,6 +84,85 @@ def test_every_condition_is_a_stream_error():
     # Refused and unknown are different answers to a retrying caller.
     assert not issubclass(StreamOutcomeUnknownError, StreamProducerError)
     assert not issubclass(StreamProducerError, StreamOutcomeUnknownError)
+
+
+def test_a_ref_names_a_workflow_stream():
+    ref = StreamRef.for_workflow("wf", topic=OUT)
+    assert ref == StreamRef("workflow", "wf", topic="out")
+    assert StreamRef.for_workflow("wf").topic == DEFAULT_TOPIC
+    assert ref.with_topic(None).topic == DEFAULT_TOPIC
+    assert ref.with_topic("other").workflow_id == "wf"
+
+
+def test_a_ref_refuses_owner_kinds_this_release_lacks():
+    for kind in ("activity", "standalone"):
+        with pytest.raises(StreamUnsupportedError, match="only Workflow-owned"):
+            StreamRef(kind, "x")
+    with pytest.raises(ValueError, match="unknown"):
+        StreamRef("nexus", "x")
+    with pytest.raises(ValueError):
+        StreamRef("workflow", "")
+    with pytest.raises(ValueError):
+        StreamRef("workflow", "wf", topic="")
+
+
+def test_a_ref_round_trips_through_the_default_converter():
+    ref = StreamRef.for_workflow("wf", run_id="run", topic=OUT)
+    converter = DataConverter.default.payload_converter
+    payload = converter.to_payloads([ref])[0]
+    assert converter.from_payloads([payload], [StreamRef])[0] == ref
+
+
+def test_a_ref_from_a_later_release_decodes_to_unsupported():
+    # The kind is a plain string, so the converter builds the ref and the ref
+    # says what is missing, rather than the converter failing a type check.
+    converter = DataConverter.default.payload_converter
+    payload = Payload(
+        metadata={"encoding": b"json/plain"},
+        data=b'{"kind": "activity", "workflow_id": "wf", "topic": "out"}',
+    )
+    with pytest.raises(StreamUnsupportedError, match="only Workflow-owned"):
+        converter.from_payloads([payload], [StreamRef])
+
+
+def test_a_cursor_is_bound_to_its_provider_and_stream():
+    one = stream_hash("ns", StreamRef.for_workflow("wf", topic="a"))
+    cursor = mint_cursor("memory", one, "7")
+    assert cursor_position(cursor, provider="memory", stream=one) == "7"
+    assert cursor_position(BEGINNING, provider="memory", stream=one) is None
+
+    with pytest.raises(StreamCursorError, match="minted by the 'memory' provider"):
+        cursor_position(cursor, provider="redis", stream=one)
+    for other in (
+        StreamRef.for_workflow("wf", topic="b"),
+        StreamRef.for_workflow("wf2", topic="a"),
+    ):
+        with pytest.raises(StreamCursorError, match="another stream"):
+            cursor_position(cursor, provider="memory", stream=stream_hash("ns", other))
+    with pytest.raises(StreamCursorError, match="another stream"):
+        cursor_position(
+            cursor,
+            provider="memory",
+            stream=stream_hash("ns2", StreamRef.for_workflow("wf", topic="a")),
+        )
+    for token in ("garbage", "memory:", f"memory:{one}:"):
+        with pytest.raises(StreamCursorError):
+            cursor_position(Cursor(token), provider="memory", stream=one)
+    with pytest.raises(StreamCursorError, match="END"):
+        cursor_position(END, provider="memory", stream=one)
+
+
+def test_the_stream_hash_follows_the_chain_not_the_run():
+    pinned = StreamRef.for_workflow("wf", run_id="r1", topic="a")
+    follower = StreamRef.for_workflow("wf", topic="a")
+    assert stream_hash("ns", pinned) == stream_hash("ns", follower)
+    assert len(stream_hash("ns", pinned)) == 8
+
+
+def test_the_stream_hash_is_length_delimited():
+    assert stream_hash("ns", StreamRef("workflow", "a:b", topic="c")) != stream_hash(
+        "ns", StreamRef("workflow", "a", topic="b:c")
+    )
 
 
 def test_the_envelope_keeps_its_field_numbers():
