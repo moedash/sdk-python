@@ -101,3 +101,7 @@ Both samples run in full in `tests/contrib/streams/samples/`.
   `RedisStreams.delete_workflow_streams` removes them at once.
 - **Not in this release.** Reading a stream inside a Workflow, and streams
   owned by an Activity or by no one, raise `StreamUnsupportedError`.
+
+## Further reading
+
+- [Redis provider: guarantees and setup](docs/redis-guarantees.md)
