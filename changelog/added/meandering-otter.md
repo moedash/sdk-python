@@ -1,0 +1,1 @@
+**Experimental**: `temporalio.contrib.streams` lets a Workflow, its Activities and clients publish to a stream the Workflow owns, stored in the application's Redis (`pip install "temporalio[redis]"`); a Workflow's own publish becomes visible when its Workflow Task is accepted, and outside readers follow the stream from a cursor.

@@ -4505,6 +4505,9 @@ opentelemetry = [
 pydantic = [
     { name = "pydantic" },
 ]
+redis = [
+    { name = "redis" },
+]
 strands-agents = [
     { name = "temporalio-strands-agents" },
 ]
@@ -4565,6 +4568,7 @@ requires-dist = [
     { name = "protobuf", marker = "extra == 'cloud-run-worker-otel'", specifier = "<7" },
     { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.0.0,<3" },
     { name = "python-dateutil", marker = "python_full_version < '3.11'", specifier = ">=2.8.2,<3" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=5,<8" },
     { name = "temporalio-deepagents", marker = "python_full_version >= '3.11' and extra == 'deepagents'", specifier = ">=0.0.1" },
     { name = "temporalio-google-adk", extras = ["mcp"], marker = "extra == 'google-adk'", specifier = ">=0.0.1" },
     { name = "temporalio-google-genai", extras = ["mcp"], marker = "extra == 'google-genai'", specifier = ">=0.1.0" },
@@ -4576,7 +4580,7 @@ requires-dist = [
     { name = "types-protobuf", specifier = ">=3.20,<8.0.0" },
     { name = "typing-extensions", specifier = ">=4.2.0,<5" },
 ]
-provides-extras = ["grpc", "opentelemetry", "pydantic", "openai-agents", "google-adk", "langgraph", "langsmith", "deepagents", "lambda-worker-otel", "cloud-run-worker-otel", "aioboto3", "google-genai", "strands-agents"]
+provides-extras = ["grpc", "opentelemetry", "pydantic", "redis", "openai-agents", "google-adk", "langgraph", "langsmith", "deepagents", "lambda-worker-otel", "cloud-run-worker-otel", "aioboto3", "google-genai", "strands-agents"]
 
 [package.metadata.requires-dev]
 dev = [
