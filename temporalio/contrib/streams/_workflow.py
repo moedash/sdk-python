@@ -103,6 +103,7 @@ class WorkflowStreamWriter(Generic[T]):
                     topic=self._topic,
                     kind=RecordKind.DATA,
                     value=value,
+                    run_id=workflow.info().run_id,
                 )
             ]
         )
@@ -127,6 +128,7 @@ class WorkflowStreamWriter(Generic[T]):
                     workflow.payload_converter(),
                     topic=self._topic,
                     kind=RecordKind.FINISH,
+                    run_id=workflow.info().run_id,
                 )
             ]
         )
