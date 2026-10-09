@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 __all__ = [
+    "BEGINNING",
+    "END",
     "Cursor",
     "RecordKind",
     "StreamRecord",
@@ -74,6 +76,18 @@ class Cursor:
     def __str__(self) -> str:
         """The provider's position token."""
         return self.token
+
+
+BEGINNING = Cursor("")
+"""Read from the oldest record the stream still retains."""
+
+END = Cursor("$end")
+"""Read only what is appended after the read starts.
+
+It is resolved when the read starts. To position a reader before the
+reader's process writes something, use
+:meth:`temporalio.contrib.streams.StreamHandle.latest` instead.
+"""
 
 
 @dataclass(frozen=True)

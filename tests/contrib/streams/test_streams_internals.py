@@ -14,9 +14,18 @@ import pytest
 from temporalio.api.common.v1 import Payload
 from temporalio.common import RawValue
 from temporalio.contrib.streams import (
+    BEGINNING,
     CONTENT_HASH_KEY,
     Cursor,
     RecordKind,
+    StreamClosedError,
+    StreamCursorError,
+    StreamError,
+    StreamExpiredError,
+    StreamNotFoundError,
+    StreamOutcomeUnknownError,
+    StreamProducerError,
+    StreamUnsupportedError,
     Supersession,
     content_fingerprint,
     content_hash,
@@ -27,6 +36,25 @@ from temporalio.contrib.streams._policy import AttemptTracker
 from temporalio.contrib.streams._wire import RecordDecoder, from_wire, to_wire
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.converter import DataConverter, PayloadCodec
+
+
+def test_every_condition_is_a_stream_error():
+    for error in (
+        StreamClosedError,
+        StreamCursorError,
+        StreamExpiredError,
+        StreamNotFoundError,
+        StreamOutcomeUnknownError,
+        StreamProducerError,
+        StreamUnsupportedError,
+    ):
+        assert issubclass(error, StreamError)
+    # Expired is a kind of invalid cursor, so a caller that only resets on a
+    # bad cursor still catches it, and one that cares can tell them apart.
+    assert issubclass(StreamExpiredError, StreamCursorError)
+    # Refused and unknown are different answers to a retrying caller.
+    assert not issubclass(StreamOutcomeUnknownError, StreamProducerError)
+    assert not issubclass(StreamProducerError, StreamOutcomeUnknownError)
 
 
 def test_the_envelope_keeps_its_field_numbers():
@@ -98,7 +126,7 @@ def test_a_raw_value_passes_through_untouched():
 
 def test_supersession_is_synthesized_from_observations():
     attempts = AttemptTracker()
-    assert attempts.note("model", 1, topic="t", previous=Cursor("")) is None
+    assert attempts.note("model", 1, topic="t", previous=BEGINNING) is None
     assert attempts.note("model", 1, topic="t", previous=Cursor("c1")) is None
     superseded = attempts.note("model", 2, topic="t", previous=Cursor("c2"))
     assert superseded is not None
@@ -114,7 +142,7 @@ def test_supersession_is_synthesized_from_observations():
 def test_the_decoder_skips_a_record_it_cannot_decode():
     said: list[str] = []
     converter = DataConverter.default.payload_converter
-    decoder = RecordDecoder(converter, int, after=Cursor(""), warn=said.append)
+    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=said.append)
     bad = WireRecord(
         topic="t",
         kind=RecordKind.DATA.value,  # type: ignore[arg-type]
