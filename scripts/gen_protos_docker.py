@@ -34,6 +34,9 @@ docker_run_command.extend(
         os.path.join(os.getcwd(), "temporalio", "api") + ":/api_new",
         "-v",
         os.path.join(os.getcwd(), "temporalio", "bridge", "proto") + ":/bridge_new",
+        "-v",
+        os.path.join(os.getcwd(), "temporalio", "contrib", "streams", "proto")
+        + ":/streams_new",
         image_id,
     ]
 )

@@ -182,6 +182,7 @@ exclude = [
   # Ignore generated code
   'temporalio/api',
   'temporalio/bridge/proto',
+  'temporalio/contrib/streams/proto',
   'temporalio/nexus/system/workflow_service',
 ]
 
@@ -258,6 +259,7 @@ exclude = [
   "temporalio/api",
   "temporalio/bridge/proto",
   "temporalio/bridge/_visitor.py",
+  "temporalio/contrib/streams/proto",
   "tests/worker/workflow_sandbox/testmodules/proto",
 ]
 
