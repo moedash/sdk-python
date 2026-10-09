@@ -556,3 +556,33 @@ async def test_a_server_older_than_redis_7_is_refused(
     stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
     with pytest.raises(StreamUnsupportedError, match="Redis 7.0 or later"):
         await stream.latest()
+
+
+async def test_a_read_that_falls_behind_retention_raises_instead_of_skipping(
+    client: Client, owner: WorkflowHandle
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+        poll_interval=timedelta(milliseconds=100),
+    )
+    # One record per read, so the trim lands between two reads of one batch.
+    provider._read_count = 1
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 1}, {"n": 2})
+    records = stream.read(topic=EVENTS)
+    assert (await records.__anext__()).value == {"n": 1}
+    await asyncio.sleep(0.35)
+    # This append trims records 1 and 2; record 2 was never delivered.
+    await producer.append({"n": 3})
+    with pytest.raises(StreamExpiredError, match="while this read was behind"):
+        await records.__anext__()
+    await records.aclose()
+
+    # A read that starts after the trim begins at the oldest record left.
+    fresh = stream.read(topic=EVENTS)
+    assert (await asyncio.wait_for(fresh.__anext__(), 5.0)).value == {"n": 3}
+    await fresh.aclose()
+    await provider.close()

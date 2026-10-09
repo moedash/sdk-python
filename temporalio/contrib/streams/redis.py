@@ -56,6 +56,13 @@ lasts until a reader or a new producer sees the ended chain. Records written
 in the window stay readable. The Workflow's own committed output is never
 refused, so its final task's publish lands after the close.
 
+**A read that falls behind.** After every blocking read the provider
+reads the trim watermark on the same connection. When retention dropped
+records the read had not delivered yet, the read raises
+:class:`temporalio.contrib.streams.StreamExpiredError` instead of skipping
+them. Records a read already fetched are delivered even if they are
+trimmed afterwards.
+
 **Expired, empty or missing.** A read that resumes from a cursor decides
 at its start what the store still holds after it. With the log present, the
 cursor is expired when it is older than the newest trimmed record. With the
@@ -461,6 +468,13 @@ class RedisStreamHandle:
             last_id = _text(newest[0][0]) if newest else "0-0"
         else:
             last_id = position or "0-0"
+        # Records dropped before the read started are not lost to it: they
+        # were behind its start.
+        seen = _entry(last_id)
+        if position is None:
+            trimmed = await _awaited(redis_client.hget(keys.meta(topic), "trimmed"))
+            if trimmed is not None:
+                seen = max(seen, _entry(_text(trimmed)))
         decoder = RecordDecoder(
             self._converter.payload_converter,
             result_type,
@@ -470,12 +484,30 @@ class RedisStreamHandle:
         block_ms = self._streams._poll_ms
         ended = False
         while True:
-            batch = await redis_client.xread(
-                {log: last_id}, count=_READ_BATCH, block=None if ended else block_ms
-            )
+            # The watermark is read after XREAD returns, on the same
+            # connection, so a trim that raced the read is seen here.
+            async with redis_client.pipeline(transaction=False) as pipe:
+                pipe.xread(
+                    {log: last_id},
+                    count=self._streams._read_count,
+                    block=None if ended else block_ms,
+                )
+                pipe.hget(keys.meta(topic), "trimmed")
+                batch, trimmed = await pipe.execute()
             entries = batch[0][1] if batch else []
+            if trimmed is not None:
+                watermark = _entry(_text(trimmed))
+                if watermark > seen and (
+                    not entries or watermark < _entry(_text(entries[0][0]))
+                ):
+                    raise StreamExpiredError(
+                        f"records after {last_id} on topic {topic!r} were dropped "
+                        f"by retention while this read was behind; the newest "
+                        f"dropped one is {_text(trimmed)}"
+                    )
             for entry_id, fields in entries:
                 last_id = _text(entry_id)
+                seen = _entry(last_id)
                 cursor = self._cursor(topic, last_id)
                 try:
                     wire = WireRecord.FromString(fields[_RECORD_FIELD.encode()])
@@ -655,6 +687,7 @@ class RedisStreams(StreamProviderPlugin):
         self._grace_ms = int(_TOMBSTONE_GRACE / timedelta(milliseconds=1))
         self._poll_ms = max(1, int(poll_interval / timedelta(milliseconds=1)))
         self._checked_server = False
+        self._read_count = _READ_BATCH
         if isinstance(redis_client, str):
             self._redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url(
                 redis_client

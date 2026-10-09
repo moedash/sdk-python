@@ -146,7 +146,7 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             assert handle.result_run_id is not None
             return handle.result_run_id
 
-        case = ProviderCase("redis", provider, client, host=host, live_gaps=False)
+        case = ProviderCase("redis", provider, client, host=host)
 
         async def truncate(workflow_id: str, name: str, keep: int) -> None:
             # Trims as the append script does, watermark included.
@@ -342,8 +342,19 @@ async def test_a_reader_that_falls_behind_retention_is_told(case: ProviderCase):
     records = stream.read(topic=OUT)
     assert (await records.__anext__()).value == {"n": 1}
     await case.truncate(workflow_id, OUT.name, 1)
+    # A reader may still deliver what it already fetched, but it must never
+    # skip a dropped record without saying so.
+    delivered = [1]
     with pytest.raises(StreamExpiredError):
-        await records.__anext__()
+        while True:
+            record = await asyncio.wait_for(records.__anext__(), 5.0)
+            assert record.value is not None
+            delivered.append(record.value["n"])
+            assert delivered == list(range(1, len(delivered) + 1))
+            if len(delivered) == 3:
+                await producer.append({"n": 4})
+                await case.truncate(workflow_id, OUT.name, 0)
+    await records.aclose()
 
 
 @reads
