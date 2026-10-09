@@ -92,6 +92,18 @@ class StreamProviderPlugin(SimplePlugin, ABC):
             f"Workflow {workflow_id!r} in namespace {namespace!r}"
         )
 
+    async def _abort(self, namespace: str, workflow_id: str, token: str) -> None:
+        """Drop the staged batch ``token`` without making it visible.
+
+        Internal. Called once History shows that the task which staged it
+        failed. Aborting a token twice, or one the provider does not hold,
+        does nothing.
+        """
+        raise StreamUnsupportedError(
+            f"stream provider {self.name()!r} cannot abort stage {token!r} of "
+            f"Workflow {workflow_id!r} in namespace {namespace!r}"
+        )
+
     def configure_client(self, config: ClientConfig) -> ClientConfig:
         """Register this provider on the client.
 

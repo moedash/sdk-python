@@ -14,20 +14,31 @@ before it goes to Core:
    the completion's other commands, so the batch is part of the task.
 
 After the completion, the batch is promoted only when History shows the
-marker that names its stage token. A completion that fails stages nothing.
-Several publishing completions in one Workflow Task each commit their own
-batch, and the stages are kept per run in order.
+marker that names its stage token, and aborted when History shows that the
+task failed. A completion that fails stages nothing. Several publishing
+completions in one Workflow Task each commit their own batch, and the
+stages are kept per run in order.
+
+On replay nothing is staged. Core hands back the recorded manifests in
+``ReplayExternalStreams`` jobs, in order, and they are paired by order with
+the replayed publishing completions. Each of those completions sends its
+recomputed manifest again, and Core compares it with the recorded one, so a
+Workflow that publishes different data on replay fails as nondeterministic.
+A recorded manifest whose stage this Worker still holds is promoted, because
+History proves it.
 """
 
 from __future__ import annotations
 
 import logging
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
 import temporalio.converter
+import temporalio.workflow
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
@@ -85,6 +96,8 @@ class _RunOutput:
         self.run_id = run_id
         self.pending: list[WireRecord] = []
         self.staged: list[_Stage] = []
+        self.replayed: deque[ExternalOutputStreamManifest] = deque()
+        self.proven: list[str] = []
 
     def publish(self, records: Sequence[WireRecord]) -> None:
         """Buffer records the running Workflow published, on its thread."""
@@ -196,19 +209,44 @@ class OutputCoordinator:
         self._client = client
         self._namespace = namespace
         self._runs: dict[str, _RunOutput] = {}
+        # Stages of an evicted run that History had not decided yet. A run
+        # that comes back picks them up, so a later completion or a replay
+        # can still settle them.
+        self._orphans: dict[str, list[_Stage]] = {}
 
     def open_run(self, workflow_id: str, run_id: str) -> _RunOutput:
         """The buffer for ``run_id``, created on first use."""
         run = self._runs.get(run_id)
         if run is None:
             run = self._runs[run_id] = _RunOutput(workflow_id, run_id)
+            run.staged = self._orphans.pop(run_id, [])
+        elif not run.workflow_id:
+            run.workflow_id = workflow_id
         return run
 
     def take_jobs(self, act: WorkflowActivation) -> None:
-        """Remove the jobs that are this coordinator's, before the run sees them."""
+        """Remove the jobs that are this coordinator's, before the run sees them.
+
+        The manifests in ``ReplayExternalStreams`` jobs are kept in order for
+        the replayed completions to pair with.
+        """
         if not any(job.HasField("replay_external_streams") for job in act.jobs):
             return
-        kept = [job for job in act.jobs if not job.HasField("replay_external_streams")]
+        workflow_id = next(
+            (
+                job.initialize_workflow.workflow_id
+                for job in act.jobs
+                if job.HasField("initialize_workflow")
+            ),
+            "",
+        )
+        run = self.open_run(workflow_id, act.run_id)
+        kept = []
+        for job in act.jobs:
+            if not job.HasField("replay_external_streams"):
+                kept.append(job)
+            elif job.replay_external_streams.HasField("output"):
+                run.replayed.append(job.replay_external_streams.output)
         del act.jobs[:]
         act.jobs.extend(kept)
 
@@ -223,16 +261,24 @@ class OutputCoordinator:
         Raises:
             RuntimeError: Core did not report the task's history floor, so the
                 output cannot be committed.
+            temporalio.workflow.NondeterminismError: History recorded output
+                that the replayed run did not publish.
         """
         run = self._runs.get(act.run_id)
-        if run is None or not run.pending:
+        if run is None:
+            return
+        if not act.is_replaying and run.replayed:
+            raise temporalio.workflow.NondeterminismError(
+                f"History recorded {len(run.replayed)} stream output batch(es) that "
+                "the replayed Workflow did not publish"
+            )
+        if not run.pending:
             return
         records, run.pending = run.pending, []
-        if act.is_replaying:
-            # The original completion committed this output already; replay
-            # must not stage it again.
-            return
         floor = act.history_floor_event_id
+        if act.is_replaying:
+            self._recommit(act, completion, run, records)
+            return
         if floor <= 0:
             raise RuntimeError(
                 "Core did not report this Workflow Task's history floor, so the "
@@ -257,6 +303,30 @@ class OutputCoordinator:
         )
         run.staged.append(_Stage(manifest.stage_token, floor))
 
+    def _recommit(
+        self,
+        act: WorkflowActivation,
+        completion: WorkflowActivationCompletion,
+        run: _RunOutput,
+        records: Sequence[WireRecord],
+    ) -> None:
+        # Nothing is staged on replay. The recomputed manifest goes back to
+        # Core, which compares it with the one History recorded.
+        manifest = build_manifest(
+            records,
+            history_floor_event_id=act.history_floor_event_id,
+            run_id=act.run_id,
+            provider_id=self.provider.name(),
+        )
+        if run.replayed:
+            recorded = run.replayed.popleft()
+            manifest.stage_token = recorded.stage_token
+            if any(stage.token == recorded.stage_token for stage in run.staged):
+                run.proven.append(recorded.stage_token)
+        completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
+            manifest
+        )
+
     def discard(self, run_id: str) -> None:
         """Drop what a failed activation published; nothing of it is staged."""
         run = self._runs.get(run_id)
@@ -270,12 +340,22 @@ class OutputCoordinator:
             await self._reconcile(run)
 
     async def on_eviction(self, run_id: str) -> None:
-        """Settle what History already decides, then forget the run."""
+        """Settle what History already decides, then forget the run.
+
+        A stage History has not decided yet is kept for the run's return.
+        """
         run = self._runs.pop(run_id, None)
-        if run is not None:
-            await self._reconcile(run)
+        if run is None:
+            return
+        await self._reconcile(run)
+        if run.staged:
+            self._orphans[run_id] = run.staged
 
     async def _reconcile(self, run: _RunOutput) -> None:
+        for token in run.proven:
+            await self.provider._promote(self._namespace, run.workflow_id, token)
+            run.staged = [stage for stage in run.staged if stage.token != token]
+        run.proven.clear()
         if self._client is None or not run.staged:
             return
         try:
@@ -292,11 +372,18 @@ class OutputCoordinator:
             )
             return
         for stage in list(run.staged):
-            if decide(events, stage) is _Decision.PROMOTE:
+            decision = decide(events, stage)
+            if decision is _Decision.PROMOTE:
                 await self.provider._promote(
                     self._namespace, run.workflow_id, stage.token
                 )
-                run.staged.remove(stage)
+            elif decision is _Decision.ABORT:
+                await self.provider._abort(
+                    self._namespace, run.workflow_id, stage.token
+                )
+            else:
+                continue
+            run.staged.remove(stage)
 
     async def _events_after(self, run: _RunOutput, floor: int) -> list[HistoryEvent]:
         assert self._client is not None

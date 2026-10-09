@@ -492,6 +492,9 @@ class MemoryStreams(StreamProviderPlugin):
         for record in batch.records:
             self._topic(namespace, workflow_id, record.topic).append([record])
 
+    async def _abort(self, namespace: str, workflow_id: str, token: str) -> None:
+        self._stages.pop(token, None)
+
     def truncate(
         self, workflow_id: str, topic: str, *, keep: int, namespace: str = "default"
     ) -> None:
