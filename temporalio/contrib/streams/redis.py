@@ -806,6 +806,31 @@ class RedisStreams(StreamProviderPlugin):
         if self._owns_redis:
             await self._redis.aclose()
 
+    async def delete_workflow_streams(self, namespace: str, workflow_id: str) -> int:
+        """Delete every stream key of ``workflow_id`` in ``namespace``.
+
+        An admin helper for cleanup and compliance requests. Deleting a
+        Workflow does not delete its streams; their retention bounds what is
+        left, and this removes it at once. It covers every run chain of the
+        Workflow id: logs, metas, stages and chain flags. It asks Temporal
+        nothing, so it can run after the Workflow is gone. It walks the
+        keyspace with ``SCAN``, so run it rarely, not on a hot path.
+
+        Returns:
+            How many keys were deleted.
+        """
+        pattern = f"{_part(self._prefix)}:{{{_part(namespace)}:{_part(workflow_id)}:*"
+        deleted = 0
+        batch: list[Any] = []
+        async for key in self._redis.scan_iter(match=pattern, count=1000):
+            batch.append(key)
+            if len(batch) >= 500:
+                deleted += await _awaited(self._redis.unlink(*batch))
+                batch = []
+        if batch:
+            deleted += await _awaited(self._redis.unlink(*batch))
+        return deleted
+
     def _retention_args(self) -> list[int]:
         return [self._retention_ms, self._grace_ms]
 

@@ -783,3 +783,26 @@ async def test_a_noeviction_server_is_not_warned_about(
         with pytest.raises(StreamNotFoundError):
             await stream.latest()
     assert not [r for r in caplog.records if "maxmemory" in r.getMessage()]
+
+
+async def test_an_admin_deletes_one_workflows_stream_keys(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    deleted_id = f"redis-deleted-{uuid.uuid4().hex}"
+    # A Workflow id that the deleted one is a prefix of must survive.
+    kept_id = f"{deleted_id}x"
+    async with new_worker(streams_client, PublishAndFinish) as worker:
+        for workflow_id in (kept_id, deleted_id):
+            await streams_client.execute_workflow(
+                PublishAndFinish.run, id=workflow_id, task_queue=worker.task_queue
+            )
+    gone = provider.get_stream_handle(client, StreamRef.for_workflow(deleted_id))
+    kept = provider.get_stream_handle(client, StreamRef.for_workflow(kept_id))
+    gone_keys, kept_keys = await gone._keys(), await kept._keys()
+    assert await raw.exists(gone_keys.log("events"), gone_keys.meta("events")) == 2
+
+    assert await provider.delete_workflow_streams(client.namespace, deleted_id) >= 2
+    assert await raw.exists(gone_keys.log("events"), gone_keys.meta("events")) == 0
+    assert await raw.exists(kept_keys.log("events")) == 1
+    assert await provider.delete_workflow_streams(client.namespace, deleted_id) == 0
