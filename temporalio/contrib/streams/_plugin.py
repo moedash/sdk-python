@@ -6,17 +6,20 @@ built from that client inherits it. ``Worker(plugins=[provider])`` and
 ``Replayer(plugins=[provider])`` register it on a Worker alone.
 
 On a Worker the plugin adds one interceptor and nothing else. The
-interceptor makes the provider reachable from Workflow code through the
-Worker's extern functions, which is how a passthrough object crosses into
-the sandbox. No Worker internals change.
+interceptor makes the provider reachable from an Activity through a context
+variable, and from Workflow code through the Worker's extern functions,
+which is how a passthrough object crosses into the sandbox. No Worker
+internals change.
 """
 
 from __future__ import annotations
 
+import contextvars
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
+import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
 from temporalio.contrib.streams._errors import StreamUnsupportedError
@@ -32,6 +35,10 @@ if TYPE_CHECKING:
 __all__ = ["StreamProviderPlugin"]
 
 _WORKFLOW_EXTERN = "__temporal_contrib_streams_provider"
+
+_activity_provider: contextvars.ContextVar[StreamProviderPlugin | None] = (
+    contextvars.ContextVar("__temporal_contrib_streams_provider", default=None)
+)
 
 
 class _WorkflowOutput(Protocol):
@@ -137,10 +144,15 @@ def _two_providers(held: StreamProviderPlugin, new: StreamProviderPlugin) -> str
 
 
 class _StreamsInterceptor(temporalio.worker.Interceptor):
-    """Makes the provider reachable from Workflow code."""
+    """Makes the provider reachable from Activities and Workflow code."""
 
     def __init__(self, provider: StreamProviderPlugin) -> None:
         self.provider = provider
+
+    def intercept_activity(
+        self, next: temporalio.worker.ActivityInboundInterceptor
+    ) -> temporalio.worker.ActivityInboundInterceptor:
+        return _ActivityInbound(next, self.provider)
 
     def workflow_interceptor_class(
         self, input: temporalio.worker.WorkflowInterceptorClassInput
@@ -150,11 +162,57 @@ class _StreamsInterceptor(temporalio.worker.Interceptor):
         return None
 
 
+class _ActivityInbound(temporalio.worker.ActivityInboundInterceptor):
+    def __init__(
+        self,
+        next: temporalio.worker.ActivityInboundInterceptor,
+        provider: StreamProviderPlugin,
+    ) -> None:
+        super().__init__(next)
+        self._provider = provider
+
+    async def execute_activity(
+        self, input: temporalio.worker.ExecuteActivityInput
+    ) -> Any:
+        token = _activity_provider.set(self._provider)
+        try:
+            return await self.next.execute_activity(input)
+        finally:
+            _activity_provider.reset(token)
+
+
 def _no_provider(where: str) -> ValueError:
     return ValueError(
         f"no stream provider is registered on {where}; pass one as a plugin, for "
         "example Client.connect(..., plugins=[provider])"
     )
+
+
+def provider_for_client(client: Client) -> StreamProviderPlugin:
+    """The provider registered on ``client``.
+
+    Raises:
+        ValueError: No provider is registered on the client.
+    """
+    for plugin in client.config()["plugins"]:
+        if isinstance(plugin, StreamProviderPlugin):
+            return plugin
+    raise _no_provider("this client")
+
+
+def provider_for_activity() -> StreamProviderPlugin:
+    """The provider registered on the Worker running the current Activity.
+
+    Raises:
+        ValueError: No provider is registered on the Worker or its client.
+    """
+    provider = _activity_provider.get()
+    if provider is not None:
+        return provider
+    try:
+        return provider_for_client(temporalio.activity.client())
+    except (RuntimeError, ValueError):
+        raise _no_provider("this Activity's Worker") from None
 
 
 def provider_for_workflow() -> StreamProviderPlugin:

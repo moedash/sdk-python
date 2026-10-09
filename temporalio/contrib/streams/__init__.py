@@ -35,6 +35,12 @@ registers it on the client and on every Worker built from that client. Each
 context then reaches a stream the same way:
 
 - Workflow code publishes to its own stream with :func:`workflow_writer`.
+- An Activity reaches the stream of the Workflow that scheduled it with
+  :func:`activity_handle`, and writes as itself: its Activity id and its
+  Temporal attempt.
+- Any process holding a client reaches a Workflow's stream with
+  :func:`get_stream_handle`, and writes with a producer id and an attempt of
+  its own.
 
 The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.contrib.streams.proto.v1`, with the user's value in ``body``
@@ -59,6 +65,11 @@ from temporalio.contrib.streams._errors import (
     StreamProducerError,
     StreamUnsupportedError,
 )
+from temporalio.contrib.streams._handles import (
+    ActivityStreamHandle,
+    activity_handle,
+    get_stream_handle,
+)
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._provider import (
     StreamHandle,
@@ -81,6 +92,7 @@ from temporalio.contrib.streams._topic import (
 from temporalio.contrib.streams._workflow import WorkflowStreamWriter, workflow_writer
 
 __all__ = [
+    "ActivityStreamHandle",
     "BEGINNING",
     "CONTENT_HASH_KEY",
     "Cursor",
@@ -105,10 +117,12 @@ __all__ = [
     "StreamUnsupportedError",
     "Supersession",
     "WorkflowStreamWriter",
+    "activity_handle",
     "content_fingerprint",
     "content_hash",
     "decode_body",
     "encode_body",
+    "get_stream_handle",
     "resolve_topic",
     "topic",
     "workflow_writer",

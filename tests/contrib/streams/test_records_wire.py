@@ -83,6 +83,47 @@ def test_supersession_is_synthesized_from_observations():
     assert attempts.note("other", 0, topic="t", previous=Cursor("c4")) is None
 
 
+def test_an_attempt_that_goes_backwards_is_reported():
+    said: list[str] = []
+    attempts = AttemptTracker(said.append)
+    assert attempts.note("model", 2, topic="t", previous=BEGINNING) is None
+    assert attempts.note("model", 1, topic="t", previous=Cursor("c3")) is None
+    assert len(said) == 1
+    assert "attempt 1" in said[0] and "behind attempt 2" in said[0]
+    assert "'model'" in said[0]
+
+
+def test_a_repeat_of_the_current_attempt_is_not_reported():
+    said: list[str] = []
+    attempts = AttemptTracker(said.append)
+    attempts.note("model", 1, topic="t", previous=BEGINNING)
+    assert attempts.note("model", 1, topic="t", previous=Cursor("c1")) is None
+    assert said == []
+
+
+def test_the_decoder_reports_a_backwards_attempt():
+    said: list[str] = []
+    converter = DataConverter.default.payload_converter
+    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=said.append)
+
+    def record(attempt: int) -> WireRecord:
+        return to_wire(
+            converter,
+            topic="t",
+            kind=RecordKind.DATA,
+            value=attempt,
+            producer_id="model",
+            attempt=attempt,
+            sequence=1,
+        )
+
+    decoder.decode(Cursor("c1"), record(2))
+    out = decoder.decode(Cursor("c2"), record(1))
+    # Still delivered, because dropping it would hide what the store holds.
+    assert [r.value for r in out] == [1]
+    assert len(said) == 1 and "behind attempt 2" in said[0]
+
+
 def test_the_decoder_skips_a_record_it_cannot_decode():
     said: list[str] = []
     converter = DataConverter.default.payload_converter
