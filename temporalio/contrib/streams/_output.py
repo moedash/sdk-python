@@ -79,26 +79,48 @@ class StagedBatch:
 
     namespace: str
     workflow_id: str
+    first_run_id: str
+    """The first run of the Workflow's run chain, which keys its streams."""
     run_id: str
     records: Sequence[WireRecord]
 
 
 @dataclass(frozen=True)
-class _Stage:
+class StageRef:
+    """Names one staged batch to the provider that holds it.
+
+    ``topics`` are the batch's topics in order of first publish, so a store
+    that keys each topic apart can name every key a promotion touches.
+    """
+
+    namespace: str
+    workflow_id: str
+    first_run_id: str
     token: str
+    topics: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Stage:
+    ref: StageRef
     history_floor_event_id: int
+
+    @property
+    def token(self) -> str:
+        return self.ref.token
 
 
 class _RunOutput:
     """One run's buffered publish and the stages it is waiting on."""
 
-    def __init__(self, workflow_id: str, run_id: str) -> None:
+    def __init__(self, workflow_id: str, run_id: str, first_run_id: str) -> None:
         self.workflow_id = workflow_id
         self.run_id = run_id
+        self.first_run_id = first_run_id
         self.pending: list[WireRecord] = []
         self.staged: list[_Stage] = []
         self.replayed: deque[ExternalOutputStreamManifest] = deque()
-        self.proven: list[str] = []
+        self.proven: list[_Stage] = []
         # A completion and the eviction that follows it can settle the same
         # run at once; one at a time keeps each stage decided once.
         self.settling = asyncio.Lock()
@@ -218,14 +240,16 @@ class OutputCoordinator:
         # can still settle them.
         self._orphans: dict[str, list[_Stage]] = {}
 
-    def open_run(self, workflow_id: str, run_id: str) -> _RunOutput:
+    def open_run(
+        self, workflow_id: str, run_id: str, first_run_id: str = ""
+    ) -> _RunOutput:
         """The buffer for ``run_id``, created on first use."""
         run = self._runs.get(run_id)
         if run is None:
-            run = self._runs[run_id] = _RunOutput(workflow_id, run_id)
+            run = self._runs[run_id] = _RunOutput(workflow_id, run_id, first_run_id)
             run.staged = self._orphans.pop(run_id, [])
-        elif not run.workflow_id:
-            run.workflow_id = workflow_id
+        run.workflow_id = run.workflow_id or workflow_id
+        run.first_run_id = run.first_run_id or first_run_id
         return run
 
     def take_jobs(self, act: WorkflowActivation) -> None:
@@ -300,12 +324,25 @@ class OutputCoordinator:
             copy.CopyFrom(record)
             encoded.append(await encode_body(data_converter, copy))
         manifest.stage_token = await self.provider._stage(
-            StagedBatch(self._namespace, run.workflow_id, act.run_id, encoded)
+            StagedBatch(
+                self._namespace,
+                run.workflow_id,
+                run.first_run_id,
+                act.run_id,
+                encoded,
+            )
         )
         completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
             manifest
         )
-        run.staged.append(_Stage(manifest.stage_token, floor))
+        ref = StageRef(
+            self._namespace,
+            run.workflow_id,
+            run.first_run_id,
+            manifest.stage_token,
+            tuple(topic.topic for topic in manifest.topics),
+        )
+        run.staged.append(_Stage(ref, floor))
 
     def _recommit(
         self,
@@ -325,8 +362,9 @@ class OutputCoordinator:
         if run.replayed:
             recorded = run.replayed.popleft()
             manifest.stage_token = recorded.stage_token
-            if any(stage.token == recorded.stage_token for stage in run.staged):
-                run.proven.append(recorded.stage_token)
+            run.proven.extend(
+                stage for stage in run.staged if stage.token == recorded.stage_token
+            )
         completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
             manifest
         )
@@ -360,9 +398,9 @@ class OutputCoordinator:
             await self._settle(run)
 
     async def _settle(self, run: _RunOutput) -> None:
-        for token in run.proven:
-            await self.provider._promote(self._namespace, run.workflow_id, token)
-            run.staged = [stage for stage in run.staged if stage.token != token]
+        for proven in run.proven:
+            await self.provider._promote(proven.ref)
+            run.staged = [stage for stage in run.staged if stage is not proven]
         run.proven.clear()
         if self._client is None or not run.staged:
             return
@@ -382,13 +420,9 @@ class OutputCoordinator:
         for stage in list(run.staged):
             decision = decide(events, stage)
             if decision is _Decision.PROMOTE:
-                await self.provider._promote(
-                    self._namespace, run.workflow_id, stage.token
-                )
+                await self.provider._promote(stage.ref)
             elif decision is _Decision.ABORT:
-                await self.provider._abort(
-                    self._namespace, run.workflow_id, stage.token
-                )
+                await self.provider._abort(stage.ref)
             else:
                 continue
             run.staged.remove(stage)

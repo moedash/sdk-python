@@ -31,6 +31,7 @@ from temporalio.contrib.streams._output import (
     MARKER_NAME,
     OutputCoordinator,
     StagedBatch,
+    StageRef,
     _Stage,
 )
 from temporalio.contrib.streams.memory import MemoryStreams
@@ -56,15 +57,15 @@ class CountingStreams(MemoryStreams):
         self.staged.append(token)
         return token
 
-    async def _promote(self, namespace: str, workflow_id: str, token: str) -> None:
-        self.promoted.append(token)
+    async def _promote(self, stage: StageRef) -> None:
+        self.promoted.append(stage.token)
         # A store round trip yields, which is where two settles interleave.
         await asyncio.sleep(0.01)
-        await super()._promote(namespace, workflow_id, token)
+        await super()._promote(stage)
 
-    async def _abort(self, namespace: str, workflow_id: str, token: str) -> None:
-        self.aborted.append(token)
-        await super()._abort(namespace, workflow_id, token)
+    async def _abort(self, stage: StageRef) -> None:
+        self.aborted.append(stage.token)
+        await super()._abort(stage)
 
 
 def client_with(client: Client, provider: MemoryStreams) -> Client:
@@ -277,11 +278,11 @@ class _HistoryWithMarker:
 
 async def test_a_completion_and_an_eviction_settle_a_stage_once():
     provider = CountingStreams()
-    token = await provider._stage(StagedBatch("default", "wf", "run", []))
+    token = await provider._stage(StagedBatch("default", "wf", "run", "run", []))
     history: Any = _HistoryWithMarker(token)
     coordinator = OutputCoordinator(provider, history, "default")
     run = coordinator.open_run("wf", "run")
-    run.staged.append(_Stage(token, 1))
+    run.staged.append(_Stage(StageRef("default", "wf", "run", token, ()), 1))
     await asyncio.gather(
         coordinator.after_completion("run"), coordinator.on_eviction("run")
     )

@@ -94,6 +94,7 @@ dev = [
   "opentelemetry-sdk-extension-aws>=2.0.0,<3",
   "pytest-flakefinder>=1.1.0",
   "async-timeout>=4.0,<6; python_version < '3.11'",
+  "redis>=5,<8",
 ]
 
 [tool.poe.tasks]

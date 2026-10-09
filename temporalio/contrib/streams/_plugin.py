@@ -24,7 +24,11 @@ import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
 from temporalio.contrib.streams._errors import StreamUnsupportedError
-from temporalio.contrib.streams._output import OutputCoordinator, StagedBatch
+from temporalio.contrib.streams._output import (
+    OutputCoordinator,
+    StagedBatch,
+    StageRef,
+)
 from temporalio.contrib.streams._provider import StreamHandle
 from temporalio.contrib.streams._ref import StreamRef
 from temporalio.plugin import SimplePlugin
@@ -80,28 +84,28 @@ class StreamProviderPlugin(SimplePlugin, ABC):
             f"Workflow {batch.workflow_id!r}"
         )
 
-    async def _promote(self, namespace: str, workflow_id: str, token: str) -> None:
-        """Make the staged batch ``token`` visible to readers, in order.
+    async def _promote(self, stage: StageRef) -> None:
+        """Make the staged batch ``stage`` visible to readers, in order.
 
         Internal. Called once History shows the marker that names the
-        token. Promoting a token twice, or one the provider does not hold,
+        stage. Promoting a stage twice, or one the provider does not hold,
         does nothing.
         """
         raise StreamUnsupportedError(
-            f"stream provider {self.name()!r} cannot promote stage {token!r} of "
-            f"Workflow {workflow_id!r} in namespace {namespace!r}"
+            f"stream provider {self.name()!r} cannot promote stage {stage.token!r} "
+            f"of Workflow {stage.workflow_id!r}"
         )
 
-    async def _abort(self, namespace: str, workflow_id: str, token: str) -> None:
-        """Drop the staged batch ``token`` without making it visible.
+    async def _abort(self, stage: StageRef) -> None:
+        """Drop the staged batch ``stage`` without making it visible.
 
         Internal. Called once History shows that the task which staged it
-        failed. Aborting a token twice, or one the provider does not hold,
+        failed. Aborting a stage twice, or one the provider does not hold,
         does nothing.
         """
         raise StreamUnsupportedError(
-            f"stream provider {self.name()!r} cannot abort stage {token!r} of "
-            f"Workflow {workflow_id!r} in namespace {namespace!r}"
+            f"stream provider {self.name()!r} cannot abort stage {stage.token!r} "
+            f"of Workflow {stage.workflow_id!r}"
         )
 
     def configure_client(self, config: ClientConfig) -> ClientConfig:

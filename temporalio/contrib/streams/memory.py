@@ -57,7 +57,7 @@ from temporalio.contrib.streams._errors import (
     StreamExpiredError,
     StreamProducerError,
 )
-from temporalio.contrib.streams._output import StagedBatch
+from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._record import (
     Cursor,
@@ -485,15 +485,17 @@ class MemoryStreams(StreamProviderPlugin):
         self._stages[token] = batch
         return token
 
-    async def _promote(self, namespace: str, workflow_id: str, token: str) -> None:
-        batch = self._stages.pop(token, None)
+    async def _promote(self, stage: StageRef) -> None:
+        batch = self._stages.pop(stage.token, None)
         if batch is None:
             return
         for record in batch.records:
-            self._topic(namespace, workflow_id, record.topic).append([record])
+            self._topic(stage.namespace, stage.workflow_id, record.topic).append(
+                [record]
+            )
 
-    async def _abort(self, namespace: str, workflow_id: str, token: str) -> None:
-        self._stages.pop(token, None)
+    async def _abort(self, stage: StageRef) -> None:
+        self._stages.pop(stage.token, None)
 
     def truncate(
         self, workflow_id: str, topic: str, *, keep: int, namespace: str = "default"

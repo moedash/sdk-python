@@ -45,7 +45,9 @@ def _run_streams() -> _RunStreams:
     if state is None:
         info = workflow.info()
         state = _RunStreams(
-            output_for_workflow().open_run(info.workflow_id, info.run_id)
+            output_for_workflow().open_run(
+                info.workflow_id, info.run_id, info.first_execution_run_id
+            )
         )
         setattr(loop, _RUN_STATE, state)
     return state
