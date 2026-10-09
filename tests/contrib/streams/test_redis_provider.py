@@ -695,3 +695,41 @@ async def test_a_replay_promotes_output_a_stopped_worker_committed(
     assert [key async for key in raw.scan_iter(match=f"{prefix}*:stage:*")] == []
     await first.close()
     await second.close()
+
+
+@workflow.defn
+class PublishAndFinish:
+    @workflow.run
+    async def run(self) -> None:
+        workflow_writer(EVENTS).publish({"n": 1})
+        workflow_writer(EVENTS).publish({"n": 2})
+
+
+async def test_a_reader_promotes_output_a_stopped_worker_committed(
+    client: Client, raw: Any
+):
+    # The run finished, so no Worker will ever replay it; only a reader can
+    # find the stage the stopped Worker left.
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishAndFinish) as worker:
+        await stopped_client.execute_workflow(
+            PublishAndFinish.run, id=workflow_id, task_queue=worker.task_queue
+        )
+    reader = RedisStreams(url, key_prefix=prefix)
+    stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    keys = await stream._keys()
+    assert await raw.exists(keys.log("events")) == 0
+    assert len(await raw.hgetall(keys.pending())) == 1
+
+    records = await read_until_end(stream.read(topic=EVENTS))
+    assert [r.value for r in records] == [{"n": 1}, {"n": 2}]
+    assert await raw.hgetall(keys.pending()) == {}
+    # A second reader finds nothing left to repair and sees each record once.
+    again = await read_until_end(stream.read(topic=EVENTS))
+    assert [r.value for r in again] == [{"n": 1}, {"n": 2}]
+    await stopped.close()
+    await reader.close()

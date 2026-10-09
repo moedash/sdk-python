@@ -56,6 +56,14 @@ lasts until a reader or a new producer sees the ended chain. Records written
 in the window stay readable. The Workflow's own committed output is never
 refused, so its final task's publish lands after the close.
 
+**Stages left behind.** A Worker that stops between a Workflow Task's
+commit and the promotion leaves its stage pending. A Worker that replays
+the run promotes it. A reader also looks, when its read starts and when it
+learns the owner ended: for every pending stage of the chain it reads the
+staging run's History and promotes the stage if the commit is there, or
+aborts it if that task failed. Promotion is idempotent, so the records
+become visible exactly once.
+
 **A read that falls behind.** After every blocking read the provider
 reads the trim watermark on the same connection. When retention dropped
 records the read had not delivered yet, the read raises
@@ -115,7 +123,14 @@ from temporalio.contrib.streams._errors import (
     StreamProducerError,
     StreamUnsupportedError,
 )
-from temporalio.contrib.streams._output import CHAIN_ENDED, StagedBatch, StageRef
+from temporalio.contrib.streams._output import (
+    CHAIN_ENDED,
+    StagedBatch,
+    StageRef,
+    _Decision,
+    decide_token,
+    events_after,
+)
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
 from temporalio.contrib.streams._ref import StreamRef
@@ -213,25 +228,31 @@ return {first, last}
 """
 )
 
-# KEYS: stage. ARGV: retention ms, then topic and record pairs.
+# KEYS: stage, pending stages. ARGV: retention ms, stage token, stage
+# description, then topic and record pairs. The pending hash names every
+# stage not yet promoted or aborted, so a reader can find one left by a
+# Worker that stopped, without a SCAN.
 _STAGE_LUA = """
-redis.call('RPUSH', KEYS[1], unpack(ARGV, 2))
+redis.call('RPUSH', KEYS[1], unpack(ARGV, 4))
 redis.call('PEXPIRE', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
+redis.call('PEXPIRE', KEYS[2], ARGV[1])
 """
 
-# KEYS: stage, then a log and its meta per topic. ARGV: retention ms,
-# grace ms, then the topics in KEYS order.
+# KEYS: stage, pending stages, then a log and its meta per topic. ARGV:
+# retention ms, grace ms, stage token, then the topics in KEYS order.
 _PROMOTE_LUA = (
     _KEEP_LUA
     + """
+redis.call('HDEL', KEYS[2], ARGV[3])
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
 if #items == 0 then
   return 0
 end
 local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
 local slots = {}
-for i = 3, #ARGV do
-  slots[ARGV[i]] = {log = KEYS[2 * (i - 2)], meta = KEYS[2 * (i - 2) + 1], added = 0}
+for i = 4, #ARGV do
+  slots[ARGV[i]] = {log = KEYS[2 * (i - 3) + 1], meta = KEYS[2 * (i - 3) + 2], added = 0}
 end
 for _, slot in pairs(slots) do
   revive(slot.log, slot.meta)
@@ -262,6 +283,7 @@ class _ChainKeys:
     def __init__(
         self, prefix: str, namespace: str, workflow_id: str, first_run_id: str
     ) -> None:
+        self.first_run_id = first_run_id
         self.base = (
             f"{_part(prefix)}:"
             f"{{{_part(namespace)}:{_part(workflow_id)}:{_part(first_run_id)}}}"
@@ -276,6 +298,9 @@ class _ChainKeys:
     def chain(self) -> str:
         return f"{self.base}:chain"
 
+    def pending(self) -> str:
+        return f"{self.base}:stages"
+
     def stage(self, token: str) -> str:
         return f"{self.base}:stage:{_part(token)}"
 
@@ -283,6 +308,13 @@ class _ChainKeys:
 async def _awaited(value: Awaitable[T] | T) -> T:
     # redis-py types its commands for both its sync and asyncio clients.
     return await value if inspect.isawaitable(value) else value  # type: ignore[return-value]
+
+
+def _topics(records: Any) -> list[str]:
+    seen: dict[str, None] = {}
+    for record in records:
+        seen.setdefault(record.topic, None)
+    return list(seen)
 
 
 def _entry(entry_id: str) -> tuple[int, int]:
@@ -467,6 +499,7 @@ class RedisStreamHandle:
         keys = await self._keys()
         log = keys.log(topic)
         redis_client = self._streams._redis
+        await self._repair(keys)
         if position is not None:
             await self._refuse_lost(keys, topic, position)
         if from_end:
@@ -539,6 +572,8 @@ class RedisStreamHandle:
             # One more pass after learning the owner closed, so a record
             # that landed between the read and the describe is delivered.
             ended = await self._owner_ended(keys)
+            if ended:
+                await self._repair(keys)
             check_every = min(check_every * 2, self._streams._owner_check_max)
             next_check = loop.time() + check_every
 
@@ -571,6 +606,46 @@ class RedisStreamHandle:
         if last is not None and cursor < _entry(_text(last)):
             raise StreamExpiredError(
                 f"the log of topic {topic!r} expired with records after {position}"
+            )
+
+    async def _repair(self, keys: _ChainKeys) -> None:
+        """Settle stages a Worker left behind, as History decides them.
+
+        A Worker that stops after a Workflow Task's commit but before the
+        promotion leaves the stage pending, and a run that finished is never
+        replayed to promote it. Best effort: a stage History has not decided
+        stays for the next reader.
+        """
+        streams = self._streams
+        try:
+            pending = await _awaited(streams._redis.hgetall(keys.pending()))
+            for raw_token, raw_description in pending.items():
+                token = _text(raw_token)
+                run_id, floor, *topics = _text(raw_description).split("\x1f")
+                events = await events_after(
+                    self._client,
+                    self._client.namespace,
+                    self._ref.workflow_id,
+                    run_id,
+                    int(floor),
+                )
+                decision = decide_token(events, token, int(floor))
+                stage = StageRef(
+                    self._client.namespace,
+                    self._ref.workflow_id,
+                    keys.first_run_id,
+                    token,
+                    tuple(topics),
+                )
+                if decision is _Decision.PROMOTE:
+                    await streams._promote(stage)
+                elif decision is _Decision.ABORT:
+                    await streams._abort(stage)
+        except Exception:
+            logger.warning(
+                "Could not settle the pending stages of Workflow %s",
+                self._ref.workflow_id,
+                exc_info=True,
             )
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
@@ -762,8 +837,12 @@ class RedisStreams(StreamProviderPlugin):
         items: list[Any] = []
         for record in batch.records:
             items += [record.topic, record.SerializeToString()]
+        description = "\x1f".join(
+            [batch.run_id, str(batch.history_floor_event_id), *_topics(batch.records)]
+        )
         await self._stage_script(
-            keys=[keys.stage(token)], args=[self._retention_ms, *items]
+            keys=[keys.stage(token), keys.pending()],
+            args=[self._retention_ms, token, description, *items],
         )
         return token
 
@@ -771,8 +850,8 @@ class RedisStreams(StreamProviderPlugin):
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
         topic_keys = [key for t in stage.topics for key in (keys.log(t), keys.meta(t))]
         await self._promote_script(
-            keys=[keys.stage(stage.token), *topic_keys],
-            args=[*self._retention_args(), *stage.topics],
+            keys=[keys.stage(stage.token), keys.pending(), *topic_keys],
+            args=[*self._retention_args(), stage.token, *stage.topics],
         )
 
     async def _close_chain(
@@ -788,4 +867,7 @@ class RedisStreams(StreamProviderPlugin):
 
     async def _abort(self, stage: StageRef) -> None:
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
-        await _awaited(self._redis.delete(keys.stage(stage.token)))
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.delete(keys.stage(stage.token))
+            pipe.hdel(keys.pending(), stage.token)
+            await pipe.execute()

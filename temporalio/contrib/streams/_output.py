@@ -88,6 +88,9 @@ class StagedBatch:
     """The first run of the Workflow's run chain, which keys its streams."""
     run_id: str
     records: Sequence[WireRecord]
+    history_floor_event_id: int = 0
+    """The event before the staging Workflow Task's scheduled event, where a
+    History search for its commit starts."""
 
 
 @dataclass(frozen=True)
@@ -225,7 +228,14 @@ _TASK_RESULTS = (
 
 
 def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
-    """What History says about one stage.
+    """What History says about one stage; see :func:`decide_token`."""
+    return decide_token(events, stage.token, stage.history_floor_event_id)
+
+
+def decide_token(
+    events: Sequence[HistoryEvent], token: str, history_floor_event_id: int
+) -> _Decision:
+    """What History says about the stage ``token``.
 
     ``events`` are the run's events after the stage's history floor, in
     order. A marker naming the stage token proves the commit. Otherwise, a
@@ -233,10 +243,10 @@ def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
     proves the completion was dropped. Anything else is not known yet, for
     example while a Local Activity holds the task open.
     """
-    if any(_marker_token(event) == stage.token for event in events):
+    if any(_marker_token(event) == token for event in events):
         return _Decision.PROMOTE
     for event in events:
-        if event.event_id <= stage.history_floor_event_id:
+        if event.event_id <= history_floor_event_id:
             continue
         if event.event_type in _TASK_RESULTS:
             if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
@@ -369,6 +379,7 @@ class OutputCoordinator:
                 run.first_run_id,
                 act.run_id,
                 encoded,
+                floor,
             )
         )
         completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
@@ -514,26 +525,33 @@ class OutputCoordinator:
 
     async def _events_after(self, run: _RunOutput, floor: int) -> list[HistoryEvent]:
         assert self._client is not None
-        events: list[HistoryEvent] = []
-        token = b""
-        while True:
-            response = await self._client.workflow_service.get_workflow_execution_history_reverse(
-                GetWorkflowExecutionHistoryReverseRequest(
-                    namespace=self._namespace,
-                    execution=WorkflowExecution(
-                        workflow_id=run.workflow_id, run_id=run.run_id
-                    ),
-                    next_page_token=token,
-                )
+        return await events_after(
+            self._client, self._namespace, run.workflow_id, run.run_id, floor
+        )
+
+
+async def events_after(
+    client: Client, namespace: str, workflow_id: str, run_id: str, floor: int
+) -> list[HistoryEvent]:
+    """The run's History events after ``floor``, in order, read from the end."""
+    events: list[HistoryEvent] = []
+    token = b""
+    while True:
+        response = await client.workflow_service.get_workflow_execution_history_reverse(
+            GetWorkflowExecutionHistoryReverseRequest(
+                namespace=namespace,
+                execution=WorkflowExecution(workflow_id=workflow_id, run_id=run_id),
+                next_page_token=token,
             )
-            done = False
-            for event in response.history.events:
-                if event.event_id <= floor:
-                    done = True
-                    break
-                events.append(event)
-            token = response.next_page_token
-            if done or not token:
+        )
+        done = False
+        for event in response.history.events:
+            if event.event_id <= floor:
+                done = True
                 break
-        events.reverse()
-        return events
+            events.append(event)
+        token = response.next_page_token
+        if done or not token:
+            break
+    events.reverse()
+    return events
