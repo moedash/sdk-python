@@ -33,6 +33,7 @@ proto_paths.extend(additional_proto_dir.glob("**/*.proto"))
 
 api_out_dir = base_dir / "temporalio" / "api"
 sdk_out_dir = base_dir / "temporalio" / "bridge" / "proto"
+streams_out_dir = base_dir / "temporalio" / "contrib" / "streams" / "proto"
 
 py_fixes = [
     partial(re.compile(r"from temporal\.api\.").sub, r"from temporalio.api."),
@@ -218,6 +219,11 @@ def generate_protos(output_dir: Path):
     for p in (output_dir / "temporal" / "sdk" / "core").iterdir():
         shutil.rmtree(sdk_out_dir / p.name, ignore_errors=True)
         p.replace(sdk_out_dir / p.name)
+    streams_out_dir.mkdir(exist_ok=True)
+    for p in (output_dir / "temporal" / "sdk" / "streams").iterdir():
+        if p.is_dir():
+            shutil.rmtree(streams_out_dir / p.name, ignore_errors=True)
+            p.replace(streams_out_dir / p.name)
     shutil.rmtree(sdk_out_dir / "health", ignore_errors=True)
     (output_dir / "health").replace(sdk_out_dir / "health")
     # Move test protos
