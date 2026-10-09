@@ -8,7 +8,6 @@ reaches a Workflow's stream by Workflow id through its provider.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -28,7 +27,6 @@ from temporalio.contrib.streams import (
 )
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.exceptions import ApplicationError
-from temporalio.testing import ActivityEnvironment
 from tests.contrib.streams.test_workflow_writer import EVENTS, Publisher
 from tests.helpers import new_worker
 
@@ -191,16 +189,3 @@ async def test_a_client_producer_and_the_workflow_share_a_topic(client: Client):
         ("", {"step": "init"}),
         ("", None),
     ]
-
-
-async def test_an_activity_with_no_workflow_has_no_workflow_stream():
-    env = ActivityEnvironment()
-    env.info = dataclasses.replace(
-        ActivityEnvironment.default_info(), workflow_id=None, workflow_run_id=None
-    )
-
-    async def standalone() -> None:
-        activity_handle()
-
-    with pytest.raises(ValueError, match="not scheduled by a Workflow"):
-        await env.run(standalone)

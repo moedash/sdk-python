@@ -1,7 +1,8 @@
 """Publishing to a Workflow's own stream from Workflow code.
 
 The writer converts values on the Workflow thread and hands the records to
-the provider's output for the run. Nothing here does I/O.
+the provider's output for the run. Nothing here does I/O. Reading a stream
+inside a Workflow is not part of this release.
 """
 
 from __future__ import annotations
@@ -10,12 +11,13 @@ import asyncio
 from typing import Any, Generic, TypeVar, overload
 
 from temporalio import workflow
+from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._plugin import _WorkflowOutput, provider_for_workflow
 from temporalio.contrib.streams._record import RecordKind
 from temporalio.contrib.streams._topic import StreamTopic, resolve_topic
 from temporalio.contrib.streams._wire import to_wire
 
-__all__ = ["WorkflowStreamWriter", "workflow_writer"]
+__all__ = ["WorkflowStreamWriter", "workflow_reader", "workflow_writer"]
 
 T = TypeVar("T")
 
@@ -157,3 +159,21 @@ def workflow_writer(
     """
     name, _ = resolve_topic(topic)
     return WorkflowStreamWriter(_run_streams(), name)
+
+
+def workflow_reader(*_args: Any, **_kwargs: Any) -> Any:
+    """Reading a stream inside a Workflow is not supported in this release.
+
+    Read from an Activity or a client with
+    :func:`temporalio.contrib.streams.activity_handle` or
+    :func:`temporalio.contrib.streams.get_stream_handle`, and send the
+    Workflow what it needs, for example as a Signal.
+
+    Raises:
+        StreamUnsupportedError: Always.
+    """
+    raise StreamUnsupportedError(
+        "reading a stream inside a Workflow is not supported in this release; "
+        "read it from an Activity or a client and send the Workflow what it "
+        "needs, for example as a Signal"
+    )

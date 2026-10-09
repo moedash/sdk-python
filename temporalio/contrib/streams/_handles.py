@@ -15,6 +15,7 @@ from typing import Any, TypeVar, overload
 import temporalio.activity
 from temporalio.client import Client
 from temporalio.contrib.streams._cursor import BEGINNING
+from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._plugin import (
     provider_for_activity,
     provider_for_client,
@@ -118,15 +119,17 @@ def activity_handle() -> ActivityStreamHandle:
     producer id of your own.
 
     Raises:
-        ValueError: The Activity was not scheduled by a Workflow, or no stream
-            provider is registered on the Worker or its client.
+        StreamUnsupportedError: The Activity was not scheduled by a Workflow;
+            streams owned by an Activity are not supported in this release.
+        ValueError: No stream provider is registered on the Worker or its
+            client.
         RuntimeError: Not called from inside an Activity.
     """
     info = temporalio.activity.info()
     if info.workflow_id is None:
-        raise ValueError(
-            "this Activity was not scheduled by a Workflow, so it has no Workflow "
-            "stream"
+        raise StreamUnsupportedError(
+            "this Activity was not scheduled by a Workflow, and streams owned by "
+            "an Activity are not supported in this release"
         )
     provider = provider_for_activity()
     ref = StreamRef.for_workflow(info.workflow_id, run_id=info.workflow_run_id)
