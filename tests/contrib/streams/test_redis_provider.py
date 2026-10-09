@@ -556,3 +556,70 @@ async def test_a_server_older_than_redis_7_is_refused(
     stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
     with pytest.raises(StreamUnsupportedError, match="Redis 7.0 or later"):
         await stream.latest()
+
+
+class StopsBeforePromoting(RedisStreams):
+    """Stands in for a Worker that died between its commit and the promotion."""
+
+    async def _promote(self, stage: StageRef) -> None:
+        pass
+
+
+@workflow.defn
+class PublishThenWait:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        workflow_writer(EVENTS).publish({"n": 1})
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+
+async def test_a_replay_promotes_output_a_stopped_worker_committed(
+    client: Client, raw: Any
+):
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    first = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-repair-{uuid.uuid4().hex}"
+    task_queue = f"redis-repair-{uuid.uuid4().hex}"
+    first_client = client_with(client, first)
+    # No cache, so nothing sticks to this Worker once it is gone.
+    async with new_worker(
+        first_client, PublishThenWait, task_queue=task_queue, max_cached_workflows=0
+    ):
+        handle = await first_client.start_workflow(
+            PublishThenWait.run, id=workflow_id, task_queue=task_queue
+        )
+        for _ in range(100):
+            if (
+                await handle.describe()
+            ).raw_description.workflow_execution_info.history_length >= 5:
+                break
+            await asyncio.sleep(0.05)
+    stream = first.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    keys = await stream._keys()
+    assert await raw.exists(keys.log("events")) == 0
+    assert len([key async for key in raw.scan_iter(match=f"{prefix}*:stage:*")]) == 1
+
+    second = RedisStreams(url, key_prefix=prefix)
+    second_client = client_with(client, second)
+    async with new_worker(
+        second_client, PublishThenWait, task_queue=task_queue, max_cached_workflows=0
+    ):
+        await handle.signal(PublishThenWait.finish)
+        await handle.result()
+
+    # The replay found the committed stage and promoted it, exactly once.
+    assert [
+        r.metadata[RUN_ID_KEY].data.decode()
+        for r in await log_entries(raw, stream, "events")
+    ] == [handle.first_execution_run_id]
+    assert [key async for key in raw.scan_iter(match=f"{prefix}*:stage:*")] == []
+    await first.close()
+    await second.close()
