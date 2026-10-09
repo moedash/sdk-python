@@ -26,7 +26,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -92,6 +92,8 @@ class ProviderCase:
     run id, when the store needs the owner to exist."""
     reads: bool = True
     """The provider can read, so the cases marked ``reads`` run."""
+    hosted: dict[str, str] = field(default_factory=dict)
+    """The run id of each owner ``host`` started, by Workflow id."""
 
     async def open(
         self,
@@ -101,7 +103,9 @@ class ProviderCase:
         topic: str | None = None,
         pin_run: bool = False,
     ) -> StreamHandle:
-        run_id = await self.host(workflow_id) if self.host is not None else "a-run"
+        run_id = self.hosted.get(workflow_id, "a-run")
+        if self.host is not None and workflow_id not in self.hosted:
+            run_id = self.hosted[workflow_id] = await self.host(workflow_id)
         ref = StreamRef.for_workflow(
             workflow_id, run_id=run_id if pin_run else None, topic=topic
         )
@@ -139,7 +143,7 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             assert handle.result_run_id is not None
             return handle.result_run_id
 
-        yield ProviderCase("redis", provider, client, host=host, reads=False)
+        yield ProviderCase("redis", provider, client, host=host)
         for owner in owners:
             await owner.terminate()
     await provider.close()
@@ -271,8 +275,13 @@ async def test_end_reads_only_what_arrives_after_the_read_starts(case: ProviderC
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
     await producer.append({"n": 1})
     records = stream.read(topic=OUT, after=END)
+    # A store that keeps positions remotely resolves END when the read
+    # starts iterating, so the read is started before the append.
+    first = asyncio.ensure_future(records.__anext__())
+    await asyncio.sleep(0.3)
     await producer.append({"n": 2})
-    assert [r.value for r in await take(records, 1)] == [{"n": 2}]
+    assert (await asyncio.wait_for(first, 5.0)).value == {"n": 2}
+    await records.aclose()
     assert await nothing_arrives(stream.read(topic=OUT, after=END))
 
 

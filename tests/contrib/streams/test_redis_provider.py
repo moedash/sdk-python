@@ -28,6 +28,7 @@ from temporalio.contrib.streams import (
     StreamOutcomeUnknownError,
     StreamProducerError,
     StreamRef,
+    get_stream_handle,
     topic,
     workflow_writer,
 )
@@ -415,5 +416,66 @@ async def test_continue_as_new_does_not_close_the_chain(
         await stream.producer(topic=OTHER, producer_id="p", attempt=1).append(1)
         keys = await stream._keys()
         assert not await raw.hget(keys.chain(), "closed")
+        await handle.signal(PublishUntilTold.finish)
+        await handle.result()
+
+
+async def read_until_end(records: Any, timeout: float = 15.0) -> list:
+    out: list = []
+
+    async def pull() -> None:
+        async for record in records:
+            out.append(record)
+
+    try:
+        await asyncio.wait_for(pull(), timeout)
+    finally:
+        await records.aclose()
+    return out
+
+
+async def test_a_read_follows_the_chain_and_marks_it_closed(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-follow-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishUntilTold) as worker:
+        handle = await streams_client.start_workflow(
+            PublishUntilTold.run, True, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = get_stream_handle(streams_client, workflow_id, topic=EVENTS)
+        records = stream.read()
+        first = await asyncio.wait_for(records.__anext__(), 10.0)
+        await handle.signal(PublishUntilTold.finish)
+        rest = await read_until_end(records)
+        keys = await stream._keys()  # type: ignore[attr-defined]
+    values = [r.value for r in [first, *rest]]
+    assert values == [{"run": "started"}, {"run": "started"}, {"run": "last"}]
+    runs = [r.run_id for r in [first, *rest]]
+    assert runs[0] == handle.first_execution_run_id
+    assert runs[1] == runs[2] != runs[0]
+    # The read saw the chain end, and says so to later producers.
+    assert await raw.hget(keys.chain(), "closed") == b"1"
+
+
+async def test_a_read_pinned_to_a_run_ends_when_that_run_continues(
+    client: Client, provider: RedisStreams
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-pinned-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishUntilTold) as worker:
+        handle = await streams_client.start_workflow(
+            PublishUntilTold.run, True, id=workflow_id, task_queue=worker.task_queue
+        )
+        pinned = provider.get_stream_handle(
+            client,
+            StreamRef.for_workflow(
+                workflow_id, run_id=handle.first_execution_run_id, topic=EVENTS
+            ),
+        )
+        records = await read_until_end(pinned.read())
+        # It stopped with the first run, though the chain is still running.
+        assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+        assert len(records) >= 1
         await handle.signal(PublishUntilTold.finish)
         await handle.result()

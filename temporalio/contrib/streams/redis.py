@@ -60,44 +60,55 @@ refused, so its final task's publish lands after the close.
 from __future__ import annotations
 
 import inspect
+import logging
 import uuid
-from collections.abc import Awaitable
+from collections.abc import AsyncGenerator, Awaitable
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
 from urllib.parse import quote
 
 import redis.asyncio
 import redis.exceptions
+from google.protobuf.message import DecodeError
 
 import temporalio.converter
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.streams._body import (
     content_fingerprint,
+    decode_body,
     encode_body,
 )
-from temporalio.contrib.streams._cursor import BEGINNING, mint_cursor, stream_hash
+from temporalio.contrib.streams._cursor import (
+    BEGINNING,
+    END,
+    cursor_position,
+    mint_cursor,
+    stream_hash,
+)
 from temporalio.contrib.streams._errors import (
     StreamClosedError,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
-    StreamUnsupportedError,
 )
 from temporalio.contrib.streams._output import CHAIN_ENDED, StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
-from temporalio.contrib.streams._record import Cursor, RecordKind
+from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
 from temporalio.contrib.streams._ref import StreamRef
 from temporalio.contrib.streams._topic import StreamTopic, resolve_topic
-from temporalio.contrib.streams._wire import WireRecord, to_wire
+from temporalio.contrib.streams._wire import RecordDecoder, WireRecord, to_wire
 from temporalio.service import RPCError, RPCStatusCode
 
 __all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
 
 _PROVIDER = "redis"
+_READ_BATCH = 100
 _TOMBSTONE_GRACE = timedelta(days=30)
 _RECORD_FIELD = "r"
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 # Trims a log to the retention window and slides the expiry of the log and
 # its meta. The meta also records how many records the log ever took and the
@@ -368,14 +379,86 @@ class RedisStreamHandle:
         topic: str | StreamTopic[Any] | None = None,
         after: Cursor = BEGINNING,
         result_type: type | None = None,
-    ) -> Any:
-        """Reading is not supported by this provider yet.
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        """See :meth:`temporalio.contrib.streams.StreamHandle.read`.
 
-        Raises:
-            StreamUnsupportedError: Always.
+        The read long-polls the log with ``XREAD BLOCK``. ``END`` is
+        resolved when iteration begins. While no record arrives, the read
+        asks the server whether the owner closed; once it has, the read
+        delivers what is left and ends, and marks the chain closed. A read
+        on a handle pinned to a run ends when that run closes, even if the
+        chain continued as new.
         """
-        del topic, after, result_type
-        raise StreamUnsupportedError("RedisStreams cannot read streams yet")
+        name, result_type = self._resolve(topic, result_type)
+        # Parsed here so a bad cursor fails this call, not the first
+        # iteration.
+        position = (
+            None
+            if after == END
+            else cursor_position(after, provider=_PROVIDER, stream=self._hash(name))
+        )
+        previous = BEGINNING if after == END else after
+        return self._read(name, after == END, position, previous, result_type)
+
+    async def _read(
+        self,
+        topic: str,
+        from_end: bool,
+        position: str | None,
+        previous: Cursor,
+        result_type: type | None,
+    ) -> AsyncGenerator[StreamRecord[Any], None]:
+        keys = await self._keys()
+        log = keys.log(topic)
+        redis_client = self._streams._redis
+        if from_end:
+            newest = await redis_client.xrevrange(log, count=1)
+            last_id = _text(newest[0][0]) if newest else "0-0"
+        else:
+            last_id = position or "0-0"
+        decoder = RecordDecoder(
+            self._converter.payload_converter,
+            result_type,
+            after=previous,
+            warn=logger.warning,
+        )
+        block_ms = self._streams._poll_ms
+        ended = False
+        while True:
+            batch = await redis_client.xread(
+                {log: last_id}, count=_READ_BATCH, block=None if ended else block_ms
+            )
+            entries = batch[0][1] if batch else []
+            for entry_id, fields in entries:
+                last_id = _text(entry_id)
+                cursor = self._cursor(topic, last_id)
+                try:
+                    wire = WireRecord.FromString(fields[_RECORD_FIELD.encode()])
+                except (KeyError, DecodeError) as error:
+                    logger.warning("skipping stream record at %s: %s", cursor, error)
+                    continue
+                await decode_body(self._converter, wire)
+                for record in decoder.decode(cursor, wire):
+                    yield record
+            if entries:
+                continue
+            if ended:
+                return
+            # One more pass after learning the owner closed, so a record
+            # that landed between the read and the describe is delivered.
+            ended = await self._owner_ended(keys)
+
+    async def _owner_ended(self, keys: _ChainKeys) -> bool:
+        description = await self._client.get_workflow_handle(
+            self._ref.workflow_id, run_id=self._ref.run_id
+        ).describe()
+        status = description.status
+        if self._ref.run_id is not None:
+            return status is not None and status != WorkflowExecutionStatus.RUNNING
+        if status not in CHAIN_ENDED:
+            return False
+        await self._streams._mark_closed(keys)
+        return True
 
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamHandle.latest`."""
@@ -404,11 +487,13 @@ class RedisStreamHandle:
     ) -> tuple[str, type | None]:
         return resolve_topic(self._ref.topic if topic is None else topic, result_type)
 
-    def _cursor(self, topic: str, entry_id: str) -> Cursor:
-        stream = stream_hash(
+    def _hash(self, topic: str) -> str:
+        return stream_hash(
             self._client.namespace, self._ref.kind, self._ref.workflow_id, topic
         )
-        return mint_cursor(_PROVIDER, stream, entry_id)
+
+    def _cursor(self, topic: str, entry_id: str) -> Cursor:
+        return mint_cursor(_PROVIDER, self._hash(topic), entry_id)
 
     async def _keys(self) -> _ChainKeys:
         if self._chain is None:
@@ -463,6 +548,7 @@ class RedisStreams(StreamProviderPlugin):
         *,
         key_prefix: str = "temporal-streams",
         retention: timedelta = timedelta(days=7),
+        poll_interval: timedelta = timedelta(milliseconds=500),
     ) -> None:
         """Create the provider.
 
@@ -474,6 +560,8 @@ class RedisStreams(StreamProviderPlugin):
                 with other data and an ACL can scope them.
             retention: How long a stream keeps a record, and how long after
                 its last write the stream itself lives.
+            poll_interval: How long a read blocks on Redis before it asks the
+                server whether the owner closed.
 
         Raises:
             ValueError: ``key_prefix`` is empty or ``retention`` is shorter
@@ -488,6 +576,7 @@ class RedisStreams(StreamProviderPlugin):
             )
         self._retention_ms = int(retention / timedelta(milliseconds=1))
         self._grace_ms = int(_TOMBSTONE_GRACE / timedelta(milliseconds=1))
+        self._poll_ms = max(1, int(poll_interval / timedelta(milliseconds=1)))
         if isinstance(redis_client, str):
             self._redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url(
                 redis_client
