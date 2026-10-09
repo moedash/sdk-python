@@ -1,22 +1,28 @@
-"""The plugin a provider is.
+"""The plugin a provider is, and how each context finds it.
 
 A provider is registered once, as a plugin:
 ``Client.connect(plugins=[provider])``. The client keeps it, and every Worker
 built from that client inherits it. ``Worker(plugins=[provider])`` and
 ``Replayer(plugins=[provider])`` register it on a Worker alone.
 
-On a Worker the plugin adds one interceptor and nothing else, so the
-Worker knows which provider it carries. No Worker internals change.
+On a Worker the plugin adds one interceptor and nothing else. The
+interceptor makes the provider reachable from Workflow code through the
+Worker's extern functions, which is how a passthrough object crosses into
+the sandbox. No Worker internals change.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Protocol
 
 import temporalio.worker
+import temporalio.workflow
+from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._provider import StreamHandle
 from temporalio.contrib.streams._ref import StreamRef
+from temporalio.contrib.streams._wire import WireRecord
 from temporalio.plugin import SimplePlugin
 
 if TYPE_CHECKING:
@@ -24,6 +30,21 @@ if TYPE_CHECKING:
     from temporalio.worker import ReplayerConfig, WorkerConfig
 
 __all__ = ["StreamProviderPlugin"]
+
+_WORKFLOW_EXTERN = "__temporal_contrib_streams_provider"
+
+
+class _WorkflowOutput(Protocol):
+    """Where a Workflow's own publish goes, on the Workflow thread.
+
+    Internal: the Worker side of a Workflow publish is not part of the
+    public surface. ``publish`` is synchronous and must not block, because
+    it runs on the Workflow thread.
+    """
+
+    def publish(self, records: Sequence[WireRecord]) -> None:
+        """Take records the running Workflow published."""
+        ...
 
 
 class StreamProviderPlugin(SimplePlugin, ABC):
@@ -49,6 +70,18 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     @abstractmethod
     async def close(self) -> None:
         """See :meth:`temporalio.contrib.streams.StreamProvider.close`."""
+
+    def _workflow_output(self, info: temporalio.workflow.Info) -> _WorkflowOutput:
+        """The output for one run's own publish, opened on the Workflow thread.
+
+        Raises:
+            StreamUnsupportedError: The provider does not accept a Workflow's
+                own publish.
+        """
+        raise StreamUnsupportedError(
+            f"stream provider {self.name()!r} does not accept the own publish of "
+            f"Workflow {info.workflow_id!r}"
+        )
 
     def configure_client(self, config: ClientConfig) -> ClientConfig:
         """Register this provider on the client.
@@ -104,7 +137,33 @@ def _two_providers(held: StreamProviderPlugin, new: StreamProviderPlugin) -> str
 
 
 class _StreamsInterceptor(temporalio.worker.Interceptor):
-    """Marks the provider a Worker carries."""
+    """Makes the provider reachable from Workflow code."""
 
     def __init__(self, provider: StreamProviderPlugin) -> None:
         self.provider = provider
+
+    def workflow_interceptor_class(
+        self, input: temporalio.worker.WorkflowInterceptorClassInput
+    ) -> type[temporalio.worker.WorkflowInboundInterceptor] | None:
+        provider = self.provider
+        input.unsafe_extern_functions[_WORKFLOW_EXTERN] = lambda: provider
+        return None
+
+
+def _no_provider(where: str) -> ValueError:
+    return ValueError(
+        f"no stream provider is registered on {where}; pass one as a plugin, for "
+        "example Client.connect(..., plugins=[provider])"
+    )
+
+
+def provider_for_workflow() -> StreamProviderPlugin:
+    """The provider registered on the Worker running the current Workflow.
+
+    Raises:
+        ValueError: No provider is registered on the Worker.
+    """
+    found = temporalio.workflow.extern_functions().get(_WORKFLOW_EXTERN)
+    if found is None:
+        raise _no_provider("this Workflow's Worker")
+    return found()

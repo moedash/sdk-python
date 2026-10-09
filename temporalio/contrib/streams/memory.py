@@ -16,6 +16,11 @@ a store, and to show in one file what a provider owes. Its limits:
   stops.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the oldest
   ones, which stands in for a store's retention in tests.
+- A Workflow's own publish is stored when ``publish`` is called, not when its
+  Workflow Task is accepted, and a failed task's records stay. A replay
+  stores nothing, so an evicted Workflow does not publish twice. The record
+  is stored as the payload converter produced it, without the payload codec,
+  because the codec cannot run on the Workflow thread.
 
 The outside surface (producer identity, retry deduplication, positions,
 ``SUPERSEDED``, stream-bound cursors, expired cursors) is faithful, which is
@@ -26,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
@@ -34,11 +39,13 @@ from typing import Any, Generic, TypeVar
 from google.protobuf.message import DecodeError
 
 import temporalio.converter
+from temporalio import workflow
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.streams._body import (
     content_fingerprint,
     decode_body,
     encode_body,
+    stamp_content_hash,
 )
 from temporalio.contrib.streams._cursor import (
     BEGINNING,
@@ -439,6 +446,26 @@ class MemoryStreamHandle:
         return start
 
 
+class _MemoryWorkflowOutput:
+    """A run's own publish, stored at once."""
+
+    def __init__(
+        self, streams: MemoryStreams, namespace: str, workflow_id: str
+    ) -> None:
+        self._streams = streams
+        self._namespace = namespace
+        self._workflow_id = workflow_id
+
+    def publish(self, records: Sequence[WireRecord]) -> None:
+        if workflow.unsafe.is_replaying_history_events():
+            return
+        for record in records:
+            stamp_content_hash(record)
+            self._streams._topic(
+                self._namespace, self._workflow_id, record.topic
+            ).append([record])
+
+
 class MemoryStreams(StreamProviderPlugin):
     """The in-memory provider, one list per topic.
 
@@ -472,6 +499,9 @@ class MemoryStreams(StreamProviderPlugin):
 
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection."""
+
+    def _workflow_output(self, info: workflow.Info) -> _MemoryWorkflowOutput:
+        return _MemoryWorkflowOutput(self, info.namespace, info.workflow_id)
 
     def truncate(
         self, workflow_id: str, topic: str, *, keep: int, namespace: str = "default"

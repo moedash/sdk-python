@@ -31,7 +31,10 @@ The contract:
    that names no topic addresses :data:`DEFAULT_TOPIC`.
 
 A provider is a plugin: ``Client.connect(..., plugins=[provider])``
-registers it on the client and on every Worker built from that client.
+registers it on the client and on every Worker built from that client. Each
+context then reaches a stream the same way:
+
+- Workflow code publishes to its own stream with :func:`workflow_writer`.
 
 The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.contrib.streams.proto.v1`, with the user's value in ``body``
@@ -75,6 +78,7 @@ from temporalio.contrib.streams._topic import (
     resolve_topic,
     topic,
 )
+from temporalio.contrib.streams._workflow import WorkflowStreamWriter, workflow_writer
 
 __all__ = [
     "BEGINNING",
@@ -100,10 +104,12 @@ __all__ = [
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
+    "WorkflowStreamWriter",
     "content_fingerprint",
     "content_hash",
     "decode_body",
     "encode_body",
     "resolve_topic",
     "topic",
+    "workflow_writer",
 ]
