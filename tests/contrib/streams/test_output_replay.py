@@ -16,12 +16,23 @@ import pytest
 
 import temporalio.contrib.streams._output as output_module
 from temporalio import activity, workflow
-from temporalio.bridge.proto.external_data import ExternalOutputStreamManifest
+from temporalio.api.enums.v1 import EventType
+from temporalio.api.history.v1 import HistoryEvent
+from temporalio.api.workflowservice.v1 import GetWorkflowExecutionHistoryReverseResponse
+from temporalio.bridge.proto.external_data import (
+    ExternalOutputStreamManifest,
+    ExternalStreamMarkerData,
+)
 from temporalio.bridge.proto.workflow_activation import WorkflowActivation
 from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
 from temporalio.client import Client
 from temporalio.contrib.streams import StreamRef, topic, workflow_writer
-from temporalio.contrib.streams._output import OutputCoordinator, StagedBatch
+from temporalio.contrib.streams._output import (
+    MARKER_NAME,
+    OutputCoordinator,
+    StagedBatch,
+    _Stage,
+)
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.converter import DataConverter
 from temporalio.worker import Replayer
@@ -47,6 +58,8 @@ class CountingStreams(MemoryStreams):
 
     async def _promote(self, namespace: str, workflow_id: str, token: str) -> None:
         self.promoted.append(token)
+        # A store round trip yields, which is where two settles interleave.
+        await asyncio.sleep(0.01)
         await super()._promote(namespace, workflow_id, token)
 
     async def _abort(self, namespace: str, workflow_id: str, token: str) -> None:
@@ -233,3 +246,43 @@ async def test_output_history_recorded_but_not_republished_is_nondeterministic()
     completion.successful.SetInParent()
     with pytest.raises(NondeterminismError, match="did not publish"):
         await coordinator.before_completion(live, completion, DataConverter.default)
+
+
+class _HistoryWithMarker:
+    """A client whose reverse History holds one output marker, after a pause."""
+
+    def __init__(self, token: str) -> None:
+        self.namespace = "default"
+        self.workflow_service = self
+        self._token = token
+
+    async def get_workflow_execution_history_reverse(
+        self, request: Any
+    ) -> GetWorkflowExecutionHistoryReverseResponse:
+        del request
+        await asyncio.sleep(0.05)
+        marker = ExternalStreamMarkerData()
+        marker.output.stage_token = self._token
+        event = HistoryEvent(
+            event_id=5, event_type=EventType.EVENT_TYPE_MARKER_RECORDED
+        )
+        event.marker_recorded_event_attributes.marker_name = MARKER_NAME
+        event.marker_recorded_event_attributes.details["external_stream"].payloads.add(
+            data=marker.SerializeToString()
+        )
+        response = GetWorkflowExecutionHistoryReverseResponse()
+        response.history.events.append(event)
+        return response
+
+
+async def test_a_completion_and_an_eviction_settle_a_stage_once():
+    provider = CountingStreams()
+    token = await provider._stage(StagedBatch("default", "wf", "run", []))
+    history: Any = _HistoryWithMarker(token)
+    coordinator = OutputCoordinator(provider, history, "default")
+    run = coordinator.open_run("wf", "run")
+    run.staged.append(_Stage(token, 1))
+    await asyncio.gather(
+        coordinator.after_completion("run"), coordinator.on_eviction("run")
+    )
+    assert provider.promoted == [token]

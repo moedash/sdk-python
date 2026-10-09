@@ -30,6 +30,7 @@ History proves it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from collections.abc import Sequence
@@ -98,6 +99,9 @@ class _RunOutput:
         self.staged: list[_Stage] = []
         self.replayed: deque[ExternalOutputStreamManifest] = deque()
         self.proven: list[str] = []
+        # A completion and the eviction that follows it can settle the same
+        # run at once; one at a time keeps each stage decided once.
+        self.settling = asyncio.Lock()
 
     def publish(self, records: Sequence[WireRecord]) -> None:
         """Buffer records the running Workflow published, on its thread."""
@@ -352,6 +356,10 @@ class OutputCoordinator:
             self._orphans[run_id] = run.staged
 
     async def _reconcile(self, run: _RunOutput) -> None:
+        async with run.settling:
+            await self._settle(run)
+
+    async def _settle(self, run: _RunOutput) -> None:
         for token in run.proven:
             await self.provider._promote(self._namespace, run.workflow_id, token)
             run.staged = [stage for stage in run.staged if stage.token != token]
