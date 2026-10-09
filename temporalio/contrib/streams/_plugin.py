@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import contextvars
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Protocol
 
 import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
+from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._provider import StreamHandle
 from temporalio.contrib.streams._ref import StreamRef
+from temporalio.contrib.streams._wire import WireRecord
 from temporalio.plugin import SimplePlugin
 
 if TYPE_CHECKING:
@@ -36,6 +39,19 @@ _WORKFLOW_EXTERN = "__temporal_contrib_streams_provider"
 _activity_provider: contextvars.ContextVar[StreamProviderPlugin | None] = (
     contextvars.ContextVar("__temporal_contrib_streams_provider", default=None)
 )
+
+
+class _WorkflowOutput(Protocol):
+    """Where a Workflow's own publish goes, on the Workflow thread.
+
+    Internal: the Worker side of a Workflow publish is not part of the
+    public surface. ``publish`` is synchronous and must not block, because
+    it runs on the Workflow thread.
+    """
+
+    def publish(self, records: Sequence[WireRecord]) -> None:
+        """Take records the running Workflow published."""
+        ...
 
 
 class StreamProviderPlugin(SimplePlugin, ABC):
@@ -61,6 +77,18 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     @abstractmethod
     async def close(self) -> None:
         """See :meth:`temporalio.contrib.streams.StreamProvider.close`."""
+
+    def _workflow_output(self, info: temporalio.workflow.Info) -> _WorkflowOutput:
+        """The output for one run's own publish, opened on the Workflow thread.
+
+        Raises:
+            StreamUnsupportedError: The provider does not accept a Workflow's
+                own publish.
+        """
+        raise StreamUnsupportedError(
+            f"stream provider {self.name()!r} does not accept the own publish of "
+            f"Workflow {info.workflow_id!r}"
+        )
 
     def configure_client(self, config: ClientConfig) -> ClientConfig:
         """Register this provider on the client.
