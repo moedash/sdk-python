@@ -1,7 +1,8 @@
 """Publishing to a Workflow's own stream from Workflow code.
 
-The writer converts values on the Workflow thread and hands the records to
-the provider's output for the run. Nothing here does I/O. Reading a stream
+The writer converts values on the Workflow thread and buffers the records
+for the run. Nothing here does I/O: the Worker stages the buffered records
+when the activation completes and commits them with its Workflow Task. Reading a stream
 inside a Workflow is not part of this release.
 """
 
@@ -12,7 +13,8 @@ from typing import Any, Generic, TypeVar, overload
 
 from temporalio import workflow
 from temporalio.contrib.streams._errors import StreamUnsupportedError
-from temporalio.contrib.streams._plugin import _WorkflowOutput, provider_for_workflow
+from temporalio.contrib.streams._output import _RunOutput
+from temporalio.contrib.streams._plugin import output_for_workflow
 from temporalio.contrib.streams._record import RecordKind
 from temporalio.contrib.streams._topic import StreamTopic, resolve_topic
 from temporalio.contrib.streams._wire import to_wire
@@ -27,7 +29,7 @@ _RUN_STATE = "__temporal_contrib_streams_run"
 class _RunStreams:
     """The stream state one Workflow run carries."""
 
-    def __init__(self, output: _WorkflowOutput) -> None:
+    def __init__(self, output: _RunOutput) -> None:
         self.output = output
         # FINISH is a statement about the topic, not about the writer object,
         # and every workflow_writer() call returns a new writer. Rebuilt in
@@ -41,7 +43,10 @@ def _run_streams() -> _RunStreams:
     loop = asyncio.get_running_loop()
     state: _RunStreams | None = getattr(loop, _RUN_STATE, None)
     if state is None:
-        state = _RunStreams(provider_for_workflow()._workflow_output(workflow.info()))
+        info = workflow.info()
+        state = _RunStreams(
+            output_for_workflow().open_run(info.workflow_id, info.run_id)
+        )
         setattr(loop, _RUN_STATE, state)
     return state
 
@@ -76,13 +81,12 @@ class WorkflowStreamWriter(Generic[T]):
         """Append ``value`` to this topic.
 
         Synchronous: the value is converted with the Workflow's payload
-        converter here, and the record goes to the provider. A
+        converter here and buffered for this Workflow Task. A
         :class:`temporalio.common.RawValue` passes through pre-encoded.
 
-        When the record becomes visible to readers is the provider's
-        contract. A provider for production makes it visible when the
-        Workflow Task that published it is accepted, and never if the task
-        fails. The memory provider makes it visible at once.
+        The record becomes visible to readers when the Workflow Task that
+        published it is accepted, and never if the task fails. Its body goes
+        through the Workflow's payload codec before it is stored.
 
         Raises:
             ValueError: The topic was already finished in this run.

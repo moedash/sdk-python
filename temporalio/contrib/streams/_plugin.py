@@ -5,27 +5,28 @@ A provider is registered once, as a plugin:
 built from that client inherits it. ``Worker(plugins=[provider])`` and
 ``Replayer(plugins=[provider])`` register it on a Worker alone.
 
-On a Worker the plugin adds one interceptor and nothing else. The
-interceptor makes the provider reachable from an Activity through a context
-variable, and from Workflow code through the Worker's extern functions,
-which is how a passthrough object crosses into the sandbox. No Worker
-internals change.
+On a Worker the plugin adds one interceptor per Worker. The interceptor
+makes the provider reachable from an Activity through a context variable,
+and gives Workflow code the Worker's output coordinator through the
+Worker's extern functions, which is how a passthrough object crosses into
+the sandbox. The Worker finds the same coordinator on the interceptor
+through an internal attribute and calls it around each activation, so a
+Workflow's own publish commits with its Workflow Task.
 """
 
 from __future__ import annotations
 
 import contextvars
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
 from temporalio.contrib.streams._errors import StreamUnsupportedError
+from temporalio.contrib.streams._output import OutputCoordinator, StagedBatch
 from temporalio.contrib.streams._provider import StreamHandle
 from temporalio.contrib.streams._ref import StreamRef
-from temporalio.contrib.streams._wire import WireRecord
 from temporalio.plugin import SimplePlugin
 
 if TYPE_CHECKING:
@@ -34,24 +35,11 @@ if TYPE_CHECKING:
 
 __all__ = ["StreamProviderPlugin"]
 
-_WORKFLOW_EXTERN = "__temporal_contrib_streams_provider"
+_WORKFLOW_EXTERN = "__temporal_contrib_streams_output"
 
 _activity_provider: contextvars.ContextVar[StreamProviderPlugin | None] = (
     contextvars.ContextVar("__temporal_contrib_streams_provider", default=None)
 )
-
-
-class _WorkflowOutput(Protocol):
-    """Where a Workflow's own publish goes, on the Workflow thread.
-
-    Internal: the Worker side of a Workflow publish is not part of the
-    public surface. ``publish`` is synchronous and must not block, because
-    it runs on the Workflow thread.
-    """
-
-    def publish(self, records: Sequence[WireRecord]) -> None:
-        """Take records the running Workflow published."""
-        ...
 
 
 class StreamProviderPlugin(SimplePlugin, ABC):
@@ -68,7 +56,6 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     def __init__(self, name: str) -> None:
         """Name the plugin; the name shows in the Worker's plugin list."""
         super().__init__(name)
-        self._interceptor = _StreamsInterceptor(self)
 
     @abstractmethod
     def get_stream_handle(self, client: Client, ref: StreamRef) -> StreamHandle:
@@ -78,8 +65,11 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     async def close(self) -> None:
         """See :meth:`temporalio.contrib.streams.StreamProvider.close`."""
 
-    def _workflow_output(self, info: temporalio.workflow.Info) -> _WorkflowOutput:
-        """The output for one run's own publish, opened on the Workflow thread.
+    async def _stage(self, batch: StagedBatch) -> str:
+        """Hold a Workflow's published batch, unseen, and return its stage token.
+
+        Internal. Called off the Workflow thread before the completion that
+        commits the batch goes to Core.
 
         Raises:
             StreamUnsupportedError: The provider does not accept a Workflow's
@@ -87,7 +77,19 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         """
         raise StreamUnsupportedError(
             f"stream provider {self.name()!r} does not accept the own publish of "
-            f"Workflow {info.workflow_id!r}"
+            f"Workflow {batch.workflow_id!r}"
+        )
+
+    async def _promote(self, namespace: str, workflow_id: str, token: str) -> None:
+        """Make the staged batch ``token`` visible to readers, in order.
+
+        Internal. Called once History shows the marker that names the
+        token. Promoting a token twice, or one the provider does not hold,
+        does nothing.
+        """
+        raise StreamUnsupportedError(
+            f"stream provider {self.name()!r} cannot promote stage {token!r} of "
+            f"Workflow {workflow_id!r} in namespace {namespace!r}"
         )
 
     def configure_client(self, config: ClientConfig) -> ClientConfig:
@@ -108,7 +110,10 @@ class StreamProviderPlugin(SimplePlugin, ABC):
             ValueError: Another provider is already registered on the Worker.
         """
         config = super().configure_worker(config)
-        config["interceptors"] = self._with_interceptor(config.get("interceptors"))
+        client = config["client"]  # type:ignore[reportTypedDictNotRequiredAccess]
+        config["interceptors"] = self._with_interceptor(
+            config.get("interceptors"), client, client.namespace
+        )
         return config
 
     def configure_replayer(self, config: ReplayerConfig) -> ReplayerConfig:
@@ -118,11 +123,13 @@ class StreamProviderPlugin(SimplePlugin, ABC):
             ValueError: Another provider is already registered on the Replayer.
         """
         config = super().configure_replayer(config)
-        config["interceptors"] = self._with_interceptor(config.get("interceptors"))
+        config["interceptors"] = self._with_interceptor(
+            config.get("interceptors"), None, config.get("namespace", "default")
+        )
         return config
 
     def _with_interceptor(
-        self, interceptors: Any
+        self, interceptors: Any, client: Client | None, namespace: str
     ) -> list[temporalio.worker.Interceptor]:
         held = list(interceptors or [])
         for interceptor in held:
@@ -132,7 +139,7 @@ class StreamProviderPlugin(SimplePlugin, ABC):
                 # The same plugin on the client and the Worker configures the
                 # Worker twice; one interceptor is enough.
                 return held
-        return [*held, self._interceptor]
+        return [*held, _StreamsInterceptor(self, client, namespace)]
 
 
 def _two_providers(held: StreamProviderPlugin, new: StreamProviderPlugin) -> str:
@@ -144,10 +151,22 @@ def _two_providers(held: StreamProviderPlugin, new: StreamProviderPlugin) -> str
 
 
 class _StreamsInterceptor(temporalio.worker.Interceptor):
-    """Makes the provider reachable from Activities and Workflow code."""
+    """Makes the provider reachable from Activities and Workflow code.
 
-    def __init__(self, provider: StreamProviderPlugin) -> None:
+    One per Worker, because the output coordinator holds that Worker's runs.
+    """
+
+    def __init__(
+        self, provider: StreamProviderPlugin, client: Client | None, namespace: str
+    ) -> None:
         self.provider = provider
+        self.output = OutputCoordinator(provider, client, namespace)
+
+    @property
+    def _temporal_activation_hook(self) -> OutputCoordinator:
+        # The Worker looks for this name on its interceptors; see
+        # temporalio.worker._workflow._ActivationHook.
+        return self.output
 
     def intercept_activity(
         self, next: temporalio.worker.ActivityInboundInterceptor
@@ -157,8 +176,8 @@ class _StreamsInterceptor(temporalio.worker.Interceptor):
     def workflow_interceptor_class(
         self, input: temporalio.worker.WorkflowInterceptorClassInput
     ) -> type[temporalio.worker.WorkflowInboundInterceptor] | None:
-        provider = self.provider
-        input.unsafe_extern_functions[_WORKFLOW_EXTERN] = lambda: provider
+        output = self.output
+        input.unsafe_extern_functions[_WORKFLOW_EXTERN] = lambda: output
         return None
 
 
@@ -215,8 +234,8 @@ def provider_for_activity() -> StreamProviderPlugin:
         raise _no_provider("this Activity's Worker") from None
 
 
-def provider_for_workflow() -> StreamProviderPlugin:
-    """The provider registered on the Worker running the current Workflow.
+def output_for_workflow() -> OutputCoordinator:
+    """The output coordinator of the Worker running the current Workflow.
 
     Raises:
         ValueError: No provider is registered on the Worker.

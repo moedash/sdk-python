@@ -16,11 +16,10 @@ a store, and to show in one file what a provider owes. Its limits:
   stops.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the oldest
   ones, which stands in for a store's retention in tests.
-- A Workflow's own publish is stored when ``publish`` is called, not when its
-  Workflow Task is accepted, and a failed task's records stay. A replay
-  stores nothing, so an evicted Workflow does not publish twice. The record
-  is stored as the payload converter produced it, without the payload codec,
-  because the codec cannot run on the Workflow thread.
+- A Workflow's own publish is staged in process memory and promoted when
+  History shows its commit, as on any provider. A stage is lost with the
+  process, so output a Workflow Task committed just before a crash is never
+  promoted.
 
 The outside surface (producer identity, retry deduplication, positions,
 ``SUPERSEDED``, stream-bound cursors, expired cursors) is faithful, which is
@@ -31,7 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Sequence
+import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
@@ -39,13 +39,11 @@ from typing import Any, Generic, TypeVar
 from google.protobuf.message import DecodeError
 
 import temporalio.converter
-from temporalio import workflow
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.streams._body import (
     content_fingerprint,
     decode_body,
     encode_body,
-    stamp_content_hash,
 )
 from temporalio.contrib.streams._cursor import (
     BEGINNING,
@@ -59,6 +57,7 @@ from temporalio.contrib.streams._errors import (
     StreamExpiredError,
     StreamProducerError,
 )
+from temporalio.contrib.streams._output import StagedBatch
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._record import (
     Cursor,
@@ -446,26 +445,6 @@ class MemoryStreamHandle:
         return start
 
 
-class _MemoryWorkflowOutput:
-    """A run's own publish, stored at once."""
-
-    def __init__(
-        self, streams: MemoryStreams, namespace: str, workflow_id: str
-    ) -> None:
-        self._streams = streams
-        self._namespace = namespace
-        self._workflow_id = workflow_id
-
-    def publish(self, records: Sequence[WireRecord]) -> None:
-        if workflow.unsafe.is_replaying_history_events():
-            return
-        for record in records:
-            stamp_content_hash(record)
-            self._streams._topic(
-                self._namespace, self._workflow_id, record.topic
-            ).append([record])
-
-
 class MemoryStreams(StreamProviderPlugin):
     """The in-memory provider, one list per topic.
 
@@ -485,6 +464,7 @@ class MemoryStreams(StreamProviderPlugin):
         super().__init__("temporalio.contrib.streams.MemoryStreams")
         self._poll = poll_interval
         self._topics: dict[tuple[str, str, str], _Topic] = {}
+        self._stages: dict[str, StagedBatch] = {}
 
     def get_stream_handle(
         self, client: Client | None, ref: StreamRef
@@ -500,8 +480,17 @@ class MemoryStreams(StreamProviderPlugin):
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection."""
 
-    def _workflow_output(self, info: workflow.Info) -> _MemoryWorkflowOutput:
-        return _MemoryWorkflowOutput(self, info.namespace, info.workflow_id)
+    async def _stage(self, batch: StagedBatch) -> str:
+        token = uuid.uuid4().hex
+        self._stages[token] = batch
+        return token
+
+    async def _promote(self, namespace: str, workflow_id: str, token: str) -> None:
+        batch = self._stages.pop(token, None)
+        if batch is None:
+            return
+        for record in batch.records:
+            self._topic(namespace, workflow_id, record.topic).append([record])
 
     def truncate(
         self, workflow_id: str, topic: str, *, keep: int, namespace: str = "default"
