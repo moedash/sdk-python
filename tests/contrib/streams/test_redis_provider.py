@@ -10,6 +10,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from temporalio.contrib.streams import (
     topic,
     workflow_writer,
 )
+from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.contrib.streams.redis import RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
@@ -114,7 +116,11 @@ async def test_a_batch_is_one_script_and_keeps_one_high_water_field(
     assert [r.sequence for r in await log_entries(raw, stream, "events")] == [
         *range(1, 11)
     ]
-    held = await raw.hgetall(keys.meta("events"))
+    held = {
+        field: value
+        for field, value in (await raw.hgetall(keys.meta("events"))).items()
+        if field.startswith(b"hw:")
+    }
     # Bounded state: one field per producer attempt, however long it writes.
     assert len(held) == 1
     ((field, value),) = held.items()
@@ -266,3 +272,56 @@ async def test_a_workflow_publish_lands_in_the_chain_log_once_committed(
     assert [
         key async for key in raw.scan_iter(match=f"{keys.base[:20]}*:stage:*")
     ] == []
+
+
+async def test_appends_trim_to_retention_and_slide_the_expiry(
+    client: Client, owner: WorkflowHandle, raw: Any
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=500),
+    )
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 1}, {"n": 2})
+    keys = await stream._keys()
+    assert 0 < await raw.pttl(keys.log("events")) <= 500
+    # The meta outlives the log by the tombstone grace.
+    assert await raw.pttl(keys.meta("events")) > 29 * 24 * 3600 * 1000
+    await asyncio.sleep(0.6)
+    await producer.append({"n": 3})
+    assert [r.sequence for r in await log_entries(raw, stream, "events")] == [3]
+    meta = await raw.hgetall(keys.meta("events"))
+    assert meta[b"added"] == b"3"
+    assert meta[b"last"] == (await raw.xrange(keys.log("events")))[-1][0]
+    await provider.close()
+
+
+async def test_a_stage_expires_with_retention_and_a_promotion_keeps_the_log(
+    raw: Any,
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(seconds=30),
+    )
+    record = WireRecord(topic="events")
+    batch = StagedBatch("ns", "wf", "first", "run", [record, record])
+    token = await provider._stage(batch)
+    keys = provider._chain_keys("ns", "wf", "first")
+    assert 0 < await raw.pttl(keys.stage(token)) <= 30_000
+    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    assert await raw.exists(keys.stage(token)) == 0
+    assert await raw.xlen(keys.log("events")) == 2
+    assert 0 < await raw.pttl(keys.log("events")) <= 30_000
+    assert (await raw.hgetall(keys.meta("events")))[b"added"] == b"2"
+    # Promoting again does nothing: the stage is gone.
+    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    assert await raw.xlen(keys.log("events")) == 2
+    await provider.close()
+
+
+def test_retention_must_be_positive():
+    with pytest.raises(ValueError, match="retention"):
+        RedisStreams("redis://localhost:1", retention=timedelta(0))

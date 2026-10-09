@@ -33,6 +33,14 @@ sends anything to Temporal.
 **A Workflow's own publish** is staged next to the log and moved into it by
 one script once History shows the Workflow Task's commit, so readers see a
 task's records together or not at all.
+
+**Retention.** Every script that writes a log trims it with ``XTRIM MINID``
+to the provider's ``retention`` (seven days by default) and refreshes the
+expiry of the log, its meta and the stage it writes, so a stream dies
+``retention`` after its last write and nobody has to clean up when the
+Workflow closes, is terminated or times out. The meta outlives its log by a
+thirty day grace. It is the tombstone that lets a reader tell a log that
+expired from one that never existed.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from __future__ import annotations
 import inspect
 import uuid
 from collections.abc import Awaitable
+from datetime import timedelta
 from typing import Any, Generic, TypeVar
 from urllib.parse import quote
 
@@ -70,59 +79,102 @@ from temporalio.service import RPCError, RPCStatusCode
 __all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
 
 _PROVIDER = "redis"
+_TOMBSTONE_GRACE = timedelta(days=30)
 _RECORD_FIELD = "r"
 
 T = TypeVar("T")
 
-# KEYS: log, meta. ARGV: session field, first sequence, digest, records...
-# The high-water field reads "<sequence>|<first id>|<last id>|<digest>".
-_APPEND_LUA = """
-local held = redis.call('HGET', KEYS[2], ARGV[1])
-local sequence = tonumber(ARGV[2])
+# Trims a log to the retention window and slides the expiry of the log and
+# its meta. The meta also records how many records the log ever took and the
+# newest id, which is what remains of a log after it expires.
+_KEEP_LUA = """
+local function now_ms()
+  local time = redis.call('TIME')
+  return tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+end
+local function keep(log, meta, added, last, retention, grace)
+  redis.call('XTRIM', log, 'MINID', (now_ms() - retention) .. '-0')
+  redis.call('PEXPIRE', log, retention)
+  redis.call('HINCRBY', meta, 'added', added)
+  redis.call('HSET', meta, 'last', last)
+  redis.call('PEXPIRE', meta, retention + grace)
+end
+"""
+
+# KEYS: log, meta. ARGV: retention ms, grace ms, session field, first
+# sequence, digest, records... The high-water field reads
+# "<sequence>|<first id>|<last id>|<digest>".
+_APPEND_LUA = (
+    _KEEP_LUA
+    + """
+local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
+local field, digest_arg = ARGV[3], ARGV[5]
+local held = redis.call('HGET', KEYS[2], field)
+local sequence = tonumber(ARGV[4])
 if held then
   local held_sequence, first, last, digest =
     string.match(held, '^(%d+)|([^|]+)|([^|]+)|(%x+)$')
   held_sequence = tonumber(held_sequence)
   if sequence == held_sequence then
-    if digest == ARGV[3] then
+    if digest == digest_arg then
       return {first, last}
     end
-    return redis.error_reply('STREAMS_DIVERGENT sequence ' .. ARGV[2] ..
+    return redis.error_reply('STREAMS_DIVERGENT sequence ' .. ARGV[4] ..
       ' was already written with different content')
   end
   if sequence < held_sequence then
-    return redis.error_reply('STREAMS_STALE sequence ' .. ARGV[2] ..
+    return redis.error_reply('STREAMS_STALE sequence ' .. ARGV[4] ..
       ' is below the newest one written, ' .. held_sequence)
   end
 end
 local first, last
-for i = 4, #ARGV do
+for i = 6, #ARGV do
   last = redis.call('XADD', KEYS[1], '*', 'r', ARGV[i])
   if not first then
     first = last
   end
 end
-redis.call('HSET', KEYS[2], ARGV[1],
-  ARGV[2] .. '|' .. first .. '|' .. last .. '|' .. ARGV[3])
+redis.call('HSET', KEYS[2], field,
+  ARGV[4] .. '|' .. first .. '|' .. last .. '|' .. digest_arg)
+keep(KEYS[1], KEYS[2], #ARGV - 5, last, retention, grace)
 return {first, last}
 """
+)
 
-# KEYS: stage, then one log per topic. ARGV: the topics, in KEYS order.
-_PROMOTE_LUA = """
+# KEYS: stage. ARGV: retention ms, then topic and record pairs.
+_STAGE_LUA = """
+redis.call('RPUSH', KEYS[1], unpack(ARGV, 2))
+redis.call('PEXPIRE', KEYS[1], ARGV[1])
+"""
+
+# KEYS: stage, then a log and its meta per topic. ARGV: retention ms,
+# grace ms, then the topics in KEYS order.
+_PROMOTE_LUA = (
+    _KEEP_LUA
+    + """
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
 if #items == 0 then
   return 0
 end
-local logs = {}
-for i = 1, #ARGV do
-  logs[ARGV[i]] = KEYS[i + 1]
+local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
+local slots = {}
+for i = 3, #ARGV do
+  slots[ARGV[i]] = {log = KEYS[2 * (i - 2)], meta = KEYS[2 * (i - 2) + 1], added = 0}
 end
 for i = 1, #items, 2 do
-  redis.call('XADD', logs[items[i]], '*', 'r', items[i + 1])
+  local slot = slots[items[i]]
+  slot.last = redis.call('XADD', slot.log, '*', 'r', items[i + 1])
+  slot.added = slot.added + 1
+end
+for _, slot in pairs(slots) do
+  if slot.added > 0 then
+    keep(slot.log, slot.meta, slot.added, slot.last, retention, grace)
+  end
 end
 redis.call('DEL', KEYS[1])
 return #items / 2
 """
+)
 
 
 def _part(text: str) -> str:
@@ -250,6 +302,7 @@ class RedisProducer(Generic[T]):
             _, last = await streams._append(
                 keys=[keys.log(self._topic), keys.meta(self._topic)],
                 args=[
+                    *streams._retention_args(),
                     _session_field(self._producer_id, self._attempt),
                     self._sequence,
                     digest,
@@ -363,6 +416,7 @@ class RedisStreams(StreamProviderPlugin):
         redis_client: str | redis.asyncio.Redis,
         *,
         key_prefix: str = "temporal-streams",
+        retention: timedelta = timedelta(days=7),
     ) -> None:
         """Create the provider.
 
@@ -372,13 +426,22 @@ class RedisStreams(StreamProviderPlugin):
                 :meth:`close`.
             key_prefix: Prepended to every key, so streams can share a Redis
                 with other data and an ACL can scope them.
+            retention: How long a stream keeps a record, and how long after
+                its last write the stream itself lives.
 
         Raises:
-            ValueError: ``key_prefix`` is empty.
+            ValueError: ``key_prefix`` is empty or ``retention`` is shorter
+                than a millisecond.
         """
         super().__init__("temporalio.contrib.streams.RedisStreams")
         if not key_prefix:
             raise ValueError("key_prefix must not be empty")
+        if retention < timedelta(milliseconds=1):
+            raise ValueError(
+                f"retention must be at least a millisecond, got {retention}"
+            )
+        self._retention_ms = int(retention / timedelta(milliseconds=1))
+        self._grace_ms = int(_TOMBSTONE_GRACE / timedelta(milliseconds=1))
         if isinstance(redis_client, str):
             self._redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url(
                 redis_client
@@ -390,6 +453,7 @@ class RedisStreams(StreamProviderPlugin):
         self._prefix = key_prefix
         self._append = self._redis.register_script(_APPEND_LUA)
         self._promote_script = self._redis.register_script(_PROMOTE_LUA)
+        self._stage_script = self._redis.register_script(_STAGE_LUA)
 
     def get_stream_handle(self, client: Client, ref: StreamRef) -> RedisStreamHandle:
         """A handle on the stream ``ref`` names."""
@@ -399,6 +463,9 @@ class RedisStreams(StreamProviderPlugin):
         """Close the Redis connection, if this provider made it."""
         if self._owns_redis:
             await self._redis.aclose()
+
+    def _retention_args(self) -> list[int]:
+        return [self._retention_ms, self._grace_ms]
 
     def _chain_keys(
         self, namespace: str, workflow_id: str, first_run_id: str
@@ -411,14 +478,17 @@ class RedisStreams(StreamProviderPlugin):
         items: list[Any] = []
         for record in batch.records:
             items += [record.topic, record.SerializeToString()]
-        await _awaited(self._redis.rpush(keys.stage(token), *items))
+        await self._stage_script(
+            keys=[keys.stage(token)], args=[self._retention_ms, *items]
+        )
         return token
 
     async def _promote(self, stage: StageRef) -> None:
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
+        topic_keys = [key for t in stage.topics for key in (keys.log(t), keys.meta(t))]
         await self._promote_script(
-            keys=[keys.stage(stage.token), *(keys.log(t) for t in stage.topics)],
-            args=list(stage.topics),
+            keys=[keys.stage(stage.token), *topic_keys],
+            args=[*self._retention_args(), *stage.topics],
         )
 
     async def _abort(self, stage: StageRef) -> None:
