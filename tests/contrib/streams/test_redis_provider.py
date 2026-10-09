@@ -7,6 +7,7 @@ test fixtures. Each test gets its own key prefix.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -733,3 +734,52 @@ async def test_a_reader_promotes_output_a_stopped_worker_committed(
     assert [r.value for r in again] == [{"n": 1}, {"n": 2}]
     await stopped.close()
     await reader.close()
+
+
+async def test_an_evicting_server_is_warned_about_once(
+    client: Client,
+    provider: RedisStreams,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    async def evicting(*_: Any) -> dict[str, str]:
+        return {"maxmemory-policy": "allkeys-lru"}
+
+    monkeypatch.setattr(provider._redis, "config_get", evicting)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
+    with caplog.at_level(logging.DEBUG, logger="temporalio.contrib.streams.redis"):
+        with pytest.raises(StreamNotFoundError):
+            await stream.latest()
+        with pytest.raises(StreamNotFoundError):
+            await stream.latest()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "allkeys-lru" in warnings[0].getMessage()
+
+
+async def test_a_server_that_refuses_config_is_not_warned_about(
+    client: Client,
+    provider: RedisStreams,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    async def refused(*_: Any) -> dict[str, str]:
+        raise redis.exceptions.ResponseError("NOPERM this user has no permissions")
+
+    monkeypatch.setattr(provider._redis, "config_get", refused)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
+    with caplog.at_level(logging.DEBUG, logger="temporalio.contrib.streams.redis"):
+        with pytest.raises(StreamNotFoundError):
+            await stream.latest()
+    levels = [r.levelno for r in caplog.records if "maxmemory" in r.getMessage()]
+    assert levels == [logging.DEBUG]
+
+
+async def test_a_noeviction_server_is_not_warned_about(
+    client: Client, provider: RedisStreams, caplog: pytest.LogCaptureFixture
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
+    with caplog.at_level(logging.WARNING, logger="temporalio.contrib.streams.redis"):
+        with pytest.raises(StreamNotFoundError):
+            await stream.latest()
+    assert not [r for r in caplog.records if "maxmemory" in r.getMessage()]

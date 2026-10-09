@@ -82,7 +82,9 @@ raise :class:`temporalio.contrib.streams.StreamExpiredError` and
 iteration, since deciding needs Redis.
 
 Redis 7.0 or later is required; the provider refuses an older server the
-first time it talks to it.
+first time it talks to it. At the same moment it reads ``maxmemory-policy``
+and logs a warning for anything but ``noeviction``, because an evicting
+Redis drops whole stream keys under memory pressure.
 """
 
 from __future__ import annotations
@@ -829,6 +831,26 @@ class RedisStreams(StreamProviderPlugin):
                 f"redis_version {version}"
             )
         self._checked_server = True
+        await self._warn_on_eviction()
+
+    async def _warn_on_eviction(self) -> None:
+        try:
+            policy = await _awaited(self._redis.config_get("maxmemory-policy"))
+        except redis.exceptions.ResponseError as error:
+            # Managed services often refuse CONFIG; the policy is theirs to
+            # document then.
+            logger.debug("Could not read maxmemory-policy: %s", error)
+            return
+        value = _text(
+            policy.get("maxmemory-policy", "") or policy.get(b"maxmemory-policy", "")
+        )
+        if value and value != "noeviction":
+            logger.warning(
+                "Redis maxmemory-policy is %r; under memory pressure Redis may "
+                "evict whole stream keys, losing records and their dedupe state. "
+                "Use 'noeviction' for streams.",
+                value,
+            )
 
     async def _stage(self, batch: StagedBatch) -> str:
         await self._ready()
