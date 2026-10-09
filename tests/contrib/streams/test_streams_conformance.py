@@ -92,6 +92,9 @@ class ProviderCase:
     run id, when the store needs the owner to exist."""
     reads: bool = True
     """The provider can read, so the cases marked ``reads`` run."""
+    live_gaps: bool = True
+    """A read in progress notices records dropped from under it, so the
+    cases marked ``live_gaps`` run."""
     hosted: dict[str, str] = field(default_factory=dict)
     """The run id of each owner ``host`` started, by Workflow id."""
 
@@ -143,7 +146,24 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             assert handle.result_run_id is not None
             return handle.result_run_id
 
-        yield ProviderCase("redis", provider, client, host=host)
+        case = ProviderCase("redis", provider, client, host=host, live_gaps=False)
+
+        async def truncate(workflow_id: str, name: str, keep: int) -> None:
+            # Trims as the append script does, watermark included.
+            keys = provider._chain_keys(
+                client.namespace, workflow_id, case.hosted[workflow_id]
+            )
+            entries = await provider._redis.xrange(keys.log(name))
+            doomed = entries[: len(entries) - keep]
+            if doomed:
+                await provider._redis.xtrim(
+                    keys.log(name), maxlen=keep, approximate=False
+                )
+                redis_client: Any = provider._redis
+                await redis_client.hset(keys.meta(name), "trimmed", doomed[-1][0])
+
+        case.truncate = truncate
+        yield case
         for owner in owners:
             await owner.terminate()
     await provider.close()
@@ -160,6 +180,8 @@ async def case(request: pytest.FixtureRequest, client: Client):
     async with SETUPS[request.param](client) as found:
         if request.node.get_closest_marker("reads") and not found.reads:
             pytest.skip(f"the {found.name} provider cannot read")
+        if request.node.get_closest_marker("live_gaps") and not found.live_gaps:
+            pytest.skip(f"the {found.name} provider misses a gap during a read")
         yield found
 
 
@@ -305,10 +327,11 @@ async def test_beginning_starts_at_the_oldest_record_still_held(case: ProviderCa
     # reader can tell apart from a cursor that was never valid here.
     await case.truncate(workflow_id, OUT.name, 1)
     with pytest.raises(StreamExpiredError):
-        stream.read(topic=OUT, after=old)
+        await stream.read(topic=OUT, after=old).__anext__()
 
 
 @reads
+@pytest.mark.live_gaps
 async def test_a_reader_that_falls_behind_retention_is_told(case: ProviderCase):
     if case.truncate is None:
         pytest.skip(f"{case.name} offers no way to drop records")

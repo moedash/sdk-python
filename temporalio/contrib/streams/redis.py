@@ -55,6 +55,19 @@ still accepted. If the Worker stops before it marks the chain, the window
 lasts until a reader or a new producer sees the ended chain. Records written
 in the window stay readable. The Workflow's own committed output is never
 refused, so its final task's publish lands after the close.
+
+**Expired, empty or missing.** A read that resumes from a cursor decides
+at its start what the store still holds after it. With the log present, the
+cursor is expired when it is older than the newest trimmed record. With the
+log gone but its meta tombstone left, the cursor is expired when it is
+older than the last record the log took, and otherwise the stream is just
+empty after it. With neither left, nothing is known about the stream. These
+raise :class:`temporalio.contrib.streams.StreamExpiredError` and
+:class:`temporalio.contrib.streams.StreamNotFoundError` from the first
+iteration, since deciding needs Redis.
+
+Redis 7.0 or later is required; the provider refuses an older server the
+first time it talks to it.
 """
 
 from __future__ import annotations
@@ -87,9 +100,12 @@ from temporalio.contrib.streams._cursor import (
 )
 from temporalio.contrib.streams._errors import (
     StreamClosedError,
+    StreamCursorError,
+    StreamExpiredError,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamUnsupportedError,
 )
 from temporalio.contrib.streams._output import CHAIN_ENDED, StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
@@ -111,15 +127,30 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 # Trims a log to the retention window and slides the expiry of the log and
-# its meta. The meta also records how many records the log ever took and the
-# newest id, which is what remains of a log after it expires.
+# its meta. The meta also records how many records the log ever took, the
+# newest id, which is what remains of a log after it expires, and the newest
+# trimmed id, because XTRIM leaves no trace a reader could compare with. A
+# log that expired whole is trimmed through its last id when it comes back.
 _KEEP_LUA = """
 local function now_ms()
   local time = redis.call('TIME')
   return tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 end
+local function revive(log, meta)
+  if redis.call('EXISTS', log) == 0 then
+    local last = redis.call('HGET', meta, 'last')
+    if last then
+      redis.call('HSET', meta, 'trimmed', last)
+    end
+  end
+end
 local function keep(log, meta, added, last, retention, grace)
-  redis.call('XTRIM', log, 'MINID', (now_ms() - retention) .. '-0')
+  local floor = (now_ms() - retention) .. '-0'
+  local doomed = redis.call('XREVRANGE', log, '(' .. floor, '-', 'COUNT', 1)
+  if #doomed > 0 then
+    redis.call('XTRIM', log, 'MINID', floor)
+    redis.call('HSET', meta, 'trimmed', doomed[1][1])
+  end
   redis.call('PEXPIRE', log, retention)
   redis.call('HINCRBY', meta, 'added', added)
   redis.call('HSET', meta, 'last', last)
@@ -157,6 +188,7 @@ if redis.call('HGET', KEYS[3], 'closed') then
   return redis.error_reply('STREAMS_CLOSED the Workflow that owns this stream ' ..
     'has closed')
 end
+revive(KEYS[1], KEYS[2])
 local first, last
 for i = 6, #ARGV do
   last = redis.call('XADD', KEYS[1], '*', 'r', ARGV[i])
@@ -190,6 +222,9 @@ local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
 local slots = {}
 for i = 3, #ARGV do
   slots[ARGV[i]] = {log = KEYS[2 * (i - 2)], meta = KEYS[2 * (i - 2) + 1], added = 0}
+end
+for _, slot in pairs(slots) do
+  revive(slot.log, slot.meta)
 end
 for i = 1, #items, 2 do
   local slot = slots[items[i]]
@@ -238,6 +273,14 @@ class _ChainKeys:
 async def _awaited(value: Awaitable[T] | T) -> T:
     # redis-py types its commands for both its sync and asyncio clients.
     return await value if inspect.isawaitable(value) else value  # type: ignore[return-value]
+
+
+def _entry(entry_id: str) -> tuple[int, int]:
+    milliseconds, _, sequence = entry_id.partition("-")
+    try:
+        return int(milliseconds), int(sequence or 0)
+    except ValueError:
+        raise StreamCursorError(f"{entry_id!r} is not a Redis stream id") from None
 
 
 def _text(value: Any) -> str:
@@ -411,6 +454,8 @@ class RedisStreamHandle:
         keys = await self._keys()
         log = keys.log(topic)
         redis_client = self._streams._redis
+        if position is not None:
+            await self._refuse_lost(keys, topic, position)
         if from_end:
             newest = await redis_client.xrevrange(log, count=1)
             last_id = _text(newest[0][0]) if newest else "0-0"
@@ -447,6 +492,37 @@ class RedisStreamHandle:
             # One more pass after learning the owner closed, so a record
             # that landed between the read and the describe is delivered.
             ended = await self._owner_ended(keys)
+
+    async def _refuse_lost(self, keys: _ChainKeys, topic: str, position: str) -> None:
+        """Raise when the store no longer holds what follows ``position``.
+
+        Raises:
+            StreamExpiredError: Records after ``position`` were dropped.
+            StreamNotFoundError: Neither the log nor its tombstone is left.
+        """
+        async with self._streams._redis.pipeline(transaction=False) as pipe:
+            pipe.exists(keys.log(topic))
+            pipe.hgetall(keys.meta(topic))
+            exists, meta = await pipe.execute()
+        cursor = _entry(position)
+        if exists:
+            trimmed = meta.get(b"trimmed")
+            if trimmed is not None and cursor < _entry(_text(trimmed)):
+                raise StreamExpiredError(
+                    f"records after {position} on topic {topic!r} were dropped by "
+                    f"retention; the newest dropped one is {_text(trimmed)}"
+                )
+            return
+        if not meta:
+            raise StreamNotFoundError(
+                f"topic {topic!r} keeps no log and no tombstone, so nothing is "
+                f"known about what followed {position}"
+            )
+        last = meta.get(b"last")
+        if last is not None and cursor < _entry(_text(last)):
+            raise StreamExpiredError(
+                f"the log of topic {topic!r} expired with records after {position}"
+            )
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
         description = await self._client.get_workflow_handle(
@@ -496,6 +572,7 @@ class RedisStreamHandle:
         return mint_cursor(_PROVIDER, self._hash(topic), entry_id)
 
     async def _keys(self) -> _ChainKeys:
+        await self._streams._ready()
         if self._chain is None:
             first_run_id = await self._first_run_id()
             self._chain = self._streams._chain_keys(
@@ -577,6 +654,7 @@ class RedisStreams(StreamProviderPlugin):
         self._retention_ms = int(retention / timedelta(milliseconds=1))
         self._grace_ms = int(_TOMBSTONE_GRACE / timedelta(milliseconds=1))
         self._poll_ms = max(1, int(poll_interval / timedelta(milliseconds=1)))
+        self._checked_server = False
         if isinstance(redis_client, str):
             self._redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url(
                 redis_client
@@ -607,7 +685,26 @@ class RedisStreams(StreamProviderPlugin):
     ) -> _ChainKeys:
         return _ChainKeys(self._prefix, namespace, workflow_id, first_run_id)
 
+    async def _ready(self) -> None:
+        """Refuse a server older than Redis 7.0, once.
+
+        Raises:
+            StreamUnsupportedError: The server is older than Redis 7.0.
+        """
+        if self._checked_server:
+            return
+        info = await _awaited(self._redis.info("server"))
+        version = str(info.get("redis_version", "0"))
+        major = int(version.split(".", 1)[0] or 0)
+        if major < 7:
+            raise StreamUnsupportedError(
+                f"RedisStreams needs Redis 7.0 or later, but the server reports "
+                f"redis_version {version}"
+            )
+        self._checked_server = True
+
     async def _stage(self, batch: StagedBatch) -> str:
+        await self._ready()
         token = uuid.uuid4().hex
         keys = self._chain_keys(batch.namespace, batch.workflow_id, batch.first_run_id)
         items: list[Any] = []

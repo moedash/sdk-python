@@ -24,10 +24,12 @@ from temporalio.contrib.streams import (
     CONTENT_HASH_KEY,
     RUN_ID_KEY,
     StreamClosedError,
+    StreamExpiredError,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
     StreamRef,
+    StreamUnsupportedError,
     get_stream_handle,
     topic,
     workflow_writer,
@@ -479,3 +481,78 @@ async def test_a_read_pinned_to_a_run_ends_when_that_run_continues(
         assert len(records) >= 1
         await handle.signal(PublishUntilTold.finish)
         await handle.result()
+
+
+async def nothing_arrives(records: Any, wait: float = 0.5) -> bool:
+    try:
+        await asyncio.wait_for(records.__anext__(), wait)
+        return False
+    except asyncio.TimeoutError:
+        return True
+    finally:
+        await records.aclose()
+
+
+async def test_retention_expires_a_cursor_only_past_the_newest_trimmed_record(
+    client: Client, owner: WorkflowHandle
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+        poll_interval=timedelta(milliseconds=100),
+    )
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    first = await producer.append({"n": 1})
+    second = await producer.append({"n": 2})
+    await asyncio.sleep(0.4)
+    await producer.append({"n": 3})
+    with pytest.raises(StreamExpiredError, match="dropped by retention"):
+        await stream.read(topic=EVENTS, after=first).__anext__()
+    # Nothing after the newest trimmed record was lost, so it still resumes.
+    records = stream.read(topic=EVENTS, after=second)
+    assert (await asyncio.wait_for(records.__anext__(), 5.0)).value == {"n": 3}
+    await records.aclose()
+    await provider.close()
+
+
+async def test_an_expired_log_leaves_a_tombstone_that_tells_expired_from_empty(
+    client: Client, owner: WorkflowHandle, raw: Any
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+        poll_interval=timedelta(milliseconds=100),
+    )
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    first = await producer.append({"n": 1})
+    last = await producer.append({"n": 2})
+    await asyncio.sleep(0.5)
+    keys = await stream._keys()
+    assert await raw.exists(keys.log("events")) == 0
+    assert await raw.exists(keys.meta("events")) == 1
+    with pytest.raises(StreamExpiredError, match="expired"):
+        await stream.read(topic=EVENTS, after=first).__anext__()
+    # Nothing came after the last record, so the stream is empty after it.
+    assert await nothing_arrives(stream.read(topic=EVENTS, after=last))
+    await raw.delete(keys.meta("events"))
+    with pytest.raises(StreamNotFoundError, match="no tombstone"):
+        await stream.read(topic=EVENTS, after=last).__anext__()
+    # A read from the beginning of a missing log just waits for records.
+    assert await nothing_arrives(stream.read(topic=EVENTS))
+    await provider.close()
+
+
+async def test_a_server_older_than_redis_7_is_refused(
+    client: Client, provider: RedisStreams, monkeypatch: pytest.MonkeyPatch
+):
+    async def old_server(*_: Any) -> dict[str, str]:
+        return {"redis_version": "6.2.14"}
+
+    monkeypatch.setattr(provider._redis, "info", old_server)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
+    with pytest.raises(StreamUnsupportedError, match="Redis 7.0 or later"):
+        await stream.latest()
