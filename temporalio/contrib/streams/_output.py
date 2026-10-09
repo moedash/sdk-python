@@ -24,15 +24,18 @@ On replay nothing is staged. Core hands back the recorded manifests in
 the replayed publishing completions. Each of those completions sends its
 recomputed manifest again, and Core compares it with the recorded one, so a
 Workflow that publishes different data on replay fails as nondeterministic.
-A recorded manifest whose stage this Worker still holds is promoted, because
-History proves it.
+A recorded manifest is promoted, idempotently and once per token, because
+History proves it: a Worker that stopped after its commit but before the
+promotion leaves the stage for the next Worker that replays the run. The
+Replayer has no client and promotes nothing, so a replay there touches no
+store.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -67,6 +70,7 @@ _MARKER_DETAILS_KEY = "external_stream"
 _SCHEMA_VERSION = 1
 _FINGERPRINT_VERSION = 1
 _PROVIDER_FORMAT_VERSION = 1
+_SETTLED_TOKENS = 10_000
 
 
 @dataclass(frozen=True)
@@ -239,6 +243,10 @@ class OutputCoordinator:
         # that comes back picks them up, so a later completion or a replay
         # can still settle them.
         self._orphans: dict[str, list[_Stage]] = {}
+        # Tokens this coordinator promoted or aborted, so a run replayed again
+        # and again (a small cache) does not ask the store about each one
+        # every time. Bounded: forgetting one only costs a repeat request.
+        self._settled: OrderedDict[str, None] = OrderedDict()
 
     def open_run(
         self, workflow_id: str, run_id: str, first_run_id: str = ""
@@ -260,15 +268,19 @@ class OutputCoordinator:
         """
         if not any(job.HasField("replay_external_streams") for job in act.jobs):
             return
-        workflow_id = next(
+        init = next(
             (
-                job.initialize_workflow.workflow_id
+                job.initialize_workflow
                 for job in act.jobs
                 if job.HasField("initialize_workflow")
             ),
-            "",
+            None,
         )
-        run = self.open_run(workflow_id, act.run_id)
+        run = (
+            self.open_run(init.workflow_id, act.run_id, init.first_execution_run_id)
+            if init is not None
+            else self.open_run("", act.run_id)
+        )
         kept = []
         for job in act.jobs:
             if not job.HasField("replay_external_streams"):
@@ -362,9 +374,21 @@ class OutputCoordinator:
         if run.replayed:
             recorded = run.replayed.popleft()
             manifest.stage_token = recorded.stage_token
-            run.proven.extend(
-                stage for stage in run.staged if stage.token == recorded.stage_token
-            )
+            own = [stage for stage in run.staged if stage.token == recorded.stage_token]
+            if own:
+                run.proven.extend(own)
+            elif self._client is not None and recorded.stage_token not in self._settled:
+                # History proves the commit, but the Worker that staged it may
+                # have stopped before promoting it. Promotion is idempotent,
+                # so asking again is safe, and each token is asked once.
+                ref = StageRef(
+                    self._namespace,
+                    run.workflow_id,
+                    run.first_run_id,
+                    recorded.stage_token,
+                    tuple(topic.topic for topic in recorded.topics),
+                )
+                run.proven.append(_Stage(ref, recorded.history_floor_event_id))
         completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
             manifest
         )
@@ -397,9 +421,16 @@ class OutputCoordinator:
         async with run.settling:
             await self._settle(run)
 
+    def _note_settled(self, token: str) -> None:
+        self._settled[token] = None
+        self._settled.move_to_end(token)
+        while len(self._settled) > _SETTLED_TOKENS:
+            self._settled.popitem(last=False)
+
     async def _settle(self, run: _RunOutput) -> None:
         for proven in run.proven:
             await self.provider._promote(proven.ref)
+            self._note_settled(proven.token)
             run.staged = [stage for stage in run.staged if stage is not proven]
         run.proven.clear()
         if self._client is None or not run.staged:
@@ -425,6 +456,7 @@ class OutputCoordinator:
                 await self.provider._abort(stage.ref)
             else:
                 continue
+            self._note_settled(stage.token)
             run.staged.remove(stage)
 
     async def _events_after(self, run: _RunOutput, floor: int) -> list[HistoryEvent]:
