@@ -108,6 +108,16 @@ class StreamProviderPlugin(SimplePlugin, ABC):
             f"of Workflow {stage.workflow_id!r}"
         )
 
+    async def _close_chain(
+        self, namespace: str, workflow_id: str, first_run_id: str
+    ) -> None:
+        """Refuse further appends to the streams of an ended run chain.
+
+        Internal. Called best effort by the Worker after a run's final
+        Workflow Task. A provider without a close gate does nothing.
+        """
+        del namespace, workflow_id, first_run_id
+
     def configure_client(self, config: ClientConfig) -> ClientConfig:
         """Register this provider on the client.
 

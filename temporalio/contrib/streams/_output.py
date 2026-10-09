@@ -52,6 +52,7 @@ from temporalio.bridge.proto.external_data import (
 )
 from temporalio.bridge.proto.workflow_activation import WorkflowActivation
 from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.contrib.streams._body import content_fingerprint, encode_body
 from temporalio.contrib.streams._record import RecordKind
 from temporalio.contrib.streams._wire import WireRecord
@@ -121,6 +122,7 @@ class _RunOutput:
         self.staged: list[_Stage] = []
         self.replayed: deque[ExternalOutputStreamManifest] = deque()
         self.proven: list[_Stage] = []
+        self.closing = False
         # A completion and the eviction that follows it can settle the same
         # run at once; one at a time keeps each stage decided once.
         self.settling = asyncio.Lock()
@@ -190,6 +192,26 @@ def _marker_token(event: HistoryEvent) -> str | None:
     marker = ExternalStreamMarkerData.FromString(payloads.payloads[0].data)
     return marker.output.stage_token if marker.HasField("output") else None
 
+
+_CHAIN_ENDING_COMMANDS = (
+    "complete_workflow_execution",
+    "fail_workflow_execution",
+    "cancel_workflow_execution",
+)
+
+CHAIN_ENDED = frozenset(
+    {
+        WorkflowExecutionStatus.COMPLETED,
+        WorkflowExecutionStatus.FAILED,
+        WorkflowExecutionStatus.CANCELED,
+        WorkflowExecutionStatus.TERMINATED,
+        WorkflowExecutionStatus.TIMED_OUT,
+    }
+)
+"""Statuses after which a run chain writes nothing more.
+
+``CONTINUED_AS_NEW`` is not one of them: the chain goes on in the next run.
+"""
 
 _TASK_RESULTS = (
     EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED,
@@ -295,6 +317,11 @@ class OutputCoordinator:
         run = self._runs.get(act.run_id)
         if run is None:
             return
+        if not act.is_replaying and any(
+            command.WhichOneof("variant") in _CHAIN_ENDING_COMMANDS
+            for command in completion.successful.commands
+        ):
+            run.closing = True
         if not act.is_replaying and run.replayed:
             raise temporalio.workflow.NondeterminismError(
                 f"History recorded {len(run.replayed)} stream output batch(es) that "
@@ -376,10 +403,36 @@ class OutputCoordinator:
             run.pending.clear()
 
     async def after_completion(self, run_id: str) -> None:
-        """Promote the run's stages that History now shows as committed."""
+        """Promote the run's stages that History now shows as committed.
+
+        Once the run's chain has ended, close its streams, best effort.
+        """
         run = self._runs.get(run_id)
         if run is not None:
             await self._reconcile(run)
+            if run.closing:
+                await self._close_if_ended(run)
+
+    async def _close_if_ended(self, run: _RunOutput) -> None:
+        if self._client is None:
+            return
+        try:
+            description = await self._client.get_workflow_handle(
+                run.workflow_id, run_id=run.run_id
+            ).describe()
+            if description.status not in CHAIN_ENDED:
+                # The completion was not accepted; the run goes on.
+                return
+            run.closing = False
+            await self.provider._close_chain(
+                self._namespace, run.workflow_id, run.first_run_id
+            )
+        except Exception:
+            # Readers and producers close the streams too when they see the
+            # chain ended, so a failure here only widens the closing window.
+            logger.warning(
+                "Could not close the streams of run %s", run.run_id, exc_info=True
+            )
 
     async def on_eviction(self, run_id: str) -> None:
         """Settle what History already decides, then forget the run.

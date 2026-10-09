@@ -41,6 +41,20 @@ expiry of the log, its meta and the stage it writes, so a stream dies
 Workflow closes, is terminated or times out. The meta outlives its log by a
 thirty day grace. It is the tombstone that lets a reader tell a log that
 expired from one that never existed.
+
+**Closing.** When the owner's run chain ends (complete, fail, cancel,
+terminate or time out, but not Continue-as-New), the chain is marked
+``closed`` and the append script refuses new batches with
+:class:`temporalio.contrib.streams.StreamClosedError`; a retry of a batch
+that landed before the close still returns its position. Redis cannot see
+the Workflow close, so the mark is set by whoever sees it first: the Worker,
+best effort, after a publishing run's final Workflow Task; a producer, when
+it first writes; and a reader, when its read ends. Between the final
+Workflow Task and the mark there is a closing window in which appends are
+still accepted. If the Worker stops before it marks the chain, the window
+lasts until a reader or a new producer sees the ended chain. Records written
+in the window stay readable. The Workflow's own committed output is never
+refused, so its final task's publish lands after the close.
 """
 
 from __future__ import annotations
@@ -63,12 +77,13 @@ from temporalio.contrib.streams._body import (
 )
 from temporalio.contrib.streams._cursor import BEGINNING, mint_cursor, stream_hash
 from temporalio.contrib.streams._errors import (
+    StreamClosedError,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
     StreamUnsupportedError,
 )
-from temporalio.contrib.streams._output import StagedBatch, StageRef
+from temporalio.contrib.streams._output import CHAIN_ENDED, StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._record import Cursor, RecordKind
 from temporalio.contrib.streams._ref import StreamRef
@@ -101,7 +116,7 @@ local function keep(log, meta, added, last, retention, grace)
 end
 """
 
-# KEYS: log, meta. ARGV: retention ms, grace ms, session field, first
+# KEYS: log, meta, chain. ARGV: retention ms, grace ms, session field, first
 # sequence, digest, records... The high-water field reads
 # "<sequence>|<first id>|<last id>|<digest>".
 _APPEND_LUA = (
@@ -126,6 +141,10 @@ if held then
     return redis.error_reply('STREAMS_STALE sequence ' .. ARGV[4] ..
       ' is below the newest one written, ' .. held_sequence)
   end
+end
+if redis.call('HGET', KEYS[3], 'closed') then
+  return redis.error_reply('STREAMS_CLOSED the Workflow that owns this stream ' ..
+    'has closed')
 end
 local first, last
 for i = 6, #ARGV do
@@ -198,6 +217,9 @@ class _ChainKeys:
     def meta(self, topic: str) -> str:
         return f"{self.log(topic)}:meta"
 
+    def chain(self) -> str:
+        return f"{self.base}:chain"
+
     def stage(self, token: str) -> str:
         return f"{self.base}:stage:{_part(token)}"
 
@@ -226,6 +248,8 @@ def _append_error(error: redis.exceptions.RedisError) -> Exception:
     message = str(error)
     if message.startswith(("STREAMS_DIVERGENT", "STREAMS_STALE")):
         return StreamProducerError(message.split(" ", 1)[1])
+    if message.startswith("STREAMS_CLOSED"):
+        return StreamClosedError(message.split(" ", 1)[1])
     return error
 
 
@@ -246,6 +270,7 @@ class RedisProducer(Generic[T]):
         self._attempt = attempt
         self._sequence = 1
         self._last = BEGINNING
+        self._checked_owner = False
 
     @property
     def producer_id(self) -> str:
@@ -298,9 +323,14 @@ class RedisProducer(Generic[T]):
             await encode_body(self._handle._converter, wire)
         keys = await self._handle._keys()
         streams = self._handle._streams
+        if not self._checked_owner:
+            # A producer that starts after the chain ended would otherwise
+            # write until something else marks the chain closed.
+            await self._handle._refuse_if_ended(keys)
+            self._checked_owner = True
         try:
             _, last = await streams._append(
-                keys=[keys.log(self._topic), keys.meta(self._topic)],
+                keys=[keys.log(self._topic), keys.meta(self._topic), keys.chain()],
                 args=[
                     *streams._retention_args(),
                     _session_field(self._producer_id, self._attempt),
@@ -387,6 +417,22 @@ class RedisStreamHandle:
                 self._client.namespace, self._ref.workflow_id, first_run_id
             )
         return self._chain
+
+    async def _refuse_if_ended(self, keys: _ChainKeys) -> None:
+        """Mark the chain closed and raise if its latest run has ended.
+
+        Raises:
+            StreamClosedError: The chain has ended.
+        """
+        description = await self._client.get_workflow_handle(
+            self._ref.workflow_id
+        ).describe()
+        if description.status in CHAIN_ENDED:
+            await self._streams._mark_closed(keys)
+            raise StreamClosedError(
+                f"the Workflow {self._ref.workflow_id!r} that owns this stream has "
+                "closed"
+            )
 
     async def _first_run_id(self) -> str:
         try:
@@ -490,6 +536,17 @@ class RedisStreams(StreamProviderPlugin):
             keys=[keys.stage(stage.token), *topic_keys],
             args=[*self._retention_args(), *stage.topics],
         )
+
+    async def _close_chain(
+        self, namespace: str, workflow_id: str, first_run_id: str
+    ) -> None:
+        await self._mark_closed(self._chain_keys(namespace, workflow_id, first_run_id))
+
+    async def _mark_closed(self, keys: _ChainKeys) -> None:
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.hset(keys.chain(), "closed", "1")
+            pipe.pexpire(keys.chain(), self._retention_ms + self._grace_ms)
+            await pipe.execute()
 
     async def _abort(self, stage: StageRef) -> None:
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)

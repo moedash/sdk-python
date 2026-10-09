@@ -19,10 +19,11 @@ import redis.exceptions
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client, WorkflowHandle
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHandle
 from temporalio.contrib.streams import (
     CONTENT_HASH_KEY,
     RUN_ID_KEY,
+    StreamClosedError,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
@@ -84,7 +85,8 @@ async def owner(client: Client) -> AsyncIterator[WorkflowHandle]:
             task_queue=worker.task_queue,
         )
         yield handle
-        await handle.terminate()
+        if (await handle.describe()).status == WorkflowExecutionStatus.RUNNING:
+            await handle.terminate()
 
 
 def client_with(
@@ -325,3 +327,93 @@ async def test_a_stage_expires_with_retention_and_a_promotion_keeps_the_log(
 def test_retention_must_be_positive():
     with pytest.raises(ValueError, match="retention"):
         RedisStreams("redis://localhost:1", retention=timedelta(0))
+
+
+@workflow.defn
+class PublishUntilTold:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.run
+    async def run(self, continue_once: bool) -> None:
+        workflow_writer(EVENTS).publish({"run": "started"})
+        if continue_once:
+            workflow.continue_as_new(False)
+        await workflow.wait_condition(lambda: self.done)
+        workflow_writer(EVENTS).publish({"run": "last"})
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+
+async def wait_closed(raw: Any, keys: Any) -> None:
+    for _ in range(100):
+        if await raw.hget(keys.chain(), "closed"):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the chain was never marked closed")
+
+
+async def test_the_worker_closes_the_streams_of_an_ended_chain(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-close-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishUntilTold) as worker:
+        handle = await streams_client.start_workflow(
+            PublishUntilTold.run, False, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        producer = stream.producer(topic=OTHER, producer_id="backend", attempt=1)
+        landed = await producer.append({"n": 1})
+        await handle.signal(PublishUntilTold.finish)
+        await handle.result()
+        keys = await stream._keys()
+        await wait_closed(raw, keys)
+
+    with pytest.raises(StreamClosedError):
+        await producer.append({"n": 2})
+    # A retry of a batch that landed before the close still finds it.
+    retry = stream.producer(topic=OTHER, producer_id="backend", attempt=1)
+    retry._checked_owner = True
+    assert await retry.append({"n": 1}) == landed
+    # The final Workflow Task's own publish is committed output, never refused.
+    events = await log_entries(raw, stream, "events")
+    assert [r.body.data for r in events][-1] == b'{"run":"last"}'
+
+
+async def test_a_new_producer_closes_an_ended_chain_the_worker_missed(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(1)
+    await owner.terminate()
+    keys = await stream._keys()
+    assert not await raw.hget(keys.chain(), "closed")
+    late = stream.producer(topic=EVENTS, producer_id="q", attempt=1)
+    with pytest.raises(StreamClosedError):
+        await late.append(2)
+    assert await raw.hget(keys.chain(), "closed") == b"1"
+    assert 0 < await raw.pttl(keys.chain())
+
+
+async def test_continue_as_new_does_not_close_the_chain(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-can-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishUntilTold) as worker:
+        handle = await streams_client.start_workflow(
+            PublishUntilTold.run, True, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        for _ in range(100):
+            if (await handle.describe()).run_id != handle.first_execution_run_id:
+                break
+            await asyncio.sleep(0.05)
+        await stream.producer(topic=OTHER, producer_id="p", attempt=1).append(1)
+        keys = await stream._keys()
+        assert not await raw.hget(keys.chain(), "closed")
+        await handle.signal(PublishUntilTold.finish)
+        await handle.result()
