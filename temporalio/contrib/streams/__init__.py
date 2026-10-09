@@ -10,18 +10,28 @@ through a provider, and never pass through Temporal or its History.
 
 The contract:
 
-1. **A new attempt supersedes the old one.** When a reader sees the first
+1. **Producers write with an identity.** A producer has an id, an attempt
+   and a sequence that starts at one for each attempt. A retry of the
+   newest batch with the same content is written once and returns the
+   original position. A retry with different content, or with a lower
+   sequence, is refused with :class:`StreamProducerError`. Content is
+   compared over the payloads the converter produced, before the codec, so
+   a codec with a fresh nonce per call still deduplicates a retry.
+2. **A new attempt supersedes the old one.** When a reader sees the first
    record of a producer's newer attempt, it yields a
    :attr:`RecordKind.SUPERSEDED` record first. No store holds that record,
    so every provider reports a retry the same way.
-2. **A cursor belongs to one stream.** Hand it back to resume strictly after
+3. **A cursor belongs to one stream.** Hand it back to resume strictly after
    the record it names. A provider refuses a cursor from another provider
    or another stream with :class:`StreamCursorError`, and one whose record
    retention dropped with :class:`StreamExpiredError`. A read with no cursor
    starts at :data:`BEGINNING` or :data:`END`.
-3. **Topics are defined once.** :func:`topic` defines a topic with the type
+4. **Topics are defined once.** :func:`topic` defines a topic with the type
    its records decode to, and every party shares that definition. A call
    that names no topic addresses :data:`DEFAULT_TOPIC`.
+
+A provider is a plugin: ``Client.connect(..., plugins=[provider])``
+registers it on the client and on every Worker built from that client.
 
 The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.contrib.streams.proto.v1`, with the user's value in ``body``
@@ -44,6 +54,12 @@ from temporalio.contrib.streams._errors import (
     StreamOutcomeUnknownError,
     StreamProducerError,
     StreamUnsupportedError,
+)
+from temporalio.contrib.streams._plugin import StreamProviderPlugin
+from temporalio.contrib.streams._provider import (
+    StreamHandle,
+    StreamProducer,
+    StreamProvider,
 )
 from temporalio.contrib.streams._record import (
     BEGINNING,
@@ -72,10 +88,14 @@ __all__ = [
     "StreamCursorError",
     "StreamError",
     "StreamExpiredError",
+    "StreamHandle",
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamOwnerKind",
+    "StreamProducer",
     "StreamProducerError",
+    "StreamProvider",
+    "StreamProviderPlugin",
     "StreamRecord",
     "StreamRef",
     "StreamTopic",

@@ -11,7 +11,9 @@ from collections.abc import Sequence
 
 import pytest
 
+from temporalio import activity
 from temporalio.api.common.v1 import Payload
+from temporalio.client import Client
 from temporalio.common import RawValue
 from temporalio.contrib.streams import (
     BEGINNING,
@@ -24,9 +26,11 @@ from temporalio.contrib.streams import (
     StreamCursorError,
     StreamError,
     StreamExpiredError,
+    StreamHandle,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamProviderPlugin,
     StreamRef,
     StreamTopic,
     StreamUnsupportedError,
@@ -43,10 +47,12 @@ from temporalio.contrib.streams._cursor import (
     mint_cursor,
     stream_hash,
 )
+from temporalio.contrib.streams._plugin import _StreamsInterceptor
 from temporalio.contrib.streams._policy import AttemptTracker
 from temporalio.contrib.streams._wire import RecordDecoder, from_wire, to_wire
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.converter import DataConverter, PayloadCodec
+from temporalio.worker import Worker
 
 OUT = topic("out", dict)
 
@@ -331,3 +337,49 @@ async def test_the_body_is_hashed_before_the_codec_and_decoded_after():
     finish = to_wire(converter.payload_converter, topic="t", kind=RecordKind.FINISH)
     await encode_body(converter, finish)
     assert CONTENT_HASH_KEY not in finish.metadata
+
+
+class _StubProvider(StreamProviderPlugin):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+
+    def get_stream_handle(self, client: Client, ref: StreamRef) -> StreamHandle:
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_one_provider_per_client(client: Client):
+    first, second = _StubProvider("first"), _StubProvider("second")
+    config = client.config()
+    config["plugins"] = [first, second]
+    with pytest.raises(ValueError, match="is already registered"):
+        Client(**config)
+    # The same instance twice is one provider, not two.
+    config["plugins"] = [first, first]
+    Client(**config)
+
+
+class _OtherStubProvider(_StubProvider):
+    pass
+
+
+async def test_one_provider_per_worker(client: Client):
+    first, second = _StubProvider("first"), _OtherStubProvider("second")
+    config = client.config()
+    config["plugins"] = [first]
+    with pytest.raises(ValueError, match="is already registered"):
+        Worker(Client(**config), task_queue="tq", activities=[_noop], plugins=[second])
+    # The provider on the client and the Worker adds one interceptor.
+    with pytest.warns(UserWarning, match="same plugin type"):
+        worker = Worker(
+            Client(**config), task_queue="tq", activities=[_noop], plugins=[first]
+        )
+    interceptors = worker.config(active_config=True).get("interceptors", [])
+    assert len([i for i in interceptors if isinstance(i, _StreamsInterceptor)]) == 1
+
+
+@activity.defn
+async def _noop() -> None:
+    pass
