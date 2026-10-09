@@ -586,3 +586,45 @@ async def test_a_read_that_falls_behind_retention_raises_instead_of_skipping(
     assert (await asyncio.wait_for(fresh.__anext__(), 5.0)).value == {"n": 3}
     await fresh.aclose()
     await provider.close()
+
+
+async def test_an_idle_read_backs_off_its_owner_checks(
+    client: Client, owner: WorkflowHandle, monkeypatch: pytest.MonkeyPatch
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        poll_interval=timedelta(milliseconds=50),
+    )
+    provider._owner_check_min, provider._owner_check_max = 0.1, 0.4
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 0})
+    checks: list[float] = []
+    real = stream._owner_ended
+
+    async def counted(keys: Any) -> bool:
+        checks.append(asyncio.get_running_loop().time())
+        return await real(keys)
+
+    monkeypatch.setattr(stream, "_owner_ended", counted)
+    records = stream.read(topic=EVENTS)
+    await records.__anext__()
+    pending = asyncio.ensure_future(records.__anext__())
+    await asyncio.sleep(2.0)
+    # Fixed checks every 0.1 s would be about 20; doubling to 0.4 s is 6.
+    assert 4 <= len(checks) <= 8
+    gaps = [later - earlier for earlier, later in zip(checks, checks[1:])]
+    assert gaps[-1] >= 0.35
+    # A record restarts the interval at its minimum.
+    await producer.append({"n": 1})
+    assert (await asyncio.wait_for(pending, 5.0)).value == {"n": 1}
+    before = len(checks)
+    pending = asyncio.ensure_future(records.__anext__())
+    await asyncio.sleep(0.25)
+    assert len(checks) - before >= 1
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await records.aclose()
+    await provider.close()

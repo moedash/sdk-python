@@ -79,6 +79,7 @@ first time it talks to it.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import uuid
@@ -126,6 +127,8 @@ __all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
 
 _PROVIDER = "redis"
 _READ_BATCH = 100
+_OWNER_CHECK_MIN = timedelta(milliseconds=500)
+_OWNER_CHECK_MAX = timedelta(seconds=5)
 _TOMBSTONE_GRACE = timedelta(days=30)
 _RECORD_FIELD = "r"
 
@@ -434,8 +437,11 @@ class RedisStreamHandle:
 
         The read long-polls the log with ``XREAD BLOCK``. ``END`` is
         resolved when iteration begins. While no record arrives, the read
-        asks the server whether the owner closed; once it has, the read
-        delivers what is left and ends, and marks the chain closed. A read
+        asks the server whether the owner closed, first after 500 ms and
+        then twice as long each time, up to every 5 s; a record arriving
+        starts the interval over. Once the owner has closed, the read
+        delivers what is left and ends, and marks the chain closed. So an
+        idle read may end up to 5 s after its owner closed. A read
         on a handle pinned to a run ends when that run closes, even if the
         chain continued as new.
         """
@@ -483,6 +489,11 @@ class RedisStreamHandle:
         )
         block_ms = self._streams._poll_ms
         ended = False
+        # An idle reader asks about its owner less and less often, so many
+        # readers parked on a quiet stream do not load the server.
+        check_every = self._streams._owner_check_min
+        loop = asyncio.get_running_loop()
+        next_check = loop.time() + check_every
         while True:
             # The watermark is read after XREAD returns, on the same
             # connection, so a trim that raced the read is seen here.
@@ -518,12 +529,18 @@ class RedisStreamHandle:
                 for record in decoder.decode(cursor, wire):
                     yield record
             if entries:
+                check_every = self._streams._owner_check_min
+                next_check = loop.time() + check_every
                 continue
             if ended:
                 return
+            if loop.time() < next_check:
+                continue
             # One more pass after learning the owner closed, so a record
             # that landed between the read and the describe is delivered.
             ended = await self._owner_ended(keys)
+            check_every = min(check_every * 2, self._streams._owner_check_max)
+            next_check = loop.time() + check_every
 
     async def _refuse_lost(self, keys: _ChainKeys, topic: str, position: str) -> None:
         """Raise when the store no longer holds what follows ``position``.
@@ -688,6 +705,8 @@ class RedisStreams(StreamProviderPlugin):
         self._poll_ms = max(1, int(poll_interval / timedelta(milliseconds=1)))
         self._checked_server = False
         self._read_count = _READ_BATCH
+        self._owner_check_min = _OWNER_CHECK_MIN.total_seconds()
+        self._owner_check_max = _OWNER_CHECK_MAX.total_seconds()
         if isinstance(redis_client, str):
             self._redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url(
                 redis_client
