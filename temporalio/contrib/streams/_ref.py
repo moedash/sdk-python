@@ -22,7 +22,12 @@ from temporalio.contrib.streams._topic import (
 __all__ = ["StreamOwnerKind", "StreamRef"]
 
 StreamOwnerKind = Literal["workflow"]
-"""What owns a stream. Only a Workflow does in this release."""
+"""The owner kinds this release opens. Only a Workflow owns a stream.
+
+:attr:`StreamRef.kind` is a plain string, so a ref that names an owner kind
+a later release adds still reaches the ref's own check when it is decoded,
+instead of failing the converter's type check.
+"""
 
 
 @dataclass(frozen=True)
@@ -39,7 +44,7 @@ class StreamRef:
     argument or an Activity result.
     """
 
-    kind: StreamOwnerKind
+    kind: str
     workflow_id: str
     run_id: str | None = None
     topic: str = DEFAULT_TOPIC
