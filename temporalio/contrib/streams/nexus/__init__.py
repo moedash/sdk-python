@@ -67,7 +67,6 @@ from temporalio.contrib.streams.nexus._reader import (
     ReadSupersession,
     StreamIncompleteError,
     StreamReader,
-    StreamRecordError,
 )
 from temporalio.contrib.streams.nexus._workflow import close_workflow_stream
 
@@ -85,7 +84,6 @@ __all__ = [
     "StreamNotifier",
     "StreamOperationHandler",
     "StreamReader",
-    "StreamRecordError",
     "StreamRef",
     "TemporalStreams",
     "TemporalStreamsHandler",
