@@ -218,7 +218,8 @@ class NexusOperationProgress(google.protobuf.message.Message):
     """The event ID of the `NEXUS_OPERATION_SCHEDULED` event of the caller Workflow's operation."""
     position: builtins.str
     """Where the operation's output stands after the change this progress reports, in the
-    handler's terms, such as a stream cursor. Opaque to the server.
+    handler's terms, such as a stream cursor. Opaque to the server, which rejects a position
+    longer than 1 KiB of UTF-8.
     """
     counter: builtins.int
     """Orders the progress of one operation. Among progress folded together, the highest counter
