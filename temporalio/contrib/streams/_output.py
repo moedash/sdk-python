@@ -84,6 +84,9 @@ class _RunOutput:
         self.workflow_id = workflow_id
         self.run_id = run_id
         self.pending: list[WireRecord] = []
+        # FINISH is a statement about the topic, not about a writer object,
+        # and every workflow_writer() call returns a new writer.
+        self.finished: set[str] = set()
         self.staged: list[_Stage] = []
 
     def publish(self, records: Sequence[WireRecord]) -> None:
