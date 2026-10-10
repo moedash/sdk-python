@@ -34,7 +34,7 @@ def client_with(client: Client, provider: MemoryStreams) -> Client:
 
 
 async def take(records: Any, count: int, timeout: float = 10.0) -> list:
-    out = []
+    out: list[Any] = []
     try:
         while len(out) < count:
             out.append(await asyncio.wait_for(anext(records), timeout))
