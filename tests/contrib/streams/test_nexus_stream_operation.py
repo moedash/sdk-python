@@ -358,6 +358,8 @@ async def test_a_provider_that_notifies_tells_the_notifier_after_each_append(
         for request in service.notified
     )
     assert service.notified[-1].close
+    # The server refuses a reference without its chain.
+    assert all(request.stream_ref.run_id for request in service.notified)
     await provider.close()
 
 
@@ -868,10 +870,23 @@ async def test_a_workflow_closes_its_own_stream_through_system_nexus(
             ),
             30,
         )
-        owner_result = await client.get_workflow_handle(owner_id).result()
+        owner = client.get_workflow_handle(owner_id)
+        owner_result = await owner.result()
+        owner_history = await owner.fetch_history()
 
     assert observed.result == "3 tokens"
     assert owner_result is None
+    # The server refuses a reference without its chain, so the close names the
+    # chain's first run.
+    first_run_id = owner_history.events[
+        0
+    ].workflow_execution_started_event_attributes.first_execution_run_id
+    [close] = [
+        event.nexus_operation_scheduled_event_attributes
+        for event in owner_history.events
+        if event.HasField("nexus_operation_scheduled_event_attributes")
+    ]
+    assert first_run_id and first_run_id.encode() in close.input.data
     await provider.close()
 
 
