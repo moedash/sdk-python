@@ -514,7 +514,12 @@ class MemoryStreams(StreamProviderPlugin):
         ``client`` may be ``None`` here, unlike on a storage provider. Then
         the handle uses the default data converter and the ``default``
         namespace, and a read waits until the caller stops it.
+
+        Raises:
+            StreamUnsupportedError: ``ref`` names an owner kind this release
+                lacks.
         """
+        ref._require_supported()
         return MemoryStreamHandle(self, client, ref)
 
     async def close(self) -> None:

@@ -15,6 +15,7 @@ from temporalio.contrib.streams import (
 from temporalio.contrib.streams._topic import (
     resolve_topic,
 )
+from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.converter import DataConverter
 
 OUT = topic("out", dict)
@@ -52,24 +53,26 @@ def test_a_ref_round_trips_through_the_default_converter():
 
 
 def test_a_ref_refuses_what_it_cannot_name():
-    with pytest.raises(ValueError, match="unknown"):
-        StreamRef("nexus", "x")
     with pytest.raises(ValueError):
         StreamRef("workflow", "")
     with pytest.raises(ValueError):
         StreamRef("workflow", "wf", topic="")
 
 
-def test_a_ref_from_a_later_release_decodes_to_unsupported():
-    # The kind is a plain string, so the converter builds the ref and the ref
-    # says what is missing, rather than the converter failing a type check.
+@pytest.mark.parametrize("kind", ["activity", "nexus"])
+def test_a_ref_from_a_later_release_decodes_and_fails_where_it_opens(kind: str):
+    # Decoding happens while a Workflow Task applies its input, where a raise
+    # fails the task on every retry. Opening the handle is where the caller
+    # can catch it.
     converter = DataConverter.default.payload_converter
     payload = Payload(
         metadata={"encoding": b"json/plain"},
-        data=b'{"kind": "activity", "workflow_id": "wf", "topic": "out"}',
+        data=f'{{"kind": "{kind}", "workflow_id": "wf", "topic": "out"}}'.encode(),
     )
+    ref = converter.from_payloads([payload], [StreamRef])[0]
+    assert ref.kind == kind
     with pytest.raises(StreamUnsupportedError, match="only Workflow-owned"):
-        converter.from_payloads([payload], [StreamRef])
+        MemoryStreams().get_stream_handle(None, ref)
 
 
 @pytest.mark.parametrize(

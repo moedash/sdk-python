@@ -26,11 +26,8 @@ StreamOwnerKind = Literal["workflow"]
 """The owner kinds this release opens. Only a Workflow owns a stream.
 
 :attr:`StreamRef.kind` is a plain string, so a ref that names an owner kind
-a later release adds still reaches the ref's own check when it is decoded,
-instead of failing the converter's type check.
+a later release adds still decodes, and is refused where a handle opens.
 """
-
-_LATER_KINDS = ("activity", "standalone")
 
 
 @dataclass(frozen=True)
@@ -56,25 +53,34 @@ class StreamRef:
     topic: str = DEFAULT_TOPIC
 
     def __post_init__(self) -> None:
-        """Refuse a ref this release cannot open.
+        """Refuse a ref that names no stream.
+
+        Any ``kind`` decodes, since a ref of a later release can arrive as
+        Workflow input, where raising would fail the Workflow Task on every
+        retry. :meth:`_require_supported` refuses it where a handle opens.
 
         Raises:
-            StreamUnsupportedError: ``kind`` names an owner kind that a later
-                release adds.
-            ValueError: ``kind`` is unknown, or ``workflow_id`` or ``topic``
-                is empty.
+            ValueError: ``kind`` or ``topic`` is empty, or a Workflow ref has
+                no ``workflow_id``.
         """
-        if self.kind != "workflow":
-            if self.kind in _LATER_KINDS:
-                raise StreamUnsupportedError(
-                    f"streams owned by an {self.kind!r} are not supported in this "
-                    "release; only Workflow-owned streams are"
-                )
-            raise ValueError(f"unknown StreamRef kind {self.kind!r}")
-        if not self.workflow_id:
+        if not self.kind:
+            raise ValueError("a StreamRef needs a kind")
+        if self.kind == "workflow" and not self.workflow_id:
             raise ValueError("a Workflow StreamRef needs a workflow_id")
         if not self.topic:
             raise ValueError("a StreamRef needs a topic name")
+
+    def _require_supported(self) -> None:
+        """Refuse to open a stream whose owner kind this release lacks.
+
+        Raises:
+            StreamUnsupportedError: ``kind`` is not ``"workflow"``.
+        """
+        if self.kind != "workflow":
+            raise StreamUnsupportedError(
+                f"streams owned by kind {self.kind!r} are not supported in this "
+                "release; only Workflow-owned streams are"
+            )
 
     @classmethod
     def for_workflow(

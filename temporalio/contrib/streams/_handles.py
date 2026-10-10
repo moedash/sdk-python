@@ -178,4 +178,5 @@ def get_stream_handle(
         ref = workflow_id
     else:
         ref = StreamRef.for_workflow(workflow_id, run_id=run_id, topic=topic)
+    ref._require_supported()
     return provider_for_client(client).get_stream_handle(client, ref)
