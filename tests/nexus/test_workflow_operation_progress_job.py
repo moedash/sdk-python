@@ -15,7 +15,7 @@ from google.protobuf.duration_pb2 import Duration
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from temporalio import workflow
-from temporalio.api.common.v1 import Payload, Payloads, WorkflowType
+from temporalio.api.common.v1 import Payloads, WorkflowType
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import (
     HistoryEvent,
