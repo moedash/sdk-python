@@ -212,6 +212,9 @@ class MemoryProducer(Generic[T]):
         self._attempt = attempt
         self._sequence = 1
         self._last = BEGINNING
+        # A batch reads the sequence, then awaits the codec, then writes;
+        # calls one at a time keep each batch's sequences its own.
+        self._lock = asyncio.Lock()
 
     @property
     def producer_id(self) -> str:
@@ -225,37 +228,39 @@ class MemoryProducer(Generic[T]):
 
     async def append(self, *values: T) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamProducer.append`."""
-        if not values:
-            return self._last
-        return await self._write(
-            [
-                to_wire(
-                    self._converter.payload_converter,
-                    topic=self._topic,
-                    kind=RecordKind.DATA,
-                    value=value,
-                    producer_id=self._producer_id,
-                    attempt=self._attempt,
-                    sequence=self._sequence + index,
-                )
-                for index, value in enumerate(values)
-            ]
-        )
+        async with self._lock:
+            if not values:
+                return self._last
+            return await self._write(
+                [
+                    to_wire(
+                        self._converter.payload_converter,
+                        topic=self._topic,
+                        kind=RecordKind.DATA,
+                        value=value,
+                        producer_id=self._producer_id,
+                        attempt=self._attempt,
+                        sequence=self._sequence + index,
+                    )
+                    for index, value in enumerate(values)
+                ]
+            )
 
     async def finish(self) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamProducer.finish`."""
-        return await self._write(
-            [
-                to_wire(
-                    self._converter.payload_converter,
-                    topic=self._topic,
-                    kind=RecordKind.FINISH,
-                    producer_id=self._producer_id,
-                    attempt=self._attempt,
-                    sequence=self._sequence,
-                )
-            ]
-        )
+        async with self._lock:
+            return await self._write(
+                [
+                    to_wire(
+                        self._converter.payload_converter,
+                        topic=self._topic,
+                        kind=RecordKind.FINISH,
+                        producer_id=self._producer_id,
+                        attempt=self._attempt,
+                        sequence=self._sequence,
+                    )
+                ]
+            )
 
     async def _write(self, wires: list[WireRecord]) -> Cursor:
         content = content_fingerprint(wires)
@@ -446,7 +451,10 @@ class MemoryStreamHandle:
 
 
 class MemoryStreams(StreamProviderPlugin):
-    """The in-memory provider, one list per topic.
+    """The in-memory provider, one list per topic. For tests only.
+
+    It keeps everything in process memory: nothing survives the process,
+    and it is not meant for production.
 
     Pass the same instance to the client, or to the Worker, and to any code
     that opens handles from it directly; two instances share nothing.
