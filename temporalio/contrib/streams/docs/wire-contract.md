@@ -121,9 +121,13 @@ Trim and refresh:
    failed or timed out, when the run closed without the marker, or, for a
    stage the Worker held across an eviction of the run, when another marker
    carries the same history floor.
-5. Repair: a reader settles the `stages` fields a stopped Worker left, in
-   commit order, by run start time and then history floor. It stops at the
-   first stage History has not decided yet.
+5. Repair: a reader settles the `stages` fields a stopped Worker left. It
+   takes the stages pending at that moment by run start time and then
+   history floor, and stops at the first stage History has not decided yet.
+   A stage whose run History no longer holds is aborted. Order holds only
+   among the stages one repair settles: a later run's Worker promotes its
+   own output at once, so a stopped Worker's output that a reader repairs
+   later lands after it (a known limit of DD-41).
 
 ## Cursors
 

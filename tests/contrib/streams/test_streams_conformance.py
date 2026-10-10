@@ -129,10 +129,15 @@ async def _memory_case(client: Client) -> AsyncIterator[ProviderCase]:
 
 @asynccontextmanager
 async def _redis_case(
-    client: Client, cluster: bool = False
+    client: Client,
+    cluster: bool = False,
+    *,
+    url: str | None = None,
+    prefix: str | None = None,
+    name: str | None = None,
 ) -> AsyncIterator[ProviderCase]:
     variable = "STREAMS_REDIS_CLUSTER_URL" if cluster else "STREAMS_REDIS_URL"
-    url = os.environ.get(variable)
+    url = url or os.environ.get(variable)
     if not url:
         pytest.skip(f"set {variable} to run these Redis provider cases")
     from redis.asyncio.cluster import RedisCluster
@@ -140,7 +145,7 @@ async def _redis_case(
     from temporalio.contrib.streams.redis import RedisStreams
 
     # A prefix per case keeps cases apart in one Redis.
-    prefix = f"conformance-{uuid.uuid4().hex}"
+    prefix = prefix or f"conformance-{uuid.uuid4().hex}"
     cluster_client = RedisCluster.from_url(url) if cluster else None
     provider = RedisStreams(cluster_client or url, key_prefix=prefix)
     owners: list[WorkflowHandle] = []
@@ -154,7 +159,7 @@ async def _redis_case(
             assert handle.result_run_id is not None
             return handle.result_run_id
 
-        name = "redis-cluster" if cluster else "redis"
+        name = name or ("redis-cluster" if cluster else "redis")
         case = ProviderCase(name, provider, client, host=host)
 
         async def truncate(workflow_id: str, name: str, keep: int) -> None:
@@ -180,9 +185,26 @@ async def _redis_case(
         await cluster_client.aclose()
 
 
+@asynccontextmanager
+async def _redis_acl_case(client: Client) -> AsyncIterator[ProviderCase]:
+    # The guarantees page says this suite passes as its documented ACL user.
+    url = os.environ.get("STREAMS_REDIS_URL")
+    if not url:
+        pytest.skip("set STREAMS_REDIS_URL to run these Redis provider cases")
+    from tests.contrib.streams._redis_acl import documented_user
+
+    prefix = f"conformance-{uuid.uuid4().hex}"
+    async with documented_user(url, client.namespace, prefix) as acl_url:
+        async with _redis_case(
+            client, url=acl_url, prefix=prefix, name="redis-acl"
+        ) as case:
+            yield case
+
+
 SETUPS: dict[str, Callable[[Client], Any]] = {
     "memory": _memory_case,
     "redis": _redis_case,
+    "redis-acl": _redis_acl_case,
     "redis-cluster": functools.partial(_redis_case, cluster=True),
 }
 
