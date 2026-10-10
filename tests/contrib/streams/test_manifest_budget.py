@@ -15,7 +15,8 @@ import pytest
 
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.streams import (
     StreamError,
     StreamRef,
@@ -161,3 +162,37 @@ async def test_a_refused_finish_leaves_the_topic_open(client: Client):
             task_queue=worker.task_queue,
         )
     assert result == "finished"
+
+
+@workflow.defn
+class PublishToManyTopicsUncaught:
+    @workflow.run
+    async def run(self, count: int) -> None:
+        for index in range(count):
+            workflow_writer(topic_name(index)).publish({"i": index})
+
+
+async def test_an_uncaught_budget_error_fails_the_task_on_every_retry(client: Client):
+    # The error is not a Temporal failure, so the Workflow does not fail; the
+    # task retries the same code and fails the same way until it is fixed.
+    streams_client = client_with(client, MemoryStreams())
+    async with new_worker(streams_client, PublishToManyTopicsUncaught) as worker:
+        handle = await streams_client.start_workflow(
+            PublishToManyTopicsUncaught.run,
+            1000,
+            id=f"streams-budget-uncaught-{uuid.uuid4().hex}",
+            task_queue=worker.task_queue,
+        )
+        failures: list[str] = []
+        for _ in range(100):
+            failures = [
+                event.workflow_task_failed_event_attributes.failure.message
+                async for event in handle.fetch_history_events()
+                if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+            ]
+            if failures:
+                break
+            await asyncio.sleep(0.1)
+        assert failures and "manifest past" in failures[0]
+        assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+        await handle.terminate()

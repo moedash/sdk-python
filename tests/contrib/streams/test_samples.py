@@ -30,8 +30,11 @@ async def test_path_a_a_client_reads_what_a_workflow_published(client: Client):
     provider = RedisStreams(
         os.environ["STREAMS_REDIS_URL"], key_prefix=f"sample-{uuid.uuid4().hex}"
     )
+    # Ids of their own, so runs that share a dev server never collide.
     steps = await path_a_workflow_publish.main(
-        client_with(client, provider), f"sample-a-{uuid.uuid4().hex}"
+        client_with(client, provider),
+        f"sample-a-{uuid.uuid4().hex}",
+        workflow_id=f"order-{uuid.uuid4().hex}",
     )
     assert steps == ["reserved", "charged", "shipped"]
     await provider.close()
@@ -42,7 +45,9 @@ async def test_path_b_a_reader_drops_what_a_failed_attempt_wrote(client: Client)
         os.environ["STREAMS_REDIS_URL"], key_prefix=f"sample-{uuid.uuid4().hex}"
     )
     text = await path_b_activity_publish.main(
-        client_with(client, provider), f"sample-b-{uuid.uuid4().hex}"
+        client_with(client, provider),
+        f"sample-b-{uuid.uuid4().hex}",
+        workflow_id=f"answer-{uuid.uuid4().hex}",
     )
     assert text == "an answer to streams"
     await provider.close()

@@ -12,11 +12,13 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
 
+import pytest
+
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
 from temporalio.bridge.proto.external_data import ExternalStreamMarkerData
-from temporalio.client import Client, WorkflowHandle
+from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
 from temporalio.contrib.streams import (
     RecordKind,
     StreamRef,
@@ -30,6 +32,7 @@ from temporalio.contrib.streams._output import MARKER_NAME
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.converter import DataConverter, PayloadCodec
+from temporalio.worker import Replayer
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
@@ -248,3 +251,61 @@ async def test_two_publishing_completions_in_one_task_commit_in_order(
     )
     records = await read_all(stream.read(topic=EVENTS))
     assert [r.value for r in records] == [{"n": "before"}, {"n": "after"}]
+
+
+async def test_a_replayer_without_the_stream_plugin_says_so(client: Client):
+    provider = MemoryStreams()
+    streams_client = client_with(client, provider)
+    async with new_worker(streams_client, PublishOnce) as worker:
+        handle = await streams_client.start_workflow(
+            PublishOnce.run, id=new_workflow_id(), task_queue=worker.task_queue
+        )
+        await handle.result()
+    history = await handle.fetch_history()
+    with pytest.raises(Exception, match="stream provider plugin"):
+        await Replayer(workflows=[PublishOnce]).replay_workflow(history)
+
+
+@workflow.defn
+class PublishAfterARejectedUpdate:
+    def __init__(self) -> None:
+        self.go = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self.go)
+        workflow_writer(EVENTS).publish({"after": "rejected update"})
+
+    @workflow.update
+    def set_go(self, value: bool) -> None:
+        self.go = value
+
+    @set_go.validator
+    def check_go(self, value: bool) -> None:
+        if not value:
+            raise ValueError("only True starts the publish")
+
+    @workflow.signal
+    def start(self) -> None:
+        self.go = True
+
+
+async def test_a_publish_right_after_a_rejected_update_commits(client: Client):
+    # Core drops the speculative task of a rejected Update, and with it the
+    # task's history floor, so the next publishing task must find its own.
+    provider = MemoryStreams()
+    streams_client = client_with(client, provider)
+    workflow_id = new_workflow_id()
+    async with new_worker(streams_client, PublishAfterARejectedUpdate) as worker:
+        handle = await streams_client.start_workflow(
+            PublishAfterARejectedUpdate.run,
+            id=workflow_id,
+            task_queue=worker.task_queue,
+        )
+        with pytest.raises(WorkflowUpdateFailedError):
+            await handle.execute_update(PublishAfterARejectedUpdate.set_go, False)
+        await handle.signal(PublishAfterARejectedUpdate.start)
+        await handle.result()
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    (record,) = await read_all(stream.read(topic=EVENTS))
+    assert record.value == {"after": "rejected update"}
