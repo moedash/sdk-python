@@ -39,4 +39,7 @@ enum StreamRecordKind {
     // The producer named by `producer_id` writes nothing more on `topic`.
     // Says nothing about that producer's outcome and does not end the stream.
     STREAM_RECORD_KIND_FINISH = 2;
+    // A reader synthesizes SUPERSEDED with this value and never stores it, so
+    // no stored kind may take it.
+    reserved 3;
 }
