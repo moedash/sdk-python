@@ -12,6 +12,7 @@ _PRIVATE = {
     "content_hash",
     "decode_body",
     "encode_body",
+    "resolve_topic",
 }
 
 

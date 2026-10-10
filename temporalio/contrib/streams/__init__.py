@@ -51,7 +51,6 @@ from temporalio.contrib.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.contrib.streams._topic import (
     DEFAULT_TOPIC,
     StreamTopic,
-    resolve_topic,
     topic,
 )
 
@@ -76,6 +75,5 @@ __all__ = [
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
-    "resolve_topic",
     "topic",
 ]
