@@ -77,6 +77,8 @@ class WorkflowStreamWriter(Generic[T]):
                 published to so many topics that one more would take the
                 Workflow Task's manifest past its budget. Nothing is
                 published; publish the rest after the Workflow next waits.
+                Catch it: uncaught, it fails the Workflow Task, and every
+                retry runs the same code and fails the same way.
         """
         _refuse_read_only("publish to a stream")
         if self._topic in self._state.finished:
@@ -96,8 +98,9 @@ class WorkflowStreamWriter(Generic[T]):
     def finish(self) -> None:
         """Write ``FINISH`` for this Workflow on this topic. Idempotent.
 
-        Says this Workflow publishes nothing more on the topic. It does not
-        say the Workflow succeeded, and it does not end anyone's read.
+        Says this run publishes nothing more on the topic. A run that
+        follows by Continue-as-New can publish on it again. It does not say
+        the Workflow succeeded, and it does not end anyone's read.
 
         Raises:
             temporalio.workflow.ReadOnlyContextError: Called from a query or

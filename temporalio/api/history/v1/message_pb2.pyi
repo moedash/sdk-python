@@ -875,7 +875,9 @@ class WorkflowTaskScheduledEventAttributes(google.protobuf.message.Message):
         """Progress of the Workflow's Nexus operations that arrived since the previous Workflow Task was
         scheduled, at most one entry per operation: the one with the highest counter. Recorded here
         rather than as events of its own, so a burst of progress costs one task and replay sees the
-        same progress the Workflow saw.
+        same progress the Workflow saw. Its size is bounded by the Workflow's pending Nexus operation
+        limit times the per-entry bounds on `position` and `metadata`, about 3 KiB per operation, and
+        it counts toward the History size limit.
         """
     def __init__(
         self,
