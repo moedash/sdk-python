@@ -43,7 +43,6 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
@@ -59,7 +58,7 @@ from temporalio.bridge.proto.workflow_completion import WorkflowActivationComple
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.contrib.streams._body import content_fingerprint, encode_body
 from temporalio.contrib.streams._record import RecordKind
-from temporalio.contrib.streams._wire import WireRecord
+from temporalio.contrib.streams._wire import RUN_ID_KEY, WireRecord
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -148,6 +147,17 @@ class _Decision(Enum):
     UNKNOWN = "unknown"
 
 
+def _logical(record: WireRecord) -> WireRecord:
+    """``record`` without what a reset changes, which replay must not compare."""
+    if RUN_ID_KEY not in record.metadata:
+        return record
+    # A reset run replays the base run's markers, whose records name the base run.
+    logical = WireRecord()
+    logical.CopyFrom(record)
+    del logical.metadata[RUN_ID_KEY]
+    return logical
+
+
 def build_manifest(
     records: Sequence[WireRecord],
     *,
@@ -158,12 +168,14 @@ def build_manifest(
     """The manifest Core records for one publishing completion.
 
     Taken over the records as the converter produced them, so it does not
-    depend on the codec and replay recomputes the same manifest. Topics are
+    depend on the codec and replay recomputes the same manifest. The run id
+    in each record's metadata stays out, since a reset run replays markers
+    that the base run wrote. Topics are
     in order of first publish, and the completion is one segment.
     """
     by_topic: dict[str, list[WireRecord]] = {}
     for record in records:
-        by_topic.setdefault(record.topic, []).append(record)
+        by_topic.setdefault(record.topic, []).append(_logical(record))
     manifest = ExternalOutputStreamManifest(
         schema_version=_SCHEMA_VERSION,
         fingerprint_version=_FINGERPRINT_VERSION,
@@ -260,9 +272,11 @@ def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
     if any(event.event_type in _RUN_CLOSED for event in events):
         return _Decision.ABORT
     # Several commits of one task attempt share a floor, but they never
-    # straddle an eviction; a failed attempt always ends in one. So a stage
-    # from before an eviction whose floor another stage committed at belongs
-    # to a failed attempt, even a transient one that History never records.
+    # straddle an eviction; a failed attempt always ends in one, since Core
+    # evicts the run when a Workflow Task fails (the WFT failure path in
+    # Core's workflow/mod.rs). So a stage from before an eviction whose floor
+    # another stage committed at belongs to a failed attempt, even a transient
+    # one that History never records.
     if stage.survived_eviction:
         for event in events:
             output = _marker_output(event)
@@ -279,6 +293,10 @@ def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
                 return _Decision.UNKNOWN
             return _Decision.ABORT
     return _Decision.UNKNOWN
+
+
+# Enough evicted runs to cover a cache's churn, without growing for the life of the process.
+_MAX_ORPHAN_RUNS = 1000
 
 
 class OutputCoordinator:
@@ -299,8 +317,9 @@ class OutputCoordinator:
         self._runs: dict[str, _RunOutput] = {}
         # Stages of an evicted run that History had not decided yet. A run
         # that comes back picks them up, so a later completion or a replay
-        # can still settle them.
-        self._orphans: dict[str, list[_Stage]] = {}
+        # can still settle them. Bounded, since a run that finishes on another
+        # Worker never comes back here.
+        self._orphans: OrderedDict[str, list[_Stage]] = OrderedDict()
         # Tokens this coordinator promoted or aborted, so a run replayed again
         # and again (a small cache) does not ask the store about each one
         # every time. Bounded: forgetting one only costs a repeat request.
@@ -359,8 +378,6 @@ class OutputCoordinator:
         Raises:
             RuntimeError: Core did not report the task's history floor, so the
                 output cannot be committed.
-            temporalio.workflow.NondeterminismError: History recorded output
-                that the replayed run did not publish.
         """
         run = self._runs.get(act.run_id)
         if run is None:
@@ -370,11 +387,6 @@ class OutputCoordinator:
             for command in completion.successful.commands
         ):
             run.closing = True
-        if not act.is_replaying and run.replayed:
-            raise temporalio.workflow.NondeterminismError(
-                f"History recorded {len(run.replayed)} stream output batch(es) that "
-                "the replayed Workflow did not publish"
-            )
         if not run.pending:
             return
         records, run.pending = run.pending, []
@@ -519,6 +531,8 @@ class OutputCoordinator:
                 dataclasses.replace(stage, survived_eviction=True)
                 for stage in run.staged
             ]
+            while len(self._orphans) > _MAX_ORPHAN_RUNS:
+                self._orphans.popitem(last=False)
 
     async def _reconcile(self, run: _RunOutput) -> None:
         async with run.settling:
