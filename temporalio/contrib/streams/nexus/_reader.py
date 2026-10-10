@@ -21,12 +21,9 @@ from google.protobuf.message import DecodeError
 from temporalio import workflow
 from temporalio.contrib.streams._errors import StreamError
 from temporalio.contrib.streams._record import Cursor, RecordKind, Supersession
+from temporalio.contrib.streams._ref import StreamRef
 from temporalio.contrib.streams._wire import RecordDecoder, WireRecord
-from temporalio.contrib.streams.nexus._generated import (
-    ReadInput,
-    StreamRef,
-    TemporalStreams,
-)
+from temporalio.contrib.streams.nexus._generated import ReadInput, TemporalStreams
 from temporalio.contrib.streams.nexus._operation import stream_ref_from_token
 
 __all__ = ["ReadSupersession", "StreamReader", "StreamRecordError"]
