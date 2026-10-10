@@ -36,7 +36,12 @@ async def _skip_without_notifier(client: Client) -> None:
     except RPCError as err:
         if err.status == RPCStatusCode.UNIMPLEMENTED:
             pytest.skip(f"server has no stream notifier: {err.message}")
-        if err.status != RPCStatusCode.NOT_FOUND:
+        # A server that keys the notifier by run chain refuses the probe's
+        # empty run id, which still shows it has the notifier.
+        if err.status not in (
+            RPCStatusCode.NOT_FOUND,
+            RPCStatusCode.INVALID_ARGUMENT,
+        ):
             raise
 
 
