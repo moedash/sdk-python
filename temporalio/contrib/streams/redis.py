@@ -21,18 +21,22 @@ handoff.
 
 **Appends.** One Lua script writes a whole batch, so a reader never sees
 part of one. The meta hash keeps one high-water field per producer attempt:
-the batch's first sequence, its first and last entry ids, and its digest,
-taken over the converted records before the codec. A retry of the newest
-batch with the same digest returns the original position and writes
-nothing; the same sequence with another digest, or any lower sequence, is
-refused with :class:`temporalio.contrib.streams.StreamProducerError`. A
+the newest batch's first sequence, its record count, its first and last
+entry ids, and its digest, taken over the converted records before the
+codec. A retry of the newest batch with the same digest returns the original
+position and writes nothing; the same sequence with another digest, or any
+sequence below the end of that batch, is refused with
+:class:`temporalio.contrib.streams.StreamProducerError`. A
 connection that fails while the script may have run raises
 :class:`temporalio.contrib.streams.StreamOutcomeUnknownError`. No append
 sends anything to Temporal.
 
 **A Workflow's own publish** is staged next to the log and moved into it by
 one script once History shows the Workflow Task's commit, so readers see a
-task's records together or not at all.
+task's records together or not at all. A Worker that replays a run sends one
+such script for each recorded batch it hasn't settled in this process, so a
+new Worker process touches the store once per batch of the History it
+replays. A Replayer touches nothing.
 
 **Retention.** Every script that writes a log trims it with ``XTRIM MINID``
 to the provider's ``retention`` (seven days by default) and refreshes the
@@ -126,6 +130,7 @@ from temporalio.contrib.streams._errors import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRecordError,
     StreamRefusedError,
     StreamStorageError,
     StreamUnsupportedError,
@@ -151,6 +156,7 @@ _PROVIDER = "redis"
 _READ_BATCH = 100
 _OWNER_CHECK_MIN = timedelta(milliseconds=500)
 _OWNER_CHECK_MAX = timedelta(seconds=5)
+_OWNER_RECHECK_S = 60.0
 _TOMBSTONE_GRACE = timedelta(days=30)
 _RECORD_FIELD = "r"
 
@@ -163,6 +169,10 @@ logger = logging.getLogger(__name__)
 # newest id, which is what remains of a log after it expires, and the newest
 # trimmed id, because XTRIM leaves no trace a reader could compare with. A
 # log that expired whole is trimmed through its last id when it comes back.
+# Each call also looks at a few session fields, resuming where the last call
+# stopped, and drops those whose last write is older than the retention: the
+# records they guard against a duplicate are gone, and the meta would
+# otherwise grow with every session the topic ever had.
 _KEEP_LUA = """
 local function now_ms()
   local time = redis.call('TIME')
@@ -176,8 +186,21 @@ local function revive(log, meta)
     end
   end
 end
+local function sweep_sessions(meta, floor_ms)
+  local cursor = redis.call('HGET', meta, 'hwscan') or '0'
+  local found = redis.call('HSCAN', meta, cursor, 'MATCH', 'hw:*', 'COUNT', 50)
+  local fields = found[2]
+  for i = 1, #fields, 2 do
+    local last_ms = string.match(fields[i + 1], '|(%d+)%-%d+|[^|]+$')
+    if last_ms and tonumber(last_ms) < floor_ms then
+      redis.call('HDEL', meta, fields[i])
+    end
+  end
+  redis.call('HSET', meta, 'hwscan', found[1])
+end
 local function keep(log, meta, added, last, retention, grace)
-  local floor = (now_ms() - retention) .. '-0'
+  local floor_ms = now_ms() - retention
+  local floor = floor_ms .. '-0'
   local doomed = redis.call('XREVRANGE', log, '(' .. floor, '-', 'COUNT', 1)
   if #doomed > 0 then
     redis.call('XTRIM', log, 'MINID', floor)
@@ -187,12 +210,13 @@ local function keep(log, meta, added, last, retention, grace)
   redis.call('HINCRBY', meta, 'added', added)
   redis.call('HSET', meta, 'last', last)
   redis.call('PEXPIRE', meta, retention + grace)
+  sweep_sessions(meta, floor_ms)
 end
 """
 
 # KEYS: log, meta, chain. ARGV: retention ms, grace ms, session field, first
 # sequence, digest, records... The high-water field reads
-# "<sequence>|<first id>|<last id>|<digest>".
+# "<sequence>|<count>|<first id>|<last id>|<digest>".
 _APPEND_LUA = (
     _KEEP_LUA
     + """
@@ -201,9 +225,10 @@ local field, digest_arg = ARGV[3], ARGV[5]
 local held = redis.call('HGET', KEYS[2], field)
 local sequence = tonumber(ARGV[4])
 if held then
-  local held_sequence, first, last, digest =
-    string.match(held, '^(%d+)|([^|]+)|([^|]+)|(%x+)$')
+  local held_sequence, held_count, first, last, digest =
+    string.match(held, '^(%d+)|(%d+)|([^|]+)|([^|]+)|(%x+)$')
   held_sequence = tonumber(held_sequence)
+  local next_sequence = held_sequence + tonumber(held_count)
   if sequence == held_sequence then
     if digest == digest_arg then
       return {first, last}
@@ -211,9 +236,9 @@ if held then
     return redis.error_reply('STREAMS_DIVERGENT sequence ' .. ARGV[4] ..
       ' was already written with different content')
   end
-  if sequence < held_sequence then
+  if sequence < next_sequence then
     return redis.error_reply('STREAMS_STALE sequence ' .. ARGV[4] ..
-      ' is below the newest one written, ' .. held_sequence)
+      ' is below the next one expected, ' .. next_sequence)
   end
 end
 if redis.call('HGET', KEYS[3], 'closed') then
@@ -229,7 +254,7 @@ for i = 6, #ARGV do
   end
 end
 redis.call('HSET', KEYS[2], field,
-  ARGV[4] .. '|' .. first .. '|' .. last .. '|' .. digest_arg)
+  ARGV[4] .. '|' .. (#ARGV - 5) .. '|' .. first .. '|' .. last .. '|' .. digest_arg)
 keep(KEYS[1], KEYS[2], #ARGV - 5, last, retention, grace)
 return {first, last}
 """
@@ -258,22 +283,30 @@ end
 # KEYS: stage, pending stages, then a log and its meta per topic. ARGV:
 # retention ms, grace ms, stage token, then the topics in KEYS order.
 # Returns the records added, or -1 when the stage was still pending but its
-# list was gone, which means retention dropped committed output.
+# list was gone, which means retention dropped committed output. Redis keeps
+# what a failed script already wrote, so every item is checked before the
+# first write.
 _PROMOTE_LUA = (
     _KEEP_LUA
     + """
-local was_pending = redis.call('HDEL', KEYS[2], ARGV[3])
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
+local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
+local slots = {}
+for i = 4, #ARGV do
+  slots[ARGV[i]] = {log = KEYS[2 * (i - 3) + 1], meta = KEYS[2 * (i - 3) + 2], added = 0}
+end
+for i = 1, #items, 2 do
+  if not slots[items[i]] then
+    return redis.error_reply('STREAMS_TOPIC the stage holds topic ' .. items[i] ..
+      ', which the promotion did not name')
+  end
+end
+local was_pending = redis.call('HDEL', KEYS[2], ARGV[3])
 if #items == 0 then
   if was_pending == 1 then
     return -1
   end
   return 0
-end
-local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
-local slots = {}
-for i = 4, #ARGV do
-  slots[ARGV[i]] = {log = KEYS[2 * (i - 3) + 1], meta = KEYS[2 * (i - 3) + 2], added = 0}
 end
 for _, slot in pairs(slots) do
   revive(slot.log, slot.meta)
@@ -352,7 +385,15 @@ def _text(value: Any) -> str:
 
 def _session_field(producer_id: str, attempt: int) -> str:
     # Length-prefixed, so an id that contains ':' cannot name another session.
-    return f"hw:{len(producer_id)}:{producer_id}:{attempt}"
+    # UTF-8 bytes, so every language counts the same length.
+    return f"hw:{len(producer_id.encode())}:{producer_id}:{attempt}"
+
+
+def _describe_error(error: RPCError) -> StreamError:
+    # Callers catch stream errors only, and the owner check is part of a call.
+    return StreamStorageError(
+        f"Temporal could not describe the stream's owner: {error}"
+    )
 
 
 def _stream_error(error: redis.exceptions.RedisError, *, write: bool) -> StreamError:
@@ -468,9 +509,11 @@ class RedisProducer(Generic[T]):
         checked = self._owner_checked_at
         now = time.monotonic()
         # A producer that starts after the chain ended would otherwise write
-        # until something else marks the chain closed. The mark expires, so a
-        # check older than the retention is made again.
-        if checked is None or now - checked > streams._retention_ms / 1000:
+        # until something else marks the chain closed. Nothing marks the chain
+        # of a Workflow that never published itself, and the mark expires, so
+        # the check is made again at least once a minute.
+        recheck_s = min(streams._retention_ms / 1000, _OWNER_RECHECK_S)
+        if checked is None or now - checked > recheck_s:
             await self._handle._refuse_if_ended(keys)
             self._owner_checked_at = now
         try:
@@ -525,6 +568,10 @@ class RedisStreamHandle:
         idle read may end up to 5 s after its owner closed. A read
         on a handle pinned to a run ends when that run closes, even if the
         chain continued as new.
+
+        A read holds one Redis connection while it waits, so a process that
+        follows many streams opens as many connections. Pass a client with a
+        ``max_connections`` that fits the server's ``maxclients``.
         """
         name, result_type = self._resolve(topic, result_type)
         # Parsed here so a bad cursor fails this call, not the first
@@ -561,7 +608,8 @@ class RedisStreamHandle:
         # were behind its start.
         seen = _entry(last_id)
         if position is None:
-            trimmed = await _awaited(redis_client.hget(keys.meta(topic), "trimmed"))
+            async with _mapped(write=False):
+                trimmed = await _awaited(redis_client.hget(keys.meta(topic), "trimmed"))
             if trimmed is not None:
                 seen = max(seen, _entry(_text(trimmed)))
         decoder = RecordDecoder(
@@ -570,6 +618,18 @@ class RedisStreamHandle:
             after=previous,
             warn=logger.warning,
         )
+        if position is not None and not from_end:
+            # The record at the cursor was delivered before, so its attempt
+            # is the one a newer attempt supersedes.
+            async with _mapped(write=False):
+                at_cursor = await redis_client.xrange(log, position, position)
+            if at_cursor:
+                try:
+                    decoder.prime(
+                        WireRecord.FromString(at_cursor[0][1][_RECORD_FIELD.encode()])
+                    )
+                except (KeyError, DecodeError):
+                    pass
         block_ms = self._streams._poll_ms
         ended = False
         # An idle reader asks about its owner less and less often, so many
@@ -606,10 +666,12 @@ class RedisStreamHandle:
                 cursor = self._cursor(topic, last_id)
                 try:
                     wire = WireRecord.FromString(fields[_RECORD_FIELD.encode()])
-                except (KeyError, DecodeError) as error:
-                    logger.warning("skipping stream record at %s: %s", cursor, error)
-                    continue
-                await decode_body(self._converter, wire)
+                    await decode_body(self._converter, wire)
+                except Exception as error:
+                    raise StreamRecordError(
+                        f"stream record at {cursor} could not be decoded: {error}",
+                        cursor,
+                    ) from error
                 for record in decoder.decode(cursor, wire):
                     yield record
             if entries:
@@ -676,11 +738,12 @@ class RedisStreamHandle:
                 run_id, floor_text, *topics = _text(raw_description).split("\x1f")
                 stages.append((_text(raw_token), run_id, int(floor_text), topics))
             started = {
-                run_id: await self._run_started(run_id) for _, run_id, _, _ in stages
+                run_id: await self._run_started(run_id)
+                for run_id in {run_id for _, run_id, _, _ in stages}
             }
             # Promotions append, so they go in commit order: by run, then by
             # floor within the run. A stage History has not decided holds back
-            # the ones after it. A run History no longer holds is oldest.
+            # the ones after it.
             stages.sort(
                 key=lambda s: (
                     started[s[1]] if started[s[1]] is not None else float("-inf"),
@@ -690,25 +753,30 @@ class RedisStreamHandle:
             )
             for token, run_id, floor, topics in stages:
                 if started[run_id] is None:
-                    # Namespace retention removed the run, so nothing can
-                    # prove the commit any more.
-                    logger.warning(
-                        "Aborting stream stage %s of Workflow %s: its run %s is no "
-                        "longer in History",
+                    # Retention may have removed the run, or a replica behind a
+                    # failover may not have it yet. Aborting could drop
+                    # committed output, so the stage waits for its expiry and
+                    # holds back nothing.
+                    logger.debug(
+                        "Leaving stream stage %s of Workflow %s: its run %s is not "
+                        "in History",
                         token,
                         self._ref.workflow_id,
                         run_id,
                     )
-                    decision = _Decision.ABORT
-                else:
-                    events = await events_after(
-                        self._client,
-                        self._client.namespace,
-                        self._ref.workflow_id,
-                        run_id,
-                        floor,
-                    )
-                    decision = decide_token(events, token, floor)
+                    continue
+                events = await events_after(
+                    self._client,
+                    self._client.namespace,
+                    self._ref.workflow_id,
+                    run_id,
+                    floor,
+                )
+                # Every commit made at one floor rides the completion of the
+                # attempt that made it, so a completion that carries other
+                # commits at this floor and not this one means this stage's
+                # attempt failed, even when History never recorded that.
+                decision = decide_token(events, token, floor, survived_eviction=True)
                 stage = StageRef(
                     self._client.namespace,
                     self._ref.workflow_id,
@@ -742,9 +810,18 @@ class RedisStreamHandle:
         return description.start_time.timestamp()
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
-        description = await self._client.get_workflow_handle(
-            self._ref.workflow_id, run_id=self._ref.run_id
-        ).describe()
+        try:
+            description = await self._client.get_workflow_handle(
+                self._ref.workflow_id, run_id=self._ref.run_id
+            ).describe()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise _describe_error(error) from error
+            # The keys came from this Workflow, so History has since dropped
+            # it, and nothing more will be written for it.
+            if self._ref.run_id is None:
+                await self._streams._mark_closed(keys)
+            return True
         status = description.status
         if self._ref.run_id is not None:
             return status is not None and status != WorkflowExecutionStatus.RUNNING
@@ -806,11 +883,24 @@ class RedisStreamHandle:
         A Workflow id reused by a new chain also means this chain has ended.
 
         Raises:
-            StreamClosedError: The chain has ended.
+            StreamClosedError: The chain has ended, or History no longer holds
+                the Workflow the keys were resolved from.
+            StreamStorageError: Temporal could not describe the Workflow.
         """
-        description = await self._client.get_workflow_handle(
-            self._ref.workflow_id
-        ).describe()
+        try:
+            description = await self._client.get_workflow_handle(
+                self._ref.workflow_id
+            ).describe()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise _describe_error(error) from error
+            # The keys came from this Workflow, so it existed and History has
+            # since dropped it.
+            await self._streams._mark_closed(keys)
+            raise StreamClosedError(
+                f"the Workflow {self._ref.workflow_id!r} that owns this stream is "
+                "gone from History"
+            ) from error
         latest = description.raw_description.workflow_execution_info
         if (
             description.status in CHAIN_ENDED
@@ -833,8 +923,17 @@ class RedisStreamHandle:
                     f"Workflow {self._ref.workflow_id!r} was not found, and its "
                     "stream is keyed by its run chain"
                 ) from error
-            raise
-        return description.raw_description.workflow_execution_info.first_run_id
+            raise _describe_error(error) from error
+        first_run_id = description.raw_description.workflow_execution_info.first_run_id
+        if not first_run_id:
+            # The Workflow's own publish keys by the chain's first run, so an
+            # empty one would split the stream in two without an error.
+            raise StreamUnsupportedError(
+                f"the server did not report the first run id of Workflow "
+                f"{self._ref.workflow_id!r}, which the Redis provider keys "
+                "streams by"
+            )
+        return first_run_id
 
 
 class RedisStreams(StreamProviderPlugin):
@@ -902,7 +1001,13 @@ class RedisStreams(StreamProviderPlugin):
         self._stage_script = scripts.register_script(_STAGE_LUA)
 
     def get_stream_handle(self, client: Client, ref: StreamRef) -> RedisStreamHandle:
-        """A handle on the stream ``ref`` names."""
+        """A handle on the stream ``ref`` names.
+
+        Raises:
+            StreamUnsupportedError: ``ref`` names an owner kind this release
+                lacks.
+        """
+        ref._require_supported()
         return RedisStreamHandle(self, client, ref)
 
     async def close(self) -> None:
@@ -988,7 +1093,9 @@ class RedisStreams(StreamProviderPlugin):
         async with _mapped(write=True):
             await self._stage_script(
                 keys=[keys.stage(token), keys.pending()],
-                args=[self._retention_ms, token, description, *items],
+                # Until promoted, a stage holds committed output, and crash
+                # repair can come after the retention.
+                args=[self._retention_ms + self._grace_ms, token, description, *items],
             )
         return token
 
