@@ -15,6 +15,7 @@ from temporalio.contrib.streams import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRecordError,
     StreamUnsupportedError,
 )
 from temporalio.contrib.streams._cursor import (
@@ -32,6 +33,7 @@ def test_every_condition_is_a_stream_error():
         StreamNotFoundError,
         StreamOutcomeUnknownError,
         StreamProducerError,
+        StreamRecordError,
         StreamUnsupportedError,
     ):
         assert issubclass(error, StreamError)
