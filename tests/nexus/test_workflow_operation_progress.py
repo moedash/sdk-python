@@ -237,6 +237,85 @@ def clear_observed() -> None:
     observed.clear()
 
 
+@dataclass
+class Rules:
+    first: int | None = None
+    immediate: int | None = None
+    after_stale: workflow.NexusOperationProgress | None = None
+    latest_at_end: int | None = None
+    waiters_after_cancels: int | None = None
+    metadata_is_read_only: bool | None = None
+
+
+rules: list[Rules] = []
+
+
+@workflow.defn(name="ProgressRules")
+class ProgressRules:
+    @workflow.run
+    async def run(self) -> None:
+        client = workflow.create_nexus_client(
+            service=ProgressService, endpoint=ENDPOINT
+        )
+        handle = await client.start_operation(ProgressService.produce, "input")
+        seen = Rules()
+        first = await handle.progress()
+        assert first
+        seen.first = first.counter
+        try:
+            first.metadata["records"] = "changed"  # type: ignore[index]
+            seen.metadata_is_read_only = False
+        except TypeError:
+            seen.metadata_is_read_only = True
+        # A counter the handle already passed answers at once.
+        immediate = await handle.progress(after_counter=first.counter - 1)
+        seen.immediate = immediate.counter if immediate else None
+        # Waits given up on leave nothing behind.
+        for _ in range(5):
+            waiting = asyncio.create_task(handle.progress(after_counter=first.counter))
+            await asyncio.sleep(0)
+            waiting.cancel()
+            try:
+                await waiting
+            except asyncio.CancelledError:
+                pass
+        seen.waiters_after_cancels = len(handle._progress_waiters)  # type: ignore[attr-defined]
+        # The lower counter that arrives next is dropped, so the wait ends
+        # only when the operation resolves.
+        seen.after_stale = await handle.progress(after_counter=first.counter)
+        await handle
+        latest = handle.latest_progress
+        seen.latest_at_end = latest.counter if latest else None
+        rules.append(seen)
+
+
+async def test_progress_keeps_the_highest_counter_and_answers_from_it() -> None:
+    h = History()
+    h.started()
+    h.task()
+    scheduled = h.operation_scheduled()
+    h.operation_started(scheduled)
+    h.task(progress(scheduled, 3))
+    h.task(progress(scheduled, 2))
+    h.operation_completed(scheduled, "done")
+    h.task()
+    h.workflow_completed()
+    started = h.events[0].workflow_execution_started_event_attributes
+    started.workflow_type.name = "ProgressRules"
+    rules.clear()
+    await Replayer(
+        workflows=[ProgressRules], workflow_runner=UnsandboxedWorkflowRunner()
+    ).replay_workflow(WorkflowHistory(workflow_id="progress-rules", events=h.events))
+
+    [seen] = rules
+    assert seen.first == 3
+    assert seen.immediate == 3
+    assert seen.waiters_after_cancels == 0
+    assert seen.metadata_is_read_only
+    assert seen.after_stale is None
+    assert seen.latest_at_end == 3
+
+
 async def test_progress_reaches_the_operation_handle_on_replay() -> None:
     await replay(progress_history())
 

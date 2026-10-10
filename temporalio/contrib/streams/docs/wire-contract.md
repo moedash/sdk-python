@@ -32,7 +32,7 @@ Workflow's run chain:
 | Suffix | Type | Holds |
 |---|---|---|
 | `:t:<topic>` | stream | The log of one topic |
-| `:t:<topic>:meta` | hash | Dedupe state and the tombstone of that log; `closed` = `1` once the topic is closed |
+| `:t:<topic>:meta` | hash | Dedupe state, the log's tombstone, and `closed` = `1` once closed |
 | `:chain` | hash | `closed` = `1` once the run chain has ended |
 | `:stage:<token>` | list | A staged Workflow publish: topic, record, topic, record, ... |
 | `:stages` | hash | Every stage not yet promoted or aborted |
@@ -176,12 +176,12 @@ Any party that sees the Workflow's run chain end (complete, fail, cancel,
 terminate or time out, but not Continue-as-New) sets `HSET chain closed 1`
 and `PEXPIRE chain <retention + 30 days>`.
 
-Closing one topic (`close_stream`, or the Worker after promoting a batch with
-a `temporal.io/stream-close` record) sets `HSET meta closed 1` and
+Closing one topic (`close_stream`, or the Worker after promoting a batch
+with a `temporal.io/stream-close` record) sets `HSET meta closed 1` and
 `PEXPIRE meta <retention + 30 days>` on that topic, before the server's
 notifier completes the operations. The append script refuses a batch on a
 closed topic with `STREAMS_CLOSED`, after its retry check, so a retry of a
-batch that landed before the close still answers. Promotion never refuses
-a closed topic, as with the chain flag: the Worker logs a warning, since the
-owner's own publishes still land and readers that ended miss them. A read of a closed topic delivers what is left
-and ends.
+batch that landed before the close still answers. Promotion never refuses a
+closed topic, as with the chain flag: the Worker logs a warning, since the
+owner's own publishes still land and readers that ended miss them. A read of
+a closed topic delivers what is left and ends.

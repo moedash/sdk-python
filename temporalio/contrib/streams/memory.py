@@ -216,7 +216,7 @@ class MemoryProducer(Generic[T]):
 
     def __init__(
         self,
-        store: Callable[[], Awaitable[_Topic]],
+        store: Callable[[], Awaitable[tuple[_Topic, str]]],
         converter: temporalio.converter.DataConverter,
         topic: str,
         stream: str,
@@ -231,6 +231,8 @@ class MemoryProducer(Generic[T]):
         """
         self._find_store = store
         self._store: _Topic | None = None
+        self._written_chain: str | None = None
+        """The run chain this producer's writes go to, once it has written."""
         self._converter = converter
         self._topic = topic
         self._stream = stream
@@ -293,7 +295,7 @@ class MemoryProducer(Generic[T]):
         for wire in wires:
             await encode_body(self._converter, wire)
         if self._store is None:
-            self._store = await self._find_store()
+            self._store, self._written_chain = await self._find_store()
         first, count = self._store.append(
             wires,
             session=(self._producer_id, self._attempt),
@@ -443,8 +445,8 @@ class MemoryStreamHandle:
                 )
         name, _ = self._resolve(topic, None)
 
-        async def store() -> _Topic:
-            return await self._store(name)
+        async def store() -> tuple[_Topic, str]:
+            return await self._store_and_chain(name)
 
         return self._streams._notified_producer(
             self._client,
@@ -463,6 +465,10 @@ class MemoryStreamHandle:
 
     async def _store(self, topic: str) -> _Topic:
         """The records of ``topic`` on the chain this handle's ref names."""
+        return (await self._store_and_chain(topic))[0]
+
+    async def _store_and_chain(self, topic: str) -> tuple[_Topic, str]:
+        """The records of ``topic`` and the chain they belong to."""
         chain = None
         if self._client is not None:
             try:
@@ -475,9 +481,14 @@ class MemoryStreamHandle:
                     RPCStatusCode.INVALID_ARGUMENT,
                 ):
                     raise
-        return self._streams._topic(
+        store = self._streams._topic(
             self._namespace, self._ref.workflow_id, topic, chain=chain
         )
+        if chain is None:
+            chain = self._streams._chains.get(
+                (self._namespace, self._ref.workflow_id), ""
+            )
+        return store, chain
 
     def _resolve(
         self, topic: str | StreamTopic[Any] | None, result_type: type | None

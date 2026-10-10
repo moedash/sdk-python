@@ -420,6 +420,8 @@ class RedisProducer(Generic[T]):
         self._attempt = attempt
         self._sequence = next_sequence
         self._last = BEGINNING
+        self._written_chain: str | None = None
+        """The run chain this producer's writes go to, once it has written."""
         self._owner_checked_at: float | None = None
         # A batch reads the sequence, then awaits the codec and Redis, then
         # moves it on; calls one at a time keep each batch's sequences.
@@ -477,6 +479,7 @@ class RedisProducer(Generic[T]):
         for wire in wires:
             await encode_body(self._handle._converter, wire)
         keys = await self._handle._keys()
+        self._written_chain = keys.first_run_id
         streams = self._handle._streams
         checked = self._owner_checked_at
         now = time.monotonic()
