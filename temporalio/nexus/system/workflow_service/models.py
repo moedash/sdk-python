@@ -7,6 +7,7 @@ import dataclasses
 import datetime
 import typing
 
+import google.protobuf.timestamp_pb2
 import typing_extensions
 
 import temporalio.api.common.v1.message_pb2
@@ -336,6 +337,8 @@ class AttachStreamCallbackRequest:
     stream_ref: StreamReference | None = None
     request_id: str
     callback: CallbackNexus | None = None
+    operation_token: str
+    start_time: Timestamp | None = None
 
 
 class _AttachStreamCallbackRequestTransferTypeConverter(
@@ -362,6 +365,11 @@ class _AttachStreamCallbackRequestTransferTypeConverter(
                 "missing required field AttachStreamCallbackRequest.request_id"
             )
         request_id = value.request_id
+        if not value.operation_token:
+            raise ValueError(
+                "missing required field AttachStreamCallbackRequest.operation_token"
+            )
+        operation_token = value.operation_token
         return AttachStreamCallbackRequest(
             namespace=value.namespace,
             stream_ref=_StreamReferenceTransferTypeConverter().from_transfer_type(
@@ -374,6 +382,12 @@ class _AttachStreamCallbackRequestTransferTypeConverter(
                 value.callback, CallbackNexus
             )
             if value.HasField("callback")
+            else None,
+            operation_token=operation_token,
+            start_time=_TimestampTransferTypeConverter().from_transfer_type(
+                value.start_time, Timestamp
+            )
+            if value.HasField("start_time")
             else None,
         )
 
@@ -394,6 +408,11 @@ class _AttachStreamCallbackRequestTransferTypeConverter(
         if value.callback is not None:
             message.callback.CopyFrom(
                 _CallbackNexusTransferTypeConverter().to_transfer_type(value.callback)
+            )
+        message.operation_token = value.operation_token
+        if value.start_time is not None:
+            message.start_time.CopyFrom(
+                _TimestampTransferTypeConverter().to_transfer_type(value.start_time)
             )
         return message
 
@@ -512,6 +531,50 @@ class _CallbackNexusTransferTypeConverter(
 
 temporalio.converter.transfer_type_convertible(_CallbackNexusTransferTypeConverter)(
     CallbackNexus
+)  # pyright: ignore[reportUnusedCallResult]
+
+
+@dataclasses.dataclass(slots=True)
+class Timestamp:
+    seconds: int | None = None
+    nanos: int | None = None
+
+
+class _TimestampTransferTypeConverter(
+    temporalio.converter.TransferTypeConverter[
+        Timestamp, google.protobuf.timestamp_pb2.Timestamp
+    ]
+):
+    transfer_type: type[google.protobuf.timestamp_pb2.Timestamp] | None = (
+        google.protobuf.timestamp_pb2.Timestamp
+    )
+
+    @typing_extensions.override
+    def from_transfer_type(
+        self,
+        value: google.protobuf.timestamp_pb2.Timestamp,
+        type_hint: type[Timestamp],
+    ) -> Timestamp:
+        return Timestamp(
+            seconds=value.seconds if value.seconds != 0 else None,
+            nanos=value.nanos if value.nanos != 0 else None,
+        )
+
+    @typing_extensions.override
+    def to_transfer_type(
+        self,
+        value: Timestamp,
+    ) -> google.protobuf.timestamp_pb2.Timestamp:
+        message = google.protobuf.timestamp_pb2.Timestamp()
+        if value.seconds is not None:
+            message.seconds = value.seconds
+        if value.nanos is not None:
+            message.nanos = value.nanos
+        return message
+
+
+temporalio.converter.transfer_type_convertible(_TimestampTransferTypeConverter)(
+    Timestamp
 )  # pyright: ignore[reportUnusedCallResult]
 
 
