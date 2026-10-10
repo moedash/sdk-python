@@ -649,6 +649,10 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             self._apply_signal_workflow(job.signal_workflow)
         elif job.HasField("initialize_workflow"):
             self._apply_initialize_workflow(job.initialize_workflow)
+        elif job.HasField("resolve_nexus_operation_progress"):
+            # Progress is a hint this Worker doesn't act on. Failing the task
+            # would let any server that sends progress break the Workflow.
+            pass
         elif job.HasField("update_random_seed"):
             self._apply_update_random_seed(job.update_random_seed)
         else:
