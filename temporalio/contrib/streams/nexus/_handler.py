@@ -53,6 +53,12 @@ __all__ = ["TemporalStreamsHandler"]
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RECORDS = 100
+# A read answer is a sync Nexus result, recorded in the caller's History, so it
+# stays well below the server's blob size limit (2 MiB by default).
+_DEFAULT_MAX_ANSWER_BYTES = 1 << 20
+# How long a read waits for records the store already holds to be fetched and
+# decoded, such as behind a slow payload codec.
+_CATCH_UP_LIMIT = 10.0
 # Room left inside the request deadline for the answer to travel back.
 _DEADLINE_MARGIN = timedelta(milliseconds=500)
 
@@ -148,12 +154,18 @@ class _Subscription:
     key: _StreamKey
     records: AsyncGenerator[StreamRecord[Any], None]
     position: str
+    handle: StreamHandle
     pending: asyncio.Task[StreamRecord[Any]] | None = None
     """A record fetch still in flight when the last call ran out of time. The
     next call waits on it rather than starting another, so a record the store
     already handed over is never dropped."""
     expiry: asyncio.TimerHandle | None = None
     ended: bool = False
+    fetched: str = ""
+    """The position of the last record fetched from the store, whether or not
+    an answer carried it yet."""
+    carried: RecordWire | None = None
+    """A fetched record the last answer had no room for. It leads the next."""
 
 
 @nexusrpc.handler.service_handler(service=TemporalStreams)
@@ -179,6 +191,13 @@ class TemporalStreamsHandler:
     carries the writer's sequence and the provider compares it with what it
     holds.
 
+    A read answers with at most ``max_records`` records and, past its first
+    record, at most ``max_answer_bytes`` of serialized records, so a read's
+    result stays below the server's blob size limit; a reader reads again
+    from the cursor it got. A read with ``wait_ms`` 0 waits for no new record,
+    but answers with every record the store held when it started, up to those
+    limits.
+
     Give the Worker more Nexus pollers than the default
     (``nexus_task_poller_behavior``). A Nexus request is matched only to a
     waiting poll, and with the default five pollers spread over a task queue's
@@ -194,17 +213,22 @@ class TemporalStreamsHandler:
         *,
         idle_timeout: timedelta = timedelta(minutes=1),
         max_idle_subscriptions: int = 1000,
+        max_answer_bytes: int = _DEFAULT_MAX_ANSWER_BYTES,
     ) -> None:
         """Serve ``provider``.
 
         Raises:
-            ValueError: ``idle_timeout`` is not positive or
-                ``max_idle_subscriptions`` is below zero.
+            ValueError: ``idle_timeout`` is not positive,
+                ``max_idle_subscriptions`` is below zero, or
+                ``max_answer_bytes`` is not positive.
         """
         if idle_timeout <= timedelta(0):
             raise ValueError("idle_timeout must be positive")
         if max_idle_subscriptions < 0:
             raise ValueError("max_idle_subscriptions must not be negative")
+        if max_answer_bytes <= 0:
+            raise ValueError("max_answer_bytes must be positive")
+        self._max_answer_bytes = max_answer_bytes
         self._provider = provider
         self._idle_timeout = idle_timeout.total_seconds()
         self._max_idle = max_idle_subscriptions
@@ -286,24 +310,31 @@ class TemporalStreamsHandler:
             return ReadOutput(records=[], next_token=latest.token, done=False)
         max_records = input.max_records or _DEFAULT_MAX_RECORDS
         wait = (input.wait_ms or 0) / 1000
+        ceiling = _CATCH_UP_LIMIT
         deadline = ctx.request_deadline
         if deadline is not None:
             if deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
-            left = deadline - datetime.now(timezone.utc) - _DEADLINE_MARGIN
-            wait = max(0.0, min(wait, left.total_seconds()))
+            left = (
+                deadline - datetime.now(timezone.utc) - _DEADLINE_MARGIN
+            ).total_seconds()
+            wait = max(0.0, min(wait, left))
+            ceiling = max(0.0, min(ceiling, left))
 
         key = _stream_key(input.stream)
         subscription = self._take(key, after)
         if subscription is None:
             # Resolved here, so a cursor from another stream or store is
             # refused by this call.
-            records = self._open(input.stream).read(
+            handle = self._open(input.stream)
+            records = handle.read(
                 after=Cursor(after) if after else BEGINNING, result_type=RawValue
             )
-            subscription = _Subscription(key, records, after)
+            subscription = _Subscription(
+                key, records, after, handle=handle, fetched=after
+            )
         try:
-            collected = await self._collect(subscription, max_records, wait)
+            collected = await self._collect(subscription, max_records, wait, ceiling)
         except BaseException:
             # A subscription whose read failed, or whose call was cancelled
             # mid-fetch, is not kept: the reader's next call resumes from its
@@ -312,31 +343,55 @@ class TemporalStreamsHandler:
             raise
         if collected:
             subscription.position = collected[-1].token
-        if subscription.ended:
+        done = subscription.ended and subscription.carried is None
+        if done:
             self._release(subscription)
         else:
             self._park(subscription)
         return ReadOutput(
             records=collected,
             next_token=subscription.position,
-            done=subscription.ended,
+            done=done,
         )
 
     async def _collect(
-        self, subscription: _Subscription, max_records: int, wait: float
+        self,
+        subscription: _Subscription,
+        max_records: int,
+        wait: float,
+        ceiling: float,
     ) -> list[RecordWire]:
+        """Up to ``max_records`` records within the answer's byte budget.
+
+        First it waits up to ``wait`` for a record. Once it has one, or when
+        it may not wait, it takes every record the store already held, as
+        far as the newest one when that phase began: those need a fetch and
+        a decode, not a new record, so it waits up to ``ceiling`` for them.
+        """
         loop = asyncio.get_running_loop()
         end = loop.time() + wait
         collected: list[RecordWire] = []
+        size = 0
+        newest: str | None = None
+        if subscription.carried is not None:
+            collected.append(subscription.carried)
+            size += len(subscription.carried.record)
+            subscription.carried = None
         while len(collected) < max_records and not subscription.ended:
+            waiting = max(0.0, end - loop.time())
+            if collected or waiting == 0:
+                if newest is None:
+                    newest = (await subscription.handle.latest()).token
+                if subscription.fetched == newest:
+                    break
+                timeout = ceiling
+            else:
+                timeout = waiting
             if subscription.pending is None:
                 subscription.pending = asyncio.ensure_future(
                     subscription.records.__anext__()
                 )
-            # Once something is collected, only what is already at hand is
-            # added: the caller asked to wait for records, not for a full batch.
-            remaining = 0.0 if collected else max(0.0, end - loop.time())
-            done, _ = await asyncio.wait({subscription.pending}, timeout=remaining)
+            done, _ = await asyncio.wait({subscription.pending}, timeout=timeout)
             if not done:
                 break
             fetch, subscription.pending = subscription.pending, None
@@ -349,7 +404,13 @@ class TemporalStreamsHandler:
             # they are not transported.
             if record.kind is RecordKind.SUPERSEDED:
                 continue
-            collected.append(_record_wire(record))
+            subscription.fetched = record.cursor.token
+            wire = _record_wire(record)
+            if collected and size + len(wire.record) > self._max_answer_bytes:
+                subscription.carried = wire
+                break
+            collected.append(wire)
+            size += len(wire.record)
         return collected
 
     def _take(self, key: _StreamKey, position: str) -> _Subscription | None:
