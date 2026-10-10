@@ -33,6 +33,10 @@ on tells the notifier when the stream moves, which the caller sees as
 operation progress, and
 :meth:`temporalio.contrib.streams.StreamProviderPlugin.close_stream` completes
 the operation. :class:`StreamNotifier` is the notifier client both use.
+
+A caller Workflow reads such a stream with :class:`StreamReader`: it waits on
+the operation's progress and reads through this service as Nexus operations
+of the Workflow, so a replay hands over the same batches.
 """
 
 from temporalio.contrib.streams._notify import StreamNotifier
@@ -55,6 +59,11 @@ from temporalio.contrib.streams.nexus._operation import (
     StreamOperationHandler,
     stream_ref_from_token,
 )
+from temporalio.contrib.streams.nexus._reader import (
+    ReadSupersession,
+    StreamReader,
+    StreamRecordError,
+)
 
 __all__ = [
     "AppendInput",
@@ -62,10 +71,13 @@ __all__ = [
     "HTTPStatusError",
     "ReadInput",
     "ReadOutput",
+    "ReadSupersession",
     "RecordWire",
     "StreamCursor",
     "StreamNotifier",
     "StreamOperationHandler",
+    "StreamReader",
+    "StreamRecordError",
     "StreamRef",
     "TemporalStreams",
     "TemporalStreamsHandler",

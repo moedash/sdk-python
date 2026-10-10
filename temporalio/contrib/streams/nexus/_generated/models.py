@@ -972,7 +972,10 @@ class RecordWire:
 
     record: bytes
     """The serialized temporal.sdk.streams.v1.StreamRecord: topic, kind, producer, attempt,
-    sequence and body. The body is the producer's payload as its codec left it.
+    sequence and body. The body is the producer's payload decoded by the serving
+    Worker's data converter, payload codec and external storage included. The answer as
+    a whole is encoded on its way back like any operation result, so the caller's codec
+    decodes it and the body crosses encoded once.
     """
 
     additional_properties: dict[str, typing.Any] = dataclasses.field(
