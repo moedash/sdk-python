@@ -78,8 +78,9 @@ _ERROR_TYPES: tuple[tuple[type[StreamError], nexusrpc.HandlerErrorType, bool], .
 # temporal.api.failure.v1.Failure, which the failure converter reads back as is.
 _TEMPORAL_FAILURE_TYPE = "temporal.api.failure.v1.Failure"
 
-# The default converter passes a RawValue through untouched, so a body the
-# caller's codec encoded is never decoded or re-encoded here.
+# The default converter passes a RawValue through untouched. The codec runs
+# in the provider, with the Worker client's data converter: it encodes a body
+# on the way into the store and decodes it on the way out.
 _RAW_CONVERTER = temporalio.converter.DataConverter.default.payload_converter
 
 
@@ -162,8 +163,11 @@ class TemporalStreamsHandler:
     Register it on a Worker with ``nexus_service_handlers=[handler]`` and
     point a Nexus endpoint at the Worker's task queue. The Worker's client
     opens the streams, so a stream lives in the Worker's namespace. That
-    client should carry no payload codec: record bodies arrive encoded by the
-    writer's codec and leave that way, and the handler never decodes them.
+    client carries the namespace's payload codec, the one the stream's
+    producers and readers use: the store keeps each body encoded with it, a
+    read decodes the bodies, and the read result crosses encoded as a whole
+    like any Nexus result, so Workflow code that reads gets plain bodies with
+    no codec of its own.
 
     A reader's subscription is kept between its calls and found again by the
     cursor its last answer handed out, so readers never share one and a
