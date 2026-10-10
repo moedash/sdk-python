@@ -5,8 +5,10 @@
 A stream is an ordered log that a Workflow owns. The Workflow publishes to
 it, and so do its Activities and any client. Outside readers follow it from
 a cursor. Records live in the application's Redis and never pass through
-Temporal or its History, so publishing costs no Actions and no History
-events.
+Temporal or its History. A Workflow Task that publishes adds one marker
+event to History, which carries a small manifest of what it published and
+counts toward the History limits. Appends from Activities and clients add
+nothing to History.
 
 ## Install and register
 
@@ -86,6 +88,10 @@ async for record in get_stream_handle(client, "answer-1").read(topic=TOKENS):
         text.append(record.value)
 ```
 
+`SUPERSEDED` is per producer. This topic has one, so clearing everything is
+right. With several producers on a topic, keep the text per
+`record.producer_id` and clear only that producer's.
+
 Both samples run in full in `tests/contrib/streams/samples/`.
 
 ## What to know
@@ -100,5 +106,9 @@ Both samples run in full in `tests/contrib/streams/samples/`.
   `StreamClosedError`, after a short closing window.
 - **Deleting.** Deleting a Workflow does not delete its streams.
   `RedisStreams.delete_workflow_streams` removes them at once.
+- **Topics per task.** One Workflow Task can publish to a few hundred topics
+  before its manifest reaches the budget, and the publish that would cross
+  it raises `StreamError`. Catch it. Uncaught, it fails the Workflow Task,
+  and every retry fails the same way.
 - **Not in this release.** Reading a stream inside a Workflow, and streams
   owned by an Activity or by no one, raise `StreamUnsupportedError`.

@@ -32,6 +32,10 @@ class AttemptTracker:
         self._attempts: dict[str, int] = {}
         self._warn = warn
 
+    def behind(self, producer_id: str, attempt: int) -> bool:
+        """Whether this read already delivered a newer attempt of ``producer_id``."""
+        return bool(producer_id) and 0 < attempt < self._attempts.get(producer_id, 0)
+
     def note(
         self, producer_id: str, attempt: int, *, topic: str, previous: Cursor
     ) -> StreamRecord[Any] | None:
@@ -39,14 +43,16 @@ class AttemptTracker:
 
         ``previous`` is the cursor of the last record delivered before the
         one being noted, or the cursor the read started from. The synthesized
-        record carries it, so a consumer that checkpoints the supersession and
-        resumes after it gets the new attempt's first record next.
+        record carries it. A read that resumes there is primed with the
+        record at its cursor, so it reports the supersession again before the
+        new attempt's first record.
 
         A producer that declares no attempt supersedes nothing, because there
         is no generation to compare.
 
-        An attempt that goes backwards supersedes nothing either, and is
-        reported through ``warn`` rather than passed off as ordinary data.
+        An attempt that goes backwards supersedes nothing either. It is
+        reported through ``warn``, and the reader marks its records
+        ``stale`` rather than passing them off as ordinary data.
         A lower attempt after a higher one means an older attempt was still
         writing after a newer one started, such as an Activity attempt that
         timed out but kept running. A consumer that reads it as the current
