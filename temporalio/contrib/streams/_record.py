@@ -42,8 +42,10 @@ class RecordKind(enum.IntEnum):
     FINISH = 2
     """The producer in ``producer_id`` will write nothing more on this topic.
 
-    An empty ``producer_id`` names the owning Workflow. It does not end a
-    read and says nothing about the producer's outcome: an Activity can
+    An empty ``producer_id`` names the owning Workflow. A Workflow's
+    ``FINISH`` covers one run: after Continue-as-New the next run can publish
+    on the topic again, under the same empty ``producer_id``. It does not end
+    a read and says nothing about the producer's outcome: an Activity can
     still fail after it wrote ``FINISH``.
     """
 
