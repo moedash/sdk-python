@@ -34,6 +34,7 @@ store.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections import OrderedDict, deque
 from collections.abc import Sequence
@@ -112,6 +113,8 @@ class StageRef:
 class _Stage:
     ref: StageRef
     history_floor_event_id: int
+    survived_eviction: bool = False
+    """Staged before the run was evicted from this Worker's cache."""
 
     @property
     def token(self) -> str:
@@ -126,6 +129,9 @@ class _RunOutput:
         self.run_id = run_id
         self.first_run_id = first_run_id
         self.pending: list[WireRecord] = []
+        # FINISH is a statement about the topic, not about a writer object,
+        # and every workflow_writer() call returns a new writer.
+        self.finished: set[str] = set()
         self.staged: list[_Stage] = []
         self.replayed: deque[ExternalOutputStreamManifest] = deque()
         self.proven: list[_Stage] = []
@@ -187,7 +193,7 @@ def build_manifest(
     return manifest
 
 
-def _marker_token(event: HistoryEvent) -> str | None:
+def _marker_output(event: HistoryEvent) -> ExternalOutputStreamManifest | None:
     if event.event_type != EventType.EVENT_TYPE_MARKER_RECORDED:
         return None
     attributes = event.marker_recorded_event_attributes
@@ -197,7 +203,22 @@ def _marker_token(event: HistoryEvent) -> str | None:
     if payloads is None or not payloads.payloads:
         return None
     marker = ExternalStreamMarkerData.FromString(payloads.payloads[0].data)
-    return marker.output.stage_token if marker.HasField("output") else None
+    return marker.output if marker.HasField("output") else None
+
+
+def _marker_token(event: HistoryEvent) -> str | None:
+    output = _marker_output(event)
+    return output.stage_token if output is not None else None
+
+
+_RUN_CLOSED = (
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW,
+)
 
 
 _CHAIN_ENDING_COMMANDS = (
@@ -229,11 +250,20 @@ _TASK_RESULTS = (
 
 def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
     """What History says about one stage; see :func:`decide_token`."""
-    return decide_token(events, stage.token, stage.history_floor_event_id)
+    return decide_token(
+        events,
+        stage.token,
+        stage.history_floor_event_id,
+        survived_eviction=stage.survived_eviction,
+    )
 
 
 def decide_token(
-    events: Sequence[HistoryEvent], token: str, history_floor_event_id: int
+    events: Sequence[HistoryEvent],
+    token: str,
+    history_floor_event_id: int,
+    *,
+    survived_eviction: bool = False,
 ) -> _Decision:
     """What History says about the stage ``token``.
 
@@ -242,9 +272,26 @@ def decide_token(
     failed or timed out result for the task that started after the floor
     proves the completion was dropped. Anything else is not known yet, for
     example while a Local Activity holds the task open.
+    ``survived_eviction`` says the stage was made before its run left the
+    Worker's cache; only the Worker that made the stage knows this.
     """
     if any(_marker_token(event) == token for event in events):
         return _Decision.PROMOTE
+    # The run is over and never committed this stage, so nothing can.
+    if any(event.event_type in _RUN_CLOSED for event in events):
+        return _Decision.ABORT
+    # Several commits of one task attempt share a floor, but they never
+    # straddle an eviction; a failed attempt always ends in one. So a stage
+    # from before an eviction whose floor another stage committed at belongs
+    # to a failed attempt, even a transient one that History never records.
+    if survived_eviction:
+        for event in events:
+            output = _marker_output(event)
+            if (
+                output is not None
+                and output.history_floor_event_id == history_floor_event_id
+            ):
+                return _Decision.ABORT
     for event in events:
         if event.event_id <= history_floor_event_id:
             continue
@@ -452,11 +499,14 @@ class OutputCoordinator:
         if self._client is None:
             return
         try:
+            # The chain's latest run decides: a retried or cron run ends with
+            # a successor in the same chain, which keeps the streams open.
             description = await self._client.get_workflow_handle(
-                run.workflow_id, run_id=run.run_id
+                run.workflow_id
             ).describe()
-            if description.status not in CHAIN_ENDED:
-                # The completion was not accepted; the run goes on.
+            latest = description.raw_description.workflow_execution_info
+            same_chain = latest.first_run_id == run.first_run_id
+            if same_chain and description.status not in CHAIN_ENDED:
                 return
             run.closing = False
             await self.provider._close_chain(
@@ -477,9 +527,20 @@ class OutputCoordinator:
         run = self._runs.pop(run_id, None)
         if run is None:
             return
-        await self._reconcile(run)
+        try:
+            await self._reconcile(run)
+        except Exception:
+            # What could not be settled now waits for the run's return.
+            logger.warning(
+                "Could not settle stream output of evicted run %s",
+                run_id,
+                exc_info=True,
+            )
         if run.staged:
-            self._orphans[run_id] = run.staged
+            self._orphans[run_id] = [
+                dataclasses.replace(stage, survived_eviction=True)
+                for stage in run.staged
+            ]
 
     async def _reconcile(self, run: _RunOutput) -> None:
         async with run.settling:
@@ -492,11 +553,14 @@ class OutputCoordinator:
             self._settled.popitem(last=False)
 
     async def _settle(self, run: _RunOutput) -> None:
-        for proven in run.proven:
+        for proven in list(run.proven):
             await self.provider._promote(proven.ref)
             self._note_settled(proven.token)
-            run.staged = [stage for stage in run.staged if stage is not proven]
-        run.proven.clear()
+            # In place: an eviction may have handed this list on already.
+            run.staged[:] = [
+                stage for stage in run.staged if stage.token != proven.token
+            ]
+            run.proven.remove(proven)
         if self._client is None or not run.staged:
             return
         try:
