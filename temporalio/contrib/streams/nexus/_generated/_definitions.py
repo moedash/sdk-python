@@ -73,7 +73,7 @@ def _collect(
     path: str,
     error: temporalio.exceptions.ApplicationError,
 ) -> None:
-    """Re-paths a nested model's violations under `path` and appends them."""
+    """Re-paths a nested model's violations under ``path`` and appends them."""
 
     if error.type != "PayloadValidationError" or not error.details:
         raise error
@@ -102,11 +102,11 @@ def _transfer_type_convertible(
 ) -> collections.abc.Callable[[type[_ModelT]], type[_ModelT]]:
     """Registers a transfer type converter on a model class.
 
-    Wraps `temporalio.converter.transfer_type_convertible` to erase the
+    Wraps ``temporalio.converter.transfer_type_convertible`` to erase the
     converter's value-type parameter. Binding it directly on the decorated class
     is circular for a static type checker -- the class's type depends on the
     decorator, whose value type depends on the class -- which degrades the model
-    to `Unknown`. Erasing it here keeps the decorator idiomatic at each model and
+    to ``Unknown``. Erasing it here keeps the decorator idiomatic at each model and
     resolves the cycle.
     """
 
@@ -119,7 +119,7 @@ _INTEGER_CAP = (1 << 53) - 1
 def _parse_spec_integer(
     value: object, path: str, violations: list[Violation]
 ) -> int | None:
-    """Parses a JSON number as a spec integer (`1.0` accepted, `1.5` rejected)."""
+    """Parses a JSON number as a spec integer (``1.0`` accepted, ``1.5`` rejected)."""
 
     # `bool` is a subclass of `int`, so it must be excluded before the int check.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -139,7 +139,7 @@ def _parse_spec_integer(
 
 
 def _binary64(value: float) -> float:
-    """Narrows a `number` value to the binary64 domain shared by every target."""
+    """Narrows a ``number`` value to the binary64 domain shared by every target."""
 
     try:
         return float(value)
@@ -206,7 +206,7 @@ def _check_contains(
     path: str,
     violations: list[Violation],
 ) -> None:
-    """Asserts how many of an array's elements match the `contains` schema."""
+    """Asserts how many of an array's elements match the ``contains`` schema."""
 
     match_count = sum(1 for element in value if matches(element))
     if match_count < min_contains:
@@ -298,14 +298,14 @@ def _temporal_reason(name: str, value: str) -> str:
 
 
 def _temporal_isoformat(value: str) -> str:
-    """Rewrites a wire temporal into the spelling `fromisoformat` accepts.
+    """Rewrites a wire temporal into the spelling ``fromisoformat`` accepts.
 
-    `Z` becomes `+00:00`, and the fractional second is padded or truncated to
-    exactly `_TEMPORAL_FRACTION_DIGITS`: before Python 3.11 `fromisoformat`
-    parses only what `isoformat` writes, so an RFC 3339 `.1` or `.1234567` --
+    ``Z`` becomes ``+00:00``, and the fractional second is padded or truncated to
+    exactly ``_TEMPORAL_FRACTION_DIGITS``: before Python 3.11 ``fromisoformat``
+    parses only what ``isoformat`` writes, so an RFC 3339 ``.1`` or ``.1234567`` --
     which every other target accepts -- would otherwise raise. Digits past the
-    sixth are dropped, the loss at `datetime`'s own resolution that P1 allows;
-    the canonical output re-trims the padding, so `.1` still writes as `.1`.
+    sixth are dropped, the loss at ``datetime``'s own resolution that P1 allows;
+    the canonical output re-trims the padding, so ``.1`` still writes as ``.1``.
     """
 
     normalized = value.upper()
@@ -395,7 +395,7 @@ def _check_temporal_offset(
 ) -> None:
     """Asserts a UTC offset is a whole number of minutes in -18:00..+18:00.
 
-    `tzinfo` allows seconds and offsets up to almost 24 hours, both wider than
+    ``tzinfo`` allows seconds and offsets up to almost 24 hours, both wider than
     the materialized wire grammar.
     """
 
@@ -459,7 +459,7 @@ def _check_duration(
     value: datetime.timedelta, path: str, violations: list[Violation]
 ) -> None:
     """Asserts a timedelta is writable as a wire duration (P12): the grammar is
-    unsigned, whole-second and capped, and a `timedelta` is none of those."""
+    unsigned, whole-second and capped, and a ``timedelta`` is none of those."""
 
     if value < datetime.timedelta(0):
         reason = "a duration cannot be negative"
