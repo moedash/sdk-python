@@ -16,7 +16,9 @@ before it goes to Core:
 After the completion, the batch is promoted only when History shows the
 marker that names its stage token. A completion that fails stages nothing.
 Several publishing completions in one Workflow Task each commit their own
-batch, and the stages are kept per run in order.
+batch, and the stages are kept per run in order. On replay nothing is
+staged; each recomputed manifest goes back to Core, which fails the task as
+nondeterministic unless it matches every recorded one.
 """
 
 from __future__ import annotations
@@ -231,11 +233,19 @@ class OutputCoordinator:
         if run is None or not run.pending:
             return
         records, run.pending = run.pending, []
-        if act.is_replaying:
-            # The original completion committed this output already; replay
-            # must not stage it again.
-            return
         floor = act.history_floor_event_id
+        if act.is_replaying:
+            # Nothing is staged on replay. The recomputed manifest goes back to
+            # Core, which compares it with the one History recorded.
+            completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
+                build_manifest(
+                    records,
+                    history_floor_event_id=floor,
+                    run_id=act.run_id,
+                    provider_id=self.provider.name(),
+                )
+            )
+            return
         if floor <= 0:
             raise RuntimeError(
                 "Core did not report this Workflow Task's history floor, so the "
