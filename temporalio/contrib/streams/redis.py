@@ -394,13 +394,14 @@ class RedisProducer(Generic[T]):
         topic: str,
         producer_id: str,
         attempt: int,
+        next_sequence: int = 1,
     ) -> None:
         """Prefer :meth:`RedisStreamHandle.producer`."""
         self._handle = handle
         self._topic = topic
         self._producer_id = producer_id
         self._attempt = attempt
-        self._sequence = 1
+        self._sequence = next_sequence
         self._last = BEGINNING
         self._owner_checked_at: float | None = None
         # A batch reads the sequence, then awaits the codec and Redis, then
@@ -738,14 +739,18 @@ class RedisStreamHandle:
         topic: str | StreamTopic[Any] | None = None,
         producer_id: str,
         attempt: int,
+        next_sequence: int = 1,
     ) -> RedisProducer[Any]:
         """See :meth:`temporalio.contrib.streams.StreamHandle.producer`."""
         if not producer_id:
             raise ValueError("producer_id must not be empty")
-        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
-            raise ValueError(f"attempt must be an int of at least 1, got {attempt!r}")
+        for label, number in (("attempt", attempt), ("next_sequence", next_sequence)):
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise ValueError(
+                    f"{label} must be an int of at least 1, got {number!r}"
+                )
         name, _ = self._resolve(topic, None)
-        return RedisProducer(self, name, producer_id, attempt)
+        return RedisProducer(self, name, producer_id, attempt, next_sequence)
 
     def _resolve(
         self, topic: str | StreamTopic[Any] | None, result_type: type | None

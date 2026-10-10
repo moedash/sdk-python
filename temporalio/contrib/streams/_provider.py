@@ -173,12 +173,22 @@ class StreamHandle(Protocol):
 
     @overload
     def producer(
-        self, *, topic: StreamTopic[T], producer_id: str, attempt: int
+        self,
+        *,
+        topic: StreamTopic[T],
+        producer_id: str,
+        attempt: int,
+        next_sequence: int = 1,
     ) -> StreamProducer[T]: ...
 
     @overload
     def producer(
-        self, *, topic: str | None = None, producer_id: str, attempt: int
+        self,
+        *,
+        topic: str | None = None,
+        producer_id: str,
+        attempt: int,
+        next_sequence: int = 1,
     ) -> StreamProducer[Any]: ...
 
     def producer(
@@ -187,6 +197,7 @@ class StreamHandle(Protocol):
         topic: str | StreamTopic[Any] | None = None,
         producer_id: str,
         attempt: int,
+        next_sequence: int = 1,
     ) -> StreamProducer[Any]:
         """A producer on ``topic`` that writes as ``producer_id`` in ``attempt``.
 
@@ -194,8 +205,16 @@ class StreamHandle(Protocol):
         new sequence and tells readers that what the earlier attempt wrote is
         superseded.
 
+        ``next_sequence`` is the sequence the producer's first record takes.
+        A producer that writes its own records leaves it at one. A process
+        that writes on another's behalf, such as the stream service, keeps no
+        producer between calls: it passes the sequence the writer chose, so
+        the store deduplicates the writer's retry as it would the writer's
+        own.
+
         Raises:
-            ValueError: ``producer_id`` is empty or ``attempt`` is below one.
+            ValueError: ``producer_id`` is empty, or ``attempt`` or
+                ``next_sequence`` is below one.
         """
         ...
 
