@@ -113,10 +113,29 @@ What crosses the wire:
   they are stored, so an encrypting codec keeps them encrypted in Redis.
 - **Workflow ids, topic names and producer ids** appear in key names and
   record fields in clear text. Do not put secrets in them.
+- **Content hashes are not encrypted.** Each record carries the SHA-256 of
+  its body as the converter produced it, before the codec, under the
+  metadata key `temporal.io/content-hash`. Each producer's dedupe state in
+  the log's metadata holds a SHA-256 digest of its newest batch, also taken
+  before the codec. Neither reveals a body, but anyone who can read the
+  keys can tell when two records carry the same value, and can confirm a
+  guess of a value. If that matters for your data, add something unique,
+  such as a random field, to each value.
 - **Transport.** Use TLS (`rediss://`) to encrypt traffic to Redis.
 
 ## Redis Cluster
 
-All keys of one Workflow's streams share a hash tag, the Workflow's run
-chain, so every script touches one slot. Different Workflows spread across
-the cluster.
+The provider supports Redis Cluster. Pass a `redis.asyncio.RedisCluster`
+client; a URL string always makes a single-server client.
+
+All keys of one run chain's streams share a hash tag, so every script and
+transaction touches one slot. Different Workflows, and different run
+chains of one Workflow id, spread across the cluster. The version check
+and the `maxmemory-policy` check ask every primary, and
+`delete_workflow_streams` scans every primary.
+
+The conformance suite and the provider tests run against a Redis 7.4
+cluster with three primaries. The cluster client also sends `CLUSTER SLOTS`
+and `COMMAND` to discover the cluster, so an ACL user for it needs
+`+cluster|slots +command` as well. The ACL above was tested on a single
+server only.

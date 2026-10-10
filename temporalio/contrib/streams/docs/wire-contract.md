@@ -49,7 +49,7 @@ Each entry of a log has one field, `r`, whose value is the serialized
 | `metadata` | 2 | Map of string to `Payload`, see below |
 | `topic` | 3 | The topic name |
 | `kind` | 4 | `STREAM_RECORD_KIND_DATA` (1) or `STREAM_RECORD_KIND_FINISH` (2); 0 reads as DATA |
-| `producer_id` | 5 | Who wrote it; empty when the owning Workflow did |
+| `producer_id` | 5 | Who wrote it; empty when the owning Workflow did. An Activity writes as `<activity id>@<scheduling run id>` |
 | `attempt` | 6 | The producer's attempt; 0 for the owning Workflow |
 | `sequence` | 7 | The record's position in its attempt, starting at 1; 0 for the owning Workflow |
 
@@ -100,7 +100,8 @@ Trim and refresh:
 
 ## A Workflow's own publish
 
-1. Stage: one script runs `RPUSH stage <topic> <record> ...`, sets
+1. Stage: one script runs `RPUSH stage <topic> <record> ...` (in chunks of
+   1000 values, since Lua's `unpack` is bounded), sets
    `PEXPIRE stage <retention>`, and sets
    `HSET stages <token> <run id>\x1f<history floor>\x1f<topic>\x1f...`.
 2. The Workflow Task's commit is recorded by Core in a
@@ -109,9 +110,18 @@ Trim and refresh:
 3. Promote, once History shows that marker: one script deletes the
    `stages` field. If the stage still exists, it `XADD`s each record to its
    topic's log in order, trims and refreshes each log as above, and deletes
-   the stage. Promoting twice does nothing.
-4. Abort, once History shows that the staging Workflow Task failed: delete
-   the stage and its `stages` field.
+   the stage. Promoting twice does nothing. The script returns the number
+   of records added, or -1 when the `stages` field existed but the stage
+   was gone: retention dropped committed output, and the provider logs a
+   warning.
+4. Abort, once History shows that the stage's commit cannot happen: delete
+   the stage and its `stages` field. That is when the staging Workflow Task
+   failed or timed out, when the run closed without the marker, or, for a
+   stage the Worker held across an eviction of the run, when another marker
+   carries the same history floor.
+5. Repair: a reader settles the `stages` fields a stopped Worker left, in
+   commit order, by run start time and then history floor. It stops at the
+   first stage History has not decided yet.
 
 ## Cursors
 
