@@ -240,7 +240,10 @@ return {first, last}
 # description, then topic and record pairs. The pending hash names every
 # stage not yet promoted or aborted, so a reader can find one left by a
 # Worker that stopped, without a SCAN. Lua's unpack fails past a few
-# thousand values, so the pairs go in chunks.
+# thousand values, so the pairs go in chunks. The pending hash only ever
+# lengthens its expiry, so it outlives every stage it names even when
+# Workers of one chain use different retentions; otherwise a lost stage
+# could not be told apart. PEXPIRE GT would skip a hash with no expiry yet.
 _STAGE_LUA = """
 local chunk = 1000
 for i = 4, #ARGV, chunk do
@@ -248,7 +251,9 @@ for i = 4, #ARGV, chunk do
 end
 redis.call('PEXPIRE', KEYS[1], ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
-redis.call('PEXPIRE', KEYS[2], ARGV[1])
+if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[1]) then
+  redis.call('PEXPIRE', KEYS[2], ARGV[1])
+end
 """
 
 # KEYS: stage, pending stages, then a log and its meta per topic. ARGV:
