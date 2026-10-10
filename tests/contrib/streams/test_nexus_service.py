@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+import nexusrpc
 import pytest
 import pytest_asyncio
 
@@ -30,7 +31,21 @@ import temporalio.api.operatorservice.v1
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
-from temporalio.contrib.streams import RecordKind, StreamProvider, StreamRef
+from temporalio.contrib.streams import (
+    RecordKind,
+    StreamClosedError,
+    StreamCursorError,
+    StreamError,
+    StreamExpiredError,
+    StreamNotFoundError,
+    StreamOutcomeUnknownError,
+    StreamProducerError,
+    StreamProvider,
+    StreamRef,
+    StreamRefusedError,
+    StreamStorageError,
+    StreamUnsupportedError,
+)
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     AppendInput,
@@ -43,7 +58,9 @@ from temporalio.contrib.streams.nexus import (
     TemporalStreamsHttpClient,
 )
 from temporalio.contrib.streams.nexus._generated import client as generated_client
+from temporalio.contrib.streams.nexus._handler import _handler_error
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import PollerBehaviorSimpleMaximum, Worker
 from tests import DEV_SERVER_DOWNLOAD_VERSION
@@ -571,3 +588,33 @@ async def test_a_workflow_calls_the_service_through_its_nexus_client(
             task_queue=worker.task_queue,
         )
     assert result == ["hi"]
+
+
+@pytest.mark.parametrize(
+    "error, kind, retryable",
+    [
+        (StreamNotFoundError("x"), nexusrpc.HandlerErrorType.NOT_FOUND, False),
+        (StreamCursorError("x"), nexusrpc.HandlerErrorType.BAD_REQUEST, False),
+        (StreamExpiredError("x"), nexusrpc.HandlerErrorType.BAD_REQUEST, False),
+        (StreamProducerError("x"), nexusrpc.HandlerErrorType.BAD_REQUEST, False),
+        (StreamClosedError("x"), nexusrpc.HandlerErrorType.BAD_REQUEST, False),
+        (StreamUnsupportedError("x"), nexusrpc.HandlerErrorType.NOT_IMPLEMENTED, False),
+        (StreamRefusedError("x"), nexusrpc.HandlerErrorType.INTERNAL, False),
+        (StreamOutcomeUnknownError("x"), nexusrpc.HandlerErrorType.UNAVAILABLE, True),
+        (StreamStorageError("x"), nexusrpc.HandlerErrorType.UNAVAILABLE, True),
+        (StreamError("x"), nexusrpc.HandlerErrorType.INTERNAL, True),
+        (ValueError("x"), nexusrpc.HandlerErrorType.BAD_REQUEST, False),
+    ],
+)
+def test_each_stream_condition_crosses_as_its_own_class(
+    error: Exception, kind: nexusrpc.HandlerErrorType, retryable: bool
+):
+    crossed = _handler_error(error)  # type: ignore[arg-type]
+    name = type(error).__name__
+    assert crossed.type == kind
+    assert crossed.retryable == retryable
+    assert str(crossed).startswith(f"{name}: ")
+    cause = crossed.__cause__
+    assert isinstance(cause, ApplicationError)
+    assert cause.type == name
+    assert cause.non_retryable == (not retryable)

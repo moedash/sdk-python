@@ -28,6 +28,8 @@ from temporalio.contrib.streams._errors import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRefusedError,
+    StreamStorageError,
     StreamUnsupportedError,
 )
 from temporalio.contrib.streams._provider import StreamHandle, StreamProvider
@@ -61,9 +63,13 @@ _ERROR_TYPES: tuple[tuple[type[StreamError], nexusrpc.HandlerErrorType, bool], .
     (StreamProducerError, nexusrpc.HandlerErrorType.BAD_REQUEST, False),
     (StreamClosedError, nexusrpc.HandlerErrorType.BAD_REQUEST, False),
     (StreamUnsupportedError, nexusrpc.HandlerErrorType.NOT_IMPLEMENTED, False),
+    # Any other refusal, such as a store out of memory: nothing was written,
+    # and the same call gets the same answer until the store changes.
+    (StreamRefusedError, nexusrpc.HandlerErrorType.INTERNAL, False),
     # The write may have landed. Repeating the same call is safe, because
     # the store deduplicates it, so the caller is told to retry.
     (StreamOutcomeUnknownError, nexusrpc.HandlerErrorType.UNAVAILABLE, True),
+    (StreamStorageError, nexusrpc.HandlerErrorType.UNAVAILABLE, True),
 )
 
 # The default converter passes a RawValue through untouched, so a body the
