@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import contextvars
 import inspect
 import json
@@ -12,6 +13,7 @@ import random
 import sys
 import threading
 import traceback
+import types
 import warnings
 from abc import ABC, abstractmethod
 from collections import deque
@@ -1109,7 +1111,9 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             temporalio.workflow.NexusOperationProgress(
                 position=job.position,
                 counter=job.counter,
-                metadata=dict(job.metadata),
+                # Read-only, so Workflow code can't change what the next reader
+                # of latest_progress sees.
+                metadata=types.MappingProxyType(dict(job.metadata)),
             )
         )
 
@@ -3828,8 +3832,15 @@ class _NexusOperationHandle(temporalio.workflow.NexusOperationHandle[OutputT]):
         waiter: asyncio.Future[temporalio.workflow.NexusOperationProgress | None] = (
             self._instance.create_future()
         )
-        self._progress_waiters.append((after_counter, waiter))
-        return await waiter
+        entry = (after_counter, waiter)
+        self._progress_waiters.append(entry)
+        try:
+            return await waiter
+        finally:
+            # A wait given up on, such as one under a timeout in a loop, would
+            # otherwise stay in the list until the next progress arrives.
+            with contextlib.suppress(ValueError):
+                self._progress_waiters.remove(entry)
 
     def _resolve_progress(
         self, progress: temporalio.workflow.NexusOperationProgress
