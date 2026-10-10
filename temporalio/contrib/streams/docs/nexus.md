@@ -261,12 +261,15 @@ values at the same points.
   run chain closed without closing the stream, the notifier closes it and
   fails the callers.
 - A closed stream's notifier completes late attaches right away for
-  `streamnotifier.closedRetention` (24 hours by default), then refuses them.
+  `streamnotifier.closedRetention` (7 days by default, the store's
+  retention), then refuses them. Keep it at least as long as the store
+  keeps a stream's records.
 - Once a Workflow id is reused by a new run chain, a late start for the
   earlier chain's stream (a stream reference that names one of its runs)
   fails: the server refuses its attach with `InvalidArgument` instead of
-  completing it with that stream's close result. The server attaches only to the chain that holds the id now.
-  A reference that names no run attaches to the new chain.
+  completing it with that stream's close result. The server attaches only
+  to the chain that holds the id now. A reference that names no run
+  attaches to the new chain.
 - If a caller answers a progress delivery with 404, its operation is
   already closed, and the notifier drops that caller. Any other refusal
   turns progress off for that caller, and it still gets the completion.
@@ -290,10 +293,13 @@ values at the same points.
   the highest one and drops any lower or repeated one, so deliveries may
   arrive out of order.
 - **A burst folds.** Progress that arrives while the caller is between
-  Workflow Tasks waits for the next task. A burst of any size costs the
-  caller at most two tasks: the one it rides, and one follow-up when newer
-  progress folded in after that task was already scheduled. The Workflow
-  then sees the highest counter of the burst. Intermediate counters may be
+  Workflow Tasks waits for the next task. The server also holds progress
+  until `nexusoperation.progressMinInterval` (1 second by default) has
+  passed since the caller Workflow's last task that carried progress. So a
+  burst of any size costs the caller at most two tasks: the one it rides,
+  and one follow-up when newer progress folded in after that task was
+  already scheduled. The Workflow then sees the highest counter of the
+  burst. Intermediate counters may be
   skipped, which is why the reader reads records and does not count
   progress.
 - **No History event per delivery.** Progress rides the caller's next
