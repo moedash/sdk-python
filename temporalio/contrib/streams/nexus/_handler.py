@@ -229,6 +229,7 @@ class TemporalStreamsHandler:
         if max_answer_bytes <= 0:
             raise ValueError("max_answer_bytes must be positive")
         self._max_answer_bytes = max_answer_bytes
+        self._closed = False
         self._provider = provider
         self._idle_timeout = idle_timeout.total_seconds()
         self._max_idle = max_idle_subscriptions
@@ -258,7 +259,11 @@ class TemporalStreamsHandler:
             raise _handler_error(error)
 
     async def close(self) -> None:
-        """Close every idle subscription and wait for those already closing."""
+        """Close every idle subscription and wait for those already closing.
+
+        A call still running releases its subscription when it answers.
+        """
+        self._closed = True
         for subscription in list(self._idle):
             self._release(subscription)
         if self._closing:
@@ -344,7 +349,7 @@ class TemporalStreamsHandler:
         if collected:
             subscription.position = collected[-1].token
         done = subscription.ended and subscription.carried is None
-        if done:
+        if done or self._closed:
             self._release(subscription)
         else:
             self._park(subscription)

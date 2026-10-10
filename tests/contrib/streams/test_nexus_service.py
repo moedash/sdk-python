@@ -751,6 +751,15 @@ async def test_a_record_above_the_budget_still_crosses_alone(service: Service):
     assert texts(second) == ["small"]
 
 
+async def test_a_subscription_in_flight_at_close_is_not_kept(service: Service):
+    ref = await stream_of(service)
+    reading = asyncio.create_task(read(service, ref, wait_ms=1500))
+    await asyncio.sleep(0.5)
+    await service.handler.close()
+    await reading
+    assert not service.handler._idle  # type: ignore[reportPrivateUsage]
+
+
 @pytest.mark.parametrize(
     "error, kind, retryable",
     [
