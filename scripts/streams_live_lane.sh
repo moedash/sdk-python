@@ -199,7 +199,7 @@ sleep 12
 status=0
 uv run --no-sync pytest \
   tests/contrib/streams \
-  tests/nexus/test_workflow_operation_progress.py \
+  tests/nexus/test_workflow_operation_progress*.py \
   tests/nexus/test_temporal_system_nexus.py \
   -E "127.0.0.1:$GRPC_PORT" -p no:cacheprovider --junitxml="$WORK_DIR/junit.xml" 2>&1 |
   tee "$WORK_DIR/pytest.log" || status=$?
