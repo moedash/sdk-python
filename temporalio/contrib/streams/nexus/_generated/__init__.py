@@ -12,7 +12,6 @@ from .models import (
     ReadInput,
     ReadOutput,
     RecordWire,
-    StreamRef,
 )
 from .services import TemporalStreams
 
@@ -24,6 +23,5 @@ __all__ = [
     "ReadInput",
     "ReadOutput",
     "RecordWire",
-    "StreamRef",
     "TemporalStreams",
 ]

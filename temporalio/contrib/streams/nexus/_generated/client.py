@@ -95,8 +95,9 @@ class TemporalStreamsHttpClient:
     bytes every store keeps, so a caller in any language decodes it with that
     proto alone.
 
-    Every method posts to `{base_url}/{operation}`, so `base_url` is the service's
-    address on the Nexus HTTP ingress, up to but not including the operation name.
+    Every method posts to ``{base_url}/{operation}``, so ``base_url`` is the
+    service's address on the Nexus HTTP ingress, up to but not including the
+    operation name.
     """
 
     def __init__(
@@ -176,15 +177,15 @@ class TemporalStreamsHttpClient:
         *,
         deadline: float,
     ) -> ReadOutput:
-        """Calls `read` until it answers with something, or until `deadline`.
+        """Calls ``read`` until it answers with something, or until ``deadline``.
 
-        Each attempt sets `wait_ms` from the budget left, so the endpoint parks
+        Each attempt sets ``wait_ms`` from the budget left, so the endpoint parks
         for the caller instead of the caller spinning. The first answer whose
-        `records` is non-empty, or whose `done` is true, is returned. When the
+        ``records`` is non-empty, or whose ``done`` is true, is returned. When the
         deadline passes first, the last answer is returned, which still carries
         the caller's resume position.
 
-        `deadline` is the whole budget in seconds. The single-shot method stays
+        ``deadline`` is the whole budget in seconds. The single-shot method stays
         available for a caller that wants one attempt.
         """
         end = time.monotonic() + deadline
@@ -217,7 +218,7 @@ class TemporalStreamsHttpClient:
         *,
         stream: StreamRef,
     ) -> "StreamHandle":
-        """A `StreamHandle` bound to `stream`."""
+        """A ``StreamHandle`` bound to ``stream``."""
         return StreamHandle(
             self,
             stream=stream,
@@ -230,7 +231,7 @@ class TemporalStreamsHttpClient:
         producer_id: str,
         attempt: int,
     ) -> "StreamProducer":
-        """A `StreamProducer` bound to `stream`, `producer_id`, `attempt`."""
+        """A ``StreamProducer`` bound to ``stream``, ``producer_id``, ``attempt``."""
         return StreamProducer(
             self,
             stream=stream,
@@ -240,9 +241,9 @@ class TemporalStreamsHttpClient:
 
 
 class StreamHandle:
-    """Binds `stream` for the temporal.sdk.streams.v1.TemporalStreams service.
+    """Binds ``stream`` for the temporal.sdk.streams.v1.TemporalStreams service.
 
-    Every method posts through the `TemporalStreamsHttpClient` it was built from
+    Every method posts through the ``TemporalStreamsHttpClient`` it was built from
     with the bound members filled in, so a caller states a stream's identity once.
     The flat caller stays available for a call that spells every member out.
     """
@@ -273,8 +274,8 @@ class StreamHandle:
         refused. Supersession records are never written: a reader synthesizes them
         from the attempts it observes.
 
-        This handle supplies `stream`; the flat caller's `append` takes it spelled
-        out.
+        This handle supplies ``stream``; the flat caller's ``append`` takes it
+        spelled out.
         """
         return await self._client.append(
             AppendInput(
@@ -300,8 +301,8 @@ class StreamHandle:
         answers with what it collected. It says when the stream has ended for the
         reader, so the caller can stop.
 
-        This handle supplies `stream`; the flat caller's `read` takes it spelled
-        out.
+        This handle supplies ``stream``; the flat caller's ``read`` takes it
+        spelled out.
         """
         return await self._client.read(
             ReadInput(
@@ -326,7 +327,7 @@ class StreamHandle:
         answers with what it collected. It says when the stream has ended for the
         reader, so the caller can stop.
 
-        This handle supplies `stream`; the flat caller's `read_until_records`
+        This handle supplies ``stream``; the flat caller's ``read_until_records``
         takes it spelled out.
         """
         return await self._client.read_until_records(
@@ -345,8 +346,8 @@ class StreamHandle:
         producer_id: str,
         attempt: int,
     ) -> "StreamProducer":
-        """A `StreamProducer` bound to `stream`, `producer_id`, `attempt`: this
-        handle's own members and the ones given here.
+        """A ``StreamProducer`` bound to ``stream``, ``producer_id``, ``attempt``:
+        this handle's own members and the ones given here.
         """
         return StreamProducer(
             self._client,
@@ -357,10 +358,10 @@ class StreamHandle:
 
 
 class StreamProducer:
-    """Binds `stream`, `producer_id`, `attempt` for the
+    """Binds ``stream``, ``producer_id``, ``attempt`` for the
     temporal.sdk.streams.v1.TemporalStreams service.
 
-    Every method posts through the `TemporalStreamsHttpClient` it was built from
+    Every method posts through the ``TemporalStreamsHttpClient`` it was built from
     with the bound members filled in, so a caller states a stream's identity once.
     The flat caller stays available for a call that spells every member out.
     """
@@ -393,8 +394,8 @@ class StreamProducer:
         refused. Supersession records are never written: a reader synthesizes them
         from the attempts it observes.
 
-        This handle supplies `stream`, `producer_id`, `attempt`; the flat caller's
-        `append` takes them spelled out.
+        This handle supplies ``stream``, ``producer_id``, ``attempt``; the flat
+        caller's ``append`` takes them spelled out.
         """
         return await self._client.append(
             AppendInput(

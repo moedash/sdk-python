@@ -22,6 +22,7 @@ is generated from it by ``scripts/gen_nexus_streams_api.py``:
   nothing beyond the standard library.
 """
 
+from temporalio.contrib.streams import StreamRef
 from temporalio.contrib.streams.nexus._generated import (
     AppendInput,
     AppendOutput,
@@ -29,7 +30,6 @@ from temporalio.contrib.streams.nexus._generated import (
     ReadOutput,
     RecordWire,
     StreamCursor,
-    StreamRef,
     TemporalStreams,
 )
 from temporalio.contrib.streams.nexus._generated.client import (
