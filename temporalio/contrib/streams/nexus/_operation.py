@@ -36,7 +36,7 @@ OutputT = TypeVar("OutputT")
 
 # The token's own format version, so a later release that carries more (or a
 # typed start result instead) can tell an old token apart.
-_TOKEN_VERSION = 1
+_TOKEN_VERSION = 2
 
 
 def _encode_token(ref: StreamRef, attach_request_id: str, first_run_id: str) -> str:

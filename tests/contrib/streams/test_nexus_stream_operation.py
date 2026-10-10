@@ -9,6 +9,8 @@ the operation with the close result.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import time
 import uuid
@@ -257,7 +259,23 @@ async def test_cancel_detaches_from_the_chain_it_attached_to(
 
 
 def test_a_token_that_names_no_stream_is_refused() -> None:
-    for token in ["", "not-a-token", "eyJ2IjogMn0"]:
+    # A version 1 token, from before the token named the chain.
+    old = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "v": 1,
+                "attach": "attach-1",
+                "chain": "chain-1",
+                "ref": {
+                    "kind": "workflow",
+                    "workflow_id": "owner-1",
+                    "run_id": None,
+                    "topic": "tokens",
+                },
+            }
+        ).encode()
+    ).decode()
+    for token in ["", "not-a-token", "eyJ2IjogMn0", old]:
         with pytest.raises(ValueError):
             stream_ref_from_token(token)
 
