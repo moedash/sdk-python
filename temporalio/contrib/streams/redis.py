@@ -1027,6 +1027,10 @@ class RedisStreams(StreamProviderPlugin):
         Redis Cluster it scans every primary, since the run chains of one
         Workflow id hash to different slots.
 
+        Delete only after the chain closed and its producers stopped. A late
+        append writes a fresh log with no dedupe state and no close flag, and
+        a Worker that hasn't promoted its last stage loses that output.
+
         Returns:
             How many keys were deleted.
 
