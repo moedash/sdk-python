@@ -13,6 +13,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._topic import (
     DEFAULT_TOPIC,
     StreamTopic,
@@ -28,6 +29,8 @@ StreamOwnerKind = Literal["workflow"]
 a later release adds still reaches the ref's own check when it is decoded,
 instead of failing the converter's type check.
 """
+
+_LATER_KINDS = ("activity", "standalone")
 
 
 @dataclass(frozen=True)
@@ -53,10 +56,17 @@ class StreamRef:
         """Refuse a ref this release cannot open.
 
         Raises:
-            ValueError: ``kind`` is not ``"workflow"``, or ``workflow_id`` or
-                ``topic`` is empty.
+            StreamUnsupportedError: ``kind`` names an owner kind that a later
+                release adds.
+            ValueError: ``kind`` is unknown, or ``workflow_id`` or ``topic``
+                is empty.
         """
         if self.kind != "workflow":
+            if self.kind in _LATER_KINDS:
+                raise StreamUnsupportedError(
+                    f"streams owned by an {self.kind!r} are not supported in this "
+                    "release; only Workflow-owned streams are"
+                )
             raise ValueError(f"unknown StreamRef kind {self.kind!r}")
         if not self.workflow_id:
             raise ValueError("a Workflow StreamRef needs a workflow_id")

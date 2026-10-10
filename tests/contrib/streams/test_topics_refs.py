@@ -9,6 +9,7 @@ from temporalio.contrib.streams import (
     DEFAULT_TOPIC,
     StreamRef,
     StreamTopic,
+    StreamUnsupportedError,
     topic,
 )
 from temporalio.contrib.streams._topic import (
@@ -59,13 +60,13 @@ def test_a_ref_refuses_what_it_cannot_name():
         StreamRef("workflow", "wf", topic="")
 
 
-def test_a_ref_from_a_later_release_decodes_to_the_kind_check():
+def test_a_ref_from_a_later_release_decodes_to_unsupported():
     # The kind is a plain string, so the converter builds the ref and the ref
-    # itself refuses the kind, rather than the converter failing a type check.
+    # says what is missing, rather than the converter failing a type check.
     converter = DataConverter.default.payload_converter
     payload = Payload(
         metadata={"encoding": b"json/plain"},
         data=b'{"kind": "activity", "workflow_id": "wf", "topic": "out"}',
     )
-    with pytest.raises(ValueError, match="'activity'"):
+    with pytest.raises(StreamUnsupportedError, match="only Workflow-owned"):
         converter.from_payloads([payload], [StreamRef])

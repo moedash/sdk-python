@@ -28,6 +28,7 @@ import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.workflow.v1.message_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
+import temporalio.bridge.proto.external_data.external_data_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
 
 if sys.version_info >= (3, 10):
@@ -104,6 +105,7 @@ class WorkflowCommand(google.protobuf.message.Message):
     UPDATE_RESPONSE_FIELD_NUMBER: builtins.int
     SCHEDULE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     REQUEST_CANCEL_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    WORKFLOW_OUTPUT_STREAM_COMMIT_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """User metadata that may or may not be persisted into history depending on the command type.
@@ -178,6 +180,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     def request_cancel_nexus_operation(
         self,
     ) -> global___RequestCancelNexusOperation: ...
+    @property
+    def workflow_output_stream_commit(self) -> global___WorkflowOutputStreamCommit: ...
     def __init__(
         self,
         *,
@@ -216,6 +220,7 @@ class WorkflowCommand(google.protobuf.message.Message):
         schedule_nexus_operation: global___ScheduleNexusOperation | None = ...,
         request_cancel_nexus_operation: global___RequestCancelNexusOperation
         | None = ...,
+        workflow_output_stream_commit: global___WorkflowOutputStreamCommit | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -268,6 +273,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"user_metadata",
             "variant",
             b"variant",
+            "workflow_output_stream_commit",
+            b"workflow_output_stream_commit",
         ],
     ) -> builtins.bool: ...
     def ClearField(
@@ -323,6 +330,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"user_metadata",
             "variant",
             b"variant",
+            "workflow_output_stream_commit",
+            b"workflow_output_stream_commit",
         ],
     ) -> None: ...
     def WhichOneof(
@@ -351,11 +360,42 @@ class WorkflowCommand(google.protobuf.message.Message):
             "update_response",
             "schedule_nexus_operation",
             "request_cancel_nexus_operation",
+            "workflow_output_stream_commit",
         ]
         | None
     ): ...
 
 global___WorkflowCommand = WorkflowCommand
+
+class WorkflowOutputStreamCommit(google.protobuf.message.Message):
+    """Reports that the output batch for this Workflow Task has been durably staged outside History.
+    Core records only this compact manifest, in a `core_external_stream` marker ordered before the
+    completion's other commands, so the batch becomes visible exactly when the task is accepted.
+    While replaying, Core writes nothing and instead requires the manifest to equal the recorded
+    one, ignoring `stage_token`; a mismatch, or a commit where none was recorded, is nondeterminism.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    MANIFEST_FIELD_NUMBER: builtins.int
+    @property
+    def manifest(
+        self,
+    ) -> temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest: ...
+    def __init__(
+        self,
+        *,
+        manifest: temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest
+        | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["manifest", b"manifest"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["manifest", b"manifest"]
+    ) -> None: ...
+
+global___WorkflowOutputStreamCommit = WorkflowOutputStreamCommit
 
 class StartTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

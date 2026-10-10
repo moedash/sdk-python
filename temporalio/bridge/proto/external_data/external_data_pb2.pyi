@@ -4,19 +4,58 @@ isort:skip_file
 """
 
 import builtins
+import collections.abc
 import sys
+import typing
 
 import google.protobuf.descriptor
 import google.protobuf.duration_pb2
+import google.protobuf.internal.containers
+import google.protobuf.internal.enum_type_wrapper
 import google.protobuf.message
 import google.protobuf.timestamp_pb2
 
-if sys.version_info >= (3, 8):
+if sys.version_info >= (3, 10):
     import typing as typing_extensions
 else:
     import typing_extensions
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
+
+class _ExternalStreamBoundary:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _ExternalStreamBoundaryEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+        _ExternalStreamBoundary.ValueType
+    ],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    EXTERNAL_STREAM_BOUNDARY_UNSPECIFIED: _ExternalStreamBoundary.ValueType  # 0
+    EXTERNAL_STREAM_BOUNDARY_COMMANDS_PRODUCED: _ExternalStreamBoundary.ValueType  # 6
+    """The completion carried server-bound commands (timer, activity, child workflow, signal)."""
+    EXTERNAL_STREAM_BOUNDARY_WORKFLOW_COMPLETED: _ExternalStreamBoundary.ValueType  # 7
+    """The completion carried a terminal command: complete, fail, cancel, or continue-as-new."""
+    EXTERNAL_STREAM_BOUNDARY_TASK_COMPLETED: _ExternalStreamBoundary.ValueType  # 8
+    """The completion carried nothing else for the server."""
+
+class ExternalStreamBoundary(
+    _ExternalStreamBoundary, metaclass=_ExternalStreamBoundaryEnumTypeWrapper
+):
+    """How the Workflow Task that wrote an external stream marker ended. Values 1 to 5, 9 and 10 are
+    left free for boundaries that only stream input and output retention can produce.
+    """
+
+EXTERNAL_STREAM_BOUNDARY_UNSPECIFIED: ExternalStreamBoundary.ValueType  # 0
+EXTERNAL_STREAM_BOUNDARY_COMMANDS_PRODUCED: ExternalStreamBoundary.ValueType  # 6
+"""The completion carried server-bound commands (timer, activity, child workflow, signal)."""
+EXTERNAL_STREAM_BOUNDARY_WORKFLOW_COMPLETED: ExternalStreamBoundary.ValueType  # 7
+"""The completion carried a terminal command: complete, fail, cancel, or continue-as-new."""
+EXTERNAL_STREAM_BOUNDARY_TASK_COMPLETED: ExternalStreamBoundary.ValueType  # 8
+"""The completion carried nothing else for the server."""
+global___ExternalStreamBoundary = ExternalStreamBoundary
 
 class LocalActivityMarkerData(google.protobuf.message.Message):
     """This file defines data that Core might write externally. The first motivating case being
@@ -143,3 +182,198 @@ class PatchedMarkerData(google.protobuf.message.Message):
     ) -> None: ...
 
 global___PatchedMarkerData = PatchedMarkerData
+
+class ExternalStreamMarkerData(google.protobuf.message.Message):
+    """What Core writes into a `core_external_stream` marker. Fields 2 to 4 are left free for the
+    stream input state that will share this marker, so replay has one schedule for both.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    SCHEMA_VERSION_FIELD_NUMBER: builtins.int
+    TERMINAL_BOUNDARY_FIELD_NUMBER: builtins.int
+    OUTPUT_FIELD_NUMBER: builtins.int
+    schema_version: builtins.int
+    terminal_boundary: global___ExternalStreamBoundary.ValueType
+    @property
+    def output(self) -> global___ExternalOutputStreamManifest:
+        """The output staged for this Workflow Task."""
+    def __init__(
+        self,
+        *,
+        schema_version: builtins.int = ...,
+        terminal_boundary: global___ExternalStreamBoundary.ValueType = ...,
+        output: global___ExternalOutputStreamManifest | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["output", b"output"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "output",
+            b"output",
+            "schema_version",
+            b"schema_version",
+            "terminal_boundary",
+            b"terminal_boundary",
+        ],
+    ) -> None: ...
+
+global___ExternalStreamMarkerData = ExternalStreamMarkerData
+
+class ExternalOutputStreamManifest(google.protobuf.message.Message):
+    """Compact proof of the externally staged output belonging to one Workflow Task.
+
+    This message contains no record payloads. The stage token identifies the immutable pending
+    batch in the provider, while the remaining fields let replay validate the deterministic logical
+    output and let a cold reader reconcile the pending batch against History.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    SCHEMA_VERSION_FIELD_NUMBER: builtins.int
+    FINGERPRINT_VERSION_FIELD_NUMBER: builtins.int
+    STAGE_TOKEN_FIELD_NUMBER: builtins.int
+    HISTORY_FLOOR_EVENT_ID_FIELD_NUMBER: builtins.int
+    RUN_ID_FIELD_NUMBER: builtins.int
+    TOPICS_FIELD_NUMBER: builtins.int
+    SEGMENTS_FIELD_NUMBER: builtins.int
+    PROVIDER_ID_FIELD_NUMBER: builtins.int
+    PROVIDER_FORMAT_VERSION_FIELD_NUMBER: builtins.int
+    schema_version: builtins.int
+    fingerprint_version: builtins.int
+    stage_token: builtins.str
+    history_floor_event_id: builtins.int
+    """The event immediately preceding this Workflow Task's WorkflowTaskScheduled event in the
+    ordered History view used to build its activation.
+    """
+    run_id: builtins.str
+    @property
+    def topics(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___ExternalOutputTopicManifest
+    ]: ...
+    @property
+    def segments(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___ExternalOutputSegmentManifest
+    ]:
+        """One entry per activation segment, including segments which published no output."""
+    provider_id: builtins.str
+    """Stable configured provider binding. Reconciliation refuses to interpret the batch through a
+    different provider or provider wire format.
+    """
+    provider_format_version: builtins.int
+    def __init__(
+        self,
+        *,
+        schema_version: builtins.int = ...,
+        fingerprint_version: builtins.int = ...,
+        stage_token: builtins.str = ...,
+        history_floor_event_id: builtins.int = ...,
+        run_id: builtins.str = ...,
+        topics: collections.abc.Iterable[global___ExternalOutputTopicManifest]
+        | None = ...,
+        segments: collections.abc.Iterable[global___ExternalOutputSegmentManifest]
+        | None = ...,
+        provider_id: builtins.str = ...,
+        provider_format_version: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "fingerprint_version",
+            b"fingerprint_version",
+            "history_floor_event_id",
+            b"history_floor_event_id",
+            "provider_format_version",
+            b"provider_format_version",
+            "provider_id",
+            b"provider_id",
+            "run_id",
+            b"run_id",
+            "schema_version",
+            b"schema_version",
+            "segments",
+            b"segments",
+            "stage_token",
+            b"stage_token",
+            "topics",
+            b"topics",
+        ],
+    ) -> None: ...
+
+global___ExternalOutputStreamManifest = ExternalOutputStreamManifest
+
+class ExternalOutputTopicManifest(google.protobuf.message.Message):
+    """Logical, pre-codec identity of one topic sub-batch."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOPIC_FIELD_NUMBER: builtins.int
+    RECORD_COUNT_FIELD_NUMBER: builtins.int
+    LOGICAL_BYTE_COUNT_FIELD_NUMBER: builtins.int
+    LOGICAL_FINGERPRINT_FIELD_NUMBER: builtins.int
+    FINISHED_FIELD_NUMBER: builtins.int
+    topic: builtins.str
+    record_count: builtins.int
+    logical_byte_count: builtins.int
+    logical_fingerprint: builtins.bytes
+    finished: builtins.bool
+    def __init__(
+        self,
+        *,
+        topic: builtins.str = ...,
+        record_count: builtins.int = ...,
+        logical_byte_count: builtins.int = ...,
+        logical_fingerprint: builtins.bytes = ...,
+        finished: builtins.bool = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "finished",
+            b"finished",
+            "logical_byte_count",
+            b"logical_byte_count",
+            "logical_fingerprint",
+            b"logical_fingerprint",
+            "record_count",
+            b"record_count",
+            "topic",
+            b"topic",
+        ],
+    ) -> None: ...
+
+global___ExternalOutputTopicManifest = ExternalOutputTopicManifest
+
+class ExternalOutputSegmentManifest(google.protobuf.message.Message):
+    """Record counts for one activation segment. Entries correspond positionally to `topics` in the
+    enclosing ExternalOutputStreamManifest, so empty segments do not repeat topic names.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    RECORD_COUNTS_BY_TOPIC_FIELD_NUMBER: builtins.int
+    @property
+    def record_counts_by_topic(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[
+        builtins.int
+    ]: ...
+    def __init__(
+        self,
+        *,
+        record_counts_by_topic: collections.abc.Iterable[builtins.int] | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "record_counts_by_topic", b"record_counts_by_topic"
+        ],
+    ) -> None: ...
+
+global___ExternalOutputSegmentManifest = ExternalOutputSegmentManifest

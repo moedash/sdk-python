@@ -13,12 +13,24 @@ from collections.abc import Callable
 from typing import Any
 
 import temporalio.converter
+from temporalio.api.common.v1 import Payload
 from temporalio.contrib.streams._policy import AttemptTracker
 from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.contrib.streams.proto.v1 import StreamRecordKind
 
-__all__ = ["RecordDecoder", "WireRecord", "from_wire", "to_wire"]
+__all__ = ["RUN_ID_KEY", "RecordDecoder", "WireRecord", "from_wire", "to_wire"]
+
+RUN_ID_KEY = "temporal.io/run-id"
+"""The record metadata key the producing run id is stored under.
+
+Every record the owning Workflow publishes carries it, because a stream
+follows the Workflow's run chain and a reader needs the run to tell a reset
+branch or a successor run apart. Its value is a payload with ``encoding``
+``binary/plain`` whose data is the run id.
+"""
+
+_RUN_ID_ENCODING = b"binary/plain"
 
 
 def to_wire(
@@ -30,11 +42,12 @@ def to_wire(
     producer_id: str = "",
     attempt: int = 0,
     sequence: int = 0,
+    run_id: str = "",
 ) -> WireRecord:
     """Build the record a provider stores.
 
     Only a ``DATA`` record carries a body; the converter encodes ``value``
-    into it.
+    into it. A ``run_id`` goes into the metadata under :data:`RUN_ID_KEY`.
 
     Raises:
         ValueError: ``kind`` is ``SUPERSEDED`` or ``UNSPECIFIED``, which no
@@ -51,6 +64,10 @@ def to_wire(
     )
     if kind is RecordKind.DATA:
         record.body.CopyFrom(converter.to_payloads([value])[0])
+    if run_id:
+        record.metadata[RUN_ID_KEY].CopyFrom(
+            Payload(metadata={"encoding": _RUN_ID_ENCODING}, data=run_id.encode())
+        )
     return record
 
 
@@ -82,6 +99,9 @@ def from_wire(
         producer_id=wire.producer_id,
         attempt=wire.attempt,
         sequence=wire.sequence,
+        run_id=wire.metadata[RUN_ID_KEY].data.decode()
+        if RUN_ID_KEY in wire.metadata
+        else "",
         value=value,
     )
 
@@ -109,7 +129,7 @@ class RecordDecoder:
         self._result_type = result_type
         self._previous = after
         self._warn = warn
-        self._attempts = AttemptTracker()
+        self._attempts = AttemptTracker(warn)
 
     def decode(self, cursor: Cursor, wire: WireRecord) -> list[StreamRecord[Any]]:
         """The records to yield for one stored record, in order."""

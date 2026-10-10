@@ -16,6 +16,10 @@ a store, and to show in one file what a provider owes. Its limits:
   stops.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the oldest
   ones, which stands in for a store's retention in tests.
+- A Workflow's own publish is staged in process memory and promoted when
+  History shows its commit, as on any provider. A stage is lost with the
+  process, so output a Workflow Task committed just before a crash is never
+  promoted.
 
 The outside surface (producer identity, retry deduplication, positions,
 ``SUPERSEDED``, stream-bound cursors, expired cursors) is faithful, which is
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -52,6 +57,7 @@ from temporalio.contrib.streams._errors import (
     StreamExpiredError,
     StreamProducerError,
 )
+from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._record import (
     Cursor,
@@ -477,6 +483,7 @@ class MemoryStreams(StreamProviderPlugin):
         super().__init__("temporalio.contrib.streams.MemoryStreams")
         self._poll = poll_interval
         self._topics: dict[tuple[str, str, str], _Topic] = {}
+        self._stages: dict[str, StagedBatch] = {}
 
     def get_stream_handle(
         self, client: Client | None, ref: StreamRef
@@ -491,6 +498,23 @@ class MemoryStreams(StreamProviderPlugin):
 
     async def close(self) -> None:
         """Nothing to release: the provider holds no connection."""
+
+    async def _stage(self, batch: StagedBatch) -> str:
+        token = uuid.uuid4().hex
+        self._stages[token] = batch
+        return token
+
+    async def _promote(self, stage: StageRef) -> None:
+        batch = self._stages.pop(stage.token, None)
+        if batch is None:
+            return
+        for record in batch.records:
+            self._topic(stage.namespace, stage.workflow_id, record.topic).append(
+                [record]
+            )
+
+    async def _abort(self, stage: StageRef) -> None:
+        self._stages.pop(stage.token, None)
 
     def truncate(
         self, workflow_id: str, topic: str, *, keep: int, namespace: str = "default"

@@ -11,6 +11,7 @@ round trip and every provider reports a retry the same way.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from temporalio.contrib.streams._record import (
@@ -26,9 +27,10 @@ __all__ = ["AttemptTracker"]
 class AttemptTracker:
     """Watches producer attempts on one read."""
 
-    def __init__(self) -> None:
-        """Start with no producer seen."""
+    def __init__(self, warn: Callable[[str], None] | None = None) -> None:
+        """Start with no producer seen, reporting anything odd through ``warn``."""
         self._attempts: dict[str, int] = {}
+        self._warn = warn
 
     def note(
         self, producer_id: str, attempt: int, *, topic: str, previous: Cursor
@@ -42,10 +44,24 @@ class AttemptTracker:
 
         A producer that declares no attempt supersedes nothing, because there
         is no generation to compare.
+
+        An attempt that goes backwards supersedes nothing either, and is
+        reported through ``warn`` rather than passed off as ordinary data.
+        A lower attempt after a higher one means an older attempt was still
+        writing after a newer one started, such as an Activity attempt that
+        timed out but kept running. A consumer that reads it as the current
+        answer would show a stale one.
         """
         if not producer_id or attempt <= 0:
             return None
         seen = self._attempts.get(producer_id, 0)
+        if attempt < seen and self._warn is not None:
+            self._warn(
+                f"stream record on {topic!r} after {previous} is from attempt "
+                f"{attempt} of producer {producer_id!r}, behind attempt {seen}, "
+                "which this reader already delivered: an older attempt wrote "
+                "after a newer one started"
+            )
         if attempt <= seen:
             return None
         self._attempts[producer_id] = attempt

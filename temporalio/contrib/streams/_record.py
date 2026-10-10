@@ -103,6 +103,12 @@ class StreamRecord(Generic[T]):
     """The producer's attempt, or 0 when the producer declared none."""
     sequence: int = 0
     """The producer's position within its attempt, or 0 when it does not number."""
+    run_id: str = ""
+    """The run that published it, when the owning Workflow did; empty otherwise.
+
+    A stream follows its Workflow's run chain, so this tells a successor run
+    or a reset branch apart.
+    """
     value: T | None = None
     """The published value. Set on ``DATA`` only."""
     supersession: Supersession | None = None
