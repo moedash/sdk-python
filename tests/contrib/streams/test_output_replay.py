@@ -174,6 +174,30 @@ async def test_a_replay_that_publishes_different_data_is_nondeterministic(
         ).replay_workflow(history)
 
 
+@workflow.defn(name="Publisher")
+class PublisherWithFewerCommits:
+    @workflow.run
+    async def run(self) -> None:
+        workflow_writer(EVENTS).publish({"n": "before"})
+        await workflow.execute_local_activity(
+            nothing, start_to_close_timeout=timedelta(seconds=10)
+        )
+        await workflow.sleep(timedelta(milliseconds=10))
+        workflow_writer(EVENTS).publish({"n": "last"})
+
+
+async def test_a_replay_that_commits_less_than_history_is_nondeterministic(
+    client: Client,
+):
+    handle = await run_publisher(client, CountingStreams())
+    history = await handle.fetch_history()
+    # The first Workflow Task recorded two commits; this replay makes one.
+    with pytest.raises(Exception, match="did not commit"):
+        await Replayer(
+            workflows=[PublisherWithFewerCommits], plugins=[CountingStreams()]
+        ).replay_workflow(history)
+
+
 async def test_an_evicted_run_replays_without_publishing_twice(client: Client):
     provider = CountingStreams()
     streams_client = client_with(client, provider)
