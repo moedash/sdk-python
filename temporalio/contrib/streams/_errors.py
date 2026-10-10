@@ -14,12 +14,19 @@ same producer is safe because the store deduplicates the retry. Errors from
 the store's client library never escape: they arrive as one of these. A cursor
 that names a record the store no longer keeps
 (:class:`StreamExpiredError`) is told apart from one that is not valid for
-the stream at all (:class:`StreamCursorError`).
+the stream at all (:class:`StreamCursorError`). A stored record that the
+reader can't decode (:class:`StreamRecordError`) carries its cursor, so the
+caller can resume past it on purpose.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import temporalio.exceptions
+
+if TYPE_CHECKING:
+    from temporalio.contrib.streams._record import Cursor
 
 __all__ = [
     "StreamClosedError",
@@ -29,6 +36,7 @@ __all__ = [
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamProducerError",
+    "StreamRecordError",
     "StreamRefusedError",
     "StreamStorageError",
     "StreamUnsupportedError",
@@ -103,6 +111,20 @@ class StreamOutcomeUnknownError(StreamStorageError):
     sequence until an append succeeds, and the store returns the original
     position for a retry that repeats a batch it already holds.
     """
+
+
+class StreamRecordError(StreamError):
+    """A stored record could not be turned into a record for this reader.
+
+    Its body did not convert to the topic's type, or the codec or the store
+    could not decode it. Reading on from :attr:`cursor` skips it, which is a
+    choice the caller makes, since skipping loses the record.
+    """
+
+    def __init__(self, message: str, cursor: Cursor) -> None:
+        """Name the record that failed by its cursor."""
+        super().__init__(message)
+        self.cursor = cursor
 
 
 class StreamUnsupportedError(StreamError):

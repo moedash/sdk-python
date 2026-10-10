@@ -34,7 +34,9 @@ class ProcessOrder:
         return "done"
 
 
-async def main(client: Client, task_queue: str) -> list[str]:
+async def main(
+    client: Client, task_queue: str, *, workflow_id: str = "order-1"
+) -> list[str]:
     """Run one order and return the steps the client saw.
 
     ``client`` must carry the stream provider, for example
@@ -42,7 +44,7 @@ async def main(client: Client, task_queue: str) -> list[str]:
     """
     async with Worker(client, task_queue=task_queue, workflows=[ProcessOrder]):
         handle = await client.start_workflow(
-            ProcessOrder.run, "order-1", id="order-1", task_queue=task_queue
+            ProcessOrder.run, "order-1", id=workflow_id, task_queue=task_queue
         )
         steps = []
         async for record in get_stream_handle(client, handle.id).read(topic=PROGRESS):
