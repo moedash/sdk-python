@@ -1,0 +1,1 @@
+Experimental: a Workflow Nexus operation handle exposes the progress its operation reports through `latest_progress` and a deterministic `progress()` wait, as `workflow.NexusOperationProgress` values taken from History.
