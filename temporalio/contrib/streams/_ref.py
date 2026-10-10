@@ -26,11 +26,8 @@ StreamOwnerKind = Literal["workflow"]
 """The owner kinds this release opens. Only a Workflow owns a stream.
 
 :attr:`StreamRef.kind` is a plain string, so a ref that names an owner kind
-a later release adds still reaches the ref's own check when it is decoded,
-instead of failing the converter's type check.
+a later release adds still decodes, and is refused where a handle opens.
 """
-
-_LATER_KINDS = ("activity", "standalone")
 
 
 @dataclass(frozen=True)
@@ -39,9 +36,12 @@ class StreamRef:
 
     ``kind`` says what owns the stream; only ``"workflow"`` exists in this
     release. A Workflow ref carries ``workflow_id`` and, when pinned to one
-    run, ``run_id``. Without ``run_id`` it follows the run chain, so a reader
-    keeps reading across Continue-as-New. ``topic`` is the topic a handle
-    opened from the ref addresses when a call names none.
+    run, ``run_id``. The stream belongs to the run chain either way, and a
+    read returns the chain's records. ``run_id`` changes two things: which
+    chain the handle looks up, and that a read ends when that run closes,
+    Continue-as-New included. Without it a reader keeps reading across
+    Continue-as-New. ``topic`` is the topic a handle opened from the ref
+    addresses when a call names none.
 
     The default data converter carries it as JSON, so it can be a Workflow
     argument or an Activity result.
@@ -53,25 +53,34 @@ class StreamRef:
     topic: str = DEFAULT_TOPIC
 
     def __post_init__(self) -> None:
-        """Refuse a ref this release cannot open.
+        """Refuse a ref that names no stream.
+
+        Any ``kind`` decodes, since a ref of a later release can arrive as
+        Workflow input, where raising would fail the Workflow Task on every
+        retry. :meth:`_require_supported` refuses it where a handle opens.
 
         Raises:
-            StreamUnsupportedError: ``kind`` names an owner kind that a later
-                release adds.
-            ValueError: ``kind`` is unknown, or ``workflow_id`` or ``topic``
-                is empty.
+            ValueError: ``kind`` or ``topic`` is empty, or a Workflow ref has
+                no ``workflow_id``.
         """
-        if self.kind != "workflow":
-            if self.kind in _LATER_KINDS:
-                raise StreamUnsupportedError(
-                    f"streams owned by an {self.kind!r} are not supported in this "
-                    "release; only Workflow-owned streams are"
-                )
-            raise ValueError(f"unknown StreamRef kind {self.kind!r}")
-        if not self.workflow_id:
+        if not self.kind:
+            raise ValueError("a StreamRef needs a kind")
+        if self.kind == "workflow" and not self.workflow_id:
             raise ValueError("a Workflow StreamRef needs a workflow_id")
         if not self.topic:
             raise ValueError("a StreamRef needs a topic name")
+
+    def _require_supported(self) -> None:
+        """Refuse to open a stream whose owner kind this release lacks.
+
+        Raises:
+            StreamUnsupportedError: ``kind`` is not ``"workflow"``.
+        """
+        if self.kind != "workflow":
+            raise StreamUnsupportedError(
+                f"streams owned by kind {self.kind!r} are not supported in this "
+                "release; only Workflow-owned streams are"
+            )
 
     @classmethod
     def for_workflow(

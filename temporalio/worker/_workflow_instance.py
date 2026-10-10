@@ -655,6 +655,14 @@ class _WorkflowInstanceImpl(  # type: ignore[reportImplicitAbstractClass]
             pass
         elif job.HasField("update_random_seed"):
             self._apply_update_random_seed(job.update_random_seed)
+        elif job.HasField("replay_external_streams"):
+            # The stream provider plugin takes this job before the instance
+            # sees it, so reaching here means the plugin is not registered.
+            raise RuntimeError(
+                "History holds stream output this Workflow published, and "
+                "replaying it needs the temporalio.contrib.streams stream "
+                "provider plugin on this Worker or Replayer"
+            )
         else:
             raise RuntimeError(f"Unrecognized job: {job.WhichOneof('variant')}")
 
