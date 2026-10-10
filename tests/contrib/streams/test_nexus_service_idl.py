@@ -16,7 +16,7 @@ import nexusrpc
 import pytest
 
 import temporalio.contrib.streams
-from temporalio.contrib.streams import StreamRef
+from temporalio.contrib.streams import StreamRef, StreamUnsupportedError
 from temporalio.contrib.streams.nexus import (
     AppendInput,
     AppendOutput,
@@ -145,5 +145,5 @@ def test_a_reference_this_release_cannot_open_is_refused_at_decode():
     stream = document["stream"]
     assert isinstance(stream, dict)
     stream["kind"] = "activity"
-    with pytest.raises(ValueError, match="unknown StreamRef kind 'activity'"):
+    with pytest.raises(StreamUnsupportedError, match="'activity'"):
         _from_json(document, ReadInput)
