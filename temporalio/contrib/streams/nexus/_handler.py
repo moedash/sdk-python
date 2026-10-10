@@ -7,9 +7,9 @@ import contextlib
 import dataclasses
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 import nexusrpc
 import nexusrpc.handler
@@ -48,7 +48,7 @@ from temporalio.contrib.streams.nexus._generated import (
     TemporalStreams,
 )
 
-__all__ = ["TemporalStreamsHandler"]
+__all__ = ["StreamAccess", "TemporalStreamsHandler"]
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,12 @@ _DEFAULT_MAX_RECORDS = 100
 # A read answer is a sync Nexus result, recorded in the caller's History, so it
 # stays well below the server's blob size limit (2 MiB by default).
 _DEFAULT_MAX_ANSWER_BYTES = 1 << 20
+# One record must fit a read result on its own, so a record above this can never
+# be read through the service.
+_DEFAULT_MAX_RECORD_BYTES = 3 << 19
+# What a body gains inside its stored record: topic, producer, attempt,
+# sequence and the content hash.
+_RECORD_OVERHEAD = 256
 # How long a read waits for records the store already holds to be fetched and
 # decoded, such as behind a slow payload codec.
 _CATCH_UP_LIMIT = 10.0
@@ -135,6 +141,35 @@ def _handler_error(error: ValueError | StreamError) -> nexusrpc.HandlerError:
     )
 
 
+def _crossing_size(size: int) -> int:
+    """The bytes ``size`` record bytes take in a read result, as base64."""
+    return 4 * ((size + 2) // 3)
+
+
+@dataclasses.dataclass(frozen=True)
+class StreamAccess:
+    """One call the stream service is about to serve, for an authorizer.
+
+    .. warning::
+        This API is experimental.
+    """
+
+    operation: Literal["append", "read"]
+    """What the caller asks to do."""
+
+    stream: StreamRef
+    """The stream the call names."""
+
+    context: nexusrpc.handler.StartOperationContext
+    """The Nexus call, with the caller's headers."""
+
+    producer_id: str | None = None
+    """The producer an append writes as. ``None`` for a read."""
+
+    attempt: int | None = None
+    """The producer attempt an append writes. ``None`` for a read."""
+
+
 _StreamKey = tuple[str, str, str, str]
 
 
@@ -192,11 +227,28 @@ class TemporalStreamsHandler:
     holds.
 
     A read answers with at most ``max_records`` records and, past its first
-    record, at most ``max_answer_bytes`` of serialized records, so a read's
+    record, at most ``max_answer_bytes`` of records as they cross, so a read's
     result stays below the server's blob size limit; a reader reads again
     from the cursor it got. A read with ``wait_ms`` 0 waits for no new record,
     but answers with every record the store held when it started, up to those
     limits.
+
+    The handler writes and reads with its Worker's client and that client's
+    store credentials, whatever caller sent the call. So every caller that
+    may reach the endpoint gets the Worker's store rights, for every stream in
+    the namespace and as any producer. Pass ``authorize`` to check each call:
+    it gets a :class:`StreamAccess` and answers whether to serve it, and a
+    refused call fails as unauthorized.
+
+    A record whose bytes would take more than ``max_record_bytes`` in a read
+    result can never be read through the service, so an append with one is
+    refused. A record already in the store that is larger, written there
+    directly, crosses as an error at its cursor, which a reader goes on past.
+    Sizes count what crosses: the record bytes as base64, about 4/3 of them.
+
+    Parked reads hold Nexus task slots for up to their ``wait_ms``. With many
+    readers, serve appends and reads on separate task queues or endpoints, so
+    an append doesn't wait for a slot behind parked reads.
 
     Give the Worker more Nexus pollers than the default
     (``nexus_task_poller_behavior``). A Nexus request is matched only to a
@@ -214,13 +266,15 @@ class TemporalStreamsHandler:
         idle_timeout: timedelta = timedelta(minutes=1),
         max_idle_subscriptions: int = 1000,
         max_answer_bytes: int = _DEFAULT_MAX_ANSWER_BYTES,
+        max_record_bytes: int = _DEFAULT_MAX_RECORD_BYTES,
+        authorize: Callable[[StreamAccess], Awaitable[bool]] | None = None,
     ) -> None:
         """Serve ``provider``.
 
         Raises:
             ValueError: ``idle_timeout`` is not positive,
                 ``max_idle_subscriptions`` is below zero, or
-                ``max_answer_bytes`` is not positive.
+                ``max_answer_bytes`` or ``max_record_bytes`` is not positive.
         """
         if idle_timeout <= timedelta(0):
             raise ValueError("idle_timeout must be positive")
@@ -228,7 +282,11 @@ class TemporalStreamsHandler:
             raise ValueError("max_idle_subscriptions must not be negative")
         if max_answer_bytes <= 0:
             raise ValueError("max_answer_bytes must be positive")
+        if max_record_bytes <= 0:
+            raise ValueError("max_record_bytes must be positive")
         self._max_answer_bytes = max_answer_bytes
+        self._max_record_bytes = max_record_bytes
+        self._authorize = authorize
         self._closed = False
         self._provider = provider
         self._idle_timeout = idle_timeout.total_seconds()
@@ -240,9 +298,18 @@ class TemporalStreamsHandler:
 
     @nexusrpc.handler.sync_operation
     async def append(
-        self, _ctx: nexusrpc.handler.StartOperationContext, input: AppendInput
+        self, ctx: nexusrpc.handler.StartOperationContext, input: AppendInput
     ) -> AppendOutput:
         """Write one batch, or finish the producer, through the provider."""
+        await self._check(
+            StreamAccess(
+                "append",
+                input.stream,
+                ctx,
+                producer_id=input.producer_id,
+                attempt=input.attempt,
+            )
+        )
         try:
             return await self._append(input)
         except (ValueError, StreamError) as error:
@@ -253,6 +320,7 @@ class TemporalStreamsHandler:
         self, ctx: nexusrpc.handler.StartOperationContext, input: ReadInput
     ) -> ReadOutput:
         """Answer with the records after the caller's cursor, waiting for some."""
+        await self._check(StreamAccess("read", input.stream, ctx))
         try:
             return await self._read(ctx, input)
         except (ValueError, StreamError) as error:
@@ -268,6 +336,16 @@ class TemporalStreamsHandler:
             self._release(subscription)
         if self._closing:
             await asyncio.gather(*self._closing, return_exceptions=True)
+
+    async def _check(self, access: StreamAccess) -> None:
+        if self._authorize is None or await self._authorize(access):
+            return
+        raise nexusrpc.HandlerError(
+            f"the caller may not {access.operation} stream {access.stream.topic!r} "
+            f"of Workflow {access.stream.workflow_id!r}",
+            type=nexusrpc.HandlerErrorType.UNAUTHORIZED,
+            retryable_override=False,
+        )
 
     def _open(self, ref: StreamRef) -> StreamHandle:
         client: Client = temporalio.nexus.client()
@@ -292,6 +370,12 @@ class TemporalStreamsHandler:
         else:
             values: list[RawValue] = []
             for index, body in enumerate(payloads):
+                size = _crossing_size(len(body) + _RECORD_OVERHEAD)
+                if size > self._max_record_bytes:
+                    raise ValueError(
+                        f"payload {index} would take {size} bytes in a read result, "
+                        f"above the per-record limit of {self._max_record_bytes}"
+                    )
                 try:
                     values.append(RawValue(Payload.FromString(body)))
                 except DecodeError as error:
@@ -380,7 +464,7 @@ class TemporalStreamsHandler:
         newest: str | None = None
         if subscription.carried is not None:
             collected.append(subscription.carried)
-            size += len(subscription.carried.record)
+            size += _crossing_size(len(subscription.carried.record))
             subscription.carried = None
         while len(collected) < max_records and not subscription.ended:
             waiting = max(0.0, end - loop.time())
@@ -411,11 +495,24 @@ class TemporalStreamsHandler:
                 continue
             subscription.fetched = record.cursor.token
             wire = _record_wire(record)
-            if collected and size + len(wire.record) > self._max_answer_bytes:
+            wire_size = _crossing_size(len(wire.record))
+            if wire_size > self._max_record_bytes:
+                # No read result can carry it, so the reader is told why at
+                # its cursor and goes on past it.
+                wire = RecordWire(
+                    token=wire.token,
+                    record=b"",
+                    error=(
+                        f"the record would take {wire_size} bytes in a read result, "
+                        f"above the per-record limit of {self._max_record_bytes}"
+                    ),
+                )
+                wire_size = 0
+            if collected and size + wire_size > self._max_answer_bytes:
                 subscription.carried = wire
                 break
             collected.append(wire)
-            size += len(wire.record)
+            size += wire_size
         return collected
 
     def _take(self, key: _StreamKey, position: str) -> _Subscription | None:

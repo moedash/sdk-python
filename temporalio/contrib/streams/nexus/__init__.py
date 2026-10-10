@@ -50,7 +50,10 @@ from temporalio.contrib.streams.nexus._generated.client import (
     HTTPStatusError,
     TemporalStreamsHttpClient,
 )
-from temporalio.contrib.streams.nexus._handler import TemporalStreamsHandler
+from temporalio.contrib.streams.nexus._handler import (
+    StreamAccess,
+    TemporalStreamsHandler,
+)
 from temporalio.contrib.streams.nexus._operation import (
     StreamOperationHandler,
     stream_ref_from_token,
@@ -64,6 +67,7 @@ __all__ = [
     "ReadInput",
     "ReadOutput",
     "RecordWire",
+    "StreamAccess",
     "StreamCursor",
     "StreamNotifier",
     "StreamOperationHandler",
