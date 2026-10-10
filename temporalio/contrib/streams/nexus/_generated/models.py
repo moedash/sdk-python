@@ -27,7 +27,7 @@ _APPEND_OUTPUT_DECLARED: frozenset[str] = frozenset({"cursor"})
 _READ_OUTPUT_DECLARED: frozenset[str] = frozenset({"records", "next_token", "done"})
 
 
-_RECORD_WIRE_DECLARED: frozenset[str] = frozenset({"token", "record"})
+_RECORD_WIRE_DECLARED: frozenset[str] = frozenset({"token", "record", "error"})
 
 
 class _AppendInputTransferTypeConverter(
@@ -320,11 +320,15 @@ class AppendInput:
     """
 
     payloads: list[bytes] | None = None
-    """The record bodies, in order, each a serialized temporal.api.common.v1.Payload. The
-    caller's payload codec has already run on them, so the endpoint never sees plaintext
-    a codec protects. A retry resends the original call's bytes: the store compares the
-    bodies as they arrive, so a codec that encodes with a fresh nonce would make a
-    re-encoded retry look like other content. Empty on a call that finishes.
+    """The record bodies, in order, each a serialized temporal.api.common.v1.Payload as the
+    caller's payload converter left it, before any codec. The call crosses encoded as a
+    whole by the caller's codec, like any Nexus input, and the store encodes each body
+    with the serving Worker's codec, so a body is never plaintext in transit or at rest.
+    The store recognizes a retry by the bodies' plaintext, so a codec that encodes with
+    a fresh nonce does not make a retry look like other content. A call with a record
+    larger than the handler's per-record limit (1.5 MiB by default, below what one read
+    result can carry) is refused, so every record can be read. Empty on a call that
+    finishes.
     """
 
     finish: bool | None = None
@@ -901,6 +905,19 @@ class _RecordWireTransferTypeConverter(
                 if record_value_parsed is not None:
                     record_value = record_value_parsed
 
+        error_value: str | None = None
+        if "error" in raw:
+            error_value_raw = raw["error"]
+            if error_value_raw is None:
+                violations.append(
+                    Violation(path="error", reason="explicit null not allowed")
+                )
+            else:
+                if not isinstance(error_value_raw, str):
+                    violations.append(Violation(path="error", reason="expected string"))
+                else:
+                    error_value = error_value_raw
+
         additional_properties: dict[str, typing.Any] = {}
         for key in raw:
             if key not in _RECORD_WIRE_DECLARED:
@@ -910,6 +927,7 @@ class _RecordWireTransferTypeConverter(
         return RecordWire(
             token=token_value,
             record=record_value,
+            error=error_value,
             additional_properties=additional_properties,
         )
 
@@ -938,6 +956,11 @@ class _RecordWireTransferTypeConverter(
                 violations.append(Violation(path="record", reason="expected bytes"))
             if len(violations) == record_violation_count:
                 out["record"] = _format_base64(record_value)
+        error_value: typing.Any = runtime_value.error
+        if error_value is not None:
+            if not (isinstance(error_value, str)):
+                violations.append(Violation(path="error", reason="expected string"))
+            out["error"] = error_value
         additional_properties_value: typing.Any = runtime_value.additional_properties
         if not isinstance(additional_properties_value, dict):
             raise temporalio.converter.create_payload_validation_error(
@@ -972,7 +995,15 @@ class RecordWire:
 
     record: bytes
     """The serialized temporal.sdk.streams.v1.StreamRecord: topic, kind, producer, attempt,
-    sequence and body. The body is the producer's payload as its codec left it.
+    sequence and body. The serving Worker's codec decodes the body, and it crosses
+    encoded once, inside the read result, which the caller's codec decodes. Empty when
+    error is set.
+    """
+
+    error: str | None = None
+    """Why the endpoint can't hand over the record at this cursor, such as one written to
+    the store directly that is larger than a read result can carry. The record is left
+    out, and a reader goes on past the cursor.
     """
 
     additional_properties: dict[str, typing.Any] = dataclasses.field(

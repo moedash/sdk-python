@@ -115,7 +115,9 @@ class TemporalStreamsHttpClient:
     because a Nexus operation per record costs too much for token streams. A
     record crosses as the serialized temporal.sdk.streams.v1.StreamRecord, the
     bytes every store keeps, so a caller in any language decodes it with that
-    proto alone.
+    proto alone. The generated HTTP caller runs no payload codec, so it suits a
+    namespace whose Workers use none. A Workflow caller goes through its Worker,
+    whose codec applies.
 
     Every method posts to ``{base_url}/{operation}``, so ``base_url`` is the
     service's address on the Nexus HTTP ingress, up to but not including the
