@@ -520,6 +520,34 @@ async def test_a_worker_that_stops_waits_for_its_notifications(
     await provider.close()
 
 
+async def test_a_reused_workflow_id_reads_only_its_own_chain_on_memory(
+    client: Client,
+) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams()
+    stream_client: Any = FakeClient(service, real=client)
+    ref = StreamRef.for_workflow(f"owner-{uuid.uuid4()}", topic="tokens")
+    service.chains[ref.workflow_id] = "chain-1"
+    first = provider.get_stream_handle(stream_client, ref).producer(
+        producer_id="p", attempt=1
+    )
+    await first.append("a1", "a2")
+
+    # A new chain reuses the Workflow id and topic, and its producer starts
+    # over, as a fresh store would let it.
+    service.chains[ref.workflow_id] = "chain-2"
+    handle = provider.get_stream_handle(stream_client, ref)
+    second = handle.producer(producer_id="p", attempt=1)
+    await second.append("b1", "b2", "b3")
+
+    records = handle.read()
+    values = [(await asyncio.wait_for(records.__anext__(), 5)).value for _ in range(3)]
+    await records.aclose()
+    assert values == ["b1", "b2", "b3"]
+    assert (await handle.latest()) == (await second.append())
+    await provider.close()
+
+
 class ForeignPositionProducer:
     """A third-party producer whose positions no counter can come from."""
 
@@ -575,12 +603,10 @@ def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
         and request.stream_ref.run_id == "run-1"
         for request in service.notified
     )
-    # The stage names its chain, so nothing is described.
-    assert service.described == []
 
 
 async def test_a_promoted_close_closes_the_store_then_the_notifier() -> None:
-    service = FakeWorkflowService()
+    service = FakeWorkflowService(chains={"owner-1": "run-1"})
     provider = MemoryStreams().notify_on_append()
     client = fake_client(service)
     [result] = DataConverter.default.payload_converter.to_payloads(["3 tokens"])
