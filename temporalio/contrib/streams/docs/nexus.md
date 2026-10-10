@@ -328,3 +328,12 @@ runs a handler that streams a conversation's messages and a caller Workflow
 that reads them and files each one under its channel. Its test,
 `tests/contrib/streams/test_nexus_samples.py`, runs it on a server with the
 settings above and skips on a server without the stream notifier.
+
+## Live tests
+
+The stock dev server has no stream notifier, so the sample test and the
+reader and stream operation lifecycle tests skip there.
+`scripts/streams_live_lane.sh` builds a server that has the notifier, starts
+it with the settings above and a scratch Redis, and runs those tests against
+it. It fails when one of them skips. A release of streams over Nexus needs a
+green run of it, until CI has a lane with such a server.
