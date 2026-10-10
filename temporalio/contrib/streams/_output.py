@@ -33,14 +33,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
@@ -212,9 +211,11 @@ def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
     if any(event.event_type in _RUN_CLOSED for event in events):
         return _Decision.ABORT
     # Several commits of one task attempt share a floor, but they never
-    # straddle an eviction; a failed attempt always ends in one. So a stage
-    # from before an eviction whose floor another stage committed at belongs
-    # to a failed attempt, even a transient one that History never records.
+    # straddle an eviction; a failed attempt always ends in one, since Core
+    # evicts the run when a Workflow Task fails (the WFT failure path in
+    # Core's workflow/mod.rs). So a stage from before an eviction whose floor
+    # another stage committed at belongs to a failed attempt, even a transient
+    # one that History never records.
     if stage.survived_eviction:
         for event in events:
             output = _marker_output(event)
@@ -231,6 +232,10 @@ def decide(events: Sequence[HistoryEvent], stage: _Stage) -> _Decision:
                 return _Decision.UNKNOWN
             return _Decision.ABORT
     return _Decision.UNKNOWN
+
+
+# Enough evicted runs to cover a cache's churn, without growing for the life of the process.
+_MAX_ORPHAN_RUNS = 1000
 
 
 class OutputCoordinator:
@@ -251,8 +256,9 @@ class OutputCoordinator:
         self._runs: dict[str, _RunOutput] = {}
         # Stages of an evicted run that History had not decided yet. A run
         # that comes back picks them up, so a later completion or a replay
-        # can still settle them.
-        self._orphans: dict[str, list[_Stage]] = {}
+        # can still settle them. Bounded, since a run that finishes on another
+        # Worker never comes back here.
+        self._orphans: OrderedDict[str, list[_Stage]] = OrderedDict()
 
     def open_run(self, workflow_id: str, run_id: str) -> _RunOutput:
         """The buffer for ``run_id``, created on first use."""
@@ -301,17 +307,10 @@ class OutputCoordinator:
         Raises:
             RuntimeError: Core did not report the task's history floor, so the
                 output cannot be committed.
-            temporalio.workflow.NondeterminismError: History recorded output
-                that the replayed run did not publish.
         """
         run = self._runs.get(act.run_id)
         if run is None:
             return
-        if not act.is_replaying and run.replayed:
-            raise temporalio.workflow.NondeterminismError(
-                f"History recorded {len(run.replayed)} stream output batch(es) that "
-                "the replayed Workflow did not publish"
-            )
         if not run.pending:
             return
         records, run.pending = run.pending, []
@@ -401,6 +400,8 @@ class OutputCoordinator:
                 dataclasses.replace(stage, survived_eviction=True)
                 for stage in run.staged
             ]
+            while len(self._orphans) > _MAX_ORPHAN_RUNS:
+                self._orphans.popitem(last=False)
 
     async def _reconcile(self, run: _RunOutput) -> None:
         async with run.settling:

@@ -23,8 +23,6 @@ from temporalio.bridge.proto.external_data import (
     ExternalOutputStreamManifest,
     ExternalStreamMarkerData,
 )
-from temporalio.bridge.proto.workflow_activation import WorkflowActivation
-from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
 from temporalio.client import Client
 from temporalio.contrib.streams import StreamRef, topic, workflow_writer
 from temporalio.contrib.streams._output import (
@@ -34,9 +32,7 @@ from temporalio.contrib.streams._output import (
     _Stage,
 )
 from temporalio.contrib.streams.memory import MemoryStreams
-from temporalio.converter import DataConverter
 from temporalio.worker import Replayer
-from temporalio.workflow import NondeterminismError
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
@@ -258,20 +254,6 @@ async def test_a_rejected_commit_is_aborted(
     assert [r.value for r in await read_all(stream.read(topic=EVENTS))] == [{"n": 1}]
 
 
-async def test_output_history_recorded_but_not_republished_is_nondeterministic():
-    coordinator = OutputCoordinator(MemoryStreams(), None, "default")
-    replayed = WorkflowActivation(run_id="run", is_replaying=True)
-    replayed.jobs.add().replay_external_streams.output.stage_token = "recorded"
-    coordinator.take_jobs(replayed)
-    assert list(replayed.jobs) == []
-
-    live = WorkflowActivation(run_id="run", is_replaying=False)
-    completion = WorkflowActivationCompletion(run_id="run")
-    completion.successful.SetInParent()
-    with pytest.raises(NondeterminismError, match="did not publish"):
-        await coordinator.before_completion(live, completion, DataConverter.default)
-
-
 class _HistoryWithMarker:
     """A client whose reverse History holds one output marker, after a pause."""
 
@@ -379,3 +361,34 @@ async def test_settling_a_proven_stage_updates_the_list_others_hold():
     await coordinator.after_completion("run")
     assert provider.promoted == [token]
     assert shared == []
+
+
+class RenamedStreams(CountingStreams):
+    """The same store under another plugin name, as after a rename or a subclass."""
+
+    def name(self) -> str:
+        return "renamed.Streams"
+
+
+async def test_a_replay_through_a_renamed_provider_is_deterministic(client: Client):
+    handle = await run_publisher(client, CountingStreams())
+    history = await handle.fetch_history()
+    # The provider name is not part of what the Workflow published.
+    await Replayer(workflows=[Publisher], plugins=[RenamedStreams()]).replay_workflow(
+        history
+    )
+
+
+async def test_the_stages_kept_for_evicted_runs_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A run that never comes back to this Worker would hold its stages for the
+    # life of the process. Reader repair settles a dropped one.
+    monkeypatch.setattr(output_module, "_MAX_ORPHAN_RUNS", 2)
+    provider = CountingStreams()
+    coordinator = OutputCoordinator(provider, None, "default")
+    for n in range(3):
+        token = await provider._stage(StagedBatch("default", "wf", f"run{n}", []))
+        coordinator.open_run("wf", f"run{n}").staged.append(_Stage(token, 1))
+        await coordinator.on_eviction(f"run{n}")
+    assert list(coordinator._orphans) == ["run1", "run2"]
