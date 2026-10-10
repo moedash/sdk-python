@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 import temporalio.converter
 import temporalio.workflow
-from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.common.v1 import Payload, WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
 from temporalio.api.workflowservice.v1 import (
@@ -118,6 +118,9 @@ class StageRef:
 
     ``topics`` are the batch's topics in order of first publish, so a store
     that keys each topic apart can name every key a promotion touches.
+    ``closes`` names the topics the Workflow Task closed, each with its close
+    result as the payload converter made it, so the Worker closes them once
+    the batch is visible.
     """
 
     namespace: str
@@ -125,6 +128,7 @@ class StageRef:
     first_run_id: str
     token: str
     topics: tuple[str, ...]
+    closes: tuple[tuple[str, Payload], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,10 @@ class _RunOutput:
         # FINISH is a statement about the topic, not about a writer object,
         # and every workflow_writer() call returns a new writer.
         self.finished: set[str] = set()
+        # The topics this activation closed, with their close results. They
+        # ride with the activation's batch, as its close record does.
+        self.closes: dict[str, Payload] = {}
+        self.closed: set[str] = set()
         self.staged: list[_Stage] = []
         self.replayed: deque[ExternalOutputStreamManifest] = deque()
         self.proven: list[_Stage] = []
@@ -188,6 +196,11 @@ class _RunOutput:
         self.pending_topics = set()
         self.manifest_bound = _MANIFEST_FIXED_BYTES
         return records
+
+    def take_closes(self) -> tuple[tuple[str, Payload], ...]:
+        """The topics the activation closed, leaving none."""
+        closes, self.closes = self.closes, {}
+        return tuple(closes.items())
 
 
 class _Decision(Enum):
@@ -444,9 +457,10 @@ class OutputCoordinator:
         if not run.pending:
             return
         records = run.take_pending()
+        closes = run.take_closes()
         floor = act.history_floor_event_id
         if act.is_replaying:
-            self._recommit(act, completion, run, records)
+            self._recommit(act, completion, run, records, closes)
             return
         if floor <= 0:
             raise RuntimeError(
@@ -483,6 +497,7 @@ class OutputCoordinator:
             run.first_run_id,
             manifest.stage_token,
             tuple(topic.topic for topic in manifest.topics),
+            closes,
         )
         run.staged.append(_Stage(ref, floor))
 
@@ -492,6 +507,7 @@ class OutputCoordinator:
         completion: WorkflowActivationCompletion,
         run: _RunOutput,
         records: Sequence[WireRecord],
+        closes: tuple[tuple[str, Payload], ...],
     ) -> None:
         # Nothing is staged on replay. The recomputed manifest goes back to
         # Core, which compares it with the one History recorded.
@@ -517,6 +533,9 @@ class OutputCoordinator:
                     run.first_run_id,
                     recorded.stage_token,
                     tuple(topic.topic for topic in recorded.topics),
+                    # The replayed Workflow closed them again, so a Worker that
+                    # stopped before closing them leaves that to this one.
+                    closes,
                 )
                 run.proven.append(_Stage(ref, recorded.history_floor_event_id))
         completion.successful.commands.add().workflow_output_stream_commit.manifest.CopyFrom(
@@ -528,6 +547,7 @@ class OutputCoordinator:
         run = self._runs.get(run_id)
         if run is not None:
             run.take_pending()
+            run.take_closes()
 
     async def after_completion(self, run_id: str) -> None:
         """Promote the run's stages that History now shows as committed.

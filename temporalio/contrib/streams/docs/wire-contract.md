@@ -32,7 +32,7 @@ Workflow's run chain:
 | Suffix | Type | Holds |
 |---|---|---|
 | `:t:<topic>` | stream | The log of one topic |
-| `:t:<topic>:meta` | hash | Dedupe state and the tombstone of that log |
+| `:t:<topic>:meta` | hash | Dedupe state and the tombstone of that log; `closed` = `1` once the topic is closed |
 | `:chain` | hash | `closed` = `1` once the run chain has ended |
 | `:stage:<token>` | list | A staged Workflow publish: topic, record, topic, record, ... |
 | `:stages` | hash | Every stage not yet promoted or aborted |
@@ -59,6 +59,9 @@ Metadata keys, each a `Payload` with `encoding` = `binary/plain`:
   deterministic protobuf serialization, taken before the payload codec.
 - `temporal.io/run-id`: the run that published the record, on records the
   owning Workflow published.
+- `temporal.io/stream-close`: data `1`, on the owning Workflow's `FINISH`
+  record that closes the topic (`close_workflow_stream`). The Worker closes
+  the topic once the record's batch is promoted.
 
 The entry id that Redis assigns is the record's position. Readers never
 see a `SUPERSEDED` record in the log: a reader synthesizes one when a
@@ -160,8 +163,8 @@ which grows with the stream whichever process writes, not from a clock.
 - A memory provider offset gives `offset + 1`.
 - `BEGINNING` gives 0. A close carries the newest record's counter plus one,
   so it outranks every notification before it. A close from the owning
-  Workflow's code, which cannot read the store's position, carries
-  `2**63 - 1`.
+  Workflow's code is sent by the Worker after promotion, so it carries the
+  same.
 
 The notification's `position` is the cursor token of the newest record it
 reports. One code path computes it:
@@ -172,3 +175,12 @@ reports. One code path computes it:
 Any party that sees the Workflow's run chain end (complete, fail, cancel,
 terminate or time out, but not Continue-as-New) sets `HSET chain closed 1`
 and `PEXPIRE chain <retention + 30 days>`.
+
+Closing one topic (`close_stream`, or the Worker after promoting a batch with
+a `temporal.io/stream-close` record) sets `HSET meta closed 1` and
+`PEXPIRE meta <retention + 30 days>` on that topic, before the server's
+notifier completes the operations. The append script refuses a batch on a
+closed topic with `STREAMS_CLOSED`, after its retry check, so a retry of a
+batch that landed before the close still answers. Promotion never checks
+it, as with the chain flag. A read of a closed topic delivers what is left
+and ends.
