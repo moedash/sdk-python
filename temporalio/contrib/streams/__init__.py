@@ -28,13 +28,6 @@ The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 as an ordinary payload.
 """
 
-from temporalio.contrib.streams._body import (
-    CONTENT_HASH_KEY,
-    content_fingerprint,
-    content_hash,
-    decode_body,
-    encode_body,
-)
 from temporalio.contrib.streams._cursor import BEGINNING, END
 from temporalio.contrib.streams._errors import (
     StreamClosedError,
@@ -44,6 +37,8 @@ from temporalio.contrib.streams._errors import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRefusedError,
+    StreamStorageError,
     StreamUnsupportedError,
 )
 from temporalio.contrib.streams._record import (
@@ -62,7 +57,6 @@ from temporalio.contrib.streams._topic import (
 
 __all__ = [
     "BEGINNING",
-    "CONTENT_HASH_KEY",
     "Cursor",
     "DEFAULT_TOPIC",
     "END",
@@ -77,13 +71,11 @@ __all__ = [
     "StreamProducerError",
     "StreamRecord",
     "StreamRef",
+    "StreamRefusedError",
+    "StreamStorageError",
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
-    "content_fingerprint",
-    "content_hash",
-    "decode_body",
-    "encode_body",
     "resolve_topic",
     "topic",
 ]
