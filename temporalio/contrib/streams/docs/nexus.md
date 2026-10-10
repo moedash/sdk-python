@@ -139,8 +139,11 @@ Closing the stream completes every operation that handed it out:
   published in the same task.
 - From outside a Workflow, for example an Activity or the process that sees
   the work end, `await provider.close_stream(client, ref, result)`. It
-  closes the stream in the store first, so a later append, the owner's
-  included, raises `StreamClosedError`.
+  closes the stream in the store first, so a later append from a client or
+  an Activity raises `StreamClosedError`. The owner Workflow's own later
+  publishes still land, since Workflow code cannot be refused
+  deterministically, and readers that already ended miss them; the Worker
+  logs a warning. So close a Workflow-owned stream from the Workflow.
 
 A reader ends when the stream service says the stream is done: the stream
 is closed in the store and the reader has every record.
@@ -267,6 +270,11 @@ values at the same points.
 - If a caller answers a progress delivery with 404, its operation is
   already closed, and the notifier drops that caller. Any other refusal
   turns progress off for that caller, and it still gets the completion.
+- A reader reads the run chain the owner's Workflow id has at each read,
+  not the chain its operation started on. If the chain ends and the same id
+  starts a new one while a reader still drains, the reader can hand over
+  the new chain's records. Give each stream owner its own Workflow id, or
+  reuse an id only after its readers finish.
 - `close_workflow_stream` closes the stream after the Worker promotes the
   Workflow Task's records. If that close fails, it is retried only when the
   batch is promoted again, by a Worker that replays the run. Until then
