@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import redis.asyncio
@@ -1294,8 +1294,7 @@ async def test_a_batch_that_starts_inside_the_newest_batch_is_refused(
     )
     # A second writer of the same session, whose sequence sits inside the batch
     # the store holds last.
-    second = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
-    second._sequence = 2
+    second = stream.producer(topic=EVENTS, producer_id="p", attempt=1, next_sequence=2)
     with pytest.raises(StreamProducerError):
         await second.append({"n": 9})
 
@@ -1406,7 +1405,8 @@ async def test_a_long_lived_producer_rechecks_its_owner_within_a_minute(
     producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
     await producer.append({"n": 1})
     await owner.terminate()
-    producer._owner_checked_at = time.monotonic() - 61
+    # The provider's own producer, since this handle's provider doesn't notify.
+    cast(Any, producer)._owner_checked_at = time.monotonic() - 61
     with pytest.raises(StreamClosedError):
         await producer.append({"n": 2})
 

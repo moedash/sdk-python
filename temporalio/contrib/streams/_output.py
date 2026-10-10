@@ -43,7 +43,6 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 import temporalio.converter
-import temporalio.workflow
 from temporalio.api.common.v1 import Payload, WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent

@@ -14,7 +14,6 @@ async def test_a_batch_that_starts_inside_the_newest_batch_is_refused():
     await first.append(1, 2, 3)
     # A second writer of the same session, whose sequence sits inside the
     # batch the store holds last.
-    second = stream.producer(topic="out", producer_id="p", attempt=1)
-    second._sequence = 2
+    second = stream.producer(topic="out", producer_id="p", attempt=1, next_sequence=2)
     with pytest.raises(StreamProducerError):
         await second.append(9)
