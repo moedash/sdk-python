@@ -39,6 +39,11 @@ involved:
 Without progress, the operation still runs. The caller then gets the
 completion only, and its reader sees every record at the end.
 
+Turn on `nexusoperation.enableProgress` and `streamnotifier.enabled` only once
+every server in the cluster runs a version that has them. Before a downgrade,
+turn them off and let open stream notifiers finish, because an older server
+cannot run the tasks they leave behind.
+
 ## The handler side
 
 The handler names the stream and returns a `StreamOperationHandler`. Its
