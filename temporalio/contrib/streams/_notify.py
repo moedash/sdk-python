@@ -1,8 +1,8 @@
 """Telling a stream's notifier on the server that the stream moved or closed.
 
 The notifier holds the callbacks of every caller a stream-returning Nexus
-operation attached (see
-:class:`temporalio.contrib.streams.nexus.StreamOperationHandler`). A
+operation attached (see ``StreamOperationHandler`` in
+:mod:`temporalio.contrib.streams.nexus`). A
 notification is a hint that there is something new to read; the records
 themselves stay on the read path.
 """

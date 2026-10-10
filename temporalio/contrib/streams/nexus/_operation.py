@@ -102,7 +102,8 @@ class StreamOperationHandler(
     callback to that stream's notifier and answers asynchronously, with the
     reference in the operation token. From then on the server tells the
     caller each time the stream's producer notifies (see
-    :class:`NotifyingStreamProvider`), and completes the operation with the
+    :meth:`temporalio.contrib.streams.StreamProviderPlugin.notify_on_append`),
+    and completes the operation with the
     close result when the stream closes. A cancel detaches the caller.
 
     The operation's output type is the close result's type. The records

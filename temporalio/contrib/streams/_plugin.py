@@ -79,7 +79,7 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         With this on, every append and finish through this provider, and every
         batch a Workflow publishes once it is visible, notifies the notifier
         of that stream and topic, folded, with one call in flight per stream
-        (see :class:`temporalio.contrib.streams.nexus.StreamNotifier`). That is
+        (see :class:`StreamNotifier`). That is
         what makes a caller of a stream-returning Nexus operation see progress.
         Close a stream with :meth:`close_stream`.
 
