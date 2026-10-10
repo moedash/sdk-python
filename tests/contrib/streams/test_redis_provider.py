@@ -950,6 +950,23 @@ async def test_a_promote_that_finds_its_stage_gone_warns(
     assert await raw.hgetall(keys.pending()) == {}
 
 
+async def test_the_pending_stages_outlive_every_stage_they_name(raw: Any):
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    # Two Workers of one chain configured with different retentions.
+    long = RedisStreams(url, key_prefix=prefix, retention=timedelta(seconds=30))
+    short = RedisStreams(url, key_prefix=prefix, retention=timedelta(milliseconds=300))
+    batch = StagedBatch("ns", "wf", "first", "run", [WireRecord(topic="events")])
+    token = await long._stage(batch)
+    await short._stage(batch)
+    await asyncio.sleep(0.6)
+    keys = long._chain_keys("ns", "wf", "first")
+    assert await raw.exists(keys.stage(token)) == 1
+    assert token.encode() in await raw.hgetall(keys.pending())
+    await long.close()
+    await short.close()
+
+
 class YieldingCodec(PayloadCodec):
     async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
         await asyncio.sleep(0.01)
