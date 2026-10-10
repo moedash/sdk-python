@@ -215,9 +215,9 @@ What `next()` does:
   ```
 
 - A record whose body does not decode into `item_type` raises
-  `StreamRecordError` (a `StreamError` with `.cursor`), after the records
-  before it are handed over. The next call goes on past it, so the Workflow
-  can catch it and keep reading.
+  `temporalio.contrib.streams.StreamRecordError` (a `StreamError` with
+  `.cursor`), after the records before it are handed over. The next call
+  goes on past it, so the Workflow can catch it and keep reading.
 - A failed read raises `temporalio.exceptions.NexusOperationError`. So does
   a failed operation, after the records it left are handed over.
 - If the operation's token names no stream, it raises `ValueError`.
@@ -273,9 +273,10 @@ Two cases stop a reader that would otherwise read for ever.
 - After the operation completes, the reader reads until the stream service
   says the stream is done. If its reads find nothing for `drain_limit`
   (60 seconds by default, a `StreamReader` keyword), it raises
-  `StreamIncompleteError`, whose `.cursor` says where it stopped. That
-  happens when the owner's close never reached the store, or when the
-  Workflow id moved on to a new run chain whose topic is still open.
+  `temporalio.contrib.streams.nexus.StreamIncompleteError`, whose `.cursor`
+  says where it stopped. That happens when the owner's close never reached
+  the store, or when the Workflow id moved on to a new run chain whose
+  topic is still open.
 - A record too large for one read answer raises `StreamRecordError` at its
   cursor, and the next call goes on past it. The stream service refuses an
   append of such a record, so this only happens for a record written to the
