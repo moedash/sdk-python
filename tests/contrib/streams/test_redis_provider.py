@@ -816,6 +816,53 @@ async def test_an_admin_deletes_one_workflows_stream_keys(
     assert await provider.delete_workflow_streams(client.namespace, deleted_id) == 0
 
 
+async def test_a_store_error_on_delete_arrives_as_a_stream_error(
+    provider: RedisStreams, monkeypatch: pytest.MonkeyPatch
+):
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "execute_command", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await provider.delete_workflow_streams("ns", "wf")
+
+
+@pytest.mark.skipif(
+    "STREAMS_REDIS_CLUSTER_URL" not in os.environ,
+    reason="set STREAMS_REDIS_CLUSTER_URL to a Redis Cluster to run",
+)
+async def test_delete_reaches_every_primary_of_a_cluster():
+    cluster = redis.asyncio.RedisCluster.from_url(
+        os.environ["STREAMS_REDIS_CLUSTER_URL"]
+    )
+    await cluster.initialize()
+    provider = RedisStreams(cluster, key_prefix=f"test-{uuid.uuid4().hex}")
+    # Chains of one Workflow id hash to different slots, so their keys sit on
+    # different primaries.
+    by_node: dict[str, str] = {}
+    for n in range(200):
+        first_run_id = f"first-{n}"
+        key = provider._chain_keys("ns", "wf", first_run_id).log("events")
+        node = cluster.get_node_from_key(key)
+        assert node is not None
+        by_node.setdefault(node.name, first_run_id)
+    assert len(by_node) == len(cluster.get_primaries())
+    logs = []
+    for first_run_id in by_node.values():
+        batch = StagedBatch(
+            "ns", "wf", first_run_id, "run", [WireRecord(topic="events")]
+        )
+        token = await provider._stage(batch)
+        await provider._promote(StageRef("ns", "wf", first_run_id, token, ("events",)))
+        logs.append(provider._chain_keys("ns", "wf", first_run_id).log("events"))
+    assert all([await cluster.exists(log) for log in logs])
+
+    assert await provider.delete_workflow_streams("ns", "wf") >= len(logs)
+    assert not any([await cluster.exists(log) for log in logs])
+    await provider.close()
+
+
 @pytest.mark.skipif(
     "STREAMS_REDIS_CLUSTER_URL" not in os.environ,
     reason="set STREAMS_REDIS_CLUSTER_URL to a Redis Cluster to run",

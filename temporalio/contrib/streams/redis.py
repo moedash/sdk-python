@@ -881,22 +881,38 @@ class RedisStreams(StreamProviderPlugin):
         left, and this removes it at once. It covers every run chain of the
         Workflow id: logs, metas, stages and chain flags. It asks Temporal
         nothing, so it can run after the Workflow is gone. It walks the
-        keyspace with ``SCAN``, so run it rarely, not on a hot path.
+        keyspace with ``SCAN``, so run it rarely, not on a hot path. On a
+        Redis Cluster it scans every primary, since the run chains of one
+        Workflow id hash to different slots.
 
         Returns:
             How many keys were deleted.
+
+        Raises:
+            StreamStorageError: Redis failed; some keys may be deleted.
         """
         pattern = f"{_part(self._prefix)}:{{{_part(namespace)}:{_part(workflow_id)}:*"
         deleted = 0
         batch: list[Any] = []
-        async for key in self._redis.scan_iter(match=pattern, count=1000):
-            batch.append(key)
-            if len(batch) >= 500:
+        async with _mapped(write=True):
+            async for key in self._scan(pattern):
+                batch.append(key)
+                if len(batch) >= 500:
+                    deleted += await _awaited(self._redis.unlink(*batch))
+                    batch = []
+            if batch:
                 deleted += await _awaited(self._redis.unlink(*batch))
-                batch = []
-        if batch:
-            deleted += await _awaited(self._redis.unlink(*batch))
         return deleted
+
+    def _scan(self, pattern: str) -> AsyncIterator[Any]:
+        client: Any = self._redis
+        if isinstance(client, redis.asyncio.RedisCluster):
+            return client.scan_iter(
+                match=pattern,
+                count=1000,
+                target_nodes=redis.asyncio.RedisCluster.PRIMARIES,
+            )
+        return client.scan_iter(match=pattern, count=1000)
 
     def _retention_args(self) -> list[int]:
         return [self._retention_ms, self._grace_ms]
