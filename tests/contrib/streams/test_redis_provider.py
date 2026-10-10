@@ -398,7 +398,7 @@ async def test_a_new_producer_closes_an_ended_chain_the_worker_missed(
     client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
 ):
     stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
-    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(1)
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append({"n": 1})
     await owner.terminate()
     keys = await stream._keys()
     assert not await raw.hget(keys.chain(), "closed")
@@ -466,6 +466,24 @@ async def test_a_read_follows_the_chain_and_marks_it_closed(
     assert runs[1] == runs[2] != runs[0]
     # The read saw the chain end, and says so to later producers.
     assert await raw.hget(keys.chain(), "closed") == b"1"
+
+
+async def test_a_read_ends_when_a_new_chain_reuses_the_workflow_id(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append({"n": 1})
+    await owner.terminate()
+    async with new_worker(client, Owner) as worker:
+        reused = await client.start_workflow(
+            Owner.run, id=owner.id, task_queue=worker.task_queue
+        )
+        # The id's latest run is running, but it belongs to another chain.
+        records = await asyncio.wait_for(
+            read_until_end(stream.read(topic=EVENTS)), 10.0
+        )
+        await reused.terminate()
+    assert [r.value for r in records] == [{"n": 1}]
 
 
 async def test_a_read_pinned_to_a_run_ends_when_that_run_continues(
@@ -876,6 +894,24 @@ async def wait_for_next_run_after_completion(
             return
         await asyncio.sleep(0.1)
     raise AssertionError("the first cron run never completed")
+
+
+async def test_a_producer_whose_workflow_id_was_reused_is_refused(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+    await owner.terminate()
+    # A new chain under the same id: the old chain is over even though the
+    # id's latest run is running.
+    async with new_worker(client, Owner) as worker:
+        reused = await client.start_workflow(
+            Owner.run, id=owner.id, task_queue=worker.task_queue
+        )
+        producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+        with pytest.raises(StreamClosedError):
+            await producer.append(1)
+        await reused.terminate()
 
 
 async def test_a_producer_rechecks_its_owner_once_retention_passed(
