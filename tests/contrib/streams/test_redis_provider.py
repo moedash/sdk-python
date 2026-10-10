@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,7 +21,9 @@ import redis.asyncio
 import redis.exceptions
 
 from temporalio import workflow
-from temporalio.api.common.v1 import Payload
+from temporalio.api.common.v1 import Payload, WorkflowExecution
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
+from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHandle
 from temporalio.common import RetryPolicy
 from temporalio.contrib.streams import (
@@ -31,6 +34,7 @@ from temporalio.contrib.streams import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRecordError,
     StreamRef,
     StreamRefusedError,
     StreamStorageError,
@@ -47,6 +51,7 @@ from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.contrib.streams.redis import RedisProducer, RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError, RPCStatusCode
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
@@ -139,7 +144,8 @@ async def test_a_batch_is_one_script_and_keeps_one_high_water_field(
     assert len(held) == 1
     ((field, value),) = held.items()
     assert field == b"hw:1:p:1"
-    assert value.split(b"|")[0] == b"9"
+    # The newest batch's first sequence and its record count.
+    assert value.split(b"|")[:2] == [b"9", b"2"]
 
 
 async def test_a_retry_of_an_older_batch_is_refused_even_with_its_content(
@@ -150,7 +156,7 @@ async def test_a_retry_of_an_older_batch_is_refused_even_with_its_content(
     first = await producer.append({"n": 1})
     await producer.append({"n": 2})
     restarted = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
-    with pytest.raises(StreamProducerError, match="below the newest"):
+    with pytest.raises(StreamProducerError, match="below the next one expected"):
         await restarted.append({"n": 1})
     assert first != await stream.latest(topic=EVENTS)
     assert len(await log_entries(raw, stream, "events")) == 2
@@ -309,30 +315,6 @@ async def test_appends_trim_to_retention_and_slide_the_expiry(
     meta = await raw.hgetall(keys.meta("events"))
     assert meta[b"added"] == b"3"
     assert meta[b"last"] == (await raw.xrange(keys.log("events")))[-1][0]
-    await provider.close()
-
-
-async def test_a_stage_expires_with_retention_and_a_promotion_keeps_the_log(
-    raw: Any,
-):
-    provider = RedisStreams(
-        os.environ["STREAMS_REDIS_URL"],
-        key_prefix=f"test-{uuid.uuid4().hex}",
-        retention=timedelta(seconds=30),
-    )
-    record = WireRecord(topic="events")
-    batch = StagedBatch("ns", "wf", "first", "run", [record, record])
-    token = await provider._stage(batch)
-    keys = provider._chain_keys("ns", "wf", "first")
-    assert 0 < await raw.pttl(keys.stage(token)) <= 30_000
-    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
-    assert await raw.exists(keys.stage(token)) == 0
-    assert await raw.xlen(keys.log("events")) == 2
-    assert 0 < await raw.pttl(keys.log("events")) <= 30_000
-    assert (await raw.hgetall(keys.meta("events")))[b"added"] == b"2"
-    # Promoting again does nothing: the stage is gone.
-    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
-    assert await raw.xlen(keys.log("events")) == 2
     await provider.close()
 
 
@@ -983,8 +965,10 @@ async def test_a_reader_repairs_past_a_stage_whose_run_is_gone(
 
     records = await read_until_end(stream.read(topic=EVENTS))
     assert [r.value for r in records] == [{"n": 1}, {"n": 2}]
-    assert await raw.hgetall(keys.pending()) == {}
-    assert await raw.exists(keys.stage(gone)) == 0
+    # Not found can mean a replica behind a failover, so the stage is left to
+    # its expiry rather than aborted, and it holds back nothing.
+    assert list(await raw.hgetall(keys.pending())) == [gone.encode()]
+    assert await raw.exists(keys.stage(gone)) == 1
     await stopped.close()
     await reader.close()
 
@@ -1275,3 +1259,412 @@ async def test_a_producer_rechecks_its_owner_once_retention_passed(
     with pytest.raises(StreamClosedError):
         await producer.append(2)
     await provider.close()
+
+
+async def test_a_stage_expires_after_retention_and_grace_and_a_promotion_keeps_the_log(
+    raw: Any,
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(seconds=30),
+    )
+    record = WireRecord(topic="events")
+    batch = StagedBatch("ns", "wf", "first", "run", [record, record])
+    token = await provider._stage(batch)
+    keys = provider._chain_keys("ns", "wf", "first")
+    assert 30_000 < await raw.pttl(keys.stage(token)) <= 30_000 + provider._grace_ms
+    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    assert await raw.exists(keys.stage(token)) == 0
+    assert await raw.xlen(keys.log("events")) == 2
+    assert 0 < await raw.pttl(keys.log("events")) <= 30_000
+    assert (await raw.hgetall(keys.meta("events")))[b"added"] == b"2"
+    # Promoting again does nothing: the stage is gone.
+    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    assert await raw.xlen(keys.log("events")) == 2
+    await provider.close()
+
+
+async def test_a_batch_that_starts_inside_the_newest_batch_is_refused(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(
+        {"n": 1}, {"n": 2}, {"n": 3}
+    )
+    # A second writer of the same session, whose sequence sits inside the batch
+    # the store holds last.
+    second = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    second._sequence = 2
+    with pytest.raises(StreamProducerError):
+        await second.append({"n": 9})
+
+
+async def test_the_session_field_counts_the_producer_id_in_utf8_bytes(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    # Every SDK must name the same field, and UTF-8 bytes count the same way
+    # in every language.
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="é", attempt=1).append({"n": 1})
+    keys = await stream._keys()
+    fields = await raw.hgetall(keys.meta("events"))
+    assert [f for f in fields if f.startswith(b"hw:")] == ["hw:2:é:1".encode()]
+
+
+def described_with(first_run_id: str) -> Any:
+    info = SimpleNamespace(first_run_id=first_run_id)
+    return SimpleNamespace(
+        raw_description=SimpleNamespace(workflow_execution_info=info)
+    )
+
+
+async def test_an_empty_first_run_id_is_unsupported(
+    client: Client, provider: RedisStreams, monkeypatch: pytest.MonkeyPatch
+):
+    async def describe(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        return described_with("")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", describe)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("wf"))
+    with pytest.raises(StreamUnsupportedError, match="first run id"):
+        await stream.latest(topic=EVENTS)
+
+
+async def test_a_describe_failure_arrives_as_a_stream_error(
+    client: Client, provider: RedisStreams, monkeypatch: pytest.MonkeyPatch
+):
+    async def describe(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", describe)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("wf"))
+    with pytest.raises(StreamStorageError, match="unavailable"):
+        await stream.latest(topic=EVENTS)
+
+
+async def test_a_promote_that_names_too_few_topics_writes_nothing(
+    provider: RedisStreams, raw: Any
+):
+    records = [WireRecord(topic="a", sequence=1), WireRecord(topic="b", sequence=1)]
+    token = await provider._stage(StagedBatch("ns", "wf", "first", "run", records))
+    keys = provider._chain_keys("ns", "wf", "first")
+    with pytest.raises(StreamRefusedError):
+        await provider._promote(StageRef("ns", "wf", "first", token, ("a",)))
+    # Redis keeps what a failed script wrote, so the check comes before any write.
+    assert await raw.xlen(keys.log("a")) == 0
+    assert await raw.exists(keys.stage(token)) == 1
+    assert token.encode() in await raw.hgetall(keys.pending())
+
+
+async def test_a_ref_of_an_unsupported_kind_is_refused_where_it_opens(
+    client: Client, provider: RedisStreams
+):
+    with pytest.raises(StreamUnsupportedError):
+        provider.get_stream_handle(client, StreamRef("activity", "x"))
+
+
+async def test_a_session_older_than_the_retention_leaves_the_meta(
+    client: Client, owner: WorkflowHandle, raw: Any
+):
+    # One field per session would otherwise grow the meta for as long as the
+    # topic is written, long after the records it guards are gone.
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+    )
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="old", attempt=1).append({"n": 1})
+    await asyncio.sleep(0.5)
+    await stream.producer(topic=EVENTS, producer_id="new", attempt=1).append({"n": 2})
+    keys = await stream._keys()
+    fields = await raw.hgetall(keys.meta("events"))
+    assert [f for f in fields if f.startswith(b"hw:")] == [b"hw:3:new:1"]
+    await provider.close()
+
+
+async def test_a_stage_lives_for_the_retention_and_the_grace(
+    provider: RedisStreams, raw: Any
+):
+    # A stage only has to live until someone promotes it, and crash repair
+    # can come late.
+    batch = StagedBatch("ns", "wf", "first", "run", [WireRecord(topic="events")])
+    token = await provider._stage(batch)
+    keys = provider._chain_keys("ns", "wf", "first")
+    assert await raw.pttl(keys.stage(token)) > provider._retention_ms
+
+
+async def test_a_long_lived_producer_rechecks_its_owner_within_a_minute(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    # Nothing marks the chain of a Workflow that never published itself, so
+    # only the producer's own recheck ends its writes.
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 1})
+    await owner.terminate()
+    producer._owner_checked_at = time.monotonic() - 61
+    with pytest.raises(StreamClosedError):
+        await producer.append({"n": 2})
+
+
+async def test_an_owner_history_no_longer_holds_closes_the_stream(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def gone(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", gone)
+    with pytest.raises(StreamClosedError):
+        await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(1)
+
+
+async def test_an_owner_check_that_fails_is_a_stream_error(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", unavailable)
+    with pytest.raises(StreamStorageError, match="unavailable"):
+        await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(1)
+
+
+@workflow.defn
+class PublishAroundSignals:
+    def __init__(self) -> None:
+        self.next = False
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        workflow_writer(EVENTS).publish({"n": 1})
+        await workflow.wait_condition(lambda: self.next)
+        workflow_writer(EVENTS).publish({"n": 2})
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def go_on(self) -> None:
+        self.next = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+
+async def test_a_reset_run_replays_its_output_and_keeps_the_chain_open(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-reset-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishAroundSignals) as worker:
+        handle = await streams_client.start_workflow(
+            PublishAroundSignals.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        # Two publishing tasks, so the reset run replays a marker of the base run.
+        await logged_within(raw, stream, 1)
+        await handle.signal(PublishAroundSignals.go_on)
+        await logged_within(raw, stream, 2)
+        completed = [
+            event.event_id
+            async for event in handle.fetch_history_events()
+            if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
+        ]
+        response = await client.workflow_service.reset_workflow_execution(
+            ResetWorkflowExecutionRequest(
+                namespace=client.namespace,
+                workflow_execution=WorkflowExecution(workflow_id=workflow_id),
+                reason="test a reset of a publishing Workflow",
+                workflow_task_finish_event_id=completed[-1],
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        reset = streams_client.get_workflow_handle(workflow_id, run_id=response.run_id)
+        # The reset run keeps the chain's first run, so the chain stays open.
+        keys = await stream._keys()
+        assert not await raw.hget(keys.chain(), "closed")
+        await stream.producer(topic=OTHER, producer_id="p", attempt=1).append(1)
+        await reset.signal(PublishAroundSignals.finish)
+        await asyncio.wait_for(reset.result(), 30)
+    failed = [
+        event
+        async for event in reset.fetch_history_events()
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+        and event.workflow_task_failed_event_attributes.cause
+        != WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_WORKFLOW
+    ]
+    assert failed == []
+
+
+async def logged_within(raw: Any, stream: Any, count: int) -> None:
+    keys = await stream._keys()
+    for _ in range(200):
+        if await raw.xlen(keys.log("events")) >= count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"the log never held {count} records")
+
+
+async def test_a_malformed_entry_raises_with_its_cursor(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 1})
+    keys = await stream._keys()
+    entry = await raw.xadd(keys.log("events"), {"not-r": b"x"})
+    await producer.append({"n": 2})
+    records = stream.read(topic=EVENTS)
+    assert (await anext(records)).value == {"n": 1}
+    with pytest.raises(StreamRecordError) as raised:
+        await anext(records)
+    assert raised.value.cursor.token.endswith(entry.decode())
+    after = await anext(stream.read(topic=EVENTS, after=raised.value.cursor))
+    assert after.value == {"n": 2}
+
+
+async def test_a_read_ends_when_history_no_longer_holds_its_owner(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append({"n": 1})
+    await stream._keys()
+
+    async def gone(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", gone)
+    records = await asyncio.wait_for(read_until_end(stream.read(topic=EVENTS)), 10)
+    assert [r.value for r in records] == [{"n": 1}]
+
+
+async def test_an_owner_check_during_a_read_that_fails_is_a_stream_error(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", unavailable)
+    with pytest.raises(StreamStorageError, match="unavailable"):
+        await asyncio.wait_for(anext(stream.read(topic=EVENTS)), 10)
+
+
+async def test_a_store_error_on_the_start_watermark_is_a_stream_error(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "hget", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await asyncio.wait_for(anext(stream.read(topic=EVENTS)), 10)
+
+
+async def test_a_reader_aborts_a_stage_a_later_attempt_superseded(
+    client: Client, raw: Any
+):
+    # A transient attempt's failure is not in History, but the attempt that
+    # completed carries every commit made at that floor.
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-transient-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishThenWait) as worker:
+        handle = await stopped_client.start_workflow(
+            PublishThenWait.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        reader = RedisStreams(url, key_prefix=prefix)
+        stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        keys = await stream._keys()
+        for _ in range(200):
+            if await raw.hlen(keys.pending()) == 1:
+                break
+            await asyncio.sleep(0.05)
+        ((_, description),) = (await raw.hgetall(keys.pending())).items()
+        run_id, floor = description.decode().split("\x1f")[:2]
+        orphan = await reader._stage(
+            StagedBatch(
+                client.namespace,
+                workflow_id,
+                keys.first_run_id,
+                run_id,
+                [WireRecord(topic="events")],
+                history_floor_event_id=int(floor),
+            )
+        )
+        records = stream.read(topic=EVENTS)
+        assert (await asyncio.wait_for(anext(records), 10)).value == {"n": 1}
+        await records.aclose()
+        assert await raw.hgetall(keys.pending()) == {}
+        assert await raw.exists(keys.stage(orphan)) == 0
+        await handle.signal(PublishThenWait.finish)
+        await handle.result()
+    await stopped.close()
+    await reader.close()
+
+
+async def test_a_reader_describes_each_pending_run_once(
+    client: Client, raw: Any, monkeypatch: pytest.MonkeyPatch
+):
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-describes-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishInThreeTasks) as worker:
+        await stopped_client.execute_workflow(
+            PublishInThreeTasks.run, id=workflow_id, task_queue=worker.task_queue
+        )
+    reader = RedisStreams(url, key_prefix=prefix)
+    stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    keys = await stream._keys()
+    assert await raw.hlen(keys.pending()) == 3
+    started: list[str] = []
+    run_started = stream._run_started
+
+    async def counted(run_id: str) -> Any:
+        started.append(run_id)
+        return await run_started(run_id)
+
+    monkeypatch.setattr(stream, "_run_started", counted)
+    await read_until_end(stream.read(topic=EVENTS))
+    assert len(started) == len(set(started))
+    await stopped.close()
+    await reader.close()

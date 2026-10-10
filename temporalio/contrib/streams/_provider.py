@@ -146,7 +146,10 @@ class StreamHandle(Protocol):
         ``END`` at whatever is appended after the read starts. Any other
         cursor came from a record of this stream, and the read resumes just
         past it, so a reader that keeps the last cursor it handled and hands
-        it back sees every record once. The read ends when the owner's run
+        it back sees every stored record once. A resumed read knows the
+        attempt of the record at its cursor, so a new attempt of that
+        producer still arrives as ``SUPERSEDED``. Earlier attempts of other
+        producers are not known to it. The read ends when the owner's run
         chain is closed and every retained record has been delivered. The
         result is a generator, so a caller that stops early calls
         ``aclose()`` on it.
@@ -203,7 +206,9 @@ class StreamHandle(Protocol):
 
         A process that restarts its work raises ``attempt``, which starts a
         new sequence and tells readers that what the earlier attempt wrote is
-        superseded.
+        superseded. Keep one producer object per ``(topic, producer_id,
+        attempt)``. Each object numbers its own records from one, so a second
+        object for the same session is refused as stale.
 
         ``next_sequence`` is the sequence the producer's first record takes.
         A producer that writes its own records leaves it at one. A process

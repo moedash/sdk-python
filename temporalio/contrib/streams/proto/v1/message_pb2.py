@@ -20,7 +20,7 @@ from temporalio.api.common.v1 import (
 )
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n%temporal/sdk/streams/v1/message.proto\x12\x17temporal.sdk.streams.v1\x1a$temporal/api/common/v1/message.proto"\xd6\x02\n\x0cStreamRecord\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x45\n\x08metadata\x18\x02 \x03(\x0b\x32\x33.temporal.sdk.streams.v1.StreamRecord.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x37\n\x04kind\x18\x04 \x01(\x0e\x32).temporal.sdk.streams.v1.StreamRecordKind\x12\x13\n\x0bproducer_id\x18\x05 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x06 \x01(\x03\x12\x10\n\x08sequence\x18\x07 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01*r\n\x10StreamRecordKind\x12"\n\x1eSTREAM_RECORD_KIND_UNSPECIFIED\x10\x00\x12\x1b\n\x17STREAM_RECORD_KIND_DATA\x10\x01\x12\x1d\n\x19STREAM_RECORD_KIND_FINISH\x10\x02\x62\x06proto3'
+    b'\n%temporal/sdk/streams/v1/message.proto\x12\x17temporal.sdk.streams.v1\x1a$temporal/api/common/v1/message.proto"\xd6\x02\n\x0cStreamRecord\x12-\n\x04\x62ody\x18\x01 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload\x12\x45\n\x08metadata\x18\x02 \x03(\x0b\x32\x33.temporal.sdk.streams.v1.StreamRecord.MetadataEntry\x12\r\n\x05topic\x18\x03 \x01(\t\x12\x37\n\x04kind\x18\x04 \x01(\x0e\x32).temporal.sdk.streams.v1.StreamRecordKind\x12\x13\n\x0bproducer_id\x18\x05 \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x06 \x01(\x03\x12\x10\n\x08sequence\x18\x07 \x01(\x03\x1aP\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.temporal.api.common.v1.Payload:\x02\x38\x01*x\n\x10StreamRecordKind\x12"\n\x1eSTREAM_RECORD_KIND_UNSPECIFIED\x10\x00\x12\x1b\n\x17STREAM_RECORD_KIND_DATA\x10\x01\x12\x1d\n\x19STREAM_RECORD_KIND_FINISH\x10\x02"\x04\x08\x03\x10\x03\x62\x06proto3'
 )
 
 _STREAMRECORDKIND = DESCRIPTOR.enum_types_by_name["StreamRecordKind"]
@@ -58,7 +58,7 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     _STREAMRECORD_METADATAENTRY._options = None
     _STREAMRECORD_METADATAENTRY._serialized_options = b"8\001"
     _STREAMRECORDKIND._serialized_start = 449
-    _STREAMRECORDKIND._serialized_end = 563
+    _STREAMRECORDKIND._serialized_end = 569
     _STREAMRECORD._serialized_start = 105
     _STREAMRECORD._serialized_end = 447
     _STREAMRECORD_METADATAENTRY._serialized_start = 367
