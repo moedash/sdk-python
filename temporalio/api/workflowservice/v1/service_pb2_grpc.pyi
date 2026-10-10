@@ -1176,8 +1176,9 @@ class WorkflowServiceStub:
         temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackRequest,
         temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackResponse,
     ]
-    """DetachStreamCallback removes a callback from the notifier of a stream, so it gets no more
-    deliveries. A Nexus handler calls it when the caller cancels the operation.
+    """DetachStreamCallback removes a callback from the notifier of a stream. The notifier completes
+    the callback's operation as canceled and sends it no more progress. A Nexus handler calls it
+    when the caller cancels the operation.
 
     (-- api-linter: core::0127::http-annotation=disabled
         aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
@@ -2632,8 +2633,9 @@ class WorkflowServiceServicer(metaclass=abc.ABCMeta):
         request: temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackRequest,
         context: grpc.ServicerContext,
     ) -> temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackResponse:
-        """DetachStreamCallback removes a callback from the notifier of a stream, so it gets no more
-        deliveries. A Nexus handler calls it when the caller cancels the operation.
+        """DetachStreamCallback removes a callback from the notifier of a stream. The notifier completes
+        the callback's operation as canceled and sends it no more progress. A Nexus handler calls it
+        when the caller cancels the operation.
 
         (-- api-linter: core::0127::http-annotation=disabled
             aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)

@@ -1953,8 +1953,9 @@ class WorkflowServiceServicer(object):
         raise NotImplementedError("Method not implemented!")
 
     def DetachStreamCallback(self, request, context):
-        """DetachStreamCallback removes a callback from the notifier of a stream, so it gets no more
-        deliveries. A Nexus handler calls it when the caller cancels the operation.
+        """DetachStreamCallback removes a callback from the notifier of a stream. The notifier completes
+        the callback's operation as canceled and sends it no more progress. A Nexus handler calls it
+        when the caller cancels the operation.
 
         (-- api-linter: core::0127::http-annotation=disabled
         aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
