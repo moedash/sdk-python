@@ -35,8 +35,9 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.client import Client
 from temporalio.contrib.streams import StreamClosedError, StreamRef, workflow_writer
 from temporalio.contrib.streams._cursor import BEGINNING, progress_counter
-from temporalio.contrib.streams._output import StageRef
+from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams._record import Cursor, RecordKind
+from temporalio.contrib.streams._wire import to_wire
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     StreamNotifier,
@@ -1147,3 +1148,35 @@ async def _values(handle: Any) -> list[Any]:
     return [
         record.value async for record in handle.read() if record.kind is RecordKind.DATA
     ]
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_a_workflow_publish_after_an_outside_close_lands_with_a_warning(
+    client: Client, backing: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = _provider_for(backing)
+    workflow_id = f"owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(workflow_id, topic=TOKENS_TOPIC)
+    await provider._close_topic(client, ref, TOKENS_TOPIC, "run-1")  # type: ignore[reportPrivateUsage]
+    record = to_wire(
+        DataConverter.default.payload_converter,
+        topic=TOKENS_TOPIC,
+        kind=RecordKind.DATA,
+        value="late",
+    )
+    token = await provider._stage(  # type: ignore[reportPrivateUsage]
+        StagedBatch(client.namespace, workflow_id, "run-1", "run-1", [record])
+    )
+
+    # Workflow code cannot be told, so the output lands, and the Worker says
+    # that readers which already ended miss it.
+    with caplog.at_level("WARNING"):
+        await provider._promote(  # type: ignore[reportPrivateUsage]
+            StageRef(client.namespace, workflow_id, "run-1", token, (TOKENS_TOPIC,))
+        )
+
+    assert any(
+        "after it was closed" in message and TOKENS_TOPIC in message
+        for message in caplog.messages
+    )
+    await provider.close()

@@ -571,13 +571,18 @@ class MemoryStreams(StreamProviderPlugin):
         batch = self._stages.pop(stage.token, None)
         if batch is None:
             return
+        warned: set[str] = set()
         for record in batch.records:
-            self._topic(
+            store = self._topic(
                 stage.namespace,
                 stage.workflow_id,
                 record.topic,
                 chain=stage.first_run_id or None,
-            ).append([record])
+            )
+            if store.closed and record.topic not in warned:
+                warned.add(record.topic)
+                self._warn_closed_topic(stage.workflow_id, record.topic)
+            store.append([record])
 
     async def _abort(self, stage: StageRef) -> None:
         self._stages.pop(stage.token, None)

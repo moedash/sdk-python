@@ -60,7 +60,8 @@ A single topic closes when ``close_stream`` or ``close_workflow_stream``
 (see :mod:`temporalio.contrib.streams.nexus`) closes it: its meta gets
 ``closed``, the append script refuses new batches on it with
 :class:`temporalio.contrib.streams.StreamClosedError`, and a read of it
-delivers what is left and ends. The flag lives in the chain's keys, so a new
+delivers what is left and ends. The owner Workflow's own output still lands
+on a closed topic, with a warning from the Worker. The flag lives in the chain's keys, so a new
 chain on the same Workflow id starts open.
 
 **Stages left behind.** A Worker that stops between a Workflow Task's
@@ -1077,6 +1078,15 @@ class RedisStreams(StreamProviderPlugin):
                 stage.token,
                 stage.first_run_id,
             )
+        elif added:
+            async with _mapped(write=False):
+                async with self._redis.pipeline(transaction=False) as pipe:
+                    for topic in stage.topics:
+                        pipe.hget(keys.meta(topic), "closed")
+                    flags = await pipe.execute()
+            for topic, flag in zip(stage.topics, flags):
+                if flag is not None:
+                    self._warn_closed_topic(stage.workflow_id, topic)
 
     async def _close_chain(
         self, namespace: str, workflow_id: str, first_run_id: str
