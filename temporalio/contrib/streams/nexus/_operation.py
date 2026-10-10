@@ -25,7 +25,7 @@ from temporalio.api.workflowservice.v1 import (
     AttachStreamCallbackRequest,
     DetachStreamCallbackRequest,
 )
-from temporalio.contrib.streams._notify import stream_reference
+from temporalio.contrib.streams._notify import chain_first_run_id, stream_reference
 from temporalio.contrib.streams._ref import StreamRef
 
 __all__ = ["StreamOperationHandler", "stream_ref_from_token"]
@@ -38,7 +38,7 @@ OutputT = TypeVar("OutputT")
 _TOKEN_VERSION = 1
 
 
-def _encode_token(ref: StreamRef, attach_request_id: str) -> str:
+def _encode_token(ref: StreamRef, attach_request_id: str, first_run_id: str) -> str:
     body = {
         "v": _TOKEN_VERSION,
         "ref": {
@@ -48,12 +48,15 @@ def _encode_token(ref: StreamRef, attach_request_id: str) -> str:
             "topic": ref.topic,
         },
         "attach": attach_request_id,
+        # The chain the start attached to, so a cancel detaches from it even
+        # after the Workflow id moved on to a new chain.
+        "chain": first_run_id,
     }
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     return base64.urlsafe_b64encode(encoded).decode().rstrip("=")
 
 
-def _decode_token(token: str) -> tuple[StreamRef, str]:
+def _decode_token(token: str) -> tuple[StreamRef, str, str]:
     try:
         padded = token + "=" * (-len(token) % 4)
         body: Any = json.loads(base64.urlsafe_b64decode(padded))
@@ -63,6 +66,9 @@ def _decode_token(token: str) -> tuple[StreamRef, str]:
         attach: Any = body["attach"]
         if not isinstance(attach, str):
             raise ValueError("the attach request id is not a string")
+        chain: Any = body["chain"]
+        if not isinstance(chain, str):
+            raise ValueError("the chain's first run id is not a string")
         return (
             StreamRef(
                 kind=ref["kind"],
@@ -71,6 +77,7 @@ def _decode_token(token: str) -> tuple[StreamRef, str]:
                 topic=ref["topic"],
             ),
             attach,
+            chain,
         )
     except (ValueError, TypeError, KeyError, binascii.Error) as error:
         raise ValueError(f"not a stream operation token: {error}") from None
@@ -88,8 +95,8 @@ def stream_ref_from_token(token: str) -> StreamRef:
     return _decode_token(token)[0]
 
 
-def _stream_reference(ref: StreamRef) -> StreamReference:
-    return stream_reference(ref, ref.topic)
+def _stream_reference(ref: StreamRef, first_run_id: str) -> StreamReference:
+    return stream_reference(ref, ref.topic, first_run_id)
 
 
 class StreamOperationHandler(
@@ -140,11 +147,12 @@ class StreamOperationHandler(
             )
         ref = await self._open_stream(ctx, input)
         client = temporalio.nexus.client()
+        first_run_id = await chain_first_run_id(client, ref)
         # Idempotent by request id, so a retried start attaches once.
         await client.workflow_service.attach_stream_callback(
             AttachStreamCallbackRequest(
                 namespace=client.namespace,
-                stream_ref=_stream_reference(ref),
+                stream_ref=_stream_reference(ref, first_run_id),
                 request_id=ctx.request_id,
                 callback=Callback.Nexus(
                     url=ctx.callback_url, header=dict(ctx.callback_headers)
@@ -152,7 +160,7 @@ class StreamOperationHandler(
             )
         )
         return nexusrpc.handler.StartOperationResultAsync(
-            token=_encode_token(ref, ctx.request_id)
+            token=_encode_token(ref, ctx.request_id, first_run_id)
         )
 
     async def cancel(
@@ -164,7 +172,7 @@ class StreamOperationHandler(
             nexusrpc.HandlerError: ``token`` is not one this operation issued.
         """
         try:
-            ref, attach_request_id = _decode_token(token)
+            ref, attach_request_id, first_run_id = _decode_token(token)
         except ValueError as error:
             raise nexusrpc.HandlerError(
                 str(error), type=nexusrpc.HandlerErrorType.BAD_REQUEST
@@ -173,7 +181,7 @@ class StreamOperationHandler(
         await client.workflow_service.detach_stream_callback(
             DetachStreamCallbackRequest(
                 namespace=client.namespace,
-                stream_ref=_stream_reference(ref),
+                stream_ref=_stream_reference(ref, first_run_id),
                 request_id=attach_request_id,
             )
         )
