@@ -71,3 +71,16 @@ def test_the_stream_hash_is_short_and_length_delimited():
     assert stream_hash("ns", "workflow", "a:b", "c") != stream_hash(
         "ns", "workflow", "a", "b:c"
     )
+
+
+def test_refused_and_storage_failures_are_families_of_their_own():
+    from temporalio.contrib.streams import StreamRefusedError, StreamStorageError
+
+    # A refused write did not happen; a storage failure may have.
+    assert issubclass(StreamProducerError, StreamRefusedError)
+    assert issubclass(StreamClosedError, StreamRefusedError)
+    assert issubclass(StreamOutcomeUnknownError, StreamStorageError)
+    assert not issubclass(StreamRefusedError, StreamStorageError)
+    assert not issubclass(StreamStorageError, StreamRefusedError)
+    assert issubclass(StreamRefusedError, StreamError)
+    assert issubclass(StreamStorageError, StreamError)
