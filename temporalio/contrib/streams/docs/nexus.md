@@ -249,10 +249,14 @@ Reading a stream adds to the caller's History in two ways.
 - Each read is a synchronous Nexus operation, about three events, and its
   answer holds up to 1 MiB of records.
 - Each progress delivery costs at most one Workflow Task, three events,
-  and up to about 3 KiB on its scheduled event. The server holds progress
-  until `nexusoperation.progressMinInterval` (1 second by default) has
-  passed since the caller Workflow's last task that carried progress. So a
-  busy stream costs about one progress task per second, plus its reads.
+  and up to about 3 KiB on its scheduled event. The server schedules a task
+  for progress no sooner than `nexusoperation.progressMinInterval` (1 second
+  by default, per namespace) after the caller Workflow's last task that
+  carried progress. Progress that comes sooner waits and folds. A task
+  scheduled for any other reason still carries it, and 0 turns the interval
+  off. The interval is per caller Workflow, so all its operations share it,
+  and a busy caller costs about one progress task per second plus its
+  reads.
 
 The server terminates a Workflow whose History passes 51,200 events or
 50 MiB by default. To read a long stream, Continue-as-New before that, for
@@ -335,9 +339,8 @@ Two cases stop a reader that would otherwise read for ever.
   burst of any size costs the caller at most two tasks: the one it rides,
   and one follow-up when newer progress folded in after that task was
   already scheduled. The Workflow then sees the highest counter of the
-  burst. Intermediate counters may be
-  skipped, which is why the reader reads records and does not count
-  progress.
+  burst. Intermediate counters may be skipped, which is why the reader
+  reads records and does not count progress.
 - **No History event per delivery.** Progress rides the caller's next
   Workflow Task scheduled event. History is still the record, so replay
   sees the same progress.
