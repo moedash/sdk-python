@@ -140,6 +140,7 @@ from ._nexus import (
     NexusClient,
     NexusOperationCancellationType,
     NexusOperationHandle,
+    NexusOperationProgress,
     _NexusClient,
     create_nexus_client,
 )
@@ -256,6 +257,7 @@ __all__ = [
     "NexusClient",
     "NexusOperationCancellationType",
     "NexusOperationHandle",
+    "NexusOperationProgress",
     "create_nexus_client",
     "LoggerAdapter",
     "SandboxImportNotificationPolicy",

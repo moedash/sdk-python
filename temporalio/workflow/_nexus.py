@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 from enum import IntEnum
 from typing import Any, Generic, overload
@@ -21,8 +22,31 @@ __all__ = [
     "NexusClient",
     "NexusOperationCancellationType",
     "NexusOperationHandle",
+    "NexusOperationProgress",
     "create_nexus_client",
 ]
+
+
+@dataclass(frozen=True)
+class NexusOperationProgress:
+    """Progress a started Nexus operation reported to its caller.
+
+    Progress says that the operation's output moved, not what the output is.
+    The Workflow reads the output itself, starting from :py:attr:`position`.
+
+    .. warning::
+       This API is experimental.
+    """
+
+    position: str
+    """Where the operation's output stands, in the handler's terms, such as a
+    stream cursor."""
+
+    counter: int
+    """Orders the progress of one operation. It only grows."""
+
+    metadata: Mapping[str, str]
+    """Small details from the handler."""
 
 
 class NexusOperationHandle(Generic[OutputT]):
@@ -41,6 +65,37 @@ class NexusOperationHandle(Generic[OutputT]):
     @property
     def operation_token(self) -> str | None:
         """The operation token for this handle."""
+        raise NotImplementedError
+
+    @property
+    def latest_progress(self) -> NexusOperationProgress | None:
+        """The latest progress the operation reported, or ``None`` if none yet.
+
+        .. warning::
+           This API is experimental.
+        """
+        raise NotImplementedError
+
+    async def progress(
+        self,
+        *,
+        after_counter: int = 0,  # type: ignore[reportUnusedParameter]
+    ) -> NexusOperationProgress | None:
+        """Wait for progress newer than ``after_counter``.
+
+        Returns the latest progress as soon as its counter is higher than
+        ``after_counter``, which may be at once. Returns ``None`` if the
+        operation resolves first, since no newer progress can follow. Progress
+        comes from History, so a replay returns the same values at the same
+        points.
+
+        Progress is a hint that the operation's output moved to
+        :py:attr:`NexusOperationProgress.position`. A burst of progress folds
+        to its highest counter, so intermediate counters may be skipped.
+
+        .. warning::
+           This API is experimental.
+        """
         raise NotImplementedError
 
 
