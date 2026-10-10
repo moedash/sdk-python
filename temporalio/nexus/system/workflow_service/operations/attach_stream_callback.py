@@ -12,6 +12,7 @@ from ..models import (
     AttachStreamCallbackResponse,
     CallbackNexus,
     StreamReference,
+    Timestamp,
 )
 
 
@@ -36,10 +37,14 @@ async def attach_stream_callback(
     stream_ref: StreamReference | None = None,
     request_id: str,
     callback: CallbackNexus | None = None,
+    operation_token: str,
+    start_time: Timestamp | None = None,
 ) -> NexusOperationHandle[AttachStreamCallbackResponse,]:
     request = AttachStreamCallbackRequest(
         stream_ref=stream_ref,
         request_id=request_id,
         callback=callback,
+        operation_token=operation_token,
+        start_time=start_time,
     )
     return await _attach_stream_callback(request)
