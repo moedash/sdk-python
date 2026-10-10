@@ -9,11 +9,11 @@ converter, so every provider behaves the same where the contract says so.
 
 What a provider owes a record's body: the handle converts a value into the
 body with the payload converter, then takes the retry fingerprint
-(:func:`temporalio.contrib.streams.content_fingerprint`) over the converted
+(:func:`temporalio.contrib.streams._body.content_fingerprint`) over the converted
 records, then runs each body through
-:func:`temporalio.contrib.streams.encode_body`, which stamps the plaintext
+:func:`temporalio.contrib.streams._body.encode_body`, which stamps the plaintext
 hash and applies the codec and external storage. On a read it runs
-:func:`temporalio.contrib.streams.decode_body` before the record reaches the
+:func:`temporalio.contrib.streams._body.decode_body` before the record reaches the
 reader.
 """
 
@@ -68,12 +68,20 @@ class StreamProducer(Protocol[T_contra]):
         An empty call writes nothing and returns the cursor of this
         producer's last record, or ``BEGINNING`` when it has written none.
 
+        Calls on one producer run one at a time, in the order they were
+        made, so concurrent calls take consecutive sequences. A call that was
+        cancelled may or may not have written its batch, and the producer
+        cannot tell: start a new attempt (a new producer with a higher
+        ``attempt``) rather than continuing this one.
+
         Raises:
             StreamProducerError: The sequence was already used with different
                 content, or it is below the newest one the store holds for
                 this producer attempt.
             StreamOutcomeUnknownError: The store may or may not have written
-                the batch.
+                the batch. Retry the same values on this producer.
+            StreamRefusedError: The store refused the batch, for example
+                because it is out of memory. Nothing was written.
             StreamClosedError: The stream refuses appends.
         """
         ...

@@ -510,3 +510,26 @@ async def _bounded(records: Any, timeout: float) -> AsyncIterator[Any]:
                 return
     finally:
         await records.aclose()
+
+
+class YieldingCodec(PayloadCodec):
+    """A codec that yields to the event loop, as a remote codec would."""
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.01)
+        return list(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return list(payloads)
+
+
+async def test_concurrent_appends_on_one_producer_take_consecutive_sequences(
+    case: ProviderCase,
+):
+    coded = _client_with(case.client, DataConverter(payload_codec=YieldingCodec()))
+    stream = case.open(new_workflow_id(), client=coded)
+    producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
+    await asyncio.gather(*(producer.append({"n": n}) for n in range(10)))
+    records = await take(stream.read(topic=OUT), 10)
+    assert [r.sequence for r in records] == list(range(1, 11))
+    assert sorted(r.value["n"] for r in records) == list(range(10))
