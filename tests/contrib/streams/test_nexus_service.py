@@ -658,3 +658,23 @@ async def test_a_refusal_carries_no_handler_stack_frames(service: Service):
     failure = json.loads(refused.value.detail)
     assert not failure.get("stackTrace")
     assert not failure["details"].get("stackTrace")
+
+
+async def test_the_generated_read_loop_ends_when_the_stream_does(service: Service):
+    workflow_id = f"streams-service-{uuid.uuid4().hex}"
+    ref = StreamRef.for_workflow(workflow_id, topic="out")
+    async with new_worker(service.client, StreamOwner) as worker:
+        owner = await service.client.start_workflow(
+            StreamOwner.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        landed = await append(service, ref, "one")
+        await owner.signal(StreamOwner.finish)
+        await owner.result()
+    started = asyncio.get_running_loop().time()
+    answer = await service.caller.read_until_records(
+        ReadInput(stream=ref, after_token=landed.cursor), deadline=10.0
+    )
+    # The stream has ended, so the loop hands back the done answer at once
+    # rather than asking again until its deadline.
+    assert answer.done and answer.records == []
+    assert asyncio.get_running_loop().time() - started < 5.0
