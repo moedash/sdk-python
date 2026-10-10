@@ -372,7 +372,9 @@ class WorkflowOutputStreamCommit(google.protobuf.message.Message):
     Core records only this compact manifest, in a `core_external_stream` marker ordered before the
     completion's other commands, so the batch becomes visible exactly when the task is accepted.
     While replaying, Core writes nothing and instead requires the manifest to equal the recorded
-    one, ignoring `stage_token`; a mismatch, or a commit where none was recorded, is nondeterminism.
+    one, ignoring `stage_token` and `run_id` (a reset run replays markers that name its base run).
+    A mismatch, a commit where none was recorded, or a recorded manifest that the replayed task
+    does not commit again is nondeterminism.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
