@@ -153,8 +153,10 @@ caller drops a lower one. So the counter comes from the store's position,
 which grows with the stream whichever process writes, not from a clock.
 
 - A Redis entry id `<ms>-<seq>` gives `ms << 20 | seq`. A sequence above
-  `2**20 - 1` is held at that value, which keeps the order. The result fits
-  a positive int64 until the year 2248.
+  `2**20 - 1` is held at that value, which keeps the order non-decreasing:
+  the notifier drops an equal counter as a repeat, so the later
+  notifications of such a millisecond are lost until the next one. The
+  result fits a positive int64 until the year 2248.
 - A memory provider offset gives `offset + 1`.
 - `BEGINNING` gives 0. A close carries the newest record's counter plus one,
   so it outranks every notification before it. A close from the owning

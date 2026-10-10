@@ -14,9 +14,13 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import StreamOwnerKind
 from temporalio.api.stream.v1 import StreamReference
-from temporalio.api.workflowservice.v1 import NotifyStreamRequest
+from temporalio.api.workflowservice.v1 import (
+    DescribeWorkflowExecutionRequest,
+    NotifyStreamRequest,
+)
 from temporalio.contrib.streams._ref import StreamRef
 
 if TYPE_CHECKING:
@@ -27,17 +31,39 @@ __all__ = ["StreamNotifier"]
 logger = logging.getLogger(__name__)
 
 
-def stream_reference(ref: StreamRef, topic: str) -> StreamReference:
+def stream_reference(ref: StreamRef, topic: str, first_run_id: str) -> StreamReference:
     """The notifier's key for ``ref``'s stream on ``topic``.
 
-    The notifier is keyed without the run: one notifier per stream across
-    Continue-as-New, so a pinned ref and a following one reach the same one.
+    The notifier is keyed by the run chain, through its first run
+    ``first_run_id``: one notifier per stream across Continue-as-New, so a
+    pinned ref and a following one reach the same one, while a new chain on
+    the same Workflow id gets its own, as it gets its own records.
     """
     return StreamReference(
         owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
         workflow_id=ref.workflow_id,
+        run_id=first_run_id,
         topic=topic,
     )
+
+
+async def chain_first_run_id(client: Client, ref: StreamRef) -> str:
+    """The first run of the run chain ``ref`` names.
+
+    An unpinned ref names the Workflow id's current chain.
+
+    Raises:
+        temporalio.service.RPCError: The Workflow could not be described.
+    """
+    response = await client.workflow_service.describe_workflow_execution(
+        DescribeWorkflowExecutionRequest(
+            namespace=client.namespace,
+            execution=WorkflowExecution(
+                workflow_id=ref.workflow_id, run_id=ref.run_id or ""
+            ),
+        )
+    )
+    return response.workflow_execution_info.first_run_id
 
 
 class StreamNotifier:
@@ -60,11 +86,26 @@ class StreamNotifier:
     """
 
     def __init__(
-        self, client: Client, ref: StreamRef, *, topic: str | None = None
+        self,
+        client: Client,
+        ref: StreamRef,
+        *,
+        topic: str | None = None,
+        first_run_id: str | None = None,
     ) -> None:
-        """Notify the notifier of ``ref``'s stream, on ``topic`` or the ref's own."""
+        """Notify the notifier of ``ref``'s stream, on ``topic`` or the ref's own.
+
+        ``first_run_id`` is the first run of the stream's run chain. Without
+        it, the first call describes the Workflow to find it.
+        """
         self._client = client
-        self._reference = stream_reference(ref, ref.topic if topic is None else topic)
+        self._ref = ref
+        self._topic = ref.topic if topic is None else topic
+        self._reference = (
+            None
+            if first_run_id is None
+            else stream_reference(ref, self._topic, first_run_id)
+        )
         self._pending: tuple[str, int, dict[str, str]] | None = None
         self._last_position = ""
         self._task: asyncio.Task[None] | None = None
@@ -99,14 +140,15 @@ class StreamNotifier:
         close is the last thing the notifier hears from this process.
 
         Raises:
-            temporalio.service.RPCError: The server refused the close.
+            temporalio.service.RPCError: The server refused the close, or the
+                Workflow could not be described.
         """
         self._closed = True
         await self.flush()
         [payload] = await self._client.data_converter.encode([result])
         request = NotifyStreamRequest(
             namespace=self._client.namespace,
-            stream_ref=self._reference,
+            stream_ref=await self._stream_reference(),
             position=self._last_position,
             counter=counter,
             close=True,
@@ -118,21 +160,27 @@ class StreamNotifier:
         while self._pending is not None:
             position, counter, metadata = self._pending
             self._pending = None
-            request = NotifyStreamRequest(
-                namespace=self._client.namespace,
-                stream_ref=self._reference,
-                position=position,
-                counter=counter,
-                metadata=metadata,
-            )
             try:
+                request = NotifyStreamRequest(
+                    namespace=self._client.namespace,
+                    stream_ref=await self._stream_reference(),
+                    position=position,
+                    counter=counter,
+                    metadata=metadata,
+                )
                 await self._client.workflow_service.notify_stream(request)
                 self._last_position = position
             except Exception:
                 logger.warning(
                     "Stream notification for Workflow %r topic %r failed; the next "
                     "one tells the reader again",
-                    self._reference.workflow_id,
-                    self._reference.topic,
+                    self._ref.workflow_id,
+                    self._topic,
                     exc_info=True,
                 )
+
+    async def _stream_reference(self) -> StreamReference:
+        if self._reference is None:
+            first_run_id = await chain_first_run_id(self._client, self._ref)
+            self._reference = stream_reference(self._ref, self._topic, first_run_id)
+        return self._reference

@@ -102,11 +102,14 @@ def progress_counter(cursor: Cursor) -> int:
     * the memory provider's position, an offset in the topic, gives
       ``offset + 1``;
     * a Redis entry id ``<ms>-<seq>`` gives ``ms << 20 | seq``, with a
-      sequence beyond 20 bits held at the largest, which keeps the order;
+      sequence beyond 20 bits held at the largest, which keeps the order
+      non-decreasing;
     * ``BEGINNING`` gives 0.
 
-    Both grow with every record because the store assigns the positions in
-    order. See ``docs/wire-contract.md``.
+    Both grow with the records because the store assigns the positions in
+    order. Two records in one Redis millisecond past the 20-bit sequence get
+    one counter, and the notifier drops the second as a repeat; the next
+    notification tells the reader again. See ``docs/wire-contract.md``.
 
     Raises:
         ValueError: The cursor's position is in neither form.

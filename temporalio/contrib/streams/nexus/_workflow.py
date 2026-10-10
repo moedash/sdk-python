@@ -33,13 +33,16 @@ async def close_workflow_stream(
         This API is experimental.
     """
     name, _ = resolve_topic(topic)
+    info = temporalio.workflow.info()
     # The server takes the namespace from this Workflow. Workflow code cannot
     # read the store's position, so the close takes the highest counter there
     # is, which outranks every notification before it.
     handle = await notify_stream(
         stream_ref=StreamReference(
             owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
-            workflow_id=temporalio.workflow.info().workflow_id,
+            workflow_id=info.workflow_id,
+            # The notifier is keyed by the run chain, through its first run.
+            run_id=info.first_execution_run_id,
             topic=name,
         ),
         position="",

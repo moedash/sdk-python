@@ -554,6 +554,9 @@ class OutputCoordinator:
             if same_chain and description.status not in CHAIN_ENDED:
                 return
             run.closing = False
+            self.provider._forget_chain(
+                self._namespace, run.workflow_id, run.first_run_id
+            )
             await self.provider._close_chain(
                 self._namespace, run.workflow_id, run.first_run_id
             )
