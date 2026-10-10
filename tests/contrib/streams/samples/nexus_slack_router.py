@@ -66,7 +66,6 @@ class Conversation:
         for reply in replies:
             writer.publish(reply)
             await workflow.sleep(timedelta(milliseconds=100))
-        writer.finish()
         close_workflow_stream(f"{len(replies)} messages", topic=MESSAGES)
 
 
