@@ -31,6 +31,9 @@ __all__ = ["ReadSupersession", "StreamReader", "StreamRecordError"]
 T = TypeVar("T")
 
 _BATCH = 100
+# Once the operation completes, a read may wait this long for records still on
+# their way, such as a Workflow owner's last batch that is not promoted yet.
+_DRAIN_WAIT_MS = 2000
 
 
 class StreamRecordError(StreamError):
@@ -129,8 +132,9 @@ class StreamReader(Generic[T]):
         self._decoder: RecordDecoder | None = None
         self._cursor = ""
         self._counter = 0
-        # Whether the last read reached the stream's tail. A read that fills a
-        # batch may have left records behind, so the next call reads again.
+        # Whether the last read answered with no record. An answer short of
+        # the batch may still leave records behind (the service caps an
+        # answer's bytes too), so only an empty one means the tail.
         self._caught_up = False
         # The stream service said no record will follow.
         self._stream_done = False
@@ -150,10 +154,12 @@ class StreamReader(Generic[T]):
     async def next(self) -> list[T] | None:
         """The next batch of records, or ``None`` once the stream has ended.
 
-        Waits until the operation reports progress past what this reader has
-        read, then reads. Never answers with an empty batch. Once the
-        operation completes, the records still unread are handed over, then
-        ``None``.
+        Reads on while reads answer with records, and waits for the
+        operation to report progress only once a read answers with none.
+        Never answers with an empty batch. Once the operation completes, it
+        hands over the records still unread, then ``None``: it reads until
+        the stream service says no record will follow, or until a read that
+        waited a moment answers with none.
 
         Raises:
             temporalio.exceptions.NexusOperationError: A read failed, or the
@@ -175,6 +181,9 @@ class StreamReader(Generic[T]):
                 if self._undecodable is not None:
                     error, self._undecodable = self._undecodable, None
                     raise error
+                # An answer of records that carry no item, such as a FINISH,
+                # is not the tail.
+                continue
             if self._operation_resolved:
                 self._ended = True
                 # Raises the operation's failure, if it failed.
@@ -215,7 +224,7 @@ class StreamReader(Generic[T]):
                 stream=self._stream,
                 after_token=self._cursor or None,
                 max_records=_BATCH,
-                wait_ms=0,
+                wait_ms=_DRAIN_WAIT_MS if self._operation_resolved else 0,
             ),
         )
         batch: list[T] = []
@@ -256,7 +265,7 @@ class StreamReader(Generic[T]):
                 return batch
         if answer.next_token:
             self._cursor = answer.next_token
-        self._caught_up = len(answer.records) < _BATCH
+        self._caught_up = not answer.records
         self._stream_done = answer.done
         return batch
 

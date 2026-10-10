@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -284,10 +285,15 @@ def stream_history() -> WorkflowHistory:
     # The first read covers everything up to the progress the start brought.
     h.task(progress(chat, 1))
     h.read(answer(record(1, text="a"), record(2, text="b")))
-    # The reader hands over a and b, then waits for newer progress.
+    # The reader hands over a and b. The answer had records, so it reads on.
+    h.task()
+    h.read(answer(cursor="cursor-2"))
+    # An empty answer is the tail, so it waits for newer progress.
     h.task()
     h.task(progress(chat, 2))
     h.read(answer(record(3, text="c")))
+    h.task()
+    h.read(answer(cursor="cursor-3"))
     h.task()
     # The stream closed, which completed the operation. The reader drains what
     # is left and ends.
@@ -365,6 +371,8 @@ async def test_a_full_batch_is_followed_by_a_read_without_waiting() -> None:
     h.task()
     h.read(answer(record(101, text="101")))
     h.task()
+    h.read(answer(cursor="cursor-101"))
+    h.task()
     h.completed(chat, "summary")
     h.task()
     h.read(answer(cursor="cursor-101", done=True))
@@ -375,6 +383,32 @@ async def test_a_full_batch_is_followed_by_a_read_without_waiting() -> None:
         [Token(str(n)) for n in range(1, 101)],
         [Token("101")],
     ]
+
+
+async def test_after_the_operation_completes_a_short_answer_is_not_the_end() -> None:
+    """The stream service caps an answer's bytes, so after the operation
+    completes the reader reads until an answer, read with a wait, is empty."""
+    h = History()
+    h.started()
+    h.task()
+    chat = h.scheduled("ChatService", "chat")
+    h.chat_started(chat)
+    h.task()
+    # The first read finds nothing, so the reader waits.
+    h.read(answer())
+    h.task()
+    h.completed(chat, "summary")
+    h.task()
+    h.read(answer(record(1, text="a")))
+    h.task()
+    h.read(answer(record(2, text="b")))
+    h.task()
+    h.read(answer(cursor="cursor-2"))
+    h.task()
+    h.workflow_completed()
+    await replay(WorkflowHistory(workflow_id="chat-reader", events=h.events))
+    assert seen[0].batches == [[Token("a")], [Token("b")]]
+    assert seen[0].after_end is None
 
 
 async def test_a_read_error_raises_from_next() -> None:
@@ -400,9 +434,14 @@ async def test_a_failed_operation_raises_after_its_records_are_read() -> None:
     h.task(progress(chat, 1))
     h.read(answer(record(1, text="a")))
     h.task()
+    h.read(answer(cursor="cursor-1"))
+    h.task()
     h.failed(chat, "chat")
     h.task()
     h.read(answer(record(2, text="b")))
+    h.task()
+    # The read waited a moment and found nothing more.
+    h.read(answer(cursor="cursor-2"))
     h.task()
     h.workflow_completed()
     await replay(WorkflowHistory(workflow_id="chat-reader", events=h.events))
@@ -428,6 +467,8 @@ async def test_the_reader_records_where_a_producer_attempt_was_superseded() -> N
             record(3, text="a2", attempt=2, sequence=1),
         )
     )
+    h.task()
+    h.read(answer(cursor="cursor-3"))
     h.task()
     h.completed(chat, "summary")
     h.task()
@@ -640,6 +681,141 @@ async def test_live_a_workflow_reads_every_record_then_none(
     await provider.close()
 
 
+@workflow.defn(name="LiveLabelReader")
+class LiveLabelReader:
+    """Reads the stream and keeps each token's label, the text before its
+    colon, so large bodies stay out of its result."""
+
+    @workflow.run
+    async def run(self, endpoint: str) -> list[str]:
+        client = workflow.create_nexus_client(service=ChatService, endpoint=endpoint)
+        handle = await client.start_operation(ChatService.chat, "hello")
+        reader = StreamReader(handle, item_type=Token, endpoint=endpoint)
+        labels: list[str] = []
+        while (batch := await reader.next()) is not None:
+            labels += [token.text.split(":", 1)[0] for token in batch]
+        await handle
+        return labels
+
+
+@workflow.defn(name="LiveIdleOwner")
+class LiveIdleOwner:
+    """Owns a stream that others write to, until told to end."""
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._done)
+
+    @workflow.signal
+    def done(self) -> None:
+        self._done = True
+
+
+def _notifying_provider(backing: str) -> Any:
+    if backing == "memory":
+        return MemoryStreams().notify_on_append()
+    url = os.environ.get("STREAMS_REDIS_URL")
+    if not url:
+        pytest.skip("set STREAMS_REDIS_URL to read over Redis")
+    from temporalio.contrib.streams.redis import RedisStreams
+
+    return RedisStreams(url, key_prefix=f"reader-{uuid.uuid4().hex}").notify_on_append()
+
+
+async def _read_what_is_appended(
+    client: Client,
+    env: WorkflowEnvironment,
+    backing: str,
+    texts: list[str],
+    per_append: int,
+) -> list[str]:
+    """Appends ``texts`` from outside the owner once the caller is attached,
+    closes the stream, and answers with the labels the caller read."""
+    provider = _notifying_provider(backing)
+    owner_id = f"idle-owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-reader-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+
+    async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
+        await temporalio.nexus.client().start_workflow(
+            LiveIdleOwner.run, id=owner_id, task_queue=task_queue
+        )
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(start_owner)
+
+    streams = TemporalStreamsHandler(provider)
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[LiveLabelReader, LiveIdleOwner],
+        nexus_service_handlers=[ChatServiceHandler(), streams],
+        plugins=[provider],
+    ):
+        caller = await client.start_workflow(
+            LiveLabelReader.run,
+            endpoint,
+            id=f"stream-reader-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        for _ in range(200):
+            history = await caller.fetch_history()
+            if any(
+                event.HasField("nexus_operation_started_event_attributes")
+                for event in history.events
+            ):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            pytest.fail("the stream operation never started")
+        producer = provider.get_stream_handle(client, ref).producer(
+            producer_id="burst", attempt=1
+        )
+        for start in range(0, len(texts), per_append):
+            await producer.append(
+                *(Token(text) for text in texts[start : start + per_append])
+            )
+        await provider.close_stream(client, ref, "done")
+        labels = await asyncio.wait_for(caller.result(), 60)
+        await client.get_workflow_handle(owner_id).signal(LiveIdleOwner.done)
+        await streams.close()
+    await provider.close()
+    return labels
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_live_a_reader_gets_every_record_of_a_burst(
+    client: Client, env: WorkflowEnvironment, backing: str
+) -> None:
+    labels = await _read_what_is_appended(
+        client, env, backing, [f"{n}:" for n in range(700)], per_append=50
+    )
+    assert labels == [str(n) for n in range(700)]
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_live_a_reader_reads_on_past_answers_cut_by_the_byte_budget(
+    client: Client, env: WorkflowEnvironment, backing: str
+) -> None:
+    """Each answer holds about three of these records, so most answers are
+    short of the record limit without being the stream's tail."""
+    body = "x" * 300_000
+    labels = await _read_what_is_appended(
+        client, env, backing, [f"{n}:{body}" for n in range(12)], per_append=1
+    )
+    assert labels == [str(n) for n in range(12)]
+
+
 async def test_an_undecodable_record_raises_and_the_reader_goes_on_past_it() -> None:
     """A body that does not decode into the item type is not skipped quietly:
     the records before it are handed over, then next() raises, and the next
@@ -669,6 +845,8 @@ async def test_an_undecodable_record_raises_and_the_reader_goes_on_past_it() -> 
     # a is handed over, the bad record raises, then the reader reads after it.
     h.task()
     h.read(answer(record(3, text="c")))
+    h.task()
+    h.read(answer(cursor="cursor-3"))
     h.task()
     h.completed(chat, "summary")
     h.task()
