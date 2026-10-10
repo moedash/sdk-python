@@ -21,14 +21,18 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowHandle
 from temporalio.contrib.streams import (
-    CONTENT_HASH_KEY,
     RUN_ID_KEY,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
     StreamRef,
+    StreamRefusedError,
+    StreamStorageError,
     topic,
     workflow_writer,
+)
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
 )
 from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
@@ -392,3 +396,83 @@ async def test_a_replay_promotes_output_a_stopped_worker_committed(
     assert [key async for key in raw.scan_iter(match=f"{prefix}*:stage:*")] == []
     await first.close()
     await second.close()
+
+
+class YieldingCodec(PayloadCodec):
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.01)
+        return list(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return list(payloads)
+
+
+async def test_concurrent_appends_on_one_producer_take_consecutive_sequences(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    coded = client_with(client, provider, DataConverter(payload_codec=YieldingCodec()))
+    stream = provider.get_stream_handle(coded, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await asyncio.gather(*(producer.append({"n": n}) for n in range(10)))
+    records = await log_entries(raw, stream, "events")
+    assert [r.sequence for r in records] == list(range(1, 11))
+
+
+async def test_store_errors_on_writes_arrive_as_stream_errors(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 0})
+
+    async def out_of_memory(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ResponseError(
+            "OOM command not allowed when used memory > 'maxmemory'."
+        )
+
+    monkeypatch.setattr(provider, "_append", out_of_memory)
+    with pytest.raises(StreamRefusedError, match="OOM"):
+        await producer.append({"n": 1})
+
+    batch = StagedBatch("ns", "wf", "first", "run", [WireRecord(topic="events")])
+    # A real call first, so any first-contact checks are already done.
+    await provider._stage(batch)
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "execute_command", lost)
+    with pytest.raises(StreamOutcomeUnknownError):
+        await provider._stage(batch)
+
+    async def wrong_type(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ResponseError(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        )
+
+    monkeypatch.setattr(provider._redis, "execute_command", wrong_type)
+    with pytest.raises(StreamRefusedError, match="WRONGTYPE"):
+        await provider._promote(StageRef("ns", "wf", "first", "token", ("events",)))
+
+
+async def test_store_errors_on_reads_arrive_as_stream_errors(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "xrevrange", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await stream.latest(topic=EVENTS)
