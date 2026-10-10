@@ -145,5 +145,5 @@ def test_a_reference_this_release_cannot_open_is_refused_at_decode():
     stream = document["stream"]
     assert isinstance(stream, dict)
     stream["kind"] = "activity"
-    with pytest.raises(Exception, match="activity"):
+    with pytest.raises(ValueError, match="unknown StreamRef kind 'activity'"):
         _from_json(document, ReadInput)
