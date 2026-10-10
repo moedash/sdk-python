@@ -20,7 +20,6 @@ from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowHandle
 from temporalio.contrib.streams import (
-    CONTENT_HASH_KEY,
     RUN_ID_KEY,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
@@ -28,6 +27,9 @@ from temporalio.contrib.streams import (
     StreamRef,
     topic,
     workflow_writer,
+)
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
 )
 from temporalio.contrib.streams._output import StageRef
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
