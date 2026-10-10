@@ -14,10 +14,11 @@ over. Each yields a :class:`Backing`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -32,6 +33,7 @@ import temporalio.api.operatorservice.v1
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowHandle
+from temporalio.common import RawValue
 from temporalio.contrib.streams import (
     RecordKind,
     StreamClosedError,
@@ -47,6 +49,7 @@ from temporalio.contrib.streams import (
     StreamStorageError,
     StreamUnsupportedError,
 )
+from temporalio.contrib.streams._cursor import BEGINNING
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     AppendInput,
@@ -61,6 +64,7 @@ from temporalio.contrib.streams.nexus import (
 from temporalio.contrib.streams.nexus._generated import client as generated_client
 from temporalio.contrib.streams.nexus._handler import _handler_error
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
+from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import PollerBehaviorSimpleMaximum, Worker
 from tests import DEV_SERVER_DOWNLOAD_VERSION
@@ -196,14 +200,22 @@ class Service:
 
 @asynccontextmanager
 async def serve(
-    server: Server, backing: Backing, **handler_options: Any
+    server: Server,
+    backing: Backing,
+    *,
+    client: Client | None = None,
+    **handler_options: Any,
 ) -> AsyncIterator[Service]:
-    """Serve ``backing`` behind a fresh endpoint, deleted on the way out."""
+    """Serve ``backing`` behind a fresh endpoint, deleted on the way out.
+
+    The handler's Worker runs on ``client``, the server's own by default.
+    """
     handler = TemporalStreamsHandler(backing.provider, **handler_options)
     task_queue = f"streams-service-{uuid.uuid4().hex}"
     endpoint_name = f"streams-{uuid.uuid4().hex}"
+    worker_client = server.client if client is None else client
     async with Worker(
-        server.client,
+        worker_client,
         task_queue=task_queue,
         nexus_service_handlers=[handler],
         # As the handler recommends: with the default five pollers over the
@@ -232,7 +244,7 @@ async def serve(
                 ),
                 handler,
                 backing,
-                server.client,
+                worker_client,
                 endpoint_name,
             )
         finally:
@@ -338,8 +350,7 @@ async def test_an_append_reads_back_as_the_stored_record(service: Service):
         ("out", RecordKind.DATA, "p", 1, 1),
         ("out", RecordKind.DATA, "p", 1, 2),
     ]
-    # The writer's payload passes through untouched: the service neither
-    # decodes nor re-encodes a body its codec may have encrypted.
+    # With no codec on the handler, the body comes back as the writer sent it.
     assert stored[0].body == Payload.FromString(body("one"))
     assert answer.records[-1].token == landed.cursor
     assert answer.next_token == landed.cursor
@@ -649,6 +660,69 @@ async def test_a_workflow_calls_the_service_through_its_nexus_client(
             task_queue=worker.task_queue,
         )
     assert result == ["hi"]
+
+
+class XorCodec(PayloadCodec):
+    """Encrypts a payload by XOR, the way a namespace's codec would."""
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return [
+            Payload(
+                metadata={"encoding": b"binary/xor"},
+                data=bytes(b ^ 0x5A for b in payload.SerializeToString()),
+            )
+            for payload in payloads
+        ]
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return [
+            Payload.FromString(bytes(b ^ 0x5A for b in payload.data))
+            if payload.metadata.get("encoding") == b"binary/xor"
+            else payload
+            for payload in payloads
+        ]
+
+
+async def test_a_workflow_reader_gets_plain_bodies_that_stay_encrypted_elsewhere(
+    server: Server, backing: Backing
+):
+    # The handler and the caller share the namespace's codec. The store keeps
+    # each body encrypted, the read result crosses encrypted as a whole, and
+    # Workflow code sees the plain body.
+    config = server.client.config()
+    config["data_converter"] = dataclasses.replace(
+        DataConverter.default, payload_codec=XorCodec()
+    )
+    coded = Client(**config)
+    async with serve(server, backing, client=coded) as service:
+        ref = await stream_of(service)
+        async with new_worker(coded, StreamsThroughNexus) as worker:
+            handle = await coded.start_workflow(
+                StreamsThroughNexus.run,
+                args=[service.endpoint, ref],
+                id=f"streams-coded-{uuid.uuid4().hex}",
+                task_queue=worker.task_queue,
+            )
+            assert await handle.result() == ["hi"]
+
+        history = await handle.fetch_history()
+        results = [
+            event.nexus_operation_completed_event_attributes.result
+            for event in history.events
+            if event.HasField("nexus_operation_completed_event_attributes")
+        ]
+        assert len(results) == 2
+        assert all(result.metadata["encoding"] == b"binary/xor" for result in results)
+
+        # Read through a handle with no codec: the stored body is the codec's.
+        plain = backing.provider.get_stream_handle(server.client, ref)
+        stored = plain.read(after=BEGINNING, result_type=RawValue)
+        try:
+            record = await asyncio.wait_for(anext(stored), 5)
+        finally:
+            await stored.aclose()
+        assert record.value is not None
+        assert record.value.payload.metadata["encoding"] == b"binary/xor"
 
 
 @pytest.mark.parametrize(
