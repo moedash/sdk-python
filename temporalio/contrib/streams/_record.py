@@ -42,8 +42,10 @@ class RecordKind(enum.IntEnum):
     FINISH = 2
     """The producer in ``producer_id`` will write nothing more on this topic.
 
-    An empty ``producer_id`` names the owning Workflow. It does not end a
-    read and says nothing about the producer's outcome: an Activity can
+    An empty ``producer_id`` names the owning Workflow. A Workflow's
+    ``FINISH`` covers one run: after Continue-as-New the next run can publish
+    on the topic again, under the same empty ``producer_id``. It does not end
+    a read and says nothing about the producer's outcome: an Activity can
     still fail after it wrote ``FINISH``.
     """
 
@@ -52,8 +54,9 @@ class RecordKind(enum.IntEnum):
 
     The reader synthesizes it from the records it observed. No store holds
     it, so every provider reports a retry the same way. Its cursor is the
-    position before the new attempt's first record, so a reader that resumes
-    after it gets that record next.
+    position before the new attempt's first record. A reader that resumes
+    there gets this record again, then the new attempt, since dropping the
+    earlier attempt's records twice is harmless and missing it is not.
     """
 
 
@@ -107,9 +110,16 @@ class StreamRecord(Generic[T]):
     """The run that published it, when the owning Workflow did; empty otherwise.
 
     A stream follows its Workflow's run chain, so this tells a successor run
-    or a reset branch apart.
+    or a reset branch apart. An Activity's record leaves it empty, and the
+    scheduling run is in its ``producer_id``, as ``<Activity id>@<run id>``.
     """
     value: T | None = None
     """The published value. Set on ``DATA`` only."""
     supersession: Supersession | None = None
     """The attempt change being reported. Set on ``SUPERSEDED`` only."""
+    stale: bool = False
+    """An older attempt wrote it after this read delivered a newer attempt.
+
+    Such a record is not part of the producer's current answer, for example
+    the last writes of an Activity attempt that timed out but kept running.
+    """

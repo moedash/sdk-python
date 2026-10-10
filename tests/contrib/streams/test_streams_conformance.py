@@ -8,9 +8,7 @@ new provider proves the contract by passing this file.
 
 A store keyed by the owner's run chain needs the owner to exist before a
 stream can be opened, so a setup can give a ``host`` that starts one; cases
-open streams through :meth:`ProviderCase.open`, which calls it. A setup
-whose provider cannot read yet sets ``reads=False``, and the cases marked
-``reads`` are skipped for it.
+open streams through :meth:`ProviderCase.open`, which calls it.
 
 The scope is the publish path this release ships: append, read and latest,
 resuming after a cursor, ``BEGINNING`` and ``END``, batch order, retry
@@ -47,6 +45,7 @@ from temporalio.contrib.streams import (
     StreamHandle,
     StreamProducerError,
     StreamProvider,
+    StreamRecordError,
     StreamRef,
     Supersession,
     topic,
@@ -57,9 +56,6 @@ from tests.helpers import new_worker
 
 OUT = topic("out", dict)
 OTHER = topic("other", dict)
-
-
-reads = pytest.mark.reads
 
 
 @workflow.defn
@@ -91,11 +87,6 @@ class ProviderCase:
     host: Callable[[str], Awaitable[str]] | None = None
     """Starts the Workflow that owns ``workflow_id``'s stream and returns its
     run id, when the store needs the owner to exist."""
-    reads: bool = True
-    """The provider can read, so the cases marked ``reads`` run."""
-    live_gaps: bool = True
-    """A read in progress notices records dropped from under it, so the
-    cases marked ``live_gaps`` run."""
     hosted: dict[str, str] = field(default_factory=dict)
     """The run id of each owner ``host`` started, by Workflow id."""
 
@@ -212,10 +203,6 @@ SETUPS: dict[str, Callable[[Client], Any]] = {
 @pytest.fixture(params=sorted(SETUPS))
 async def case(request: pytest.FixtureRequest, client: Client):
     async with SETUPS[request.param](client) as found:
-        if request.node.get_closest_marker("reads") and not found.reads:
-            pytest.skip(f"the {found.name} provider cannot read")
-        if request.node.get_closest_marker("live_gaps") and not found.live_gaps:
-            pytest.skip(f"the {found.name} provider misses a gap during a read")
         yield found
 
 
@@ -249,7 +236,6 @@ async def nothing_arrives(records: Any, wait: float = 0.3) -> bool:
         await records.aclose()
 
 
-@reads
 async def test_append_read_roundtrip(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -265,7 +251,6 @@ async def test_append_read_roundtrip(case: ProviderCase):
     assert all(r.topic == "out" for r in records)
 
 
-@reads
 async def test_raw_values_pass_through_untouched(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     raw = Payload(metadata={"encoding": b"binary/custom"}, data=b"\x00\xff")
@@ -274,7 +259,6 @@ async def test_raw_values_pass_through_untouched(case: ProviderCase):
     assert record.value.payload == raw
 
 
-@reads
 async def test_a_batch_lands_in_order_and_its_cursor_names_the_last_record(
     case: ProviderCase,
 ):
@@ -302,7 +286,6 @@ async def test_latest_is_beginning_on_an_empty_topic(case: ProviderCase):
     assert await stream.latest(topic=OUT) == BEGINNING
 
 
-@reads
 async def test_a_cursor_resumes_strictly_after_its_record(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -315,7 +298,6 @@ async def test_a_cursor_resumes_strictly_after_its_record(case: ProviderCase):
     assert [r.value for r in again] == [{"n": 3}]
 
 
-@reads
 async def test_latest_positions_a_reader_at_the_end(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -325,7 +307,6 @@ async def test_latest_positions_a_reader_at_the_end(case: ProviderCase):
     assert [r.value for r in await take(records, 1)] == [{"n": 2}]
 
 
-@reads
 async def test_end_reads_only_what_arrives_after_the_read_starts(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -341,7 +322,6 @@ async def test_end_reads_only_what_arrives_after_the_read_starts(case: ProviderC
     assert await nothing_arrives(stream.read(topic=OUT, after=END))
 
 
-@reads
 async def test_beginning_starts_at_the_oldest_record_still_held(case: ProviderCase):
     if case.truncate is None:
         pytest.skip(f"{case.name} offers no way to drop records")
@@ -364,8 +344,6 @@ async def test_beginning_starts_at_the_oldest_record_still_held(case: ProviderCa
         await stream.read(topic=OUT, after=old).__anext__()
 
 
-@reads
-@pytest.mark.live_gaps
 async def test_a_reader_that_falls_behind_retention_is_told(case: ProviderCase):
     if case.truncate is None:
         pytest.skip(f"{case.name} offers no way to drop records")
@@ -391,7 +369,6 @@ async def test_a_reader_that_falls_behind_retention_is_told(case: ProviderCase):
     await records.aclose()
 
 
-@reads
 async def test_a_retried_append_returns_the_original_position(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     first = await stream.producer(topic=OUT, producer_id="p", attempt=1).append(
@@ -430,7 +407,6 @@ async def test_a_sequence_below_the_newest_is_refused(case: ProviderCase):
     assert await stream.latest(topic=OUT) == newest
 
 
-@reads
 async def test_a_producer_can_continue_at_a_given_sequence(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     first = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -458,7 +434,6 @@ async def test_a_producer_can_continue_at_a_given_sequence(case: ProviderCase):
         ).append({"n": 2})
 
 
-@reads
 async def test_producers_dedupe_apart(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     await stream.producer(topic=OUT, producer_id="a", attempt=1).append({"n": 1})
@@ -473,7 +448,6 @@ async def test_producers_dedupe_apart(case: ProviderCase):
     ]
 
 
-@reads
 async def test_a_new_attempt_supersedes_the_old_one(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     await stream.producer(topic=OUT, producer_id="model", attempt=1).append({"n": 1})
@@ -486,14 +460,43 @@ async def test_a_new_attempt_supersedes_the_old_one(case: ProviderCase):
     ]
     assert records[1].supersession == Supersession("model", 1, 2)
     assert records[1].value is None
-    # A consumer that checkpoints the supersession and resumes after it gets
-    # the new attempt's first record next.
+    # The supersession sits at the cursor of the old attempt's last record. A
+    # read that resumes there knows that attempt, so it reports the new one
+    # again rather than mixing the two, then delivers the new attempt.
     assert records[1].cursor == records[0].cursor
-    resumed = await take(stream.read(topic=OUT, after=records[1].cursor), 1)
-    assert resumed[0].value == {"n": 2}
+    resumed = await take(stream.read(topic=OUT, after=records[1].cursor), 2)
+    assert [r.kind for r in resumed] == [RecordKind.SUPERSEDED, RecordKind.DATA]
+    assert resumed[1].value == {"n": 2}
 
 
-@reads
+async def test_a_read_resumed_before_a_new_attempt_reports_it(case: ProviderCase):
+    stream = await case.open(new_workflow_id())
+    first = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await first.append({"n": 1})
+    delivered = await first.append({"n": 2})
+    # The reader stops here, then the producer's retry writes.
+    await stream.producer(topic=OUT, producer_id="model", attempt=2).append({"n": 3})
+    resumed = await take(stream.read(topic=OUT, after=delivered), 2)
+    assert [r.kind for r in resumed] == [RecordKind.SUPERSEDED, RecordKind.DATA]
+    assert resumed[0].supersession == Supersession("model", 1, 2)
+    assert resumed[1].value == {"n": 3}
+
+
+async def test_a_record_the_reader_cannot_decode_raises_with_its_cursor(
+    case: ProviderCase,
+):
+    stream = await case.open(new_workflow_id())
+    producer = stream.producer(topic="counts", producer_id="p", attempt=1)
+    bad = await producer.append({"not": "an int"})
+    await producer.append(7)
+    with pytest.raises(StreamRecordError) as raised:
+        await take(stream.read(topic="counts", result_type=int), 1)
+    assert raised.value.cursor == bad
+    # Resuming past it is the caller's choice, and the next record reads.
+    after = await take(stream.read(topic="counts", after=bad, result_type=int), 1)
+    assert [r.value for r in after] == [7]
+
+
 async def test_finish_is_a_record_of_its_own(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -506,7 +509,6 @@ async def test_finish_is_a_record_of_its_own(case: ProviderCase):
     assert records[1].cursor == finished
 
 
-@reads
 async def test_topics_are_addressed_by_name(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     await stream.producer(topic=OUT, producer_id="p", attempt=1).append({"n": 1})
@@ -515,7 +517,6 @@ async def test_topics_are_addressed_by_name(case: ProviderCase):
     assert [r.value for r in await take(stream.read(topic=OUT), 1)] == [{"n": 1}]
 
 
-@reads
 async def test_naming_no_topic_addresses_the_default_topic(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     await stream.producer(producer_id="p", attempt=1).append("hello")
@@ -525,7 +526,6 @@ async def test_naming_no_topic_addresses_the_default_topic(case: ProviderCase):
     assert stream.ref.topic == DEFAULT_TOPIC
 
 
-@reads
 async def test_a_ref_topic_is_the_handle_default(case: ProviderCase):
     workflow_id = new_workflow_id()
     stream = await case.open(workflow_id, topic=OUT.name)
@@ -534,7 +534,6 @@ async def test_a_ref_topic_is_the_handle_default(case: ProviderCase):
     assert [r.value for r in await take(plain.read(topic=OUT), 1)] == [{"n": 1}]
 
 
-@reads
 async def test_a_cursor_from_another_stream_is_refused_at_the_call(
     case: ProviderCase,
 ):
@@ -551,7 +550,6 @@ async def test_a_cursor_from_another_stream_is_refused_at_the_call(
         one.read(topic=OTHER, after=cursor)
 
 
-@reads
 async def test_a_cursor_survives_pinning_to_a_run(case: ProviderCase):
     # A stream follows its owner's run chain, so a cursor read through a
     # handle pinned to one run resumes on a handle that follows the chain.
@@ -566,7 +564,6 @@ async def test_a_cursor_survives_pinning_to_a_run(case: ProviderCase):
     ]
 
 
-@reads
 async def test_a_cursor_from_another_provider_is_refused_at_the_call(
     case: ProviderCase,
 ):
@@ -577,7 +574,6 @@ async def test_a_cursor_from_another_provider_is_refused_at_the_call(
         stream.read(topic=OUT, after=Cursor("not a cursor"))
 
 
-@reads
 async def test_argument_mistakes_are_value_errors(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     with pytest.raises(ValueError):
@@ -592,7 +588,6 @@ async def test_argument_mistakes_are_value_errors(case: ProviderCase):
         stream.read(topic="")
 
 
-@reads
 async def test_closing_a_read_early_releases_it(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
@@ -630,7 +625,6 @@ def _client_with(client: Client, converter: DataConverter) -> Client:
     return Client(**config)
 
 
-@reads
 async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     case: ProviderCase,
 ):
@@ -646,7 +640,6 @@ async def test_a_retry_through_a_nondeterministic_codec_still_deduplicates(
     assert record.value == {"n": 1}
 
 
-@reads
 async def test_a_read_ends_when_the_owner_closes(case: ProviderCase):
     workflow_id = new_workflow_id()
     async with new_worker(case.client, OwnerHost) as worker:
@@ -687,7 +680,6 @@ class YieldingCodec(PayloadCodec):
         return list(payloads)
 
 
-@reads
 async def test_concurrent_appends_on_one_producer_take_consecutive_sequences(
     case: ProviderCase,
 ):

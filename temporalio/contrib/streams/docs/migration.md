@@ -5,9 +5,11 @@
 `temporalio.contrib.workflow_streams` keeps a stream inside the Workflow:
 publishes arrive as Signals, readers poll with Updates, and the records
 live in the Workflow's state and History. `temporalio.contrib.streams`
-keeps the records in your Redis instead. Publishing costs no Signals and
-no History events, readers do not need a running Worker, and any number of
-readers can follow one stream. This page maps one to the other.
+keeps the records in your Redis instead. Publishing costs no Signals, and
+records stay out of History. A Workflow Task that publishes adds one marker
+event with a small manifest, far less than a Signal per batch. Readers do
+not need a running Worker, and any number of readers can follow one stream.
+This page maps one to the other.
 
 ## What maps
 
@@ -61,7 +63,15 @@ Differences to plan for:
    both libraries is two streams.
 3. For Workflows already running, switch at a natural boundary, such as the
    next run after Continue-as-New, or let them finish on Workflow Streams.
-   Use Workflow versioning (`workflow.patched`) if the same Workflow code
-   must publish to both while old runs complete.
+   Every new publish point needs Workflow versioning, like any new command:
+   a publish adds a marker to its Workflow Task, so a running Workflow that
+   replays new code past it fails as nondeterministic. For example:
+
+   ```python
+   if workflow.patched("publish-to-streams"):
+       workflow_writer(TOKENS).publish(token)
+   else:
+       await stream.topic("tokens").publish(token)
+   ```
 4. Remove `WorkflowStream` from a Workflow only after no reader needs its
    records.
