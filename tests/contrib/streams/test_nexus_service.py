@@ -108,6 +108,25 @@ class Backing:
     truncate: Callable[[str, str, int], Awaitable[None]] | None = None
     """Drops all but the newest records of a Workflow's topic, standing in
     for retention, or ``None`` when the provider offers no way to."""
+    host: Callable[[str], Awaitable[None]] | None = None
+    """Starts the Workflow that owns a stream, when the store needs the owner
+    to exist before a stream is written."""
+
+
+@workflow.defn
+class StreamOwner:
+    """Owns a stream until it is told to finish."""
+
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
 
 
 @asynccontextmanager
@@ -199,8 +218,12 @@ async def service(server: Server, backing: Backing) -> AsyncIterator[Service]:
         yield found
 
 
-def new_ref(topic: str = "out") -> StreamRef:
-    return StreamRef.for_workflow(f"streams-service-{uuid.uuid4().hex}", topic=topic)
+async def stream_of(service: Service, topic: str = "out") -> StreamRef:
+    """A fresh stream, its owner started when the backing needs one."""
+    workflow_id = f"streams-service-{uuid.uuid4().hex}"
+    if service.backing.host is not None:
+        await service.backing.host(workflow_id)
+    return StreamRef.for_workflow(workflow_id, topic=topic)
 
 
 def body(text: str) -> bytes:
@@ -265,7 +288,7 @@ def refused_as(error: HTTPStatusError) -> str:
 
 
 async def test_an_append_reads_back_as_the_stored_record(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     landed = await append(service, ref, "one", "two")
     answer = await read(service, ref)
     stored = records_of(answer)
@@ -286,7 +309,7 @@ async def test_an_append_reads_back_as_the_stored_record(service: Service):
 async def test_a_batch_lands_in_order_and_a_cursor_resumes_strictly_after(
     service: Service,
 ):
-    ref = new_ref()
+    ref = await stream_of(service)
     first = await append(service, ref, "one")
     await append(service, ref, "two", "three", sequence=2)
     assert texts(await read(service, ref, first.cursor)) == ["two", "three"]
@@ -300,7 +323,7 @@ async def test_a_batch_lands_in_order_and_a_cursor_resumes_strictly_after(
 async def test_max_records_caps_an_answer_and_the_next_call_continues(
     service: Service,
 ):
-    ref = new_ref()
+    ref = await stream_of(service)
     await append(service, ref, "a", "b", "c", "d", "e")
     first = await read(service, ref, max_records=2)
     second = await read(service, ref, first.next_token, max_records=2)
@@ -315,7 +338,7 @@ async def test_max_records_caps_an_answer_and_the_next_call_continues(
 async def test_a_read_that_collects_nothing_answers_with_the_callers_cursor(
     service: Service,
 ):
-    ref = new_ref()
+    ref = await stream_of(service)
     landed = await append(service, ref, "one")
     answer = await read(service, ref, landed.cursor, wait_ms=200)
     assert answer.records == []
@@ -324,7 +347,7 @@ async def test_a_read_that_collects_nothing_answers_with_the_callers_cursor(
 
 
 async def test_a_parked_read_answers_when_a_record_arrives(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     landed = await append(service, ref, "one")
     parked = asyncio.ensure_future(read(service, ref, landed.cursor, wait_ms=10000))
     await asyncio.sleep(0.3)
@@ -335,7 +358,7 @@ async def test_a_parked_read_answers_when_a_record_arrives(service: Service):
 
 
 async def test_latest_only_positions_a_reader_at_the_end(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     empty = await service.caller.read(ReadInput(stream=ref, latest_only=True))
     assert (empty.records, empty.next_token) == ([], "")
     landed = await append(service, ref, "one")
@@ -352,7 +375,7 @@ async def test_latest_only_positions_a_reader_at_the_end(service: Service):
 
 
 async def test_a_retried_append_is_written_once(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     first = await append(service, ref, "one", "two")
     # The caller lost the answer and sends the same call again.
     assert await append(service, ref, "one", "two") == first
@@ -362,7 +385,7 @@ async def test_a_retried_append_is_written_once(service: Service):
 
 
 async def test_a_divergent_or_stale_retry_is_refused(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     await append(service, ref, "one")
     with pytest.raises(HTTPStatusError) as divergent:
         await append(service, ref, "different")
@@ -377,7 +400,7 @@ async def test_a_divergent_or_stale_retry_is_refused(service: Service):
 
 
 async def test_a_new_attempt_crosses_without_a_supersession_record(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     await append(service, ref, "old", producer_id="model")
     await append(service, ref, "new", producer_id="model", attempt=2)
     stored = records_of(await read(service, ref))
@@ -389,7 +412,7 @@ async def test_a_new_attempt_crosses_without_a_supersession_record(service: Serv
 
 
 async def test_finish_is_a_call_of_its_own(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     await append(service, ref, "one")
     finished = await service.caller.append(
         AppendInput(stream=ref, producer_id="p", attempt=1, sequence=2, finish=True)
@@ -417,8 +440,8 @@ async def test_finish_is_a_call_of_its_own(service: Service):
 
 
 async def test_a_foreign_cursor_is_refused(service: Service):
-    ref = new_ref()
-    other = new_ref()
+    ref = await stream_of(service)
+    other = await stream_of(service)
     await append(service, ref, "one")
     theirs = await append(service, other, "one")
     for cursor in (theirs.cursor, "elsewhere:0000abcd:1", "not a cursor"):
@@ -436,7 +459,7 @@ async def test_a_foreign_cursor_is_refused(service: Service):
 async def test_an_expired_cursor_is_told_apart(service: Service):
     if service.backing.truncate is None:
         pytest.skip(f"{service.backing.name} offers no way to drop records")
-    ref = new_ref()
+    ref = await stream_of(service)
     old = await append(service, ref, "one")
     await append(service, ref, "two", "three", sequence=2)
     await service.backing.truncate(ref.workflow_id, ref.topic, 1)
@@ -446,7 +469,7 @@ async def test_an_expired_cursor_is_told_apart(service: Service):
 
 
 async def test_argument_mistakes_are_bad_requests(service: Service):
-    ref = new_ref()
+    ref = await stream_of(service)
     with pytest.raises(HTTPStatusError) as refused:
         await append(service, ref, "one", producer_id="")
     assert refused.value.status == 400
@@ -476,31 +499,29 @@ async def test_a_reference_this_release_cannot_open_is_refused(service: Service)
     assert "activity" in refused.value.detail
 
 
-@workflow.defn
-class ShortLived:
-    @workflow.run
-    async def run(self) -> None:
-        pass
-
-
 async def test_a_read_says_done_once_the_owner_closes(service: Service):
-    ref = new_ref()
-    await append(service, ref, "one")
-    async with new_worker(service.client, ShortLived) as worker:
-        await service.client.execute_workflow(
-            ShortLived.run, id=ref.workflow_id, task_queue=worker.task_queue
+    workflow_id = f"streams-service-{uuid.uuid4().hex}"
+    ref = StreamRef.for_workflow(workflow_id, topic="out")
+    async with new_worker(service.client, StreamOwner) as worker:
+        owner = await service.client.start_workflow(
+            StreamOwner.run, id=workflow_id, task_queue=worker.task_queue
         )
+        await append(service, ref, "one")
+        await owner.signal(StreamOwner.finish)
+        await owner.result()
+    collected: list[str] = []
     answer = await read(service, ref, wait_ms=5000)
+    collected.extend(texts(answer))
     while not answer.done:
-        assert texts(answer) == ["one"] or answer.records == []
         answer = await read(service, ref, answer.next_token, wait_ms=5000)
-    assert answer.done
+        collected.extend(texts(answer))
+    assert collected == ["one"]
 
 
 async def test_two_readers_on_one_stream_keep_their_own_subscriptions(
     service: Service,
 ):
-    ref = new_ref()
+    ref = await stream_of(service)
     await append(service, ref, "a", "b", "c", "d")
     # The readers interleave their calls; each resumes where it left off, so
     # neither takes over the other's subscription.
@@ -523,7 +544,7 @@ async def test_two_readers_on_one_stream_keep_their_own_subscriptions(
 
 async def test_an_idle_subscription_expires(server: Server, backing: Backing):
     async with serve(server, backing, idle_timeout=timedelta(seconds=0.5)) as service:
-        ref = new_ref()
+        ref = await stream_of(service)
         await append(service, ref, "a", "b")
         first = await read(service, ref, max_records=1)
         assert len(service.handler._idle) == 1
@@ -537,7 +558,7 @@ async def test_the_longest_idle_subscription_goes_first(
     server: Server, backing: Backing
 ):
     async with serve(server, backing, max_idle_subscriptions=2) as service:
-        refs = [new_ref() for _ in range(3)]
+        refs = [await stream_of(service) for _ in range(3)]
         for ref in refs:
             await append(service, ref, "a", "b")
             await read(service, ref, max_records=1)
@@ -579,7 +600,7 @@ class StreamsThroughNexus:
 async def test_a_workflow_calls_the_service_through_its_nexus_client(
     service: Service,
 ):
-    ref = new_ref()
+    ref = await stream_of(service)
     async with new_worker(service.client, StreamsThroughNexus) as worker:
         result = await service.client.execute_workflow(
             StreamsThroughNexus.run,
