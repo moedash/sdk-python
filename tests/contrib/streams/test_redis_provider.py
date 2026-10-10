@@ -10,6 +10,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,6 +28,7 @@ from temporalio.contrib.streams import (
     StreamRef,
     StreamRefusedError,
     StreamStorageError,
+    StreamUnsupportedError,
     topic,
     workflow_writer,
 )
@@ -37,6 +39,7 @@ from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.contrib.streams.redis import RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
+from temporalio.service import RPCError, RPCStatusCode
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
@@ -124,7 +127,8 @@ async def test_a_batch_is_one_script_and_keeps_one_high_water_field(
     assert len(held) == 1
     ((field, value),) = held.items()
     assert field == b"hw:1:p:1"
-    assert value.split(b"|")[0] == b"9"
+    # The newest batch's first sequence and its record count.
+    assert value.split(b"|")[:2] == [b"9", b"2"]
 
 
 async def test_a_retry_of_an_older_batch_is_refused_even_with_its_content(
@@ -135,7 +139,7 @@ async def test_a_retry_of_an_older_batch_is_refused_even_with_its_content(
     first = await producer.append({"n": 1})
     await producer.append({"n": 2})
     restarted = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
-    with pytest.raises(StreamProducerError, match="below the newest"):
+    with pytest.raises(StreamProducerError, match="below the next one expected"):
         await restarted.append({"n": 1})
     assert first != await stream.latest(topic=EVENTS)
     assert len(await log_entries(raw, stream, "events")) == 2
@@ -418,3 +422,82 @@ async def test_store_errors_on_reads_arrive_as_stream_errors(
     monkeypatch.setattr(provider._redis, "xrevrange", lost)
     with pytest.raises(StreamStorageError, match="connection reset"):
         await stream.latest(topic=EVENTS)
+
+
+async def test_a_batch_that_starts_inside_the_newest_batch_is_refused(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(
+        {"n": 1}, {"n": 2}, {"n": 3}
+    )
+    # A second writer of the same session, whose sequence sits inside the batch
+    # the store holds last.
+    second = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    second._sequence = 2
+    with pytest.raises(StreamProducerError):
+        await second.append({"n": 9})
+
+
+async def test_the_session_field_counts_the_producer_id_in_utf8_bytes(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    # Every SDK must name the same field, and UTF-8 bytes count the same way
+    # in every language.
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="é", attempt=1).append({"n": 1})
+    keys = await stream._keys()
+    assert list(await raw.hgetall(keys.meta("events"))) == ["hw:2:é:1".encode()]
+
+
+def described_with(first_run_id: str) -> Any:
+    info = SimpleNamespace(first_run_id=first_run_id)
+    return SimpleNamespace(
+        raw_description=SimpleNamespace(workflow_execution_info=info)
+    )
+
+
+async def test_an_empty_first_run_id_is_unsupported(
+    client: Client, provider: RedisStreams, monkeypatch: pytest.MonkeyPatch
+):
+    async def describe(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        return described_with("")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", describe)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("wf"))
+    with pytest.raises(StreamUnsupportedError, match="first run id"):
+        await stream.latest(topic=EVENTS)
+
+
+async def test_a_describe_failure_arrives_as_a_stream_error(
+    client: Client, provider: RedisStreams, monkeypatch: pytest.MonkeyPatch
+):
+    async def describe(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", describe)
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow("wf"))
+    with pytest.raises(StreamStorageError, match="unavailable"):
+        await stream.latest(topic=EVENTS)
+
+
+async def test_a_promote_that_names_too_few_topics_writes_nothing(
+    provider: RedisStreams, raw: Any
+):
+    records = [WireRecord(topic="a", sequence=1), WireRecord(topic="b", sequence=1)]
+    token = await provider._stage(StagedBatch("ns", "wf", "first", "run", records))
+    keys = provider._chain_keys("ns", "wf", "first")
+    with pytest.raises(StreamRefusedError):
+        await provider._promote(StageRef("ns", "wf", "first", token, ("a",)))
+    # Redis keeps what a failed script wrote, so the check comes before any write.
+    assert await raw.xlen(keys.log("a")) == 0
+    assert await raw.exists(keys.stage(token)) == 1
+
+
+async def test_a_ref_of_an_unsupported_kind_is_refused_where_it_opens(
+    client: Client, provider: RedisStreams
+):
+    with pytest.raises(StreamUnsupportedError):
+        provider.get_stream_handle(client, StreamRef("activity", "x"))

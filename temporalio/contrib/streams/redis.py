@@ -21,18 +21,22 @@ handoff.
 
 **Appends.** One Lua script writes a whole batch, so a reader never sees
 part of one. The meta hash keeps one high-water field per producer attempt:
-the batch's first sequence, its first and last entry ids, and its digest,
-taken over the converted records before the codec. A retry of the newest
-batch with the same digest returns the original position and writes
-nothing; the same sequence with another digest, or any lower sequence, is
-refused with :class:`temporalio.contrib.streams.StreamProducerError`. A
+the newest batch's first sequence, its record count, its first and last
+entry ids, and its digest, taken over the converted records before the
+codec. A retry of the newest batch with the same digest returns the original
+position and writes nothing; the same sequence with another digest, or any
+sequence below the end of that batch, is refused with
+:class:`temporalio.contrib.streams.StreamProducerError`. A
 connection that fails while the script may have run raises
 :class:`temporalio.contrib.streams.StreamOutcomeUnknownError`. No append
 sends anything to Temporal.
 
 **A Workflow's own publish** is staged next to the log and moved into it by
 one script once History shows the Workflow Task's commit, so readers see a
-task's records together or not at all.
+task's records together or not at all. A Worker that replays a run sends one
+such script for each recorded batch it hasn't settled in this process, so a
+new Worker process touches the store once per batch of the History it
+replays. A Replayer touches nothing.
 """
 
 from __future__ import annotations
@@ -80,14 +84,15 @@ _RECORD_FIELD = "r"
 T = TypeVar("T")
 
 # KEYS: log, meta. ARGV: session field, first sequence, digest, records...
-# The high-water field reads "<sequence>|<first id>|<last id>|<digest>".
+# The high-water field reads "<sequence>|<count>|<first id>|<last id>|<digest>".
 _APPEND_LUA = """
 local held = redis.call('HGET', KEYS[2], ARGV[1])
 local sequence = tonumber(ARGV[2])
 if held then
-  local held_sequence, first, last, digest =
-    string.match(held, '^(%d+)|([^|]+)|([^|]+)|(%x+)$')
+  local held_sequence, held_count, first, last, digest =
+    string.match(held, '^(%d+)|(%d+)|([^|]+)|([^|]+)|(%x+)$')
   held_sequence = tonumber(held_sequence)
+  local next_sequence = held_sequence + tonumber(held_count)
   if sequence == held_sequence then
     if digest == ARGV[3] then
       return {first, last}
@@ -95,9 +100,9 @@ if held then
     return redis.error_reply('STREAMS_DIVERGENT sequence ' .. ARGV[2] ..
       ' was already written with different content')
   end
-  if sequence < held_sequence then
+  if sequence < next_sequence then
     return redis.error_reply('STREAMS_STALE sequence ' .. ARGV[2] ..
-      ' is below the newest one written, ' .. held_sequence)
+      ' is below the next one expected, ' .. next_sequence)
   end
 end
 local first, last
@@ -108,11 +113,13 @@ for i = 4, #ARGV do
   end
 end
 redis.call('HSET', KEYS[2], ARGV[1],
-  ARGV[2] .. '|' .. first .. '|' .. last .. '|' .. ARGV[3])
+  ARGV[2] .. '|' .. (#ARGV - 3) .. '|' .. first .. '|' .. last .. '|' .. ARGV[3])
 return {first, last}
 """
 
 # KEYS: stage, then one log per topic. ARGV: the topics, in KEYS order.
+# Redis keeps what a failed script already wrote, so every item is checked
+# before the first write.
 _PROMOTE_LUA = """
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
 if #items == 0 then
@@ -121,6 +128,12 @@ end
 local logs = {}
 for i = 1, #ARGV do
   logs[ARGV[i]] = KEYS[i + 1]
+end
+for i = 1, #items, 2 do
+  if not logs[items[i]] then
+    return redis.error_reply('STREAMS_TOPIC the stage holds topic ' .. items[i] ..
+      ', which the promotion did not name')
+  end
 end
 for i = 1, #items, 2 do
   redis.call('XADD', logs[items[i]], '*', 'r', items[i + 1])
@@ -166,7 +179,15 @@ def _text(value: Any) -> str:
 
 def _session_field(producer_id: str, attempt: int) -> str:
     # Length-prefixed, so an id that contains ':' cannot name another session.
-    return f"hw:{len(producer_id)}:{producer_id}:{attempt}"
+    # UTF-8 bytes, so every language counts the same length.
+    return f"hw:{len(producer_id.encode())}:{producer_id}:{attempt}"
+
+
+def _describe_error(error: RPCError) -> StreamError:
+    # Callers catch stream errors only, and the owner check is part of a call.
+    return StreamStorageError(
+        f"Temporal could not describe the stream's owner: {error}"
+    )
 
 
 def _stream_error(error: redis.exceptions.RedisError, *, write: bool) -> StreamError:
@@ -377,8 +398,17 @@ class RedisStreamHandle:
                     f"Workflow {self._ref.workflow_id!r} was not found, and its "
                     "stream is keyed by its run chain"
                 ) from error
-            raise
-        return description.raw_description.workflow_execution_info.first_run_id
+            raise _describe_error(error) from error
+        first_run_id = description.raw_description.workflow_execution_info.first_run_id
+        if not first_run_id:
+            # The Workflow's own publish keys by the chain's first run, so an
+            # empty one would split the stream in two without an error.
+            raise StreamUnsupportedError(
+                f"the server did not report the first run id of Workflow "
+                f"{self._ref.workflow_id!r}, which the Redis provider keys "
+                "streams by"
+            )
+        return first_run_id
 
 
 class RedisStreams(StreamProviderPlugin):
@@ -427,7 +457,13 @@ class RedisStreams(StreamProviderPlugin):
         self._promote_script = scripts.register_script(_PROMOTE_LUA)
 
     def get_stream_handle(self, client: Client, ref: StreamRef) -> RedisStreamHandle:
-        """A handle on the stream ``ref`` names."""
+        """A handle on the stream ``ref`` names.
+
+        Raises:
+            StreamUnsupportedError: ``ref`` names an owner kind this release
+                lacks.
+        """
+        ref._require_supported()
         return RedisStreamHandle(self, client, ref)
 
     async def close(self) -> None:
