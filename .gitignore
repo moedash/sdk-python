@@ -15,4 +15,5 @@ temporalio/bridge/temporal_sdk_bridge*
 tags
 /.claude
 tmpclaude-*
+/.nexgen-system
 /.nexgen-streams

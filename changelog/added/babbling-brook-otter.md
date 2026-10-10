@@ -1,0 +1,1 @@
+Added `temporalio.contrib.streams.nexus.StreamOperationHandler`, a Nexus operation whose start hands its caller a stream, and `StreamProviderPlugin.notify_on_append()` and `close_stream()`, which tell the server's stream notifier so the caller sees progress and the close result.

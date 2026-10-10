@@ -24,7 +24,6 @@ wit_input_dir = (
 )
 wit_path = wit_input_dir / "workflow-service.wit"
 wit_deps_dir = wit_input_dir / "deps"
-python_support_path = base_dir / "scripts" / "nex_gen_support.py"
 output_dir = base_dir / "temporalio" / "nexus" / "system" / "workflow_service"
 workflow_init_path = base_dir / "temporalio" / "workflow" / "__init__.py"
 workflowservice_request_response_proto = (
@@ -35,28 +34,39 @@ workflowservice_request_response_proto = (
     / "v1"
     / "request_response.proto"
 )
-NEX_GEN_VERSION = "0.2.4"
+# Temporary: the nexgen fixes the stream notifier bindings need (G6 to G13) are not
+# released yet. Once they land upstream, this moves back to a released nexgen version.
+NEX_GEN_REPOSITORY = "https://github.com/moetemp/nexgen"
+NEX_GEN_REVISION = "cc2b8a7337cf79b0cdcdc2a808ef8c8ae41506ea"
+nex_gen_root = base_dir / ".nexgen-system" / NEX_GEN_REVISION
 
 
 def nex_gen_command() -> list[str]:
     if bin_path := os.environ.get("NEX_GEN_BIN"):
         return [bin_path]
 
-    if shutil.which("nexgen") is None:
+    binary = nex_gen_root / "bin" / "nexgen"
+    if not binary.exists():
         subprocess.check_call(
             [
                 "cargo",
                 "install",
                 "--locked",
                 "nexgen",
-                "--version",
-                NEX_GEN_VERSION,
+                "--git",
+                NEX_GEN_REPOSITORY,
+                "--rev",
+                NEX_GEN_REVISION,
                 "--features",
                 "advanced",
-                "--force",
-            ]
+                "--root",
+                str(nex_gen_root),
+            ],
+            # The git CLI honours the user's URL rewrites and credentials,
+            # which cargo's built-in client does not.
+            env={**os.environ, "CARGO_NET_GIT_FETCH_WITH_CLI": "true"},
         )
-    return ["nexgen"]
+    return [str(binary)]
 
 
 def build_descriptor_set(descriptor_path: Path) -> None:
@@ -114,8 +124,6 @@ def generate_nexus_system_api() -> None:
         raise RuntimeError(f"missing WIT source: {wit_path}")
     if not wit_deps_dir.exists():
         raise RuntimeError(f"missing WIT dependency directory: {wit_deps_dir}")
-    if not python_support_path.exists():
-        raise RuntimeError(f"missing Python support source: {python_support_path}")
 
     with tempfile.TemporaryDirectory(dir=base_dir) as temp_dir:
         descriptor_path = Path(temp_dir) / "temporal_api.bin"
@@ -132,8 +140,8 @@ def generate_nexus_system_api() -> None:
                 str(wit_deps_dir),
                 "--native-api",
                 "--system-nexus",
-                "--support-file",
-                str(python_support_path),
+                "--support-package",
+                "temporalio.nexus.system._support",
                 "--descriptors",
                 str(descriptor_path),
                 "--output",

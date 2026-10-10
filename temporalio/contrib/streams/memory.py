@@ -59,6 +59,7 @@ from temporalio.contrib.streams._errors import (
 )
 from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
+from temporalio.contrib.streams._provider import StreamProducer
 from temporalio.contrib.streams._record import (
     Cursor,
     RecordKind,
@@ -405,7 +406,7 @@ class MemoryStreamHandle:
         producer_id: str,
         attempt: int,
         next_sequence: int = 1,
-    ) -> MemoryProducer[Any]:
+    ) -> StreamProducer[Any]:
         """See :meth:`temporalio.contrib.streams.StreamHandle.producer`."""
         if not producer_id:
             raise ValueError("producer_id must not be empty")
@@ -416,14 +417,19 @@ class MemoryStreamHandle:
                 )
         name, _ = self._resolve(topic, None)
         store = self._streams._topic(self._namespace, self._ref.workflow_id, name)
-        return MemoryProducer(
-            store,
-            self._converter,
+        return self._streams._notified_producer(
+            self._client,
+            self._ref,
             name,
-            self._stream(name),
-            producer_id,
-            attempt,
-            next_sequence,
+            MemoryProducer(
+                store,
+                self._converter,
+                name,
+                self._stream(name),
+                producer_id,
+                attempt,
+                next_sequence,
+            ),
         )
 
     def _resolve(

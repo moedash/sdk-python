@@ -231,7 +231,6 @@ jobs:
       - run: uv add --dev --python 3.10 "googleapis-common-protos==1.70.0"
       - run: uv add --python 3.10 "protobuf<4"
       - run: uv sync --all-extras
-      - run: cargo install --locked nexgen --version 0.2.4 --features advanced --force
       - run: poe build-develop
       - run: poe gen-protos
       - name: Check generation unchanged
@@ -243,8 +242,8 @@ jobs:
           TEMPORAL_TEST_PROTO3: 1
 
   # The stream service's bindings are generated from its Nexus contract by a
-  # pinned nexgen fork revision, so they get their own job rather than a place
-  # in check-protos, whose nexgen is the released one.
+  # pinned nexgen fork revision of their own, separate from the one
+  # check-protos uses for the System Nexus bindings, so they get their own job.
   check-nexus-streams-api:
     timeout-minutes: 20
     runs-on: ubuntu-latest
