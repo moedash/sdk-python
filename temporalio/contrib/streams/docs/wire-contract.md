@@ -153,7 +153,9 @@ which grows with the stream whichever process writes, not from a clock.
   a positive int64 until the year 2248.
 - A memory provider offset gives `offset + 1`.
 - `BEGINNING` gives 0. A close carries the newest record's counter plus one,
-  so it outranks every notification before it.
+  so it outranks every notification before it. A close from the owning
+  Workflow's code, which cannot read the store's position, carries
+  `2**63 - 1`.
 
 The notification's `position` is the cursor token of the newest record it
 reports. One code path computes it:
