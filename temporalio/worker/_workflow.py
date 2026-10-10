@@ -197,6 +197,9 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             interceptor_class = i.workflow_interceptor_class(interceptor_class_input)
             if interceptor_class:
                 self._interceptor_classes.append(interceptor_class)
+        # Internal registration: an interceptor offers a hook through this
+        # attribute, so work that needs the raw activation and completion
+        # stays off the public interceptor API.
         self._activation_hooks: list[_ActivationHook] = [
             hook
             for i in interceptors
@@ -374,8 +377,6 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 logger.warning("Unexpected job alongside cache remove job")
             await self._handle_cache_eviction(act, cache_remove_job)
             return
-        for hook in self._activation_hooks:
-            hook.take_jobs(act)
 
         # Build default success completion (e.g. remove-job-only activations)
         completion = (
@@ -386,6 +387,8 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         data_converter = self._data_converter
         download_metrics = temporalio.converter._extstore.StorageOperationMetrics()
         try:
+            for hook in self._activation_hooks:
+                hook.take_jobs(act)
             if LOG_PROTOS:
                 logger.debug("Received workflow activation:\n%s", act)
 

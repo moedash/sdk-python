@@ -23,7 +23,9 @@ from temporalio.contrib.streams import (
     topic,
     workflow_writer,
 )
-from temporalio.contrib.streams._body import CONTENT_HASH_KEY
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
+)
 from temporalio.contrib.streams._output import MARKER_NAME
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
