@@ -36,8 +36,8 @@ context then reaches a stream the same way:
 
 - Workflow code publishes to its own stream with :func:`workflow_writer`.
 - An Activity reaches the stream of the Workflow that scheduled it with
-  :func:`activity_handle`, and writes as itself: its Activity id and its
-  Temporal attempt.
+  :func:`activity_handle`, and writes as itself: its Activity id with the
+  scheduling run id, and its Temporal attempt.
 - Any process holding a client reaches a Workflow's stream with
   :func:`get_stream_handle`, and writes with a producer id and an attempt of
   its own.

@@ -1,8 +1,10 @@
 """Reaching a stream from an Activity or from client code.
 
 An Activity reaches the stream of the Workflow that scheduled it, and writes
-as itself: its Activity id is the producer id and its Temporal attempt is
-the producer attempt, so a retry is reported to readers as ``SUPERSEDED``.
+as itself: its producer id is ``<Activity id>@<scheduling run id>`` and its
+Temporal attempt is the producer attempt, so a retry is reported to readers
+as ``SUPERSEDED``. The run is part of the id because a stream outlives a
+run, and Activity ids repeat across the runs of a chain.
 Any process holding a client reaches a Workflow's stream by Workflow id and
 writes with a producer id and attempt of its own.
 """
@@ -98,9 +100,9 @@ class ActivityStreamHandle:
     ) -> StreamProducer[Any]:
         """A producer on ``topic`` that writes as this Activity attempt.
 
-        The producer id is the Activity id and the attempt is the Activity's
-        Temporal attempt, so the first record of a retry makes readers see
-        ``SUPERSEDED``. A retry starts a new sequence, and the store
+        The producer id is ``<Activity id>@<scheduling run id>`` and the
+        attempt is the Activity's Temporal attempt, so the first record of a
+        retry makes readers see ``SUPERSEDED``. A retry starts a new sequence, and the store
         deduplicates a repeated append within one attempt.
         """
         inner: Any = self._inner
@@ -131,7 +133,10 @@ def activity_handle() -> ActivityStreamHandle:
     provider = provider_for_activity()
     ref = StreamRef.for_workflow(info.workflow_id, run_id=info.workflow_run_id)
     inner = provider.get_stream_handle(temporalio.activity.client(), ref)
-    return ActivityStreamHandle(inner, info.activity_id, info.attempt)
+    # Activity ids are counters within one run, so two runs of a chain would
+    # otherwise share producer state in the stream they share.
+    producer_id = f"{info.activity_id}@{info.workflow_run_id}"
+    return ActivityStreamHandle(inner, producer_id, info.attempt)
 
 
 def get_stream_handle(
