@@ -50,7 +50,9 @@ class Answer:
         )
 
 
-async def main(client: Client, task_queue: str) -> str:
+async def main(
+    client: Client, task_queue: str, *, workflow_id: str = "answer-1"
+) -> str:
     """Run one prompt and return the text the client assembled.
 
     ``client`` must carry the stream provider, for example
@@ -60,12 +62,14 @@ async def main(client: Client, task_queue: str) -> str:
         client, task_queue=task_queue, workflows=[Answer], activities=[generate]
     ):
         handle = await client.start_workflow(
-            Answer.run, "streams", id="answer-1", task_queue=task_queue
+            Answer.run, "streams", id=workflow_id, task_queue=task_queue
         )
         text: list[str] = []
         async for record in get_stream_handle(client, handle.id).read(topic=TOKENS):
             if record.kind is RecordKind.SUPERSEDED:
                 # A retry started over, so what the failed attempt wrote goes.
+                # This topic has one producer. With several, keep the text
+                # per record.producer_id and clear only that producer's.
                 text.clear()
             elif record.kind is RecordKind.DATA and record.value is not None:
                 text.append(record.value)

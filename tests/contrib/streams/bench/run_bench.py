@@ -10,6 +10,13 @@ process: the Worker, the producers and the readers all run here, so the
 latencies need no clock sync. A record carries the clock reading taken just
 before its publish call, and a reader subtracts it on receipt (PERF-04's
 boundary: publish call to the reader's SDK receiving the record).
+
+The numbers are for one client process: the Worker, every producer and
+every reader share one event loop and one GIL, so PERF-05 measures this
+process as much as Redis. Under a target rate, each batch carries the time
+the schedule meant to send it, so a stalled append counts against the
+records queued behind it, and the result says how far the producer fell
+behind. ``RESULTS.md`` next to this file keeps the reported runs.
 """
 
 from __future__ import annotations
@@ -169,7 +176,14 @@ async def perf04_activity(bench: Bench, count: int, gap_ms: int) -> dict[str, An
     )
     latencies, _, _ = await bench.read(workflow_id, count)
     await handle.result()
-    return {"scenario": "perf04-activity", "gap_ms": gap_ms, **_percentiles(latencies)}
+    # A producer's first append also describes the Workflow twice, and a
+    # short token stream pays it every time, so it is reported on its own.
+    return {
+        "scenario": "perf04-activity",
+        "gap_ms": gap_ms,
+        "first_append_ms": round(latencies[0], 2),
+        **_percentiles(latencies[1:]),
+    }
 
 
 async def perf04_workflow(bench: Bench, count: int, gap_ms: int) -> dict[str, Any]:
@@ -226,24 +240,37 @@ async def _produce_load(
     rate_per_s: float | None,
     batch: int,
     size: int,
+    behind: list[float],
 ) -> int:
-    """Append to one stream for ``duration_s``; return how many records."""
+    """Append to one stream for ``duration_s``; return how many records.
+
+    ``behind`` holds the most milliseconds the producer fell behind its
+    schedule, across every producer that shares it.
+    """
     producer = bench.stream(workflow_id).producer(
         topic=EVENTS, producer_id="bench", attempt=1
     )
     pad = "x" * size
     sent = 0
     deadline = time.monotonic() + duration_s
-    interval = None if rate_per_s is None else batch / rate_per_s
+    interval_ns = None if rate_per_s is None else int(batch / rate_per_s * 1e9)
+    start_ns = _now()
+    batches = 0
     while time.monotonic() < deadline:
-        started = time.monotonic()
-        stamp = _now()
+        if interval_ns is None:
+            stamp = _now()
+        else:
+            # The scheduled time, so time spent behind a stalled append counts.
+            stamp = start_ns + batches * interval_ns
+            wait = (stamp - _now()) / 1e9
+            if wait > 0:
+                await asyncio.sleep(wait)
+            behind[0] = max(behind[0], (_now() - stamp) / 1e6)
         await producer.append(
             *({"i": sent + i, "t": stamp, "pad": pad} for i in range(batch))
         )
         sent += batch
-        if interval is not None:
-            await asyncio.sleep(max(0.0, interval - (time.monotonic() - started)))
+        batches += 1
     return sent
 
 
@@ -290,9 +317,12 @@ async def load(
             reader_tasks.append(asyncio.ensure_future(follow(workflow_id, out)))
     await asyncio.sleep(1.0)
     started = time.monotonic()
+    behind = [0.0]
     sent_counts = await asyncio.gather(
         *(
-            _produce_load(bench, workflow_id, duration_s, rate_per_s, batch, size)
+            _produce_load(
+                bench, workflow_id, duration_s, rate_per_s, batch, size, behind
+            )
             for workflow_id in ids
         )
     )
@@ -323,6 +353,7 @@ async def load(
         "record_bytes": size,
         "batch": batch,
         "target_rate_per_stream": rate_per_s,
+        "max_behind_schedule_ms": round(behind[0], 2),
         "sent_records": sum(sent_counts),
         "delivered": received,
         "expected_deliveries": expected,
