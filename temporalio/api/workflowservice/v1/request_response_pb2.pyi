@@ -47,6 +47,7 @@ import temporalio.api.schedule.v1.message_pb2
 import temporalio.api.sdk.v1.task_complete_metadata_pb2
 import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.sdk.v1.worker_config_pb2
+import temporalio.api.stream.v1.message_pb2
 import temporalio.api.taskqueue.v1.message_pb2
 import temporalio.api.update.v1.message_pb2
 import temporalio.api.version.v1.message_pb2
@@ -13713,3 +13714,301 @@ class PollWorkflowExecutionTimeSkippingResponse(google.protobuf.message.Message)
 global___PollWorkflowExecutionTimeSkippingResponse = (
     PollWorkflowExecutionTimeSkippingResponse
 )
+
+class AttachStreamCallbackRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    STREAM_REF_FIELD_NUMBER: builtins.int
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    CALLBACK_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def stream_ref(self) -> temporalio.api.stream.v1.message_pb2.StreamReference:
+        """The stream whose notifier holds the callback."""
+    request_id: builtins.str
+    """Identifies the attachment. Attaching again with the same request ID changes nothing, and
+    DetachStreamCallback names the callback by it. A Nexus handler passes its start request ID.
+    """
+    @property
+    def callback(self) -> temporalio.api.common.v1.message_pb2.Callback.Nexus:
+        """Receives the stream's progress while it is open, and one completion when it closes. If the
+        stream is already closed, the completion is delivered right away. A Nexus handler passes the
+        callback URL and headers of its start request.
+        """
+    identity: builtins.str
+    """The identity of the client attaching the callback."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        stream_ref: temporalio.api.stream.v1.message_pb2.StreamReference | None = ...,
+        request_id: builtins.str = ...,
+        callback: temporalio.api.common.v1.message_pb2.Callback.Nexus | None = ...,
+        identity: builtins.str = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "callback", b"callback", "stream_ref", b"stream_ref"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "callback",
+            b"callback",
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "request_id",
+            b"request_id",
+            "stream_ref",
+            b"stream_ref",
+        ],
+    ) -> None: ...
+
+global___AttachStreamCallbackRequest = AttachStreamCallbackRequest
+
+class AttachStreamCallbackResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___AttachStreamCallbackResponse = AttachStreamCallbackResponse
+
+class DetachStreamCallbackRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    STREAM_REF_FIELD_NUMBER: builtins.int
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def stream_ref(self) -> temporalio.api.stream.v1.message_pb2.StreamReference: ...
+    request_id: builtins.str
+    """The request ID the callback was attached with. Detaching a callback that is not attached
+    changes nothing.
+    """
+    identity: builtins.str
+    """The identity of the client detaching the callback."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        stream_ref: temporalio.api.stream.v1.message_pb2.StreamReference | None = ...,
+        request_id: builtins.str = ...,
+        identity: builtins.str = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["stream_ref", b"stream_ref"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "identity",
+            b"identity",
+            "namespace",
+            b"namespace",
+            "request_id",
+            b"request_id",
+            "stream_ref",
+            b"stream_ref",
+        ],
+    ) -> None: ...
+
+global___DetachStreamCallbackRequest = DetachStreamCallbackRequest
+
+class DetachStreamCallbackResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___DetachStreamCallbackResponse = DetachStreamCallbackResponse
+
+class NotifyStreamRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    class MetadataEntry(google.protobuf.message.Message):
+        DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: builtins.int
+        VALUE_FIELD_NUMBER: builtins.int
+        key: builtins.str
+        value: builtins.str
+        def __init__(
+            self,
+            *,
+            key: builtins.str = ...,
+            value: builtins.str = ...,
+        ) -> None: ...
+        def ClearField(
+            self,
+            field_name: typing_extensions.Literal["key", b"key", "value", b"value"],
+        ) -> None: ...
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    STREAM_REF_FIELD_NUMBER: builtins.int
+    POSITION_FIELD_NUMBER: builtins.int
+    COUNTER_FIELD_NUMBER: builtins.int
+    METADATA_FIELD_NUMBER: builtins.int
+    CLOSE_FIELD_NUMBER: builtins.int
+    CLOSE_RESULT_FIELD_NUMBER: builtins.int
+    IDENTITY_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def stream_ref(self) -> temporalio.api.stream.v1.message_pb2.StreamReference: ...
+    position: builtins.str
+    """Where the stream stands after the append this notification reports, in the producer's terms,
+    such as a stream cursor. Passed on to the callbacks as the progress position.
+    """
+    counter: builtins.int
+    """Orders the notifications of one stream. The notifier keeps the highest counter it has seen
+    and ignores a lower one, so a producer may send them out of order. Must be positive.
+    """
+    @property
+    def metadata(
+        self,
+    ) -> google.protobuf.internal.containers.ScalarMap[builtins.str, builtins.str]:
+        """Small details passed on to the callbacks. The server rejects metadata whose keys and values
+        exceed 2 KiB in total, counted as UTF-8 bytes.
+        """
+    close: builtins.bool
+    """Closes the stream: the notifier completes every attached callback with `close_result`, and
+    completes callbacks attached later right away.
+    """
+    @property
+    def close_result(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """The completion result when `close` is set, such as a summary of the stream. Optional."""
+    identity: builtins.str
+    """The identity of the producer."""
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        stream_ref: temporalio.api.stream.v1.message_pb2.StreamReference | None = ...,
+        position: builtins.str = ...,
+        counter: builtins.int = ...,
+        metadata: collections.abc.Mapping[builtins.str, builtins.str] | None = ...,
+        close: builtins.bool = ...,
+        close_result: temporalio.api.common.v1.message_pb2.Payload | None = ...,
+        identity: builtins.str = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "close_result", b"close_result", "stream_ref", b"stream_ref"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "close",
+            b"close",
+            "close_result",
+            b"close_result",
+            "counter",
+            b"counter",
+            "identity",
+            b"identity",
+            "metadata",
+            b"metadata",
+            "namespace",
+            b"namespace",
+            "position",
+            b"position",
+            "stream_ref",
+            b"stream_ref",
+        ],
+    ) -> None: ...
+
+global___NotifyStreamRequest = NotifyStreamRequest
+
+class NotifyStreamResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___NotifyStreamResponse = NotifyStreamResponse
+
+class DescribeStreamNotifierRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    NAMESPACE_FIELD_NUMBER: builtins.int
+    STREAM_REF_FIELD_NUMBER: builtins.int
+    namespace: builtins.str
+    @property
+    def stream_ref(self) -> temporalio.api.stream.v1.message_pb2.StreamReference: ...
+    def __init__(
+        self,
+        *,
+        namespace: builtins.str = ...,
+        stream_ref: temporalio.api.stream.v1.message_pb2.StreamReference | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["stream_ref", b"stream_ref"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "namespace", b"namespace", "stream_ref", b"stream_ref"
+        ],
+    ) -> None: ...
+
+global___DescribeStreamNotifierRequest = DescribeStreamNotifierRequest
+
+class DescribeStreamNotifierResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    COUNTER_FIELD_NUMBER: builtins.int
+    POSITION_FIELD_NUMBER: builtins.int
+    CLOSED_FIELD_NUMBER: builtins.int
+    CALLBACKS_FIELD_NUMBER: builtins.int
+    counter: builtins.int
+    """The highest counter the notifier has seen."""
+    position: builtins.str
+    """The position that came with `counter`."""
+    closed: builtins.bool
+    """Whether the stream was closed."""
+    @property
+    def callbacks(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        temporalio.api.stream.v1.message_pb2.StreamCallbackInfo
+    ]:
+        """The callbacks the notifier holds, in the order they were attached."""
+    def __init__(
+        self,
+        *,
+        counter: builtins.int = ...,
+        position: builtins.str = ...,
+        closed: builtins.bool = ...,
+        callbacks: collections.abc.Iterable[
+            temporalio.api.stream.v1.message_pb2.StreamCallbackInfo
+        ]
+        | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "callbacks",
+            b"callbacks",
+            "closed",
+            b"closed",
+            "counter",
+            b"counter",
+            "position",
+            b"position",
+        ],
+    ) -> None: ...
+
+global___DescribeStreamNotifierResponse = DescribeStreamNotifierResponse

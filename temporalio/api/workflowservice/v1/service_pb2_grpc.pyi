@@ -1161,6 +1161,48 @@ class WorkflowServiceStub:
         temporalio.api.workflowservice.v1.request_response_pb2.PollWorkflowExecutionTimeSkippingRequest,
         temporalio.api.workflowservice.v1.request_response_pb2.PollWorkflowExecutionTimeSkippingResponse,
     ]
+    AttachStreamCallback: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.AttachStreamCallbackRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.AttachStreamCallbackResponse,
+    ]
+    """AttachStreamCallback attaches a callback to the notifier of a stream. The callback receives the
+    stream's progress while it is open and one completion when it closes. A Nexus handler whose
+    operation returns a stream calls it with the caller's callback when the operation starts.
+
+    (-- api-linter: core::0127::http-annotation=disabled
+        aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+    """
+    DetachStreamCallback: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackResponse,
+    ]
+    """DetachStreamCallback removes a callback from the notifier of a stream, so it gets no more
+    deliveries. A Nexus handler calls it when the caller cancels the operation.
+
+    (-- api-linter: core::0127::http-annotation=disabled
+        aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+    """
+    NotifyStream: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.NotifyStreamRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.NotifyStreamResponse,
+    ]
+    """NotifyStream tells the notifier of a stream that the stream moved, or that it closed. The
+    notifier passes the latest notification on to every attached callback as progress, and on close
+    completes them. Producers fold their notifications and keep at most one call in flight.
+
+    (-- api-linter: core::0127::http-annotation=disabled
+        aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+    """
+    DescribeStreamNotifier: grpc.UnaryUnaryMultiCallable[
+        temporalio.api.workflowservice.v1.request_response_pb2.DescribeStreamNotifierRequest,
+        temporalio.api.workflowservice.v1.request_response_pb2.DescribeStreamNotifierResponse,
+    ]
+    """DescribeStreamNotifier returns the state of the notifier of a stream and its callbacks. It is
+    for operators and tools, so it is not exposed through System Nexus.
+
+    (-- api-linter: core::0127::http-annotation=disabled
+        aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+    """
 
 class WorkflowServiceServicer(metaclass=abc.ABCMeta):
     """WorkflowService API defines how Temporal SDKs and other clients interact with the Temporal server
@@ -2571,6 +2613,56 @@ class WorkflowServiceServicer(metaclass=abc.ABCMeta):
         request: temporalio.api.workflowservice.v1.request_response_pb2.PollWorkflowExecutionTimeSkippingRequest,
         context: grpc.ServicerContext,
     ) -> temporalio.api.workflowservice.v1.request_response_pb2.PollWorkflowExecutionTimeSkippingResponse: ...
+    @abc.abstractmethod
+    def AttachStreamCallback(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.AttachStreamCallbackRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.AttachStreamCallbackResponse:
+        """AttachStreamCallback attaches a callback to the notifier of a stream. The callback receives the
+        stream's progress while it is open and one completion when it closes. A Nexus handler whose
+        operation returns a stream calls it with the caller's callback when the operation starts.
+
+        (-- api-linter: core::0127::http-annotation=disabled
+            aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+        """
+    @abc.abstractmethod
+    def DetachStreamCallback(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.DetachStreamCallbackResponse:
+        """DetachStreamCallback removes a callback from the notifier of a stream, so it gets no more
+        deliveries. A Nexus handler calls it when the caller cancels the operation.
+
+        (-- api-linter: core::0127::http-annotation=disabled
+            aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+        """
+    @abc.abstractmethod
+    def NotifyStream(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.NotifyStreamRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.NotifyStreamResponse:
+        """NotifyStream tells the notifier of a stream that the stream moved, or that it closed. The
+        notifier passes the latest notification on to every attached callback as progress, and on close
+        completes them. Producers fold their notifications and keep at most one call in flight.
+
+        (-- api-linter: core::0127::http-annotation=disabled
+            aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+        """
+    @abc.abstractmethod
+    def DescribeStreamNotifier(
+        self,
+        request: temporalio.api.workflowservice.v1.request_response_pb2.DescribeStreamNotifierRequest,
+        context: grpc.ServicerContext,
+    ) -> temporalio.api.workflowservice.v1.request_response_pb2.DescribeStreamNotifierResponse:
+        """DescribeStreamNotifier returns the state of the notifier of a stream and its callbacks. It is
+        for operators and tools, so it is not exposed through System Nexus.
+
+        (-- api-linter: core::0127::http-annotation=disabled
+            aip.dev/not-precedent: SDKs reach the stream notifier through System Nexus or gRPC. --)
+        """
 
 def add_WorkflowServiceServicer_to_server(
     servicer: WorkflowServiceServicer, server: grpc.Server

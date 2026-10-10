@@ -11,6 +11,7 @@ import google.protobuf.message
 
 import temporalio.api.common.v1.message_pb2
 import temporalio.api.failure.v1.message_pb2
+import temporalio.api.nexus.v1.message_pb2
 
 if sys.version_info >= (3, 8):
     import typing as typing_extensions
@@ -92,3 +93,54 @@ class OnCompleteResponse(google.protobuf.message.Message):
     ) -> None: ...
 
 global___OnCompleteResponse = OnCompleteResponse
+
+class OnProgressRequest(google.protobuf.message.Message):
+    """OnProgressRequest is the request type to the NotificationService's OnProgress operation, which
+    receives the non-terminal progress of the source operation. It may be delivered any number of
+    times before the single OnComplete, in any order, so a handler keeps the highest counter.
+
+    Information about the source operation is available the same way as for OnCompleteRequest.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    PROGRESS_FIELD_NUMBER: builtins.int
+    SOURCE_CONTEXT_FIELD_NUMBER: builtins.int
+    @property
+    def progress(self) -> temporalio.api.nexus.v1.message_pb2.NexusOperationProgress:
+        """The progress of the source operation. `progress.operation` is not set."""
+    @property
+    def source_context(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """User-supplied data which was added to the source invocation. (As applicable.)"""
+    def __init__(
+        self,
+        *,
+        progress: temporalio.api.nexus.v1.message_pb2.NexusOperationProgress
+        | None = ...,
+        source_context: temporalio.api.common.v1.message_pb2.Payload | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "progress", b"progress", "source_context", b"source_context"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "progress", b"progress", "source_context", b"source_context"
+        ],
+    ) -> None: ...
+
+global___OnProgressRequest = OnProgressRequest
+
+class OnProgressResponse(google.protobuf.message.Message):
+    """OnProgressResponse is the return type of the OnProgress operation."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___OnProgressResponse = OnProgressResponse

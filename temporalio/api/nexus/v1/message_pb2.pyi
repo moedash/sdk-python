@@ -181,6 +181,91 @@ class Link(google.protobuf.message.Message):
 
 global___Link = Link
 
+class NexusOperationProgress(google.protobuf.message.Message):
+    """Non-terminal progress of an asynchronous Nexus operation, delivered to the operation's callback
+    with the `running` state before its completion.
+
+    Progress says that the operation's output moved, not what the output is: the receiver reads the
+    output itself, starting from `position`. Deliveries may arrive out of order or be dropped, so a
+    receiver keeps the one with the highest `counter` and drops any lower one.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    class MetadataEntry(google.protobuf.message.Message):
+        DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: builtins.int
+        VALUE_FIELD_NUMBER: builtins.int
+        key: builtins.str
+        value: builtins.str
+        def __init__(
+            self,
+            *,
+            key: builtins.str = ...,
+            value: builtins.str = ...,
+        ) -> None: ...
+        def ClearField(
+            self,
+            field_name: typing_extensions.Literal["key", b"key", "value", b"value"],
+        ) -> None: ...
+
+    SCHEDULED_EVENT_ID_FIELD_NUMBER: builtins.int
+    POSITION_FIELD_NUMBER: builtins.int
+    COUNTER_FIELD_NUMBER: builtins.int
+    METADATA_FIELD_NUMBER: builtins.int
+    scheduled_event_id: builtins.int
+    """The event ID of the `NEXUS_OPERATION_SCHEDULED` event of the caller Workflow's operation."""
+    position: builtins.str
+    """Where the operation's output stands after the change this progress reports, in the
+    handler's terms, such as a stream cursor. Opaque to the server.
+    """
+    counter: builtins.int
+    """Orders the progress of one operation. Among progress folded together, the highest counter
+    is kept. Must be positive.
+    """
+    @property
+    def metadata(
+        self,
+    ) -> google.protobuf.internal.containers.ScalarMap[builtins.str, builtins.str]:
+        """Small details for the caller. The server rejects progress whose metadata keys and values
+        exceed 2 KiB in total, counted as UTF-8 bytes.
+        """
+    def __init__(
+        self,
+        *,
+        scheduled_event_id: builtins.int = ...,
+        position: builtins.str = ...,
+        counter: builtins.int = ...,
+        metadata: collections.abc.Mapping[builtins.str, builtins.str] | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "operation", b"operation", "scheduled_event_id", b"scheduled_event_id"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "counter",
+            b"counter",
+            "metadata",
+            b"metadata",
+            "operation",
+            b"operation",
+            "position",
+            b"position",
+            "scheduled_event_id",
+            b"scheduled_event_id",
+        ],
+    ) -> None: ...
+    def WhichOneof(
+        self, oneof_group: typing_extensions.Literal["operation", b"operation"]
+    ) -> typing_extensions.Literal["scheduled_event_id"] | None: ...
+
+global___NexusOperationProgress = NexusOperationProgress
+
 class StartOperationRequest(google.protobuf.message.Message):
     """A request to start an operation."""
 

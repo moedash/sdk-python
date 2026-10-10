@@ -27,6 +27,24 @@ class WorkflowService:
         self._client = client
         self._service = "workflow"
 
+    async def attach_stream_callback(
+        self,
+        req: temporalio.api.workflowservice.v1.AttachStreamCallbackRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.AttachStreamCallbackResponse:
+        """Invokes the WorkflowService.attach_stream_callback rpc method."""
+        return await self._client._rpc_call(
+            rpc="attach_stream_callback",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.AttachStreamCallbackResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
     async def count_activity_executions(
         self,
         req: temporalio.api.workflowservice.v1.CountActivityExecutionsRequest,
@@ -441,6 +459,24 @@ class WorkflowService:
             timeout=timeout,
         )
 
+    async def describe_stream_notifier(
+        self,
+        req: temporalio.api.workflowservice.v1.DescribeStreamNotifierRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.DescribeStreamNotifierResponse:
+        """Invokes the WorkflowService.describe_stream_notifier rpc method."""
+        return await self._client._rpc_call(
+            rpc="describe_stream_notifier",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.DescribeStreamNotifierResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
     async def describe_task_queue(
         self,
         req: temporalio.api.workflowservice.v1.DescribeTaskQueueRequest,
@@ -544,6 +580,24 @@ class WorkflowService:
             req=req,
             service=self._service,
             resp_type=temporalio.api.workflowservice.v1.DescribeWorkflowRuleResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
+    async def detach_stream_callback(
+        self,
+        req: temporalio.api.workflowservice.v1.DetachStreamCallbackRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.DetachStreamCallbackResponse:
+        """Invokes the WorkflowService.detach_stream_callback rpc method."""
+        return await self._client._rpc_call(
+            rpc="detach_stream_callback",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.DetachStreamCallbackResponse,
             retry=retry,
             metadata=metadata,
             timeout=timeout,
@@ -1030,6 +1084,24 @@ class WorkflowService:
             req=req,
             service=self._service,
             resp_type=temporalio.api.workflowservice.v1.ListWorkflowRulesResponse,
+            retry=retry,
+            metadata=metadata,
+            timeout=timeout,
+        )
+
+    async def notify_stream(
+        self,
+        req: temporalio.api.workflowservice.v1.NotifyStreamRequest,
+        retry: bool = False,
+        metadata: Mapping[str, str | bytes] = {},
+        timeout: timedelta | None = None,
+    ) -> temporalio.api.workflowservice.v1.NotifyStreamResponse:
+        """Invokes the WorkflowService.notify_stream rpc method."""
+        return await self._client._rpc_call(
+            rpc="notify_stream",
+            req=req,
+            service=self._service,
+            resp_type=temporalio.api.workflowservice.v1.NotifyStreamResponse,
             retry=retry,
             metadata=metadata,
             timeout=timeout,
