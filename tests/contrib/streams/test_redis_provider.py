@@ -306,7 +306,7 @@ async def test_appends_trim_to_retention_and_slide_the_expiry(
     await provider.close()
 
 
-async def test_a_stage_expires_with_retention_and_a_promotion_keeps_the_log(
+async def test_a_stage_expires_after_retention_and_grace_and_a_promotion_keeps_the_log(
     raw: Any,
 ):
     provider = RedisStreams(
@@ -318,7 +318,7 @@ async def test_a_stage_expires_with_retention_and_a_promotion_keeps_the_log(
     batch = StagedBatch("ns", "wf", "first", "run", [record, record])
     token = await provider._stage(batch)
     keys = provider._chain_keys("ns", "wf", "first")
-    assert 0 < await raw.pttl(keys.stage(token)) <= 30_000
+    assert 30_000 < await raw.pttl(keys.stage(token)) <= 30_000 + provider._grace_ms
     await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
     assert await raw.exists(keys.stage(token)) == 0
     assert await raw.xlen(keys.log("events")) == 2
@@ -572,3 +572,34 @@ async def test_a_ref_of_an_unsupported_kind_is_refused_where_it_opens(
 ):
     with pytest.raises(StreamUnsupportedError):
         provider.get_stream_handle(client, StreamRef("activity", "x"))
+
+
+async def test_a_session_older_than_the_retention_leaves_the_meta(
+    client: Client, owner: WorkflowHandle, raw: Any
+):
+    # One field per session would otherwise grow the meta for as long as the
+    # topic is written, long after the records it guards are gone.
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+    )
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="old", attempt=1).append({"n": 1})
+    await asyncio.sleep(0.5)
+    await stream.producer(topic=EVENTS, producer_id="new", attempt=1).append({"n": 2})
+    keys = await stream._keys()
+    fields = await raw.hgetall(keys.meta("events"))
+    assert [f for f in fields if f.startswith(b"hw:")] == [b"hw:3:new:1"]
+    await provider.close()
+
+
+async def test_a_stage_lives_for_the_retention_and_the_grace(
+    provider: RedisStreams, raw: Any
+):
+    # A stage only has to live until someone promotes it, and crash repair
+    # can come late.
+    batch = StagedBatch("ns", "wf", "first", "run", [WireRecord(topic="events")])
+    token = await provider._stage(batch)
+    keys = provider._chain_keys("ns", "wf", "first")
+    assert await raw.pttl(keys.stage(token)) > provider._retention_ms

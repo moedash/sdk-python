@@ -95,18 +95,36 @@ T = TypeVar("T")
 
 # Trims a log to the retention window and slides the expiry of the log and
 # its meta. The meta also records how many records the log ever took and the
-# newest id, which is what remains of a log after it expires.
+# newest id, which is what remains of a log after it expires. Each call also
+# looks at a few session fields, resuming where the last call stopped, and
+# drops those whose last write is older than the retention: the records they
+# guard against a duplicate are gone, and the meta would otherwise grow with
+# every session the topic ever had.
 _KEEP_LUA = """
 local function now_ms()
   local time = redis.call('TIME')
   return tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 end
+local function sweep_sessions(meta, floor)
+  local cursor = redis.call('HGET', meta, 'hwscan') or '0'
+  local found = redis.call('HSCAN', meta, cursor, 'MATCH', 'hw:*', 'COUNT', 50)
+  local fields = found[2]
+  for i = 1, #fields, 2 do
+    local last_ms = string.match(fields[i + 1], '|(%d+)%-%d+|[^|]+$')
+    if last_ms and tonumber(last_ms) < floor then
+      redis.call('HDEL', meta, fields[i])
+    end
+  end
+  redis.call('HSET', meta, 'hwscan', found[1])
+end
 local function keep(log, meta, added, last, retention, grace)
-  redis.call('XTRIM', log, 'MINID', (now_ms() - retention) .. '-0')
+  local floor = now_ms() - retention
+  redis.call('XTRIM', log, 'MINID', floor .. '-0')
   redis.call('PEXPIRE', log, retention)
   redis.call('HINCRBY', meta, 'added', added)
   redis.call('HSET', meta, 'last', last)
   redis.call('PEXPIRE', meta, retention + grace)
+  sweep_sessions(meta, floor)
 end
 """
 
@@ -554,7 +572,10 @@ class RedisStreams(StreamProviderPlugin):
             items += [record.topic, record.SerializeToString()]
         async with _mapped(write=True):
             await self._stage_script(
-                keys=[keys.stage(token)], args=[self._retention_ms, *items]
+                keys=[keys.stage(token)],
+                # Until promoted, a stage holds committed output, and crash
+                # repair can come after the retention.
+                args=[self._retention_ms + self._grace_ms, *items],
             )
         return token
 
