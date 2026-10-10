@@ -13,7 +13,10 @@ a store, and to show in one file what a provider owes. Its limits:
   ref only decides which run's close ends a read.
 - A read learns that the owner closed by describing the Workflow through the
   handle's client. A handle opened with no client reads until the caller
-  stops.
+  stops, or until the topic is closed.
+- A closed topic is closed for the run chain that closed it, which a
+  producer or a reader finds by describing the Workflow. Without a client,
+  a closed topic is closed for every chain.
 - It keeps every record until :meth:`MemoryStreams.truncate` drops the oldest
   ones, which stands in for a store's retention in tests.
 - A Workflow's own publish is staged in process memory and promoted when
@@ -31,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
@@ -53,10 +56,12 @@ from temporalio.contrib.streams._cursor import (
     stream_hash,
 )
 from temporalio.contrib.streams._errors import (
+    StreamClosedError,
     StreamCursorError,
     StreamExpiredError,
     StreamProducerError,
 )
+from temporalio.contrib.streams._notify import chain_first_run_id
 from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._provider import StreamProducer
@@ -107,6 +112,8 @@ class _Topic:
         # One high-water mark per producer attempt, so the state stays
         # bounded however long the producer writes.
         self.sessions: dict[tuple[str, int], _Batch] = {}
+        # The run chains, by first run id, that closed this topic.
+        self.closed_chains: set[str] = set()
         # Each waiter is parked with its loop, because an append may run on
         # another thread, and waking a foreign loop's future needs
         # call_soon_threadsafe.
@@ -124,16 +131,18 @@ class _Topic:
         session: tuple[str, int] | None = None,
         sequence: int = 0,
         content: bytes = b"",
+        closed: bool = False,
     ) -> tuple[int, int]:
         """Store ``wires`` and return where they landed as ``(first offset, count)``.
 
         With a ``session``, a repeat of that session's newest batch carrying
         the same ``content`` stores nothing and returns where the original
-        landed.
+        landed, even once the topic is ``closed``.
 
         Raises:
             StreamProducerError: ``sequence`` is the newest batch's with
                 different content, or below it.
+            StreamClosedError: The topic is ``closed`` for the writer.
         """
         if session is not None:
             held = self.sessions.get(session)
@@ -151,6 +160,8 @@ class _Topic:
                         f"{sequence}, below the newest one the store holds, "
                         f"{held.sequence}"
                     )
+        if closed:
+            raise StreamClosedError("the stream has closed")
         first = self.head
         self.records.extend(
             wire.SerializeToString(deterministic=True) for wire in wires
@@ -159,6 +170,11 @@ class _Topic:
             self.sessions[session] = _Batch(sequence, first, len(wires), content)
         self._wake_waiters()
         return first, len(wires)
+
+    def close(self, first_run_id: str) -> None:
+        """Close the topic for the run chain ``first_run_id``."""
+        self.closed_chains.add(first_run_id)
+        self._wake_waiters()
 
     def _wake_waiters(self) -> None:
         waiters, self._waiters = self._waiters, []
@@ -204,9 +220,16 @@ class MemoryProducer(Generic[T]):
         producer_id: str,
         attempt: int,
         next_sequence: int = 1,
+        chain: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
-        """Bind this producer to ``topic``'s ``store``."""
+        """Bind this producer to ``topic``'s ``store``.
+
+        ``chain`` finds the first run of the chain the producer writes to,
+        or ``None`` when it cannot be known.
+        """
         self._store = store
+        self._chain = chain
+        self._first_run_id: str | None = None
         self._converter = converter
         self._topic = topic
         self._stream = stream
@@ -273,10 +296,24 @@ class MemoryProducer(Generic[T]):
             session=(self._producer_id, self._attempt),
             sequence=self._sequence,
             content=content,
+            closed=await self._closed(),
         )
         self._sequence += len(wires)
         self._last = mint_cursor(_PROVIDER, self._stream, str(first + count - 1))
         return self._last
+
+    async def _closed(self) -> bool:
+        if not self._store.closed_chains:
+            return False
+        if self._first_run_id is None:
+            chain = None if self._chain is None else await self._chain()
+            if chain is None:
+                return True
+            if not chain:
+                # The owner does not exist yet, so no chain of it closed.
+                return False
+            self._first_run_id = chain
+        return self._first_run_id in self._store.closed_chains
 
 
 class MemoryStreamHandle:
@@ -357,7 +394,7 @@ class MemoryStreamHandle:
                 return
             # One more pass after learning the owner closed, so a record that
             # landed between the scan and the describe is still delivered.
-            closed = await self._closed()
+            closed = await self._closed(store)
             if not closed:
                 await store.wait_past(
                     offset,
@@ -366,9 +403,9 @@ class MemoryStreamHandle:
                     else self._streams._poll.total_seconds(),
                 )
 
-    async def _closed(self) -> bool:
+    async def _closed(self, store: _Topic) -> bool:
         if self._client is None:
-            return False
+            return bool(store.closed_chains)
         try:
             description = await self._client.get_workflow_handle(
                 self._ref.workflow_id, run_id=self._ref.run_id
@@ -379,6 +416,9 @@ class MemoryStreamHandle:
                 # nothing to follow yet; keep waiting.
                 return False
             raise
+        first_run_id = description.raw_description.workflow_execution_info.first_run_id
+        if first_run_id in store.closed_chains:
+            return True
         status = description.status
         if status is None or status == WorkflowExecutionStatus.RUNNING:
             return False
@@ -429,8 +469,18 @@ class MemoryStreamHandle:
                 producer_id,
                 attempt,
                 next_sequence,
+                chain=None if self._client is None else self._first_run_id,
             ),
         )
+
+    async def _first_run_id(self) -> str:
+        assert self._client is not None
+        try:
+            return await chain_first_run_id(self._client, self._ref)
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                return ""
+            raise
 
     def _resolve(
         self, topic: str | StreamTopic[Any] | None, result_type: type | None
@@ -521,6 +571,11 @@ class MemoryStreams(StreamProviderPlugin):
 
     async def _abort(self, stage: StageRef) -> None:
         self._stages.pop(stage.token, None)
+
+    async def _close_topic(
+        self, client: Client, ref: StreamRef, topic: str, first_run_id: str
+    ) -> None:
+        self._topic(client.namespace, ref.workflow_id, topic).close(first_run_id)
 
     def truncate(
         self, workflow_id: str, topic: str, *, keep: int, namespace: str = "default"

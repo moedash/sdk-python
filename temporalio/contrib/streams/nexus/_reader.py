@@ -31,8 +31,8 @@ __all__ = ["ReadSupersession", "StreamReader", "StreamRecordError"]
 T = TypeVar("T")
 
 _BATCH = 100
-# Once the operation completes, a read may wait this long for records still on
-# their way, such as a Workflow owner's last batch that is not promoted yet.
+# Once the operation completes, a read waits this long for a record, so a
+# reader waiting for the stream's end does not spin.
 _DRAIN_WAIT_MS = 2000
 
 
@@ -139,6 +139,7 @@ class StreamReader(Generic[T]):
         # The stream service said no record will follow.
         self._stream_done = False
         self._operation_resolved = False
+        self._operation_failed = False
         self._ended = False
         self._handed_over = 0
         self._supersessions: list[ReadSupersession] = []
@@ -156,10 +157,12 @@ class StreamReader(Generic[T]):
 
         Reads on while reads answer with records, and waits for the
         operation to report progress only once a read answers with none.
-        Never answers with an empty batch. Once the operation completes, it
-        hands over the records still unread, then ``None``: it reads until
-        the stream service says no record will follow, or until a read that
-        waited a moment answers with none.
+        Never answers with an empty batch. The stream closes in the store
+        before the operation completes, so once the operation completes the
+        reader reads until the stream service says the stream is done, then
+        answers ``None``. An operation that failed never closed the stream:
+        the reader hands over what a read finds, until a read that waited a
+        moment answers with none, then raises the failure.
 
         Raises:
             temporalio.exceptions.NexusOperationError: A read failed, or the
@@ -173,7 +176,9 @@ class StreamReader(Generic[T]):
             error, self._undecodable = self._undecodable, None
             raise error
         while not self._ended:
-            if not self._caught_up and not self._stream_done:
+            # After a completion, only the stream's end ends the read.
+            reads_on = self._operation_resolved and not self._operation_failed
+            if not self._stream_done and (reads_on or not self._caught_up):
                 batch = await self._read()
                 if batch:
                     self._handed_over += len(batch)
@@ -193,6 +198,10 @@ class StreamReader(Generic[T]):
             if progress is None:
                 # Records may have landed after the last progress.
                 self._operation_resolved = True
+                try:
+                    await self._handle
+                except Exception:
+                    self._operation_failed = True
             else:
                 self._counter = progress.counter
             self._caught_up = False

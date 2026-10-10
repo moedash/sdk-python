@@ -56,6 +56,13 @@ lasts until a reader or a new producer sees the ended chain. Records written
 in the window stay readable. The Workflow's own committed output is never
 refused, so its final task's publish lands after the close.
 
+A single topic closes when ``close_stream`` or ``close_workflow_stream``
+(see :mod:`temporalio.contrib.streams.nexus`) closes it: its meta gets
+``closed``, the append script refuses new batches on it with
+:class:`temporalio.contrib.streams.StreamClosedError`, and a read of it
+delivers what is left and ends. The flag lives in the chain's keys, so a new
+chain on the same Workflow id starts open.
+
 **Stages left behind.** A Worker that stops between a Workflow Task's
 commit and the promotion leaves its stage pending. A Worker that replays
 the run promotes it. A reader also looks, when its read starts and when it
@@ -220,6 +227,9 @@ end
 if redis.call('HGET', KEYS[3], 'closed') then
   return redis.error_reply('STREAMS_CLOSED the Workflow that owns this stream ' ..
     'has closed')
+end
+if redis.call('HGET', KEYS[2], 'closed') then
+  return redis.error_reply('STREAMS_CLOSED the stream has closed')
 end
 revive(KEYS[1], KEYS[2])
 local first, last
@@ -526,7 +536,8 @@ class RedisStreamHandle:
         delivers what is left and ends, and marks the chain closed. So an
         idle read may end up to 5 s after its owner closed. A read
         on a handle pinned to a run ends when that run closes, even if the
-        chain continued as new.
+        chain continued as new. A read of a closed topic delivers what is
+        left and ends within one poll.
         """
         name, result_type = self._resolve(topic, result_type)
         # Parsed here so a bad cursor fails this call, not the first
@@ -590,7 +601,8 @@ class RedisStreamHandle:
                         block=None if ended else block_ms,
                     )
                     pipe.hget(keys.meta(topic), "trimmed")
-                    batch, trimmed = await pipe.execute()
+                    pipe.hget(keys.meta(topic), "closed")
+                    batch, trimmed, topic_closed = await pipe.execute()
             entries = batch[0][1] if batch else []
             if trimmed is not None:
                 watermark = _entry(_text(trimmed))
@@ -620,6 +632,11 @@ class RedisStreamHandle:
                 continue
             if ended:
                 return
+            if topic_closed is not None:
+                # One more pass, so a record that landed with the close is
+                # delivered.
+                ended = True
+                continue
             if loop.time() < next_check:
                 continue
             # One more pass after learning the owner closed, so a record
@@ -1065,6 +1082,18 @@ class RedisStreams(StreamProviderPlugin):
         self, namespace: str, workflow_id: str, first_run_id: str
     ) -> None:
         await self._mark_closed(self._chain_keys(namespace, workflow_id, first_run_id))
+
+    async def _close_topic(
+        self, client: Client, ref: StreamRef, topic: str, first_run_id: str
+    ) -> None:
+        keys = self._chain_keys(client.namespace, ref.workflow_id, first_run_id)
+        async with _mapped(write=True):
+            async with self._redis.pipeline(transaction=True) as pipe:
+                pipe.hset(keys.meta(topic), "closed", "1")
+                # A topic closed before its first record has a meta with no
+                # expiry yet.
+                pipe.pexpire(keys.meta(topic), self._retention_ms + self._grace_ms)
+                await pipe.execute()
 
     async def _mark_closed(self, keys: _ChainKeys) -> None:
         async with _mapped(write=True):
