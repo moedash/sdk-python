@@ -572,6 +572,24 @@ async def test_a_reused_workflow_id_reads_only_its_own_chain_on_memory(
     await provider.close()
 
 
+async def test_a_worker_left_with_async_with_does_not_cancel_its_caller(
+    client: Client,
+) -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    async with new_worker(client, OwnerUntilDone, plugins=[provider]):
+        await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+    # The context manager cancels the Worker's run while the notification
+    # is still out, and the caller's task must go on.
+    await asyncio.sleep(0.5)
+    hold.set()
+    await asyncio.wait_for(provider.flush_notifications(), 5)
+    assert len(service.notified) == 1
+    await provider.close()
+
+
 class ForeignPositionProducer:
     """A third-party producer whose positions no counter can come from."""
 
