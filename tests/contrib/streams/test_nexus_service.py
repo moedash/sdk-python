@@ -56,6 +56,8 @@ from temporalio.contrib.streams.nexus import (
     HTTPStatusError,
     ReadInput,
     ReadOutput,
+    RecordWire,
+    StreamAccess,
     TemporalStreams,
     TemporalStreamsHandler,
     TemporalStreamsHttpClient,
@@ -725,9 +727,14 @@ async def test_a_read_that_does_not_wait_answers_with_what_the_store_holds(
         assert sizes == [100, 100, 50]
 
 
+def crossing(record: RecordWire) -> int:
+    """The bytes a record takes in a read result, where it crosses as base64."""
+    return 4 * ((len(record.record) + 2) // 3)
+
+
 async def test_a_read_answer_stays_within_its_byte_budget(service: Service):
     ref = await stream_of(service)
-    big = "x" * (400 * 1024)
+    big = "x" * (300 * 1024)
     for n in range(5):
         await append(service, ref, f"{n}{big}", sequence=n + 1)
     sizes: list[int] = []
@@ -736,7 +743,8 @@ async def test_a_read_answer_stays_within_its_byte_budget(service: Service):
         answer = await read(service, ref, after, wait_ms=0)
         if not answer.records:
             break
-        assert sum(len(record.record) for record in answer.records) <= 1 << 20
+        # The budget counts what crosses, about 4/3 of the record bytes.
+        assert sum(crossing(record) for record in answer.records) <= 1 << 20
         sizes.append(len(answer.records))
         after = answer.next_token
     assert sizes == [2, 2, 1]
@@ -749,6 +757,67 @@ async def test_a_record_above_the_budget_still_crosses_alone(service: Service):
     assert len(first.records) == 1
     second = await read(service, ref, first.next_token, wait_ms=0)
     assert texts(second) == ["small"]
+
+
+async def test_an_authorizer_sees_each_call_and_can_refuse(
+    server: Server, backing: Backing
+):
+    seen: list[StreamAccess] = []
+
+    async def authorize(access: StreamAccess) -> bool:
+        seen.append(access)
+        return access.producer_id != "intruder"
+
+    async with serve(server, backing, authorize=authorize) as service:
+        ref = await stream_of(service)
+        await append(service, ref, "a")
+        with pytest.raises(HTTPStatusError) as refused:
+            await append(service, ref, "b", producer_id="intruder")
+        answer = await read(service, ref, wait_ms=0)
+
+    assert refused.value.status == 403
+    assert texts(answer) == ["a"]
+    assert [(access.operation, access.producer_id) for access in seen] == [
+        ("append", "p"),
+        ("append", "intruder"),
+        ("read", None),
+    ]
+    assert all(access.stream == ref for access in seen)
+
+
+async def test_an_append_above_the_record_limit_is_refused(
+    server: Server, backing: Backing
+):
+    async with serve(server, backing, max_record_bytes=4096) as service:
+        ref = await stream_of(service)
+        with pytest.raises(HTTPStatusError) as refused:
+            await append(service, ref, "x" * 5000)
+        answer = await read(service, ref, wait_ms=0)
+
+    assert refused_as(refused.value) == "ValueError"
+    assert "limit" in refused.value.detail
+    assert answer.records == []
+
+
+async def test_a_stored_record_above_the_limit_crosses_as_an_error(
+    server: Server, backing: Backing
+):
+    async with serve(server, backing, max_record_bytes=4096) as service:
+        ref = await stream_of(service)
+        # Written to the store directly, as an Activity or a client may.
+        producer = backing.provider.get_stream_handle(service.client, ref).producer(
+            producer_id="direct", attempt=1
+        )
+        await producer.append(RawValue(Payload(data=b"x" * 5000)))
+        await producer.append(RawValue(Payload(data=b"small")))
+        answer = await read(service, ref, wait_ms=0)
+
+    large, small = answer.records
+    # The reader is told why, at the cursor it goes on past.
+    assert large.error and "limit" in large.error
+    assert large.record == b""
+    assert small.error is None
+    assert WireRecord.FromString(small.record).body.data == b"small"
 
 
 async def test_a_subscription_in_flight_at_close_is_not_kept(service: Service):
