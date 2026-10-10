@@ -322,7 +322,9 @@ class AppendInput:
     payloads: list[bytes] | None = None
     """The record bodies, in order, each a serialized temporal.api.common.v1.Payload. The
     caller's payload codec has already run on them, so the endpoint never sees plaintext
-    a codec protects. Empty on a call that finishes.
+    a codec protects. A retry resends the original call's bytes: the store compares the
+    bodies as they arrive, so a codec that encodes with a fresh nonce would make a
+    re-encoded retry look like other content. Empty on a call that finishes.
     """
 
     finish: bool | None = None
