@@ -725,6 +725,82 @@ async def test_a_workflow_reader_gets_plain_bodies_that_stay_encrypted_elsewhere
         assert record.value.payload.metadata["encoding"] == b"binary/xor"
 
 
+class SlowCodec(PayloadCodec):
+    """A codec that really awaits, as a KMS-backed one does."""
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.001)
+        return list(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.001)
+        return list(payloads)
+
+
+async def test_a_read_that_does_not_wait_answers_with_what_the_store_holds(
+    server: Server, backing: Backing
+):
+    # wait_ms=0 means "do not wait for new records", not "skip a fetch that
+    # needs I/O": every record already in the store comes back.
+    config = server.client.config()
+    config["data_converter"] = dataclasses.replace(
+        DataConverter.default, payload_codec=SlowCodec()
+    )
+    async with serve(server, backing, client=Client(**config)) as service:
+        ref = await stream_of(service)
+        for start in range(0, 250, 50):
+            await append(
+                service,
+                ref,
+                *[f"r{n}" for n in range(start, start + 50)],
+                sequence=start + 1,
+            )
+        sizes: list[int] = []
+        after = ""
+        while True:
+            answer = await read(service, ref, after, wait_ms=0, max_records=100)
+            if not answer.records:
+                break
+            sizes.append(len(answer.records))
+            after = answer.next_token
+        assert sizes == [100, 100, 50]
+
+
+async def test_a_read_answer_stays_within_its_byte_budget(service: Service):
+    ref = await stream_of(service)
+    big = "x" * (400 * 1024)
+    for n in range(5):
+        await append(service, ref, f"{n}{big}", sequence=n + 1)
+    sizes: list[int] = []
+    after = ""
+    while True:
+        answer = await read(service, ref, after, wait_ms=0)
+        if not answer.records:
+            break
+        assert sum(len(record.record) for record in answer.records) <= 1 << 20
+        sizes.append(len(answer.records))
+        after = answer.next_token
+    assert sizes == [2, 2, 1]
+
+
+async def test_a_record_above_the_budget_still_crosses_alone(service: Service):
+    ref = await stream_of(service)
+    await append(service, ref, "y" * (1 << 20) + "z", "small")
+    first = await read(service, ref, wait_ms=0)
+    assert len(first.records) == 1
+    second = await read(service, ref, first.next_token, wait_ms=0)
+    assert texts(second) == ["small"]
+
+
+async def test_a_subscription_in_flight_at_close_is_not_kept(service: Service):
+    ref = await stream_of(service)
+    reading = asyncio.create_task(read(service, ref, wait_ms=1500))
+    await asyncio.sleep(0.5)
+    await service.handler.close()
+    await reading
+    assert not service.handler._idle  # type: ignore[reportPrivateUsage]
+
+
 @pytest.mark.parametrize(
     "error, kind, retryable",
     [
