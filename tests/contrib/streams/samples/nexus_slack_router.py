@@ -66,7 +66,7 @@ class Conversation:
             writer.publish(reply)
             await workflow.sleep(timedelta(milliseconds=100))
         writer.finish()
-        await close_workflow_stream(f"{len(replies)} messages", topic=MESSAGES)
+        close_workflow_stream(f"{len(replies)} messages", topic=MESSAGES)
 
 
 async def open_conversation(ctx: Any, request: str) -> StreamRef:

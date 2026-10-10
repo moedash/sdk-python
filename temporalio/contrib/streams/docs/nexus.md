@@ -73,7 +73,7 @@ class Conversation:
         for reply in make_replies(request):
             writer.publish(reply)
         writer.finish()
-        await close_workflow_stream("done", topic=MESSAGES)
+        close_workflow_stream("done", topic=MESSAGES)
 
 async def open_conversation(ctx, request: str) -> StreamRef:
     workflow_id = f"conversation-{ctx.request_id}"
@@ -113,10 +113,18 @@ no progress until the close.
 
 Closing the stream completes every operation that handed it out:
 
-- From the owning Workflow, `await close_workflow_stream(result, topic=...)`
-  after its last publish. The close is recorded in History and replays.
+- From the owning Workflow, `close_workflow_stream(result, topic=...)`. The
+  close commits with the Workflow Task, like a publish. Once the Worker has
+  made the task's records visible, it closes the stream in the store and
+  then completes the operations, so a reader never misses a record
+  published in the same task.
 - From outside a Workflow, for example an Activity or the process that sees
-  the work end, `await provider.close_stream(client, ref, result)`.
+  the work end, `await provider.close_stream(client, ref, result)`. It
+  closes the stream in the store first, so a later append, the owner's
+  included, raises `StreamClosedError`.
+
+A reader ends when the stream service says the stream is done: the stream
+is closed in the store and the reader has every record.
 
 `result` becomes the operation's result, for example a summary. A cancel
 from the caller detaches its callback, and the stream keeps going for any
