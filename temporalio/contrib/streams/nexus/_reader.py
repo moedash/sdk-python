@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Generic, TypeVar, cast
 
 from google.protobuf.message import DecodeError
@@ -27,7 +28,12 @@ from temporalio.contrib.streams._wire import RecordDecoder, WireRecord
 from temporalio.contrib.streams.nexus._generated import ReadInput, TemporalStreams
 from temporalio.contrib.streams.nexus._operation import stream_ref_from_token
 
-__all__ = ["ReadSupersession", "StreamReader", "StreamRecordError"]
+__all__ = [
+    "ReadSupersession",
+    "StreamIncompleteError",
+    "StreamReader",
+    "StreamRecordError",
+]
 
 T = TypeVar("T")
 
@@ -54,6 +60,25 @@ class StreamRecordError(StreamError):
         super().__init__(message)
         self.cursor = cursor
         """Where the record is in the stream."""
+
+
+class StreamIncompleteError(StreamError):
+    """The operation completed, but the stream never said it ended.
+
+    .. warning::
+        This API is experimental and may change in future versions.
+
+    The reader gave up after its drain limit of empty reads, because every
+    read is a Nexus operation in the caller's History. It happens when the
+    owner's close didn't reach the store, or when the Workflow id moved on to
+    a new run chain whose topic is still open.
+    """
+
+    def __init__(self, message: str, *, cursor: Cursor) -> None:
+        """The reader stopped at ``cursor``."""
+        super().__init__(message)
+        self.cursor = cursor
+        """Where the reader stopped. A new reader can resume after it."""
 
 
 @dataclass(frozen=True)
@@ -110,6 +135,17 @@ class StreamReader(Generic[T]):
     over the new chain's records. Give each stream's owner a Workflow id of
     its own, or let the reader finish before the id is reused.
 
+    Every read is a Nexus operation result in the caller's History, about
+    three events and up to one read answer (1 MiB of records) each. To read a
+    long stream, Continue-as-New before History grows too large: pass
+    :attr:`cursor` to the new run, start the operation again there, and build
+    the reader with ``after=cursor``. After a successful completion, the
+    reader reads until the stream service says the stream is done, and raises
+    :class:`StreamIncompleteError` once its reads have found nothing for
+    ``drain_limit``. A read that fails because retention dropped the records
+    after the cursor raises with ``StreamExpiredError`` as its cause. A new
+    reader with no ``after`` starts again at the oldest record still kept.
+
     Bodies reach Workflow code decoded: the stream service decodes each body
     with its Worker's data converter, payload codec included, and the read's
     result travels back as one Nexus operation result, which this Worker's
@@ -123,6 +159,8 @@ class StreamReader(Generic[T]):
         *,
         item_type: type[T],
         endpoint: str,
+        after: Cursor | None = None,
+        drain_limit: timedelta = timedelta(seconds=60),
     ) -> None:
         """Read the stream ``handle``'s operation returns.
 
@@ -132,13 +170,25 @@ class StreamReader(Generic[T]):
             item_type: What each record's body decodes into.
             endpoint: The Nexus endpoint that serves the stream service for
                 this stream, usually the operation's own.
+            after: Resume after this cursor, such as a previous run's
+                :attr:`cursor`. ``None`` starts at the oldest record kept.
+            drain_limit: How long reads after a successful completion may
+                find nothing before the reader raises
+                :class:`StreamIncompleteError`.
+
+        Raises:
+            ValueError: ``drain_limit`` is not positive.
         """
+        if drain_limit <= timedelta(0):
+            raise ValueError("drain_limit must be positive")
         self._handle = handle
         self._item_type = item_type
         self._endpoint = endpoint
+        self._drain_limit = drain_limit
+        self._drain_since: datetime | None = None
         self._stream: StreamRef | None = None
         self._decoder: RecordDecoder | None = None
-        self._cursor = ""
+        self._cursor = after.token if after is not None else ""
         self._counter = 0
         # Whether the last read answered with no record. An answer short of
         # the batch may still leave records behind (the service caps an
@@ -154,6 +204,11 @@ class StreamReader(Generic[T]):
         self._undecodable: StreamRecordError | None = None
         self._decode_failure: str | None = None
         self._last_warning = ""
+
+    @property
+    def cursor(self) -> Cursor:
+        """Where the reader is: past every record it has handed over."""
+        return Cursor(self._cursor)
 
     @property
     def supersessions(self) -> Sequence[ReadSupersession]:
@@ -177,7 +232,10 @@ class StreamReader(Generic[T]):
                 operation failed. A failed operation raises after the records
                 it left are handed over.
             StreamRecordError: A record could not be decoded into
-                ``item_type``. The next call goes on past it.
+                ``item_type``, or was too large to cross. The next call goes
+                on past it.
+            StreamIncompleteError: The operation completed, but reads found
+                nothing for ``drain_limit`` and the stream never ended.
             ValueError: The operation's token does not name a stream.
         """
         if self._undecodable is not None:
@@ -190,10 +248,24 @@ class StreamReader(Generic[T]):
                 batch = await self._read()
                 if batch:
                     self._handed_over += len(batch)
+                    if reads_on:
+                        self._drain_since = workflow.now()
                     return batch
                 if self._undecodable is not None:
                     error, self._undecodable = self._undecodable, None
                     raise error
+                if (
+                    reads_on
+                    and self._caught_up
+                    and not self._stream_done
+                    and self._drain_since is not None
+                    and workflow.now() - self._drain_since >= self._drain_limit
+                ):
+                    raise StreamIncompleteError(
+                        f"the operation completed, but the stream didn't end within "
+                        f"{self._drain_limit} of empty reads",
+                        cursor=self.cursor,
+                    )
                 # An answer of records that carry no item, such as a FINISH,
                 # is not the tail.
                 continue
@@ -206,6 +278,7 @@ class StreamReader(Generic[T]):
             if progress is None:
                 # Records may have landed after the last progress.
                 self._operation_resolved = True
+                self._drain_since = workflow.now()
                 try:
                     await self._handle
                 except Exception:
@@ -247,11 +320,16 @@ class StreamReader(Generic[T]):
         batch: list[T] = []
         for stored in answer.records:
             cursor = Cursor(stored.token)
-            try:
-                wire = WireRecord.FromString(stored.record)
-            except DecodeError as error:
-                self._decode_failure = str(error)
+            wire: WireRecord | None = None
+            if stored.error:
+                # The service left out a record no read result can carry.
+                self._decode_failure = stored.error
             else:
+                try:
+                    wire = WireRecord.FromString(stored.record)
+                except DecodeError as error:
+                    self._decode_failure = str(error)
+            if wire is not None:
                 records = self._decoder.decode(cursor, wire)
                 if not records:
                     # The decoder hands back nothing only for a record it

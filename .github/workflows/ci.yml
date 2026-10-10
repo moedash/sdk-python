@@ -232,6 +232,14 @@ jobs:
       - run: uv add --python 3.10 "protobuf<4"
       - run: uv sync --all-extras
       - run: poe build-develop
+      # The generators build their pinned nexgen revision on first use, a full
+      # Rust build, so it's cached by the pin.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .nexgen-system
+            .nexgen-streams
+          key: nexgen-${{ hashFiles('scripts/gen_nexus_system_api.py', 'scripts/gen_nexus_streams_api.py') }}
       - run: poe gen-protos
       - name: Check generation unchanged
         run: |

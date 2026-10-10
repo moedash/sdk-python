@@ -30,8 +30,9 @@ def close_workflow_stream(
     once the Worker has made the task's records visible, it closes the
     stream in the store, so every reader ends after the last record, and
     then completes the operations. A record published in the same task is
-    never overtaken by the close. A Worker that stops before closing leaves
-    it to the Worker that replays the run.
+    never overtaken by the close. The Worker retries a close that fails,
+    with backoff, until it lands or the Worker stops. A Worker that stops
+    first leaves it to a Worker that replays the run, if one does.
 
     Closing a topic finishes it for this Workflow. Closing it again does
     nothing.
