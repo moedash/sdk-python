@@ -13,6 +13,7 @@ from temporalio.contrib.streams import (
     BEGINNING,
     Cursor,
     RecordKind,
+    StreamRecordError,
     Supersession,
 )
 from temporalio.contrib.streams._body import (
@@ -85,19 +86,36 @@ def test_supersession_is_synthesized_from_observations():
     assert attempts.note("other", 0, topic="t", previous=Cursor("c4")) is None
 
 
-def test_the_decoder_skips_a_record_it_cannot_decode():
-    said: list[str] = []
+def test_the_decoder_raises_with_the_cursor_of_a_record_it_cannot_decode():
     converter = DataConverter.default.payload_converter
-    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=said.append)
+    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=lambda _: None)
     bad = WireRecord(
         topic="t",
         kind=RecordKind.DATA.value,  # type: ignore[arg-type]
         body=Payload(metadata={"encoding": b"json/plain"}, data=b"{not json"),
     )
-    assert decoder.decode(Cursor("c1"), bad) == []
-    assert said and "c1" in said[0]
+    with pytest.raises(StreamRecordError) as raised:
+        decoder.decode(Cursor("c1"), bad)
+    # The caller can resume past it on purpose.
+    assert raised.value.cursor == Cursor("c1")
     good = to_wire(converter, topic="t", kind=RecordKind.DATA, value=3)
     assert [r.value for r in decoder.decode(Cursor("c2"), good)] == [3]
+
+
+def test_a_decoder_primed_at_its_resume_cursor_reports_a_new_attempt():
+    converter = DataConverter.default.payload_converter
+    decoder = RecordDecoder(converter, int, after=Cursor("c2"), warn=lambda _: None)
+
+    def written(attempt: int, value: int) -> WireRecord:
+        wire = to_wire(converter, topic="t", kind=RecordKind.DATA, value=value)
+        wire.producer_id, wire.attempt = "model", attempt
+        return wire
+
+    # The record at the cursor was already delivered, before the reader stopped.
+    decoder.prime(written(1, 2))
+    out = decoder.decode(Cursor("c3"), written(2, 3))
+    assert [r.kind for r in out] == [RecordKind.SUPERSEDED, RecordKind.DATA]
+    assert out[0].cursor == Cursor("c2")
 
 
 def test_the_content_hash_is_the_plaintext_payload_hash():

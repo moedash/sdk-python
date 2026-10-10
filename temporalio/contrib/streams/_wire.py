@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 import temporalio.converter
+from temporalio.contrib.streams._errors import StreamRecordError
 from temporalio.contrib.streams._policy import AttemptTracker
 from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
@@ -90,10 +91,10 @@ class RecordDecoder:
     """Turns stored records into the records a reader yields.
 
     One per read. It synthesizes ``SUPERSEDED`` from the attempts it
-    observes, positions each synthesized record at the cursor before the
-    record that triggered it, and skips a record it cannot decode with a
-    warning rather than raising, so one bad record cannot stop every reader
-    of the stream.
+    observes, and positions each synthesized record at the cursor before the
+    record that triggered it. A record it cannot decode raises
+    :class:`temporalio.contrib.streams.StreamRecordError` with that record's
+    cursor. Skipping it silently would lose data the reader never hears of.
     """
 
     def __init__(
@@ -111,16 +112,26 @@ class RecordDecoder:
         self._warn = warn
         self._attempts = AttemptTracker()
 
+    def prime(self, wire: WireRecord) -> None:
+        """Note the attempt of the record at the resume cursor, which was already delivered.
+
+        A read that resumes would otherwise take the next attempt of that
+        producer as its first, and report no ``SUPERSEDED``. Only the cursor
+        record's producer is primed. Another producer's earlier attempts are
+        not known to a resumed read.
+        """
+        self._attempts.note(
+            wire.producer_id, wire.attempt, topic=wire.topic, previous=self._previous
+        )
+
     def decode(self, cursor: Cursor, wire: WireRecord) -> list[StreamRecord[Any]]:
         """The records to yield for one stored record, in order."""
         try:
             record = from_wire(self._converter, cursor, wire, self._result_type)
         except Exception as error:
-            self._warn(f"skipping stream record at {cursor}: {error}")
-            # The skipped record keeps its position, so a resume after it
-            # moves on rather than tripping over it again.
-            self._previous = cursor
-            return []
+            raise StreamRecordError(
+                f"stream record at {cursor} could not be decoded: {error}", cursor
+            ) from error
         out: list[StreamRecord[Any]] = []
         superseded = self._attempts.note(
             wire.producer_id, wire.attempt, topic=wire.topic, previous=self._previous
