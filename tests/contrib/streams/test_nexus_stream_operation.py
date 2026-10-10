@@ -9,6 +9,8 @@ the operation with the close result.
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -30,7 +32,9 @@ from temporalio.api.workflowservice.v1 import (
 )
 from temporalio.client import Client
 from temporalio.contrib.streams import StreamRef, workflow_writer
+from temporalio.contrib.streams._cursor import BEGINNING, progress_counter
 from temporalio.contrib.streams._output import StageRef
+from temporalio.contrib.streams._record import Cursor
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     StreamNotifier,
@@ -42,6 +46,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 from temporalio.worker._nexus import _NexusTaskCancellation
+from tests.helpers import new_worker
 from tests.helpers.nexus import make_nexus_endpoint_name
 
 REF = StreamRef.for_workflow("owner-1", topic="tokens")
@@ -206,13 +211,35 @@ def test_a_token_that_names_no_stream_is_refused() -> None:
             stream_ref_from_token(token)
 
 
+def test_counters_come_from_the_stores_position() -> None:
+    assert progress_counter(BEGINNING) == 0
+    assert progress_counter(Cursor("memory:abcd1234:0")) == 1
+    assert progress_counter(Cursor("memory:abcd1234:41")) == 42
+    assert progress_counter(Cursor("redis:abcd1234:1700000000000-0")) == (
+        1700000000000 << 20
+    )
+    assert progress_counter(Cursor("redis:abcd1234:1700000000000-7")) == (
+        1700000000000 << 20 | 7
+    )
+    # Later in one millisecond, and a later millisecond, both rank higher.
+    assert progress_counter(Cursor("redis:x:5-1")) < progress_counter(
+        Cursor("redis:x:5-2")
+    )
+    assert progress_counter(Cursor("redis:x:5-999999999")) < progress_counter(
+        Cursor("redis:x:6-0")
+    )
+    assert progress_counter(Cursor("redis:x:1700000000000-0")) < 2**63
+    with pytest.raises(ValueError):
+        progress_counter(Cursor("other:x:not-a-position"))
+
+
 async def test_notifications_fold_with_one_call_in_flight() -> None:
     hold = asyncio.Event()
     service = FakeWorkflowService(hold=hold)
     notifier = StreamNotifier(fake_client(service), REF)
 
-    for position in ("p1", "p2", "p3", "p4", "p5"):
-        notifier.notify(position)
+    for counter, position in enumerate(("p1", "p2", "p3", "p4", "p5"), start=1):
+        notifier.notify(position, counter)
         await asyncio.sleep(0)
     hold.set()
     await notifier.flush()
@@ -220,7 +247,7 @@ async def test_notifications_fold_with_one_call_in_flight() -> None:
     assert [request.position for request in service.notified] == ["p1", "p5"]
     assert service.max_in_flight == 1
     first, second = service.notified
-    assert 0 < first.counter < second.counter
+    assert (first.counter, second.counter) == (1, 5)
     assert not first.close and not second.close
 
 
@@ -228,10 +255,10 @@ async def test_close_waits_for_the_call_in_flight_and_carries_the_result() -> No
     hold = asyncio.Event()
     service = FakeWorkflowService(hold=hold)
     notifier = StreamNotifier(fake_client(service), REF)
-    notifier.notify("p1")
+    notifier.notify("p1", 1)
     await asyncio.sleep(0)
 
-    closing = asyncio.create_task(notifier.close("done"))
+    closing = asyncio.create_task(notifier.close("done", 2))
     await asyncio.sleep(0.01)
     assert not closing.done()
     hold.set()
@@ -240,7 +267,7 @@ async def test_close_waits_for_the_call_in_flight_and_carries_the_result() -> No
     assert service.max_in_flight == 1
     last = service.notified[-1]
     assert last.close
-    assert last.counter > service.notified[0].counter
+    assert last.counter == 2
     assert (
         DataConverter.default.payload_converter.from_payload(last.close_result)
         == "done"
@@ -250,10 +277,10 @@ async def test_close_waits_for_the_call_in_flight_and_carries_the_result() -> No
 async def test_a_notification_after_close_sends_nothing() -> None:
     service = FakeWorkflowService()
     notifier = StreamNotifier(fake_client(service), REF)
-    await notifier.close()
+    await notifier.close(None, 1)
     sent = len(service.notified)
 
-    notifier.notify("late")
+    notifier.notify("late", 2)
     await notifier.flush()
 
     assert len(service.notified) == sent
@@ -263,9 +290,9 @@ async def test_a_failed_notification_leaves_the_next_one_to_tell_the_reader() ->
     service = FakeWorkflowService(fail_next=True)
     notifier = StreamNotifier(fake_client(service), REF)
 
-    notifier.notify("p1")
+    notifier.notify("p1", 1)
     await notifier.flush()
-    notifier.notify("p2")
+    notifier.notify("p2", 2)
     await notifier.flush()
 
     assert [request.position for request in service.notified] == ["p2"]
@@ -285,6 +312,9 @@ async def test_a_provider_that_notifies_tells_the_notifier_after_each_append(
     last = await producer.append("b", "c")
     await provider.close_stream(stream_client, ref, "done")
 
+    counters = [request.counter for request in service.notified]
+    assert counters == sorted(counters) and len(set(counters)) == len(counters)
+    assert service.notified[-1].counter > progress_counter(last)
     positions = [request.position for request in service.notified if not request.close]
     # The two appends may fold into one notification, but the newest is told.
     assert positions[-1] == last.token
@@ -553,3 +583,66 @@ async def test_a_workflows_own_publishes_reach_the_caller_as_progress(
     assert observed.result == "3 tokens"
     assert observed.counters == sorted(set(observed.counters)), observed
     await provider.close()
+
+
+# Two producer processes whose clocks disagree: the second appends after the
+# first, but its clock is ten seconds behind. The counters come from the store's
+# position, so the second notification still ranks above the first.
+
+
+@workflow.defn(name="SkewOwner")
+class SkewOwner:
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._done)
+
+    @workflow.signal
+    def done(self) -> None:
+        self._done = True
+
+
+@pytest.mark.skipif(
+    not os.environ.get("STREAMS_REDIS_URL"),
+    reason="set STREAMS_REDIS_URL to run the Redis provider tests",
+)
+async def test_producers_with_skewed_clocks_still_notify_in_increasing_order(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from temporalio.contrib.streams.redis import RedisStreams
+
+    service = FakeWorkflowService()
+    prefix = f"test-{uuid.uuid4().hex}"
+    first = RedisStreams(os.environ["STREAMS_REDIS_URL"], key_prefix=prefix)
+    second = RedisStreams(os.environ["STREAMS_REDIS_URL"], key_prefix=prefix)
+    first.notify_on_append()
+    second.notify_on_append()
+    real_time_ns = time.time_ns
+    async with new_worker(client, SkewOwner) as worker:
+        owner = await client.start_workflow(
+            SkewOwner.run, id=f"skew-owner-{uuid.uuid4()}", task_queue=worker.task_queue
+        )
+        ref = StreamRef.for_workflow(owner.id, topic="tokens")
+        ahead = first.get_stream_handle(fake_client(service, client), ref).producer(
+            producer_id="ahead", attempt=1
+        )
+        behind = second.get_stream_handle(fake_client(service, client), ref).producer(
+            producer_id="behind", attempt=1
+        )
+
+        monkeypatch.setattr(time, "time_ns", lambda: real_time_ns() + 10_000_000_000)
+        await ahead.append("a")
+        await asyncio.sleep(0.2)
+        monkeypatch.setattr(time, "time_ns", real_time_ns)
+        await behind.append("b")
+        await asyncio.sleep(0.2)
+        await owner.signal(SkewOwner.done)
+        await owner.result()
+
+    counters = [request.counter for request in service.notified]
+    assert len(counters) == 2, counters
+    assert counters[0] < counters[1], counters
+    await first.close()
+    await second.close()
