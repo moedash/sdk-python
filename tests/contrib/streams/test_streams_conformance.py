@@ -22,6 +22,7 @@ another provider or another stream.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -120,14 +121,21 @@ async def _memory_case(client: Client) -> AsyncIterator[ProviderCase]:
 
 
 @asynccontextmanager
-async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
-    url = os.environ.get("STREAMS_REDIS_URL")
+async def _redis_case(
+    client: Client, cluster: bool = False
+) -> AsyncIterator[ProviderCase]:
+    variable = "STREAMS_REDIS_CLUSTER_URL" if cluster else "STREAMS_REDIS_URL"
+    url = os.environ.get(variable)
     if not url:
-        pytest.skip("set STREAMS_REDIS_URL to run the Redis provider cases")
+        pytest.skip(f"set {variable} to run these Redis provider cases")
+    from redis.asyncio.cluster import RedisCluster
+
     from temporalio.contrib.streams.redis import RedisStreams
 
     # A prefix per case keeps cases apart in one Redis.
-    provider = RedisStreams(url, key_prefix=f"conformance-{uuid.uuid4().hex}")
+    prefix = f"conformance-{uuid.uuid4().hex}"
+    cluster_client = RedisCluster.from_url(url) if cluster else None
+    provider = RedisStreams(cluster_client or url, key_prefix=prefix)
     owners: list[WorkflowHandle] = []
     async with new_worker(client, OwnerHost) as worker:
 
@@ -139,15 +147,19 @@ async def _redis_case(client: Client) -> AsyncIterator[ProviderCase]:
             assert handle.result_run_id is not None
             return handle.result_run_id
 
-        yield ProviderCase("redis", provider, client, host=host, reads=False)
+        name = "redis-cluster" if cluster else "redis"
+        yield ProviderCase(name, provider, client, host=host, reads=False)
         for owner in owners:
             await owner.terminate()
     await provider.close()
+    if cluster_client is not None:
+        await cluster_client.aclose()
 
 
 SETUPS: dict[str, Callable[[Client], Any]] = {
     "memory": _memory_case,
     "redis": _redis_case,
+    "redis-cluster": functools.partial(_redis_case, cluster=True),
 }
 
 
