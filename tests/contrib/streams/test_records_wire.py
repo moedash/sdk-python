@@ -100,6 +100,22 @@ def test_the_decoder_skips_a_record_it_cannot_decode():
     assert [r.value for r in decoder.decode(Cursor("c2"), good)] == [3]
 
 
+def test_a_decoder_primed_at_its_resume_cursor_reports_a_new_attempt():
+    converter = DataConverter.default.payload_converter
+    decoder = RecordDecoder(converter, int, after=Cursor("c2"), warn=lambda _: None)
+
+    def written(attempt: int, value: int) -> WireRecord:
+        wire = to_wire(converter, topic="t", kind=RecordKind.DATA, value=value)
+        wire.producer_id, wire.attempt = "model", attempt
+        return wire
+
+    # The record at the cursor was already delivered, before the reader stopped.
+    decoder.prime(written(1, 2))
+    out = decoder.decode(Cursor("c3"), written(2, 3))
+    assert [r.kind for r in out] == [RecordKind.SUPERSEDED, RecordKind.DATA]
+    assert out[0].cursor == Cursor("c2")
+
+
 def test_the_content_hash_is_the_plaintext_payload_hash():
     converter = DataConverter.default.payload_converter
     one = converter.to_payloads([{"n": 1}])[0]

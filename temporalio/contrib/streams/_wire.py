@@ -111,6 +111,18 @@ class RecordDecoder:
         self._warn = warn
         self._attempts = AttemptTracker()
 
+    def prime(self, wire: WireRecord) -> None:
+        """Note the attempt of the record at the resume cursor, which was already delivered.
+
+        A read that resumes would otherwise take the next attempt of that
+        producer as its first, and report no ``SUPERSEDED``. Only the cursor
+        record's producer is primed. Another producer's earlier attempts are
+        not known to a resumed read.
+        """
+        self._attempts.note(
+            wire.producer_id, wire.attempt, topic=wire.topic, previous=self._previous
+        )
+
     def decode(self, cursor: Cursor, wire: WireRecord) -> list[StreamRecord[Any]]:
         """The records to yield for one stored record, in order."""
         try:
