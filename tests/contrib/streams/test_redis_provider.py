@@ -7,6 +7,7 @@ test fixtures. Each test gets its own key prefix.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 import uuid
@@ -741,6 +742,58 @@ async def test_a_reader_promotes_output_a_stopped_worker_committed(
     assert [r.value for r in again] == [{"n": 1}, {"n": 2}]
     await stopped.close()
     await reader.close()
+
+
+@workflow.defn
+class PublishInThreeTasks:
+    @workflow.run
+    async def run(self) -> None:
+        for n in range(1, 4):
+            workflow_writer(EVENTS).publish({"n": n})
+            await workflow.sleep(0.01)
+
+
+async def test_a_reader_repairs_pending_stages_in_commit_order(
+    client: Client, raw: Any
+):
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-order-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishInThreeTasks) as worker:
+        await stopped_client.execute_workflow(
+            PublishInThreeTasks.run, id=workflow_id, task_queue=worker.task_queue
+        )
+    reader = RedisStreams(url, key_prefix=prefix)
+    stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    keys = await stream._keys()
+    pending = await raw.hgetall(keys.pending())
+    assert len(pending) == 3
+    # A hash keeps no order a reader can rely on; put the stages in reverse.
+    floors = {token: int(d.split(b"\x1f")[1]) for token, d in pending.items()}
+    await raw.delete(keys.pending())
+    for token in sorted(pending, key=lambda t: floors[t], reverse=True):
+        await raw.hset(keys.pending(), token, pending[token])
+
+    records = await read_until_end(stream.read(topic=EVENTS))
+    assert [r.value for r in records] == [{"n": 1}, {"n": 2}, {"n": 3}]
+    await stopped.close()
+    await reader.close()
+
+
+async def test_a_promote_that_finds_its_stage_gone_warns(
+    provider: RedisStreams, raw: Any, caplog: pytest.LogCaptureFixture
+):
+    batch = StagedBatch("ns", "wf", "first", "run", [WireRecord(topic="events")])
+    token = await provider._stage(batch)
+    keys = provider._chain_keys("ns", "wf", "first")
+    # Retention dropped the stage while its run still held the commit.
+    await raw.delete(keys.stage(token))
+    with caplog.at_level(logging.WARNING):
+        await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    assert any(token in r.getMessage() for r in caplog.records)
+    assert await raw.hgetall(keys.pending()) == {}
 
 
 class YieldingCodec(PayloadCodec):

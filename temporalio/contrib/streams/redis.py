@@ -250,12 +250,17 @@ redis.call('PEXPIRE', KEYS[2], ARGV[1])
 
 # KEYS: stage, pending stages, then a log and its meta per topic. ARGV:
 # retention ms, grace ms, stage token, then the topics in KEYS order.
+# Returns the records added, or -1 when the stage was still pending but its
+# list was gone, which means retention dropped committed output.
 _PROMOTE_LUA = (
     _KEEP_LUA
     + """
-redis.call('HDEL', KEYS[2], ARGV[3])
+local was_pending = redis.call('HDEL', KEYS[2], ARGV[3])
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
 if #items == 0 then
+  if was_pending == 1 then
+    return -1
+  end
   return 0
 end
 local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
@@ -659,17 +664,26 @@ class RedisStreamHandle:
         streams = self._streams
         try:
             pending = await _awaited(streams._redis.hgetall(keys.pending()))
+            stages: list[tuple[str, str, int, list[str]]] = []
             for raw_token, raw_description in pending.items():
-                token = _text(raw_token)
-                run_id, floor, *topics = _text(raw_description).split("\x1f")
+                run_id, floor_text, *topics = _text(raw_description).split("\x1f")
+                stages.append((_text(raw_token), run_id, int(floor_text), topics))
+            started = {
+                run_id: await self._run_started(run_id) for _, run_id, _, _ in stages
+            }
+            # Promotions append, so they go in commit order: by run, then by
+            # floor within the run. A stage History has not decided holds back
+            # the ones after it.
+            stages.sort(key=lambda s: (started[s[1]], s[1], s[2]))
+            for token, run_id, floor, topics in stages:
                 events = await events_after(
                     self._client,
                     self._client.namespace,
                     self._ref.workflow_id,
                     run_id,
-                    int(floor),
+                    floor,
                 )
-                decision = decide_token(events, token, int(floor))
+                decision = decide_token(events, token, floor)
                 stage = StageRef(
                     self._client.namespace,
                     self._ref.workflow_id,
@@ -681,12 +695,20 @@ class RedisStreamHandle:
                     await streams._promote(stage)
                 elif decision is _Decision.ABORT:
                     await streams._abort(stage)
+                else:
+                    return
         except Exception:
             logger.warning(
                 "Could not settle the pending stages of Workflow %s",
                 self._ref.workflow_id,
                 exc_info=True,
             )
+
+    async def _run_started(self, run_id: str) -> float:
+        description = await self._client.get_workflow_handle(
+            self._ref.workflow_id, run_id=run_id
+        ).describe()
+        return description.start_time.timestamp()
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
         description = await self._client.get_workflow_handle(
@@ -897,9 +919,17 @@ class RedisStreams(StreamProviderPlugin):
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
         topic_keys = [key for t in stage.topics for key in (keys.log(t), keys.meta(t))]
         async with _mapped(write=True):
-            await self._promote_script(
+            added = await self._promote_script(
                 keys=[keys.stage(stage.token), keys.pending(), *topic_keys],
                 args=[*self._retention_args(), stage.token, *stage.topics],
+            )
+        if added == -1:
+            logger.warning(
+                "Stream output that Workflow %s committed in stage %s was dropped "
+                "by retention before it was promoted (first run %s)",
+                stage.workflow_id,
+                stage.token,
+                stage.first_run_id,
             )
 
     async def _close_chain(
