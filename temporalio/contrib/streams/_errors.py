@@ -5,10 +5,13 @@ meaning the way it catches other :class:`temporalio.exceptions.TemporalError`
 subclasses. Argument mistakes stay ``ValueError``.
 
 Two distinctions matter to a caller that retries. A write the store refused
-(:class:`StreamProducerError`, :class:`StreamClosedError`) did not happen,
-and repeating it gets the same answer. A write whose outcome is unknown
-(:class:`StreamOutcomeUnknownError`) may have landed, and repeating it on
-the same producer is safe because the store deduplicates the retry. A cursor
+(:class:`StreamRefusedError`, which includes :class:`StreamProducerError`
+and :class:`StreamClosedError`) did not happen, and repeating it gets the
+same answer until something changes. A failure of the store or of the way
+to it (:class:`StreamStorageError`) may hide a write that landed: for an
+append that is :class:`StreamOutcomeUnknownError`, and repeating it on the
+same producer is safe because the store deduplicates the retry. Errors from
+the store's client library never escape: they arrive as one of these. A cursor
 that names a record the store no longer keeps
 (:class:`StreamExpiredError`) is told apart from one that is not valid for
 the stream at all (:class:`StreamCursorError`).
@@ -26,6 +29,8 @@ __all__ = [
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamProducerError",
+    "StreamRefusedError",
+    "StreamStorageError",
     "StreamUnsupportedError",
 ]
 
@@ -57,7 +62,23 @@ class StreamExpiredError(StreamCursorError):
     """
 
 
-class StreamClosedError(StreamError):
+class StreamRefusedError(StreamError):
+    """The store refused the write, so nothing was written.
+
+    For example the store is out of memory, or a key holds a value of the
+    wrong type. The subclasses name the refusals the contract defines.
+    """
+
+
+class StreamStorageError(StreamError):
+    """The store failed, or could not be reached.
+
+    For a read, retry later. For an append, the outcome is unknown and
+    :class:`StreamOutcomeUnknownError` is raised.
+    """
+
+
+class StreamClosedError(StreamRefusedError):
     """The stream is closed and refuses appends.
 
     The store refused the write, so nothing was written. Records the stream
@@ -65,7 +86,7 @@ class StreamClosedError(StreamError):
     """
 
 
-class StreamProducerError(StreamError):
+class StreamProducerError(StreamRefusedError):
     """The store refused the append because of the producer's identity.
 
     The sequence was already used with different content, or it is below the
@@ -74,7 +95,7 @@ class StreamProducerError(StreamError):
     """
 
 
-class StreamOutcomeUnknownError(StreamError):
+class StreamOutcomeUnknownError(StreamStorageError):
     """The append may or may not have landed.
 
     The connection failed or timed out after the request left. Retrying the
