@@ -10,8 +10,10 @@ from temporalio.contrib.streams import (
     StreamRef,
     StreamTopic,
     StreamUnsupportedError,
-    resolve_topic,
     topic,
+)
+from temporalio.contrib.streams._topic import (
+    resolve_topic,
 )
 from temporalio.converter import DataConverter
 

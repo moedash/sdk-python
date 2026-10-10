@@ -92,8 +92,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, Generic, TypeVar
 from urllib.parse import quote
@@ -119,10 +121,13 @@ from temporalio.contrib.streams._cursor import (
 from temporalio.contrib.streams._errors import (
     StreamClosedError,
     StreamCursorError,
+    StreamError,
     StreamExpiredError,
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRefusedError,
+    StreamStorageError,
     StreamUnsupportedError,
 )
 from temporalio.contrib.streams._output import (
@@ -233,9 +238,13 @@ return {first, last}
 # KEYS: stage, pending stages. ARGV: retention ms, stage token, stage
 # description, then topic and record pairs. The pending hash names every
 # stage not yet promoted or aborted, so a reader can find one left by a
-# Worker that stopped, without a SCAN.
+# Worker that stopped, without a SCAN. Lua's unpack fails past a few
+# thousand values, so the pairs go in chunks.
 _STAGE_LUA = """
-redis.call('RPUSH', KEYS[1], unpack(ARGV, 4))
+local chunk = 1000
+for i = 4, #ARGV, chunk do
+  redis.call('RPUSH', KEYS[1], unpack(ARGV, i, math.min(i + chunk - 1, #ARGV)))
+end
 redis.call('PEXPIRE', KEYS[1], ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
 redis.call('PEXPIRE', KEYS[2], ARGV[1])
@@ -243,12 +252,17 @@ redis.call('PEXPIRE', KEYS[2], ARGV[1])
 
 # KEYS: stage, pending stages, then a log and its meta per topic. ARGV:
 # retention ms, grace ms, stage token, then the topics in KEYS order.
+# Returns the records added, or -1 when the stage was still pending but its
+# list was gone, which means retention dropped committed output.
 _PROMOTE_LUA = (
     _KEEP_LUA
     + """
-redis.call('HDEL', KEYS[2], ARGV[3])
+local was_pending = redis.call('HDEL', KEYS[2], ARGV[3])
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
 if #items == 0 then
+  if was_pending == 1 then
+    return -1
+  end
   return 0
 end
 local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
@@ -336,19 +350,39 @@ def _session_field(producer_id: str, attempt: int) -> str:
     return f"hw:{len(producer_id)}:{producer_id}:{attempt}"
 
 
-def _append_error(error: redis.exceptions.RedisError) -> Exception:
+def _stream_error(error: redis.exceptions.RedisError, *, write: bool) -> StreamError:
+    """The stream error a Redis client error stands for.
+
+    A connection or timeout failure during a write leaves its outcome
+    unknown; a reply the server sent means it refused the write.
+    """
     if isinstance(
         error, (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
     ):
-        return StreamOutcomeUnknownError(
-            f"the append may or may not have been written: {error}"
-        )
+        if write:
+            return StreamOutcomeUnknownError(
+                f"the write may or may not have been applied: {error}"
+            )
+        return StreamStorageError(f"Redis could not be reached: {error}")
     message = str(error)
     if message.startswith(("STREAMS_DIVERGENT", "STREAMS_STALE")):
         return StreamProducerError(message.split(" ", 1)[1])
     if message.startswith("STREAMS_CLOSED"):
         return StreamClosedError(message.split(" ", 1)[1])
-    return error
+    if isinstance(error, redis.exceptions.ResponseError):
+        if write:
+            return StreamRefusedError(f"Redis refused the write: {message}")
+        return StreamStorageError(f"Redis refused the read: {message}")
+    return StreamStorageError(f"Redis failed: {message}")
+
+
+@asynccontextmanager
+async def _mapped(*, write: bool) -> AsyncIterator[None]:
+    # Applications catch stream errors; Redis client errors must not escape.
+    try:
+        yield
+    except redis.exceptions.RedisError as error:
+        raise _stream_error(error, write=write) from error
 
 
 class RedisProducer(Generic[T]):
@@ -368,7 +402,10 @@ class RedisProducer(Generic[T]):
         self._attempt = attempt
         self._sequence = 1
         self._last = BEGINNING
-        self._checked_owner = False
+        self._owner_checked_at: float | None = None
+        # A batch reads the sequence, then awaits the codec and Redis, then
+        # moves it on; calls one at a time keep each batch's sequences.
+        self._lock = asyncio.Lock()
 
     @property
     def producer_id(self) -> str:
@@ -382,38 +419,40 @@ class RedisProducer(Generic[T]):
 
     async def append(self, *values: T) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamProducer.append`."""
-        if not values:
-            return self._last
-        converter = self._handle._converter.payload_converter
-        return await self._write(
-            [
-                to_wire(
-                    converter,
-                    topic=self._topic,
-                    kind=RecordKind.DATA,
-                    value=value,
-                    producer_id=self._producer_id,
-                    attempt=self._attempt,
-                    sequence=self._sequence + index,
-                )
-                for index, value in enumerate(values)
-            ]
-        )
+        async with self._lock:
+            if not values:
+                return self._last
+            converter = self._handle._converter.payload_converter
+            return await self._write(
+                [
+                    to_wire(
+                        converter,
+                        topic=self._topic,
+                        kind=RecordKind.DATA,
+                        value=value,
+                        producer_id=self._producer_id,
+                        attempt=self._attempt,
+                        sequence=self._sequence + index,
+                    )
+                    for index, value in enumerate(values)
+                ]
+            )
 
     async def finish(self) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamProducer.finish`."""
-        return await self._write(
-            [
-                to_wire(
-                    self._handle._converter.payload_converter,
-                    topic=self._topic,
-                    kind=RecordKind.FINISH,
-                    producer_id=self._producer_id,
-                    attempt=self._attempt,
-                    sequence=self._sequence,
-                )
-            ]
-        )
+        async with self._lock:
+            return await self._write(
+                [
+                    to_wire(
+                        self._handle._converter.payload_converter,
+                        topic=self._topic,
+                        kind=RecordKind.FINISH,
+                        producer_id=self._producer_id,
+                        attempt=self._attempt,
+                        sequence=self._sequence,
+                    )
+                ]
+            )
 
     async def _write(self, wires: list[WireRecord]) -> Cursor:
         digest = content_fingerprint(wires).hex()
@@ -421,11 +460,14 @@ class RedisProducer(Generic[T]):
             await encode_body(self._handle._converter, wire)
         keys = await self._handle._keys()
         streams = self._handle._streams
-        if not self._checked_owner:
-            # A producer that starts after the chain ended would otherwise
-            # write until something else marks the chain closed.
+        checked = self._owner_checked_at
+        now = time.monotonic()
+        # A producer that starts after the chain ended would otherwise write
+        # until something else marks the chain closed. The mark expires, so a
+        # check older than the retention is made again.
+        if checked is None or now - checked > streams._retention_ms / 1000:
             await self._handle._refuse_if_ended(keys)
-            self._checked_owner = True
+            self._owner_checked_at = now
         try:
             _, last = await streams._append(
                 keys=[keys.log(self._topic), keys.meta(self._topic), keys.chain()],
@@ -438,7 +480,7 @@ class RedisProducer(Generic[T]):
                 ],
             )
         except redis.exceptions.RedisError as error:
-            raise _append_error(error) from error
+            raise _stream_error(error, write=True) from error
         self._sequence += len(wires)
         self._last = self._handle._cursor(self._topic, _text(last))
         return self._last
@@ -505,7 +547,8 @@ class RedisStreamHandle:
         if position is not None:
             await self._refuse_lost(keys, topic, position)
         if from_end:
-            newest = await redis_client.xrevrange(log, count=1)
+            async with _mapped(write=False):
+                newest = await redis_client.xrevrange(log, count=1)
             last_id = _text(newest[0][0]) if newest else "0-0"
         else:
             last_id = position or "0-0"
@@ -532,14 +575,15 @@ class RedisStreamHandle:
         while True:
             # The watermark is read after XREAD returns, on the same
             # connection, so a trim that raced the read is seen here.
-            async with redis_client.pipeline(transaction=False) as pipe:
-                pipe.xread(
-                    {log: last_id},
-                    count=self._streams._read_count,
-                    block=None if ended else block_ms,
-                )
-                pipe.hget(keys.meta(topic), "trimmed")
-                batch, trimmed = await pipe.execute()
+            async with _mapped(write=False):
+                async with redis_client.pipeline(transaction=False) as pipe:
+                    pipe.xread(
+                        {log: last_id},
+                        count=self._streams._read_count,
+                        block=None if ended else block_ms,
+                    )
+                    pipe.hget(keys.meta(topic), "trimmed")
+                    batch, trimmed = await pipe.execute()
             entries = batch[0][1] if batch else []
             if trimmed is not None:
                 watermark = _entry(_text(trimmed))
@@ -586,10 +630,11 @@ class RedisStreamHandle:
             StreamExpiredError: Records after ``position`` were dropped.
             StreamNotFoundError: Neither the log nor its tombstone is left.
         """
-        async with self._streams._redis.pipeline(transaction=False) as pipe:
-            pipe.exists(keys.log(topic))
-            pipe.hgetall(keys.meta(topic))
-            exists, meta = await pipe.execute()
+        async with _mapped(write=False):
+            async with self._streams._redis.pipeline(transaction=False) as pipe:
+                pipe.exists(keys.log(topic))
+                pipe.hgetall(keys.meta(topic))
+                exists, meta = await pipe.execute()
         cursor = _entry(position)
         if exists:
             trimmed = meta.get(b"trimmed")
@@ -621,17 +666,26 @@ class RedisStreamHandle:
         streams = self._streams
         try:
             pending = await _awaited(streams._redis.hgetall(keys.pending()))
+            stages: list[tuple[str, str, int, list[str]]] = []
             for raw_token, raw_description in pending.items():
-                token = _text(raw_token)
-                run_id, floor, *topics = _text(raw_description).split("\x1f")
+                run_id, floor_text, *topics = _text(raw_description).split("\x1f")
+                stages.append((_text(raw_token), run_id, int(floor_text), topics))
+            started = {
+                run_id: await self._run_started(run_id) for _, run_id, _, _ in stages
+            }
+            # Promotions append, so they go in commit order: by run, then by
+            # floor within the run. A stage History has not decided holds back
+            # the ones after it.
+            stages.sort(key=lambda s: (started[s[1]], s[1], s[2]))
+            for token, run_id, floor, topics in stages:
                 events = await events_after(
                     self._client,
                     self._client.namespace,
                     self._ref.workflow_id,
                     run_id,
-                    int(floor),
+                    floor,
                 )
-                decision = decide_token(events, token, int(floor))
+                decision = decide_token(events, token, floor)
                 stage = StageRef(
                     self._client.namespace,
                     self._ref.workflow_id,
@@ -643,12 +697,20 @@ class RedisStreamHandle:
                     await streams._promote(stage)
                 elif decision is _Decision.ABORT:
                     await streams._abort(stage)
+                else:
+                    return
         except Exception:
             logger.warning(
                 "Could not settle the pending stages of Workflow %s",
                 self._ref.workflow_id,
                 exc_info=True,
             )
+
+    async def _run_started(self, run_id: str) -> float:
+        description = await self._client.get_workflow_handle(
+            self._ref.workflow_id, run_id=run_id
+        ).describe()
+        return description.start_time.timestamp()
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
         description = await self._client.get_workflow_handle(
@@ -666,7 +728,8 @@ class RedisStreamHandle:
         """See :meth:`temporalio.contrib.streams.StreamHandle.latest`."""
         name, _ = self._resolve(topic, None)
         keys = await self._keys()
-        newest = await self._streams._redis.xrevrange(keys.log(name), count=1)
+        async with _mapped(write=False):
+            newest = await self._streams._redis.xrevrange(keys.log(name), count=1)
         return self._cursor(name, _text(newest[0][0])) if newest else BEGINNING
 
     def producer(
@@ -747,7 +810,7 @@ class RedisStreams(StreamProviderPlugin):
 
     def __init__(
         self,
-        redis_client: str | redis.asyncio.Redis,
+        redis_client: str | redis.asyncio.Redis | redis.asyncio.RedisCluster,
         *,
         key_prefix: str = "temporal-streams",
         retention: timedelta = timedelta(days=7),
@@ -756,9 +819,11 @@ class RedisStreams(StreamProviderPlugin):
         """Create the provider.
 
         Args:
-            redis_client: A Redis URL, or a ``redis.asyncio.Redis`` the
-                application owns. A client made from a URL is closed by
-                :meth:`close`.
+            redis_client: A Redis URL, or a ``redis.asyncio.Redis`` or
+                ``redis.asyncio.RedisCluster`` the application owns. A client
+                made from a URL is closed by :meth:`close`. Every key of one
+                Workflow's streams shares a hash tag, so a cluster serves
+                them from one slot.
             key_prefix: Prepended to every key, so streams can share a Redis
                 with other data and an ACL can scope them.
             retention: How long a stream keeps a record, and how long after
@@ -785,17 +850,19 @@ class RedisStreams(StreamProviderPlugin):
         self._owner_check_min = _OWNER_CHECK_MIN.total_seconds()
         self._owner_check_max = _OWNER_CHECK_MAX.total_seconds()
         if isinstance(redis_client, str):
-            self._redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url(
-                redis_client
+            self._redis: redis.asyncio.Redis | redis.asyncio.RedisCluster = (
+                redis.asyncio.Redis.from_url(redis_client)
             )
             self._owns_redis = True
         else:
             self._redis = redis_client
             self._owns_redis = False
         self._prefix = key_prefix
-        self._append = self._redis.register_script(_APPEND_LUA)
-        self._promote_script = self._redis.register_script(_PROMOTE_LUA)
-        self._stage_script = self._redis.register_script(_STAGE_LUA)
+        # redis-py types register_script for Redis only; RedisCluster has it.
+        scripts: Any = self._redis
+        self._append = scripts.register_script(_APPEND_LUA)
+        self._promote_script = scripts.register_script(_PROMOTE_LUA)
+        self._stage_script = scripts.register_script(_STAGE_LUA)
 
     def get_stream_handle(self, client: Client, ref: StreamRef) -> RedisStreamHandle:
         """A handle on the stream ``ref`` names."""
@@ -822,7 +889,8 @@ class RedisStreams(StreamProviderPlugin):
         """
         if self._checked_server:
             return
-        info = await _awaited(self._redis.info("server"))
+        async with _mapped(write=False):
+            info = await _awaited(self._redis.info("server"))
         version = str(info.get("redis_version", "0"))
         major = int(version.split(".", 1)[0] or 0)
         if major < 7:
@@ -862,19 +930,29 @@ class RedisStreams(StreamProviderPlugin):
         description = "\x1f".join(
             [batch.run_id, str(batch.history_floor_event_id), *_topics(batch.records)]
         )
-        await self._stage_script(
-            keys=[keys.stage(token), keys.pending()],
-            args=[self._retention_ms, token, description, *items],
-        )
+        async with _mapped(write=True):
+            await self._stage_script(
+                keys=[keys.stage(token), keys.pending()],
+                args=[self._retention_ms, token, description, *items],
+            )
         return token
 
     async def _promote(self, stage: StageRef) -> None:
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
         topic_keys = [key for t in stage.topics for key in (keys.log(t), keys.meta(t))]
-        await self._promote_script(
-            keys=[keys.stage(stage.token), keys.pending(), *topic_keys],
-            args=[*self._retention_args(), stage.token, *stage.topics],
-        )
+        async with _mapped(write=True):
+            added = await self._promote_script(
+                keys=[keys.stage(stage.token), keys.pending(), *topic_keys],
+                args=[*self._retention_args(), stage.token, *stage.topics],
+            )
+        if added == -1:
+            logger.warning(
+                "Stream output that Workflow %s committed in stage %s was dropped "
+                "by retention before it was promoted (first run %s)",
+                stage.workflow_id,
+                stage.token,
+                stage.first_run_id,
+            )
 
     async def _close_chain(
         self, namespace: str, workflow_id: str, first_run_id: str
@@ -882,14 +960,16 @@ class RedisStreams(StreamProviderPlugin):
         await self._mark_closed(self._chain_keys(namespace, workflow_id, first_run_id))
 
     async def _mark_closed(self, keys: _ChainKeys) -> None:
-        async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.hset(keys.chain(), "closed", "1")
-            pipe.pexpire(keys.chain(), self._retention_ms + self._grace_ms)
-            await pipe.execute()
+        async with _mapped(write=True):
+            async with self._redis.pipeline(transaction=True) as pipe:
+                pipe.hset(keys.chain(), "closed", "1")
+                pipe.pexpire(keys.chain(), self._retention_ms + self._grace_ms)
+                await pipe.execute()
 
     async def _abort(self, stage: StageRef) -> None:
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
-        async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.delete(keys.stage(stage.token))
-            pipe.hdel(keys.pending(), stage.token)
-            await pipe.execute()
+        async with _mapped(write=True):
+            async with self._redis.pipeline(transaction=True) as pipe:
+                pipe.delete(keys.stage(stage.token))
+                pipe.hdel(keys.pending(), stage.token)
+                await pipe.execute()
