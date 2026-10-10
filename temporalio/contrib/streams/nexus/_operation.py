@@ -17,6 +17,7 @@ from typing import Any, Generic, TypeVar
 
 import nexusrpc
 import nexusrpc.handler
+from google.protobuf.timestamp_pb2 import Timestamp
 
 import temporalio.nexus
 from temporalio.api.common.v1 import Callback
@@ -148,7 +149,13 @@ class StreamOperationHandler(
         ref = await self._open_stream(ctx, input)
         client = temporalio.nexus.client()
         first_run_id = await chain_first_run_id(client, ref)
-        # Idempotent by request id, so a retried start attaches once.
+        token = _encode_token(ref, ctx.request_id, first_run_id)
+        start_time = Timestamp()
+        start_time.GetCurrentTime()
+        # Idempotent by request id, so a retried start attaches once. The
+        # notifier hands the token and start time back with progress and the
+        # completion, so a completion that beats this start's response, on a
+        # stream already closed for example, still names the operation.
         await client.workflow_service.attach_stream_callback(
             AttachStreamCallbackRequest(
                 namespace=client.namespace,
@@ -157,11 +164,11 @@ class StreamOperationHandler(
                 callback=Callback.Nexus(
                     url=ctx.callback_url, header=dict(ctx.callback_headers)
                 ),
+                operation_token=token,
+                start_time=start_time,
             )
         )
-        return nexusrpc.handler.StartOperationResultAsync(
-            token=_encode_token(ref, ctx.request_id, first_run_id)
-        )
+        return nexusrpc.handler.StartOperationResultAsync(token=token)
 
     async def cancel(
         self, ctx: nexusrpc.handler.CancelOperationContext, token: str
