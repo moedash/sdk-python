@@ -284,8 +284,11 @@ def decide_token(
     failed or timed out result for the task that started after the floor
     proves the completion was dropped. Anything else is not known yet, for
     example while a Local Activity holds the task open.
-    ``survived_eviction`` says the stage was made before its run left the
-    Worker's cache; only the Worker that made the stage knows this.
+    ``survived_eviction`` turns on the same-floor rule: a completion that
+    carries other commits at this stage's floor, and not this one, proves the
+    stage's attempt failed. The Worker sets it for a stage made before its
+    run left the cache, since its own attempt may still be committing. A
+    reader sets it always, since it never holds an attempt in flight.
     """
     if any(_marker_token(event) == token for event in events):
         return _Decision.PROMOTE

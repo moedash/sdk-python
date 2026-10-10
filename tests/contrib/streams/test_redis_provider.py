@@ -810,8 +810,10 @@ async def test_a_reader_repairs_past_a_stage_whose_run_is_gone(
 
     records = await read_until_end(stream.read(topic=EVENTS))
     assert [r.value for r in records] == [{"n": 1}, {"n": 2}]
-    assert await raw.hgetall(keys.pending()) == {}
-    assert await raw.exists(keys.stage(gone)) == 0
+    # Not found can mean a replica behind a failover, so the stage is left to
+    # its expiry rather than aborted, and it holds back nothing.
+    assert list(await raw.hgetall(keys.pending())) == [gone.encode()]
+    assert await raw.exists(keys.stage(gone)) == 1
     await stopped.close()
     await reader.close()
 
@@ -1437,3 +1439,77 @@ async def test_a_store_error_on_the_start_watermark_is_a_stream_error(
     monkeypatch.setattr(provider._redis, "hget", lost)
     with pytest.raises(StreamStorageError, match="connection reset"):
         await asyncio.wait_for(anext(stream.read(topic=EVENTS)), 10)
+
+
+async def test_a_reader_aborts_a_stage_a_later_attempt_superseded(
+    client: Client, raw: Any
+):
+    # A transient attempt's failure is not in History, but the attempt that
+    # completed carries every commit made at that floor.
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-transient-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishThenWait) as worker:
+        handle = await stopped_client.start_workflow(
+            PublishThenWait.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        reader = RedisStreams(url, key_prefix=prefix)
+        stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        keys = await stream._keys()
+        for _ in range(200):
+            if await raw.hlen(keys.pending()) == 1:
+                break
+            await asyncio.sleep(0.05)
+        ((_, description),) = (await raw.hgetall(keys.pending())).items()
+        run_id, floor = description.decode().split("\x1f")[:2]
+        orphan = await reader._stage(
+            StagedBatch(
+                client.namespace,
+                workflow_id,
+                keys.first_run_id,
+                run_id,
+                [WireRecord(topic="events")],
+                history_floor_event_id=int(floor),
+            )
+        )
+        records = stream.read(topic=EVENTS)
+        assert (await asyncio.wait_for(anext(records), 10)).value == {"n": 1}
+        await records.aclose()
+        assert await raw.hgetall(keys.pending()) == {}
+        assert await raw.exists(keys.stage(orphan)) == 0
+        await handle.signal(PublishThenWait.finish)
+        await handle.result()
+    await stopped.close()
+    await reader.close()
+
+
+async def test_a_reader_describes_each_pending_run_once(
+    client: Client, raw: Any, monkeypatch: pytest.MonkeyPatch
+):
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-describes-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishInThreeTasks) as worker:
+        await stopped_client.execute_workflow(
+            PublishInThreeTasks.run, id=workflow_id, task_queue=worker.task_queue
+        )
+    reader = RedisStreams(url, key_prefix=prefix)
+    stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    keys = await stream._keys()
+    assert await raw.hlen(keys.pending()) == 3
+    started: list[str] = []
+    run_started = stream._run_started
+
+    async def counted(run_id: str) -> Any:
+        started.append(run_id)
+        return await run_started(run_id)
+
+    monkeypatch.setattr(stream, "_run_started", counted)
+    await read_until_end(stream.read(topic=EVENTS))
+    assert len(started) == len(set(started))
+    await stopped.close()
+    await reader.close()

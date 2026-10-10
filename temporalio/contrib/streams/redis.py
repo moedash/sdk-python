@@ -736,11 +736,12 @@ class RedisStreamHandle:
                 run_id, floor_text, *topics = _text(raw_description).split("\x1f")
                 stages.append((_text(raw_token), run_id, int(floor_text), topics))
             started = {
-                run_id: await self._run_started(run_id) for _, run_id, _, _ in stages
+                run_id: await self._run_started(run_id)
+                for run_id in {run_id for _, run_id, _, _ in stages}
             }
             # Promotions append, so they go in commit order: by run, then by
             # floor within the run. A stage History has not decided holds back
-            # the ones after it. A run History no longer holds is oldest.
+            # the ones after it.
             stages.sort(
                 key=lambda s: (
                     started[s[1]] if started[s[1]] is not None else float("-inf"),
@@ -750,25 +751,30 @@ class RedisStreamHandle:
             )
             for token, run_id, floor, topics in stages:
                 if started[run_id] is None:
-                    # Namespace retention removed the run, so nothing can
-                    # prove the commit any more.
-                    logger.warning(
-                        "Aborting stream stage %s of Workflow %s: its run %s is no "
-                        "longer in History",
+                    # Retention may have removed the run, or a replica behind a
+                    # failover may not have it yet. Aborting could drop
+                    # committed output, so the stage waits for its expiry and
+                    # holds back nothing.
+                    logger.debug(
+                        "Leaving stream stage %s of Workflow %s: its run %s is not "
+                        "in History",
                         token,
                         self._ref.workflow_id,
                         run_id,
                     )
-                    decision = _Decision.ABORT
-                else:
-                    events = await events_after(
-                        self._client,
-                        self._client.namespace,
-                        self._ref.workflow_id,
-                        run_id,
-                        floor,
-                    )
-                    decision = decide_token(events, token, floor)
+                    continue
+                events = await events_after(
+                    self._client,
+                    self._client.namespace,
+                    self._ref.workflow_id,
+                    run_id,
+                    floor,
+                )
+                # Every commit made at one floor rides the completion of the
+                # attempt that made it, so a completion that carries other
+                # commits at this floor and not this one means this stage's
+                # attempt failed, even when History never recorded that.
+                decision = decide_token(events, token, floor, survived_eviction=True)
                 stage = StageRef(
                     self._client.namespace,
                     self._ref.workflow_id,
