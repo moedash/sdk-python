@@ -36,9 +36,12 @@ class StreamRef:
 
     ``kind`` says what owns the stream; only ``"workflow"`` exists in this
     release. A Workflow ref carries ``workflow_id`` and, when pinned to one
-    run, ``run_id``. Without ``run_id`` it follows the run chain, so a reader
-    keeps reading across Continue-as-New. ``topic`` is the topic a handle
-    opened from the ref addresses when a call names none.
+    run, ``run_id``. The stream belongs to the run chain either way, and a
+    read returns the chain's records. ``run_id`` changes two things: which
+    chain the handle looks up, and that a read ends when that run closes,
+    Continue-as-New included. Without it a reader keeps reading across
+    Continue-as-New. ``topic`` is the topic a handle opened from the ref
+    addresses when a call names none.
 
     The default data converter carries it as JSON, so it can be a Workflow
     argument or an Activity result.
