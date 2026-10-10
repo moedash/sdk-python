@@ -54,7 +54,7 @@ from temporalio.bridge.proto.workflow_activation import WorkflowActivation
 from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
 from temporalio.contrib.streams._body import content_fingerprint, encode_body
 from temporalio.contrib.streams._record import RecordKind
-from temporalio.contrib.streams._wire import WireRecord
+from temporalio.contrib.streams._wire import RUN_ID_KEY, WireRecord
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -119,6 +119,17 @@ class _Decision(Enum):
     UNKNOWN = "unknown"
 
 
+def _logical(record: WireRecord) -> WireRecord:
+    """``record`` without what a reset changes, which replay must not compare."""
+    if RUN_ID_KEY not in record.metadata:
+        return record
+    # A reset run replays the base run's markers, whose records name the base run.
+    logical = WireRecord()
+    logical.CopyFrom(record)
+    del logical.metadata[RUN_ID_KEY]
+    return logical
+
+
 def build_manifest(
     records: Sequence[WireRecord],
     *,
@@ -129,12 +140,14 @@ def build_manifest(
     """The manifest Core records for one publishing completion.
 
     Taken over the records as the converter produced them, so it does not
-    depend on the codec and replay recomputes the same manifest. Topics are
+    depend on the codec and replay recomputes the same manifest. The run id
+    in each record's metadata stays out, since a reset run replays markers
+    that the base run wrote. Topics are
     in order of first publish, and the completion is one segment.
     """
     by_topic: dict[str, list[WireRecord]] = {}
     for record in records:
-        by_topic.setdefault(record.topic, []).append(record)
+        by_topic.setdefault(record.topic, []).append(_logical(record))
     manifest = ExternalOutputStreamManifest(
         schema_version=_SCHEMA_VERSION,
         fingerprint_version=_FINGERPRINT_VERSION,

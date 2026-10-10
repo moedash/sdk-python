@@ -110,7 +110,8 @@ class StreamRecord(Generic[T]):
     """The run that published it, when the owning Workflow did; empty otherwise.
 
     A stream follows its Workflow's run chain, so this tells a successor run
-    or a reset branch apart.
+    or a reset branch apart. An Activity's record leaves it empty, and the
+    scheduling run is in its ``producer_id``, as ``<Activity id>@<run id>``.
     """
     value: T | None = None
     """The published value. Set on ``DATA`` only."""
