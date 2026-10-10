@@ -714,8 +714,25 @@ class LiveIdleOwner:
         self._done = True
 
 
+class SlowCodec(MarkingCodec):
+    """A codec that does real async work, as one calling a key service does."""
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.001)
+        return await super().encode(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.001)
+        return await super().decode(payloads)
+
+
+# Memory, memory behind a codec that awaits, and Redis: each one's fetch takes
+# real time, which a read that does not wait must still complete.
+BACKINGS = ["memory", "memory-async-codec", "redis"]
+
+
 def _notifying_provider(backing: str) -> Any:
-    if backing == "memory":
+    if backing.startswith("memory"):
         return MemoryStreams().notify_on_append()
     url = os.environ.get("STREAMS_REDIS_URL")
     if not url:
@@ -735,6 +752,12 @@ async def _read_what_is_appended(
     """Appends ``texts`` from outside the owner once the caller is attached,
     closes the stream, and answers with the labels the caller read."""
     provider = _notifying_provider(backing)
+    if backing == "memory-async-codec":
+        config = client.config()
+        config["data_converter"] = dataclasses.replace(
+            DataConverter.default, payload_codec=SlowCodec()
+        )
+        client = Client(**config)
     owner_id = f"idle-owner-{uuid.uuid4()}"
     ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
     await _skip_without_notifier(client, ref)
@@ -793,7 +816,7 @@ async def _read_what_is_appended(
     return labels
 
 
-@pytest.mark.parametrize("backing", ["memory", "redis"])
+@pytest.mark.parametrize("backing", BACKINGS)
 async def test_live_a_reader_gets_every_record_of_a_burst(
     client: Client, env: WorkflowEnvironment, backing: str
 ) -> None:
@@ -803,7 +826,7 @@ async def test_live_a_reader_gets_every_record_of_a_burst(
     assert labels == [str(n) for n in range(700)]
 
 
-@pytest.mark.parametrize("backing", ["memory", "redis"])
+@pytest.mark.parametrize("backing", BACKINGS)
 async def test_live_a_reader_reads_on_past_answers_cut_by_the_byte_budget(
     client: Client, env: WorkflowEnvironment, backing: str
 ) -> None:
