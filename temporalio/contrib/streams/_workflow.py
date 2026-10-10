@@ -104,8 +104,9 @@ class WorkflowStreamWriter(Generic[T]):
     def finish(self) -> None:
         """Write ``FINISH`` for this Workflow on this topic. Idempotent.
 
-        Says this Workflow publishes nothing more on the topic. It does not
-        say the Workflow succeeded, and it does not end anyone's read.
+        Says this run publishes nothing more on the topic. A run that
+        follows by Continue-as-New can publish on it again. It does not say
+        the Workflow succeeded, and it does not end anyone's read.
 
         Raises:
             temporalio.workflow.ReadOnlyContextError: Called from a query or
