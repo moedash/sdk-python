@@ -9,8 +9,10 @@ from temporalio.contrib.streams import (
     DEFAULT_TOPIC,
     StreamRef,
     StreamTopic,
-    resolve_topic,
     topic,
+)
+from temporalio.contrib.streams._topic import (
+    resolve_topic,
 )
 from temporalio.converter import DataConverter
 

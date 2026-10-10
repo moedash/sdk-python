@@ -11,10 +11,12 @@ from temporalio.api.common.v1 import Payload
 from temporalio.common import RawValue
 from temporalio.contrib.streams import (
     BEGINNING,
-    CONTENT_HASH_KEY,
     Cursor,
     RecordKind,
     Supersession,
+)
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
     content_fingerprint,
     content_hash,
     decode_body,
