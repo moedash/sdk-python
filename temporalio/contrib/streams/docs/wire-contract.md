@@ -104,6 +104,8 @@ Trim and refresh:
    1000 values, since Lua's `unpack` is bounded), sets
    `PEXPIRE stage <retention>`, and sets
    `HSET stages <token> <run id>\x1f<history floor>\x1f<topic>\x1f...`.
+   It sets `PEXPIRE stages <retention>` only when `PTTL stages` is lower, so
+   the hash outlives every stage it lists.
 2. The Workflow Task's commit is recorded by Core in a
    `core_external_stream` marker whose output manifest carries the stage
    token.
