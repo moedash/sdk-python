@@ -477,11 +477,14 @@ class OutputCoordinator:
         if self._client is None:
             return
         try:
+            # The chain's latest run decides: a retried or cron run ends with
+            # a successor in the same chain, which keeps the streams open.
             description = await self._client.get_workflow_handle(
-                run.workflow_id, run_id=run.run_id
+                run.workflow_id
             ).describe()
-            if description.status not in CHAIN_ENDED:
-                # The completion was not accepted; the run goes on.
+            latest = description.raw_description.workflow_execution_info
+            same_chain = latest.first_run_id == run.first_run_id
+            if same_chain and description.status not in CHAIN_ENDED:
                 return
             run.closing = False
             await self.provider._close_chain(

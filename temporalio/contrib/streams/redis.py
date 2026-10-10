@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
@@ -299,7 +300,7 @@ class RedisProducer(Generic[T]):
         self._attempt = attempt
         self._sequence = 1
         self._last = BEGINNING
-        self._checked_owner = False
+        self._owner_checked_at: float | None = None
         # A batch reads the sequence, then awaits the codec and Redis, then
         # moves it on; calls one at a time keep each batch's sequences.
         self._lock = asyncio.Lock()
@@ -357,11 +358,14 @@ class RedisProducer(Generic[T]):
             await encode_body(self._handle._converter, wire)
         keys = await self._handle._keys()
         streams = self._handle._streams
-        if not self._checked_owner:
-            # A producer that starts after the chain ended would otherwise
-            # write until something else marks the chain closed.
+        checked = self._owner_checked_at
+        now = time.monotonic()
+        # A producer that starts after the chain ended would otherwise write
+        # until something else marks the chain closed. The mark expires, so a
+        # check older than the retention is made again.
+        if checked is None or now - checked > streams._retention_ms / 1000:
             await self._handle._refuse_if_ended(keys)
-            self._checked_owner = True
+            self._owner_checked_at = now
         try:
             _, last = await streams._append(
                 keys=[keys.log(self._topic), keys.meta(self._topic), keys.chain()],
@@ -584,10 +588,11 @@ class RedisStreams(StreamProviderPlugin):
         await self._mark_closed(self._chain_keys(namespace, workflow_id, first_run_id))
 
     async def _mark_closed(self, keys: _ChainKeys) -> None:
-        async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.hset(keys.chain(), "closed", "1")
-            pipe.pexpire(keys.chain(), self._retention_ms + self._grace_ms)
-            await pipe.execute()
+        async with _mapped(write=True):
+            async with self._redis.pipeline(transaction=True) as pipe:
+                pipe.hset(keys.chain(), "closed", "1")
+                pipe.pexpire(keys.chain(), self._retention_ms + self._grace_ms)
+                await pipe.execute()
 
     async def _abort(self, stage: StageRef) -> None:
         keys = self._chain_keys(stage.namespace, stage.workflow_id, stage.first_run_id)
