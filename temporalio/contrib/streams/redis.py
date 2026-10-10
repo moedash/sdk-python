@@ -104,6 +104,7 @@ from temporalio.service import RPCError, RPCStatusCode
 __all__ = ["RedisProducer", "RedisStreamHandle", "RedisStreams"]
 
 _PROVIDER = "redis"
+_OWNER_RECHECK_S = 60.0
 _TOMBSTONE_GRACE = timedelta(days=30)
 _RECORD_FIELD = "r"
 
@@ -400,9 +401,11 @@ class RedisProducer(Generic[T]):
         checked = self._owner_checked_at
         now = time.monotonic()
         # A producer that starts after the chain ended would otherwise write
-        # until something else marks the chain closed. The mark expires, so a
-        # check older than the retention is made again.
-        if checked is None or now - checked > streams._retention_ms / 1000:
+        # until something else marks the chain closed. Nothing marks the chain
+        # of a Workflow that never published itself, and the mark expires, so
+        # the check is made again at least once a minute.
+        recheck_s = min(streams._retention_ms / 1000, _OWNER_RECHECK_S)
+        if checked is None or now - checked > recheck_s:
             await self._handle._refuse_if_ended(keys)
             self._owner_checked_at = now
         try:
@@ -502,11 +505,24 @@ class RedisStreamHandle:
         A Workflow id reused by a new chain also means this chain has ended.
 
         Raises:
-            StreamClosedError: The chain has ended.
+            StreamClosedError: The chain has ended, or History no longer holds
+                the Workflow the keys were resolved from.
+            StreamStorageError: Temporal could not describe the Workflow.
         """
-        description = await self._client.get_workflow_handle(
-            self._ref.workflow_id
-        ).describe()
+        try:
+            description = await self._client.get_workflow_handle(
+                self._ref.workflow_id
+            ).describe()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise _describe_error(error) from error
+            # The keys came from this Workflow, so it existed and History has
+            # since dropped it.
+            await self._streams._mark_closed(keys)
+            raise StreamClosedError(
+                f"the Workflow {self._ref.workflow_id!r} that owns this stream is "
+                "gone from History"
+            ) from error
         latest = description.raw_description.workflow_execution_info
         if (
             description.status in CHAIN_ENDED

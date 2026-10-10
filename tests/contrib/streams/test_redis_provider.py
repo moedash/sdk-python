@@ -20,7 +20,9 @@ import redis.asyncio
 import redis.exceptions
 
 from temporalio import workflow
-from temporalio.api.common.v1 import Payload
+from temporalio.api.common.v1 import Payload, WorkflowExecution
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
+from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHandle
 from temporalio.common import RetryPolicy
 from temporalio.contrib.streams import (
@@ -827,3 +829,129 @@ async def test_a_stage_lives_for_the_retention_and_the_grace(
     token = await provider._stage(batch)
     keys = provider._chain_keys("ns", "wf", "first")
     assert await raw.pttl(keys.stage(token)) > provider._retention_ms
+
+
+async def test_a_long_lived_producer_rechecks_its_owner_within_a_minute(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    # Nothing marks the chain of a Workflow that never published itself, so
+    # only the producer's own recheck ends its writes.
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 1})
+    await owner.terminate()
+    producer._owner_checked_at = time.monotonic() - 61
+    with pytest.raises(StreamClosedError):
+        await producer.append({"n": 2})
+
+
+async def test_an_owner_history_no_longer_holds_closes_the_stream(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def gone(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", gone)
+    with pytest.raises(StreamClosedError):
+        await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(1)
+
+
+async def test_an_owner_check_that_fails_is_a_stream_error(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", unavailable)
+    with pytest.raises(StreamStorageError, match="unavailable"):
+        await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append(1)
+
+
+@workflow.defn
+class PublishAroundSignals:
+    def __init__(self) -> None:
+        self.next = False
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        workflow_writer(EVENTS).publish({"n": 1})
+        await workflow.wait_condition(lambda: self.next)
+        workflow_writer(EVENTS).publish({"n": 2})
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def go_on(self) -> None:
+        self.next = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+
+async def test_a_reset_run_replays_its_output_and_keeps_the_chain_open(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-reset-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishAroundSignals) as worker:
+        handle = await streams_client.start_workflow(
+            PublishAroundSignals.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        # Two publishing tasks, so the reset run replays a marker of the base run.
+        await logged_within(raw, stream, 1)
+        await handle.signal(PublishAroundSignals.go_on)
+        await logged_within(raw, stream, 2)
+        completed = [
+            event.event_id
+            async for event in handle.fetch_history_events()
+            if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
+        ]
+        response = await client.workflow_service.reset_workflow_execution(
+            ResetWorkflowExecutionRequest(
+                namespace=client.namespace,
+                workflow_execution=WorkflowExecution(workflow_id=workflow_id),
+                reason="test a reset of a publishing Workflow",
+                workflow_task_finish_event_id=completed[-1],
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        reset = streams_client.get_workflow_handle(workflow_id, run_id=response.run_id)
+        # The reset run keeps the chain's first run, so the chain stays open.
+        keys = await stream._keys()
+        assert not await raw.hget(keys.chain(), "closed")
+        await stream.producer(topic=OTHER, producer_id="p", attempt=1).append(1)
+        await reset.signal(PublishAroundSignals.finish)
+        await asyncio.wait_for(reset.result(), 30)
+    failed = [
+        event
+        async for event in reset.fetch_history_events()
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+        and event.workflow_task_failed_event_attributes.cause
+        != WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_WORKFLOW
+    ]
+    assert failed == []
+
+
+async def logged_within(raw: Any, stream: Any, count: int) -> None:
+    keys = await stream._keys()
+    for _ in range(200):
+        if await raw.xlen(keys.log("events")) >= count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"the log never held {count} records")
