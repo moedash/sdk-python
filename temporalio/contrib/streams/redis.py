@@ -450,7 +450,8 @@ class RedisStreamHandle:
         log = keys.log(topic)
         redis_client = self._streams._redis
         if from_end:
-            newest = await redis_client.xrevrange(log, count=1)
+            async with _mapped(write=False):
+                newest = await redis_client.xrevrange(log, count=1)
             last_id = _text(newest[0][0]) if newest else "0-0"
         else:
             last_id = position or "0-0"
@@ -463,9 +464,10 @@ class RedisStreamHandle:
         block_ms = self._streams._poll_ms
         ended = False
         while True:
-            batch = await redis_client.xread(
-                {log: last_id}, count=_READ_BATCH, block=None if ended else block_ms
-            )
+            async with _mapped(write=False):
+                batch = await redis_client.xread(
+                    {log: last_id}, count=_READ_BATCH, block=None if ended else block_ms
+                )
             entries = batch[0][1] if batch else []
             for entry_id, fields in entries:
                 last_id = _text(entry_id)

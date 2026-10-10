@@ -23,6 +23,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHandle
 from temporalio.common import RetryPolicy
 from temporalio.contrib.streams import (
+    END,
     RUN_ID_KEY,
     StreamClosedError,
     StreamNotFoundError,
@@ -633,6 +634,11 @@ async def test_store_errors_on_reads_arrive_as_stream_errors(
     monkeypatch.setattr(provider._redis, "xrevrange", lost)
     with pytest.raises(StreamStorageError, match="connection reset"):
         await stream.latest(topic=EVENTS)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await anext(stream.read(topic=EVENTS, after=END))
+    monkeypatch.setattr(provider._redis, "xread", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await anext(stream.read(topic=EVENTS))
 
 
 async def test_a_large_stage_lands_whole(raw: Any):
