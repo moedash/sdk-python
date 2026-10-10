@@ -334,9 +334,12 @@ class LiveProgressService:
 
 
 def _stream_ref(stream_workflow_id: str) -> StreamReference:
+    # The server keys a notifier by the owner's run chain, so a reference
+    # names the chain's first run. No owner runs here, so any id serves.
     return StreamReference(
         owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
         workflow_id=stream_workflow_id,
+        run_id=f"{stream_workflow_id}-first-run",
         topic=STREAM_TOPIC,
     )
 
@@ -486,10 +489,9 @@ async def test_live_progress_is_ordered_folded_ended_and_replayed(
             )
         )
     except RPCError as err:
-        if err.status in (RPCStatusCode.UNIMPLEMENTED, RPCStatusCode.NOT_FOUND):
-            if err.status == RPCStatusCode.UNIMPLEMENTED:
-                pytest.skip(f"server has no stream notifier: {err.message}")
-        else:
+        if err.status == RPCStatusCode.UNIMPLEMENTED:
+            pytest.skip(f"server has no stream notifier: {err.message}")
+        if err.status != RPCStatusCode.NOT_FOUND:
             raise
 
     task_queue = f"live-progress-{uuid.uuid4()}"
