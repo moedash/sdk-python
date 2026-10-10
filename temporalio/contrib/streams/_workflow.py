@@ -8,7 +8,6 @@ inside a Workflow is not part of this release.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Generic, TypeVar, overload
 
 from temporalio import workflow
@@ -23,34 +22,14 @@ __all__ = ["WorkflowStreamWriter", "workflow_reader", "workflow_writer"]
 
 T = TypeVar("T")
 
-_RUN_STATE = "__temporal_contrib_streams_run"
 
-
-class _RunStreams:
-    """The stream state one Workflow run carries."""
-
-    def __init__(self, output: _RunOutput) -> None:
-        self.output = output
-        # FINISH is a statement about the topic, not about the writer object,
-        # and every workflow_writer() call returns a new writer. Rebuilt in
-        # the same order on replay, so it stays deterministic.
-        self.finished: set[str] = set()
-
-
-def _run_streams() -> _RunStreams:
-    # The running loop is the Workflow instance, so state kept on it lives
-    # and dies with the run, and an evicted run rebuilds it on replay.
-    loop = asyncio.get_running_loop()
-    state: _RunStreams | None = getattr(loop, _RUN_STATE, None)
-    if state is None:
-        info = workflow.info()
-        state = _RunStreams(
-            output_for_workflow().open_run(
-                info.workflow_id, info.run_id, info.first_execution_run_id
-            )
-        )
-        setattr(loop, _RUN_STATE, state)
-    return state
+def _run_streams() -> _RunOutput:
+    # Kept by the Worker's coordinator, keyed by run, so it is dropped with
+    # the run at eviction and rebuilt in order on replay.
+    info = workflow.info()
+    return output_for_workflow().open_run(
+        info.workflow_id, info.run_id, info.first_execution_run_id
+    )
 
 
 def _refuse_read_only(action: str) -> None:
@@ -69,7 +48,7 @@ class WorkflowStreamWriter(Generic[T]):
     is I/O, which belongs in an Activity.
     """
 
-    def __init__(self, state: _RunStreams, topic: str) -> None:
+    def __init__(self, state: _RunOutput, topic: str) -> None:
         """Prefer :func:`temporalio.contrib.streams.workflow_writer`."""
         self._state = state
         self._topic = topic
@@ -98,7 +77,7 @@ class WorkflowStreamWriter(Generic[T]):
         _refuse_read_only("publish to a stream")
         if self._topic in self._state.finished:
             raise ValueError(f"topic {self._topic!r} was already finished")
-        self._state.output.publish(
+        self._state.publish(
             [
                 to_wire(
                     workflow.payload_converter(),
@@ -124,7 +103,7 @@ class WorkflowStreamWriter(Generic[T]):
         if self._topic in self._state.finished:
             return
         self._state.finished.add(self._topic)
-        self._state.output.publish(
+        self._state.publish(
             [
                 to_wire(
                     workflow.payload_converter(),
