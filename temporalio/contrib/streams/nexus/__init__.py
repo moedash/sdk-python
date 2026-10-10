@@ -20,6 +20,9 @@ is generated from it by ``scripts/gen_nexus_streams_api.py``:
 * :class:`TemporalStreamsHttpClient`, a caller for a process outside any
   Worker, posting to the endpoint over the Nexus HTTP ingress. It depends on
   nothing beyond the standard library.
+
+:class:`TemporalStreamsHandler` is the one hand-written piece: it serves the
+generated service over a :class:`temporalio.contrib.streams.StreamProvider`.
 """
 
 from temporalio.contrib.streams.nexus._generated import (
@@ -36,6 +39,7 @@ from temporalio.contrib.streams.nexus._generated.client import (
     HTTPStatusError,
     TemporalStreamsHttpClient,
 )
+from temporalio.contrib.streams.nexus._handler import TemporalStreamsHandler
 
 __all__ = [
     "AppendInput",
@@ -47,5 +51,6 @@ __all__ = [
     "StreamCursor",
     "StreamRef",
     "TemporalStreams",
+    "TemporalStreamsHandler",
     "TemporalStreamsHttpClient",
 ]
