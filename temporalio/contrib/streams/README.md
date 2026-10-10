@@ -63,9 +63,10 @@ To resume later, keep the last `record.cursor` and pass it back as
 ## Path B: an Activity streams to its Workflow
 
 An Activity writes to the stream of the Workflow that scheduled it, as
-itself: its Activity id and its Temporal attempt. When a retry starts
-writing, readers first see a `SUPERSEDED` record, so they can drop what the
-failed attempt wrote.
+itself: its Activity id with the scheduling run id, and its Temporal
+attempt. The run id keeps two runs of a chain apart, since Activity ids
+restart in each run. When a retry starts writing, readers first see a
+`SUPERSEDED` record, so they can drop what the failed attempt wrote.
 
 ```python
 TOKENS = topic("tokens", str)
