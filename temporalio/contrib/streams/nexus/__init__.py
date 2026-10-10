@@ -32,7 +32,8 @@ A provider with :meth:`temporalio.contrib.streams.StreamProviderPlugin.notify_on
 on tells the notifier when the stream moves, which the caller sees as
 operation progress, and
 :meth:`temporalio.contrib.streams.StreamProviderPlugin.close_stream` completes
-the operation, or :func:`close_workflow_stream` from the owning Workflow. :class:`StreamNotifier` is the notifier client both use.
+the operation, or :func:`close_workflow_stream` from the owning Workflow.
+:class:`StreamNotifier` is the notifier client both use.
 """
 
 from temporalio.contrib.streams import StreamRef
