@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -30,7 +31,7 @@ import temporalio.api.nexus.v1
 import temporalio.api.operatorservice.v1
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHandle
 from temporalio.contrib.streams import (
     RecordKind,
     StreamClosedError,
@@ -140,7 +141,47 @@ async def _memory_backing(client: Client) -> AsyncIterator[Backing]:
     await provider.close()
 
 
-BACKINGS: dict[str, Callable[[Client], Any]] = {"memory": _memory_backing}
+@asynccontextmanager
+async def _redis_backing(client: Client) -> AsyncIterator[Backing]:
+    url = os.environ.get("STREAMS_REDIS_URL")
+    if not url:
+        pytest.skip("set STREAMS_REDIS_URL to run the service over Redis")
+    from temporalio.contrib.streams.redis import RedisStreams
+
+    # A prefix per case keeps cases apart in one Redis.
+    provider = RedisStreams(url, key_prefix=f"service-{uuid.uuid4().hex}")
+    owners: dict[str, WorkflowHandle[Any, Any]] = {}
+    async with new_worker(client, StreamOwner) as worker:
+
+        async def host(workflow_id: str) -> None:
+            owners[workflow_id] = await client.start_workflow(
+                StreamOwner.run, id=workflow_id, task_queue=worker.task_queue
+            )
+
+        async def truncate(workflow_id: str, name: str, keep: int) -> None:
+            # Trims as the append script does, watermark included.
+            run_id = owners[workflow_id].result_run_id
+            assert run_id is not None
+            keys = provider._chain_keys(client.namespace, workflow_id, run_id)
+            entries = await provider._redis.xrange(keys.log(name))
+            doomed = entries[: len(entries) - keep]
+            if doomed:
+                await provider._redis.xtrim(
+                    keys.log(name), maxlen=keep, approximate=False
+                )
+                redis_client: Any = provider._redis
+                await redis_client.hset(keys.meta(name), "trimmed", doomed[-1][0])
+
+        yield Backing("redis", provider, truncate=truncate, host=host)
+        for owner in owners.values():
+            await owner.terminate()
+    await provider.close()
+
+
+BACKINGS: dict[str, Callable[[Client], Any]] = {
+    "memory": _memory_backing,
+    "redis": _redis_backing,
+}
 
 
 @dataclass
