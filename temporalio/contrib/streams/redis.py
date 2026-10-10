@@ -680,17 +680,35 @@ class RedisStreamHandle:
             }
             # Promotions append, so they go in commit order: by run, then by
             # floor within the run. A stage History has not decided holds back
-            # the ones after it.
-            stages.sort(key=lambda s: (started[s[1]], s[1], s[2]))
-            for token, run_id, floor, topics in stages:
-                events = await events_after(
-                    self._client,
-                    self._client.namespace,
-                    self._ref.workflow_id,
-                    run_id,
-                    floor,
+            # the ones after it. A run History no longer holds is oldest.
+            stages.sort(
+                key=lambda s: (
+                    started[s[1]] if started[s[1]] is not None else float("-inf"),
+                    s[1],
+                    s[2],
                 )
-                decision = decide_token(events, token, floor)
+            )
+            for token, run_id, floor, topics in stages:
+                if started[run_id] is None:
+                    # Namespace retention removed the run, so nothing can
+                    # prove the commit any more.
+                    logger.warning(
+                        "Aborting stream stage %s of Workflow %s: its run %s is no "
+                        "longer in History",
+                        token,
+                        self._ref.workflow_id,
+                        run_id,
+                    )
+                    decision = _Decision.ABORT
+                else:
+                    events = await events_after(
+                        self._client,
+                        self._client.namespace,
+                        self._ref.workflow_id,
+                        run_id,
+                        floor,
+                    )
+                    decision = decide_token(events, token, floor)
                 stage = StageRef(
                     self._client.namespace,
                     self._ref.workflow_id,
@@ -711,10 +729,16 @@ class RedisStreamHandle:
                 exc_info=True,
             )
 
-    async def _run_started(self, run_id: str) -> float:
-        description = await self._client.get_workflow_handle(
-            self._ref.workflow_id, run_id=run_id
-        ).describe()
+    async def _run_started(self, run_id: str) -> float | None:
+        """When ``run_id`` started, or ``None`` when History no longer has it."""
+        try:
+            description = await self._client.get_workflow_handle(
+                self._ref.workflow_id, run_id=run_id
+            ).describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                return None
+            raise
         return description.start_time.timestamp()
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
@@ -724,7 +748,9 @@ class RedisStreamHandle:
         status = description.status
         if self._ref.run_id is not None:
             return status is not None and status != WorkflowExecutionStatus.RUNNING
-        if status not in CHAIN_ENDED:
+        # A Workflow id reused by a new chain means this chain has ended.
+        latest = description.raw_description.workflow_execution_info
+        if status not in CHAIN_ENDED and latest.first_run_id == keys.first_run_id:
             return False
         await self._streams._mark_closed(keys)
         return True
@@ -777,13 +803,19 @@ class RedisStreamHandle:
     async def _refuse_if_ended(self, keys: _ChainKeys) -> None:
         """Mark the chain closed and raise if its latest run has ended.
 
+        A Workflow id reused by a new chain also means this chain has ended.
+
         Raises:
             StreamClosedError: The chain has ended.
         """
         description = await self._client.get_workflow_handle(
             self._ref.workflow_id
         ).describe()
-        if description.status in CHAIN_ENDED:
+        latest = description.raw_description.workflow_execution_info
+        if (
+            description.status in CHAIN_ENDED
+            or latest.first_run_id != keys.first_run_id
+        ):
             await self._streams._mark_closed(keys)
             raise StreamClosedError(
                 f"the Workflow {self._ref.workflow_id!r} that owns this stream has "
