@@ -718,6 +718,37 @@ async def test_store_errors_on_reads_arrive_as_stream_errors(
         await anext(stream.read(topic=EVENTS))
 
 
+async def test_store_errors_on_read_checks_arrive_as_stream_errors(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    cursor = await producer.append({"n": 1})
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    pipeline_type = type(provider._redis.pipeline())
+    monkeypatch.setattr(pipeline_type, "execute", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await anext(stream.read(topic=EVENTS, after=cursor))
+    monkeypatch.undo()
+
+    fresh = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"], key_prefix=f"test-{uuid.uuid4().hex}"
+    )
+    monkeypatch.setattr(fresh._redis, "info", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await fresh.get_stream_handle(client, StreamRef.for_workflow(owner.id)).latest(
+            topic=EVENTS
+        )
+    await fresh.close()
+
+
 async def test_a_large_stage_lands_whole(raw: Any):
     provider = RedisStreams(
         os.environ["STREAMS_REDIS_URL"], key_prefix=f"test-{uuid.uuid4().hex}"

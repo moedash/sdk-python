@@ -540,10 +540,11 @@ class RedisStreamHandle:
             StreamExpiredError: Records after ``position`` were dropped.
             StreamNotFoundError: Neither the log nor its tombstone is left.
         """
-        async with self._streams._redis.pipeline(transaction=False) as pipe:
-            pipe.exists(keys.log(topic))
-            pipe.hgetall(keys.meta(topic))
-            exists, meta = await pipe.execute()
+        async with _mapped(write=False):
+            async with self._streams._redis.pipeline(transaction=False) as pipe:
+                pipe.exists(keys.log(topic))
+                pipe.hgetall(keys.meta(topic))
+                exists, meta = await pipe.execute()
         cursor = _entry(position)
         if exists:
             trimmed = meta.get(b"trimmed")
@@ -738,7 +739,8 @@ class RedisStreams(StreamProviderPlugin):
         """
         if self._checked_server:
             return
-        info = await _awaited(self._redis.info("server"))
+        async with _mapped(write=False):
+            info = await _awaited(self._redis.info("server"))
         version = str(info.get("redis_version", "0"))
         major = int(version.split(".", 1)[0] or 0)
         if major < 7:
