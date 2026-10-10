@@ -409,6 +409,34 @@ async def test_a_sequence_below_the_newest_is_refused(case: ProviderCase):
 
 
 @reads
+async def test_a_producer_can_continue_at_a_given_sequence(case: ProviderCase):
+    stream = await case.open(new_workflow_id())
+    first = stream.producer(topic=OUT, producer_id="p", attempt=1)
+    await first.append({"n": 1}, {"n": 2})
+    # A forwarder that keeps no producer between calls continues where the
+    # writer left off, and its retry of that batch is deduplicated.
+    second = stream.producer(topic=OUT, producer_id="p", attempt=1, next_sequence=3)
+    landed = await second.append({"n": 3})
+    retry = stream.producer(topic=OUT, producer_id="p", attempt=1, next_sequence=3)
+    assert await retry.append({"n": 3}) == landed
+    finished = await stream.producer(
+        topic=OUT, producer_id="p", attempt=1, next_sequence=4
+    ).finish()
+    records = await take(stream.read(topic=OUT), 4)
+    assert [(r.kind, r.sequence) for r in records] == [
+        (RecordKind.DATA, 1),
+        (RecordKind.DATA, 2),
+        (RecordKind.DATA, 3),
+        (RecordKind.FINISH, 4),
+    ]
+    assert records[-1].cursor == finished
+    with pytest.raises(StreamProducerError):
+        await stream.producer(
+            topic=OUT, producer_id="p", attempt=1, next_sequence=2
+        ).append({"n": 2})
+
+
+@reads
 async def test_producers_dedupe_apart(case: ProviderCase):
     stream = await case.open(new_workflow_id())
     await stream.producer(topic=OUT, producer_id="a", attempt=1).append({"n": 1})
@@ -534,6 +562,8 @@ async def test_argument_mistakes_are_value_errors(case: ProviderCase):
         stream.producer(topic=OUT, producer_id="", attempt=1)
     with pytest.raises(ValueError):
         stream.producer(topic=OUT, producer_id="p", attempt=0)
+    with pytest.raises(ValueError):
+        stream.producer(topic=OUT, producer_id="p", attempt=1, next_sequence=0)
     with pytest.raises(ValueError):
         stream.read(topic=OUT, result_type=dict)  # type: ignore[call-overload]
     with pytest.raises(ValueError):
