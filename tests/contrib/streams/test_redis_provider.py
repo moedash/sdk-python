@@ -32,6 +32,7 @@ from temporalio.contrib.streams import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRecordError,
     StreamRef,
     StreamRefusedError,
     StreamStorageError,
@@ -1041,3 +1042,58 @@ async def logged_within(raw: Any, stream: Any, count: int) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError(f"the log never held {count} records")
+
+
+async def test_a_malformed_entry_raises_with_its_cursor(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 1})
+    keys = await stream._keys()
+    entry = await raw.xadd(keys.log("events"), {"not-r": b"x"})
+    await producer.append({"n": 2})
+    records = stream.read(topic=EVENTS)
+    assert (await anext(records)).value == {"n": 1}
+    with pytest.raises(StreamRecordError) as raised:
+        await anext(records)
+    assert raised.value.cursor.token.endswith(entry.decode())
+    after = await anext(stream.read(topic=EVENTS, after=raised.value.cursor))
+    assert after.value == {"n": 2}
+
+
+async def test_a_read_ends_when_history_no_longer_holds_its_owner(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream.producer(topic=EVENTS, producer_id="p", attempt=1).append({"n": 1})
+    await stream._keys()
+
+    async def gone(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", gone)
+    records = await asyncio.wait_for(read_until_end(stream.read(topic=EVENTS)), 10)
+    assert [r.value for r in records] == [{"n": 1}]
+
+
+async def test_an_owner_check_during_a_read_that_fails_is_a_stream_error(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(WorkflowHandle, "describe", unavailable)
+    with pytest.raises(StreamStorageError, match="unavailable"):
+        await asyncio.wait_for(anext(stream.read(topic=EVENTS)), 10)

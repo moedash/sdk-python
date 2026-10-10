@@ -98,6 +98,7 @@ from temporalio.contrib.streams._errors import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRecordError,
     StreamRefusedError,
     StreamStorageError,
     StreamUnsupportedError,
@@ -469,6 +470,10 @@ class RedisStreamHandle:
         delivers what is left and ends, and marks the chain closed. A read
         on a handle pinned to a run ends when that run closes, even if the
         chain continued as new.
+
+        A read holds one Redis connection while it waits, so a process that
+        follows many streams opens as many connections. Pass a client with a
+        ``max_connections`` that fits the server's ``maxclients``.
         """
         name, result_type = self._resolve(topic, result_type)
         # Parsed here so a bad cursor fails this call, not the first
@@ -504,6 +509,18 @@ class RedisStreamHandle:
             after=previous,
             warn=logger.warning,
         )
+        if position is not None and not from_end:
+            # The record at the cursor was delivered before, so its attempt
+            # is the one a newer attempt supersedes.
+            async with _mapped(write=False):
+                at_cursor = await redis_client.xrange(log, position, position)
+            if at_cursor:
+                try:
+                    decoder.prime(
+                        WireRecord.FromString(at_cursor[0][1][_RECORD_FIELD.encode()])
+                    )
+                except (KeyError, DecodeError):
+                    pass
         block_ms = self._streams._poll_ms
         ended = False
         while True:
@@ -517,10 +534,12 @@ class RedisStreamHandle:
                 cursor = self._cursor(topic, last_id)
                 try:
                     wire = WireRecord.FromString(fields[_RECORD_FIELD.encode()])
-                except (KeyError, DecodeError) as error:
-                    logger.warning("skipping stream record at %s: %s", cursor, error)
-                    continue
-                await decode_body(self._converter, wire)
+                    await decode_body(self._converter, wire)
+                except Exception as error:
+                    raise StreamRecordError(
+                        f"stream record at {cursor} could not be decoded: {error}",
+                        cursor,
+                    ) from error
                 for record in decoder.decode(cursor, wire):
                     yield record
             if entries:
@@ -532,9 +551,18 @@ class RedisStreamHandle:
             ended = await self._owner_ended(keys)
 
     async def _owner_ended(self, keys: _ChainKeys) -> bool:
-        description = await self._client.get_workflow_handle(
-            self._ref.workflow_id, run_id=self._ref.run_id
-        ).describe()
+        try:
+            description = await self._client.get_workflow_handle(
+                self._ref.workflow_id, run_id=self._ref.run_id
+            ).describe()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise _describe_error(error) from error
+            # The keys came from this Workflow, so History has since dropped
+            # it, and nothing more will be written for it.
+            if self._ref.run_id is None:
+                await self._streams._mark_closed(keys)
+            return True
         status = description.status
         if self._ref.run_id is not None:
             return status is not None and status != WorkflowExecutionStatus.RUNNING
