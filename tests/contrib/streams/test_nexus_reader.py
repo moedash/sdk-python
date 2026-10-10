@@ -198,7 +198,7 @@ class History:
             EventType.EVENT_TYPE_NEXUS_OPERATION_STARTED,
             nexus_operation_started_event_attributes=NexusOperationStartedEventAttributes(
                 scheduled_event_id=scheduled_event_id,
-                operation_token=_encode_token(STREAM, "attach-request"),
+                operation_token=_encode_token(STREAM, "attach-request", "run-id"),
                 request_id="request-chat",
             ),
         )

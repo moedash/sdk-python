@@ -27,6 +27,8 @@ from temporalio.api.stream.v1 import StreamReference
 from temporalio.api.workflowservice.v1 import (
     AttachStreamCallbackRequest,
     DescribeStreamNotifierRequest,
+    DescribeWorkflowExecutionRequest,
+    DescribeWorkflowExecutionResponse,
     DetachStreamCallbackRequest,
     NotifyStreamRequest,
 )
@@ -64,6 +66,19 @@ class FakeWorkflowService:
     in_flight: int = 0
     max_in_flight: int = 0
     fail_next: bool = False
+    # The first run of each Workflow id's current chain, as describe answers.
+    chains: dict[str, str] = field(default_factory=dict)
+    described: list[DescribeWorkflowExecutionRequest] = field(default_factory=list)
+
+    async def describe_workflow_execution(
+        self, request: DescribeWorkflowExecutionRequest
+    ) -> DescribeWorkflowExecutionResponse:
+        self.described.append(request)
+        response = DescribeWorkflowExecutionResponse()
+        response.workflow_execution_info.first_run_id = self.chains.get(
+            request.execution.workflow_id, "chain-1"
+        )
+        return response
 
     async def attach_stream_callback(self, request: AttachStreamCallbackRequest) -> Any:
         self.attached.append(request)
@@ -158,16 +173,17 @@ async def test_start_attaches_the_callers_callback_and_hands_back_the_ref(
     assert attach.stream_ref == StreamReference(
         owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
         workflow_id="owner-1",
+        run_id="chain-1",
         topic="tokens",
     )
 
 
-async def test_a_pinned_ref_attaches_without_its_run(
+async def test_a_pinned_ref_attaches_by_its_chains_first_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = FakeWorkflowService()
+    service = FakeWorkflowService(chains={"owner-1": "run-1"})
     monkeypatch.setattr("temporalio.nexus.client", lambda: FakeClient(service))
-    pinned = StreamRef.for_workflow("owner-1", run_id="run-1", topic="tokens")
+    pinned = StreamRef.for_workflow("owner-1", run_id="run-2", topic="tokens")
 
     async def open_pinned(_ctx: Any, _prompt: str) -> StreamRef:
         return pinned
@@ -175,8 +191,10 @@ async def test_a_pinned_ref_attaches_without_its_run(
     result = await StreamOperationHandler(open_pinned).start(start_context(), "hi")
 
     assert stream_ref_from_token(result.token) == pinned
-    # One notifier per stream across runs: the run is the reader's business.
-    assert service.attached[0].stream_ref.run_id == ""
+    # One notifier per run chain: a Continue-as-New keeps it, a new chain on
+    # the same Workflow id gets its own.
+    assert service.described[0].execution.run_id == "run-2"
+    assert service.attached[0].stream_ref.run_id == "run-1"
 
 
 async def test_a_start_without_a_callback_is_refused(
@@ -204,6 +222,20 @@ async def test_cancel_detaches_the_callback_it_attached(
     [detach] = service.detached
     assert detach.request_id == "attach-1"
     assert detach.stream_ref == service.attached[0].stream_ref
+
+
+async def test_cancel_detaches_from_the_chain_it_attached_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeWorkflowService()
+    handler = handler_with(monkeypatch, service)
+    started = await handler.start(start_context(), "hi")
+    # The Workflow id moved on to a new chain since the start.
+    service.chains["owner-1"] = "chain-2"
+
+    await handler.cancel(cancel_context(), started.token)
+
+    assert service.detached[0].stream_ref.run_id == "chain-1"
 
 
 def test_a_token_that_names_no_stream_is_refused() -> None:
@@ -329,6 +361,175 @@ async def test_a_provider_that_notifies_tells_the_notifier_after_each_append(
     await provider.close()
 
 
+async def test_a_reused_workflow_id_and_topic_notifies_the_new_chain(
+    client: Client,
+) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    ref = StreamRef.for_workflow(f"owner-{uuid.uuid4()}", topic="tokens")
+    service.chains[ref.workflow_id] = "chain-1"
+    first = provider.get_stream_handle(stream_client, ref).producer(
+        producer_id="p", attempt=1
+    )
+    await first.append("a")
+    await provider.close_stream(stream_client, ref, "done")
+
+    # A new chain reuses the Workflow id and topic.
+    service.chains[ref.workflow_id] = "chain-2"
+    # The memory store keys by Workflow id, so the new chain's producer
+    # writes as a new attempt.
+    second = provider.get_stream_handle(stream_client, ref).producer(
+        producer_id="p", attempt=2
+    )
+    await second.append("b")
+    await provider.close_stream(stream_client, ref, "done again")
+
+    chains = [
+        (request.stream_ref.run_id, request.close) for request in service.notified
+    ]
+    assert chains == [
+        ("chain-1", False),
+        ("chain-1", True),
+        ("chain-2", False),
+        ("chain-2", True),
+    ]
+    await provider.close()
+
+
+async def append_to(provider: MemoryStreams, client: Any, workflow_id: str) -> None:
+    ref = StreamRef.for_workflow(workflow_id, topic="tokens")
+    producer = provider.get_stream_handle(client, ref).producer(
+        producer_id="p", attempt=1
+    )
+    await producer.append("a")
+    await asyncio.sleep(0.01)
+
+
+def notifier_owners(provider: MemoryStreams) -> list[str]:
+    notifiers = provider._notifiers  # type: ignore[reportPrivateUsage]
+    return [workflow_id for _, workflow_id, _, _ in notifiers or ()]
+
+
+async def test_a_closed_streams_notifier_is_dropped(client: Client) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    workflow_id = f"owner-{uuid.uuid4()}"
+    await append_to(provider, stream_client, workflow_id)
+    assert notifier_owners(provider) == [workflow_id]
+
+    await provider.close_stream(
+        stream_client, StreamRef.for_workflow(workflow_id, topic="tokens")
+    )
+
+    assert notifier_owners(provider) == []
+    await provider.close()
+
+
+async def test_notifiers_beyond_the_cap_are_dropped_least_recent_first(
+    client: Client,
+) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append(max_notifiers=2)
+    stream_client: Any = FakeClient(service, real=client)
+    first, second, third = (f"owner-{uuid.uuid4()}" for _ in range(3))
+
+    await append_to(provider, stream_client, first)
+    await append_to(provider, stream_client, second)
+    # A write makes its notifier the most recent.
+    await append_to(provider, stream_client, first)
+    await append_to(provider, stream_client, third)
+
+    assert sorted(notifier_owners(provider)) == sorted([first, third])
+    await provider.close()
+
+
+async def test_an_ended_chain_drops_its_notifiers(client: Client) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    ended, running = f"owner-{uuid.uuid4()}", f"owner-{uuid.uuid4()}"
+    await append_to(provider, stream_client, ended)
+    await append_to(provider, stream_client, running)
+
+    provider._forget_chain("default", ended, "chain-1")  # type: ignore[reportPrivateUsage]
+
+    assert notifier_owners(provider) == [running]
+    await provider.close()
+
+
+async def test_flush_waits_for_every_notification_in_flight(client: Client) -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    provider = MemoryStreams().notify_on_append(max_notifiers=1)
+    stream_client: Any = FakeClient(service, real=client)
+    # The second stream pushes out the first one's notifier while its call
+    # is still out.
+    await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+    await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+
+    flushing = asyncio.create_task(provider.flush_notifications())
+    await asyncio.sleep(0.05)
+    assert not flushing.done()
+    hold.set()
+    await asyncio.wait_for(flushing, 5)
+
+    assert len(service.notified) == 2
+    await provider.close()
+
+
+async def test_a_worker_that_stops_waits_for_its_notifications(
+    client: Client,
+) -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    worker = new_worker(client, OwnerUntilDone, plugins=[provider])
+    # Worker.run, not async with: the context manager cancels the run once
+    # shutdown returns, and with it what plugins do after the Worker stops.
+    running = asyncio.create_task(worker.run())
+    await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+    await worker.shutdown()
+    await asyncio.sleep(0.5)
+    assert not running.done()
+    hold.set()
+    await asyncio.wait_for(running, 10)
+
+    assert len(service.notified) == 1
+    await provider.close()
+
+
+class ForeignPositionProducer:
+    """A third-party producer whose positions no counter can come from."""
+
+    producer_id = "p"
+    attempt = 1
+
+    async def append(self, *values: Any) -> Cursor:
+        del values
+        return Cursor("other:x:not-a-position")
+
+    async def finish(self) -> Cursor:
+        return Cursor("other:x:not-a-position")
+
+
+async def test_a_position_without_a_counter_does_not_fail_the_append() -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    producer = provider._notified_producer(  # type: ignore[reportPrivateUsage]
+        fake_client(service), REF, "tokens", ForeignPositionProducer()
+    )
+
+    # The records landed, so the append answers with their cursor.
+    assert (await producer.append("a")).token == "other:x:not-a-position"
+    assert (await producer.finish()).token == "other:x:not-a-position"
+    await asyncio.sleep(0.01)
+
+    assert service.notified == []
+
+
 def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
     service = FakeWorkflowService()
     provider = MemoryStreams().notify_on_append()
@@ -351,8 +552,12 @@ def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
         "tokens",
     ]
     assert all(
-        request.stream_ref.workflow_id == "owner-1" for request in service.notified
+        request.stream_ref.workflow_id == "owner-1"
+        and request.stream_ref.run_id == "run-1"
+        for request in service.notified
     )
+    # The stage names its chain, so nothing is described.
+    assert service.described == []
 
 
 def test_a_provider_without_notifications_tells_nobody() -> None:
@@ -413,6 +618,22 @@ class StreamOperationCaller:
         return list(self._counters)
 
 
+@workflow.defn(name="OwnerUntilDone")
+class OwnerUntilDone:
+    """Owns a stream until signaled done."""
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._done)
+
+    @workflow.signal
+    def done(self) -> None:
+        self._done = True
+
+
 async def _skip_without_notifier(client: Client, ref: StreamRef) -> None:
     try:
         await client.workflow_service.describe_stream_notifier(
@@ -453,6 +674,10 @@ async def test_a_caller_sees_appends_as_progress_and_the_close_as_the_result(
     started = asyncio.Event()
 
     async def open_owned_stream(_ctx: Any, _prompt: str) -> StreamRef:
+        # The notifier is keyed by the owner's run chain, so the owner runs.
+        await client.start_workflow(
+            OwnerUntilDone.run, id=ref.workflow_id, task_queue=task_queue
+        )
         started.set()
         return ref
 
@@ -465,7 +690,7 @@ async def test_a_caller_sees_appends_as_progress_and_the_close_as_the_result(
     async with Worker(
         client,
         task_queue=task_queue,
-        workflows=[StreamOperationCaller],
+        workflows=[StreamOperationCaller, OwnerUntilDone],
         nexus_service_handlers=[ChatServiceHandler()],
     ):
         handle = await client.start_workflow(
@@ -499,6 +724,7 @@ async def test_a_caller_sees_appends_as_progress_and_the_close_as_the_result(
         await provider.close_stream(client, ref, "done")
 
         observed = await asyncio.wait_for(handle.result(), 20)
+        await client.get_workflow_handle(ref.workflow_id).signal(OwnerUntilDone.done)
 
     assert observed.result == "done"
     assert observed.counters, observed
@@ -654,20 +880,6 @@ async def test_a_workflow_closes_its_own_stream_through_system_nexus(
 # position, so the second notification still ranks above the first.
 
 
-@workflow.defn(name="SkewOwner")
-class SkewOwner:
-    def __init__(self) -> None:
-        self._done = False
-
-    @workflow.run
-    async def run(self) -> None:
-        await workflow.wait_condition(lambda: self._done)
-
-    @workflow.signal
-    def done(self) -> None:
-        self._done = True
-
-
 @pytest.mark.skipif(
     not os.environ.get("STREAMS_REDIS_URL"),
     reason="set STREAMS_REDIS_URL to run the Redis provider tests",
@@ -684,9 +896,11 @@ async def test_producers_with_skewed_clocks_still_notify_in_increasing_order(
     first.notify_on_append()
     second.notify_on_append()
     real_time_ns = time.time_ns
-    async with new_worker(client, SkewOwner) as worker:
+    async with new_worker(client, OwnerUntilDone) as worker:
         owner = await client.start_workflow(
-            SkewOwner.run, id=f"skew-owner-{uuid.uuid4()}", task_queue=worker.task_queue
+            OwnerUntilDone.run,
+            id=f"skew-owner-{uuid.uuid4()}",
+            task_queue=worker.task_queue,
         )
         ref = StreamRef.for_workflow(owner.id, topic="tokens")
         ahead = first.get_stream_handle(fake_client(service, client), ref).producer(
@@ -702,7 +916,7 @@ async def test_producers_with_skewed_clocks_still_notify_in_increasing_order(
         monkeypatch.setattr(time, "time_ns", real_time_ns)
         await behind.append("b")
         await asyncio.sleep(0.2)
-        await owner.signal(SkewOwner.done)
+        await owner.signal(OwnerUntilDone.done)
         await owner.result()
 
     counters = [request.counter for request in service.notified]
