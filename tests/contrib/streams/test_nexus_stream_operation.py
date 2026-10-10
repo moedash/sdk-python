@@ -33,10 +33,10 @@ from temporalio.api.workflowservice.v1 import (
     NotifyStreamRequest,
 )
 from temporalio.client import Client
-from temporalio.contrib.streams import StreamRef, workflow_writer
+from temporalio.contrib.streams import StreamClosedError, StreamRef, workflow_writer
 from temporalio.contrib.streams._cursor import BEGINNING, progress_counter
 from temporalio.contrib.streams._output import StageRef
-from temporalio.contrib.streams._record import Cursor
+from temporalio.contrib.streams._record import Cursor, RecordKind
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     StreamNotifier,
@@ -47,7 +47,7 @@ from temporalio.contrib.streams.nexus import (
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 from temporalio.worker._nexus import _NexusTaskCancellation
 from tests.helpers import new_worker
 from tests.helpers.nexus import make_nexus_endpoint_name
@@ -562,6 +562,50 @@ def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
     assert service.described == []
 
 
+async def test_a_promoted_close_closes_the_store_then_the_notifier() -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    client = fake_client(service)
+    [result] = DataConverter.default.payload_converter.to_payloads(["3 tokens"])
+    ref = StreamRef.for_workflow("owner-1", topic="tokens")
+    producer = provider.get_stream_handle(None, ref).producer(
+        producer_id="p", attempt=1
+    )
+    await producer.append("a")
+    stage = StageRef(
+        namespace="default",
+        workflow_id="owner-1",
+        first_run_id="run-1",
+        token="stage-1",
+        topics=("tokens", "status"),
+        closes=(("tokens", result),),
+    )
+
+    provider._notify_promoted(client, stage)  # type: ignore[reportPrivateUsage]
+    await provider.flush_notifications()
+
+    # Closed in the store: a reader ends, and an append is refused.
+    with pytest.raises(StreamClosedError):
+        await producer.append("b")
+    records = [record async for record in provider.get_stream_handle(None, ref).read()]
+    assert [record.value for record in records] == ["a"]
+    [close] = [request for request in service.notified if request.close]
+    assert close.stream_ref.topic == "tokens"
+    # The server refuses a reference without its chain.
+    assert close.stream_ref.run_id == "run-1"
+    assert close.counter == progress_counter(records[-1].cursor) + 1
+    assert (
+        DataConverter.default.payload_converter.from_payload(close.close_result)
+        == "3 tokens"
+    )
+    # The other topic is notified, not closed.
+    assert sorted(request.stream_ref.topic for request in service.notified) == [
+        "status",
+        "tokens",
+    ]
+    await provider.close()
+
+
 def test_a_provider_without_notifications_tells_nobody() -> None:
     service = FakeWorkflowService()
     provider = MemoryStreams()
@@ -651,7 +695,12 @@ async def _skip_without_notifier(client: Client, ref: StreamRef) -> None:
     except RPCError as err:
         if err.status == RPCStatusCode.UNIMPLEMENTED:
             pytest.skip(f"server has no stream notifier: {err.message}")
-        if err.status != RPCStatusCode.NOT_FOUND:
+        # A server that keys the notifier by run chain refuses the probe's
+        # empty run id, which still shows it has the notifier.
+        if err.status not in (
+            RPCStatusCode.NOT_FOUND,
+            RPCStatusCode.INVALID_ARGUMENT,
+        ):
             raise
 
 
@@ -825,7 +874,7 @@ class StreamOwnerThatCloses:
             writer.publish(token)
             await workflow.sleep(timedelta(milliseconds=200))
         writer.finish()
-        await close_workflow_stream(f"{len(tokens)} tokens", topic=TOKENS_TOPIC)
+        close_workflow_stream(f"{len(tokens)} tokens", topic=TOKENS_TOPIC)
 
 
 async def test_a_workflow_closes_its_own_stream_through_system_nexus(
@@ -870,23 +919,10 @@ async def test_a_workflow_closes_its_own_stream_through_system_nexus(
             ),
             30,
         )
-        owner = client.get_workflow_handle(owner_id)
-        owner_result = await owner.result()
-        owner_history = await owner.fetch_history()
+        owner_result = await client.get_workflow_handle(owner_id).result()
 
     assert observed.result == "3 tokens"
     assert owner_result is None
-    # The server refuses a reference without its chain, so the close names the
-    # chain's first run.
-    first_run_id = owner_history.events[
-        0
-    ].workflow_execution_started_event_attributes.first_execution_run_id
-    [close] = [
-        event.nexus_operation_scheduled_event_attributes
-        for event in owner_history.events
-        if event.HasField("nexus_operation_scheduled_event_attributes")
-    ]
-    assert first_run_id and first_run_id.encode() in close.input.data
     await provider.close()
 
 
@@ -939,3 +975,132 @@ async def test_producers_with_skewed_clocks_still_notify_in_increasing_order(
     assert counters[0] < counters[1], counters
     await first.close()
     await second.close()
+
+
+def _provider_for(backing: str) -> Any:
+    if backing == "memory":
+        return MemoryStreams().notify_on_append()
+    url = os.environ.get("STREAMS_REDIS_URL")
+    if not url:
+        pytest.skip("set STREAMS_REDIS_URL to run the Redis provider tests")
+    from temporalio.contrib.streams.redis import RedisStreams
+
+    return RedisStreams(url, key_prefix=f"test-{uuid.uuid4().hex}").notify_on_append()
+
+
+@workflow.defn(name="OwnerThatClosesInOneTask")
+class OwnerThatClosesInOneTask:
+    """Publishes its tokens and closes its stream in one Workflow Task, then
+    keeps running, so only the close can end a read."""
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self, count: int) -> None:
+        writer = workflow_writer(TOKENS_TOPIC)
+        for n in range(count):
+            writer.publish(f"t{n}")
+        close_workflow_stream(f"{count} tokens", topic=TOKENS_TOPIC)
+        await workflow.wait_condition(lambda: self._done)
+
+    @workflow.signal
+    def done(self) -> None:
+        self._done = True
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_a_close_in_the_task_of_the_last_publishes_comes_after_them(
+    client: Client, env: WorkflowEnvironment, backing: str
+) -> None:
+    provider = _provider_for(backing)
+    owner_id = f"owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=TOKENS_TOPIC)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-closer-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+
+    async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
+        await temporalio.nexus.client().start_workflow(
+            OwnerThatClosesInOneTask.run, 50, id=owner_id, task_queue=task_queue
+        )
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(start_owner)
+
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[StreamOperationCaller, OwnerThatClosesInOneTask],
+        nexus_service_handlers=[ChatServiceHandler()],
+        plugins=[provider],
+    ):
+        observed = await asyncio.wait_for(
+            client.execute_workflow(
+                StreamOperationCaller.run,
+                endpoint,
+                id=f"stream-closer-caller-{uuid.uuid4()}",
+                task_queue=task_queue,
+            ),
+            30,
+        )
+
+        # The operation completed, so the store is closed and holds every
+        # record: a read gets them all and ends while the owner still runs.
+        async def read_all() -> list[Any]:
+            return await _values(provider.get_stream_handle(client, ref))
+
+        values = await asyncio.wait_for(read_all(), 10)
+        owner = client.get_workflow_handle(owner_id)
+        await owner.signal(OwnerThatClosesInOneTask.done)
+        await owner.result()
+        history = await owner.fetch_history()
+
+    assert observed.result == "50 tokens"
+    assert values == [f"t{n}" for n in range(50)]
+    # The close is recorded with the task's publishes, so a replay commits
+    # the same batch.
+    await Replayer(
+        workflows=[OwnerThatClosesInOneTask], plugins=[provider]
+    ).replay_workflow(history)
+    await provider.close()
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_an_append_after_an_outside_close_is_refused(
+    client: Client, backing: str
+) -> None:
+    provider = _provider_for(backing)
+    async with new_worker(client, OwnerUntilDone) as worker:
+        owner = await client.start_workflow(
+            OwnerUntilDone.run, id=f"owner-{uuid.uuid4()}", task_queue=worker.task_queue
+        )
+        ref = StreamRef.for_workflow(owner.id, topic=TOKENS_TOPIC)
+        await _skip_without_notifier(client, ref)
+        handle = provider.get_stream_handle(client, ref)
+        producer = handle.producer(producer_id="owner-activity", attempt=1)
+        first = await producer.append("a")
+
+        await provider.close_stream(client, ref, "done")
+
+        with pytest.raises(StreamClosedError):
+            await producer.append("b")
+        # A retry of a batch that landed before the close still answers.
+        retried = handle.producer(producer_id="owner-activity", attempt=1)
+        assert await retried.append("a") == first
+        values = await asyncio.wait_for(_values(handle), 10)
+        await owner.signal(OwnerUntilDone.done)
+
+    assert values == ["a"]
+    await provider.close()
+
+
+async def _values(handle: Any) -> list[Any]:
+    return [
+        record.value async for record in handle.read() if record.kind is RecordKind.DATA
+    ]

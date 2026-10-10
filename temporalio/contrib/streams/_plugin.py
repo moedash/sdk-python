@@ -29,6 +29,7 @@ from typing_extensions import Self
 import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
+from temporalio.common import RawValue
 from temporalio.contrib.streams._cursor import progress_counter
 from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._notify import StreamNotifier, chain_first_run_id
@@ -80,6 +81,9 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         ) = None
         self._max_notifiers = 0
         self._notifying: set[asyncio.Task[None]] = set()
+        # Closes after a promotion. Apart from the writes' notifications,
+        # because a close waits for those.
+        self._closing: set[asyncio.Task[None]] = set()
 
     def notify_on_append(self, *, max_notifiers: int = 1000) -> Self:
         """Tell each stream's notifier on the server when the stream moves.
@@ -120,8 +124,10 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         .. warning::
             This API is experimental.
         """
-        while self._notifying:
-            await asyncio.gather(*self._notifying, return_exceptions=True)
+        while self._notifying or self._closing:
+            await asyncio.gather(
+                *self._notifying, *self._closing, return_exceptions=True
+            )
         notifiers = [] if self._notifiers is None else list(self._notifiers.values())
         await asyncio.gather(
             *(notifier.flush() for notifier in notifiers), return_exceptions=True
@@ -132,20 +138,34 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     async def close_stream(
         self, client: Client, ref: StreamRef, result: Any = None
     ) -> None:
-        """Close ``ref``'s stream on the server's notifier with ``result``.
+        """Close ``ref``'s stream with ``result``.
 
-        Every Nexus operation that handed out this stream completes with
-        ``result``. The records stay readable. Waits for the notification in
-        flight first.
+        The stream closes in the store first: every read of it ends once it
+        has delivered the records already there, and a later append raises
+        :class:`temporalio.contrib.streams.StreamClosedError`, the owner's
+        included. Then every Nexus operation that handed out this stream
+        completes with ``result``. The records stay readable. Waits for the
+        notification in flight first.
 
         Raises:
             temporalio.service.RPCError: The server refused the close, or the
                 Workflow could not be described.
+            temporalio.contrib.streams.StreamError: The store could not close
+                the stream.
 
         .. warning::
             This API is experimental.
         """
-        first_run_id = await chain_first_run_id(client, ref)
+        await self._close_now(
+            client, ref, await chain_first_run_id(client, ref), result
+        )
+
+    async def _close_now(
+        self, client: Client, ref: StreamRef, first_run_id: str, result: Any
+    ) -> None:
+        # Closed in the store before the notifier completes the operations, so
+        # a reader the completion reaches always finds the stream's end.
+        await self._close_topic(client, ref, ref.topic, first_run_id)
         # A write's notification may still be finding its chain.
         await asyncio.gather(*self._notifying, return_exceptions=True)
         key = (client.namespace, ref.workflow_id, first_run_id, ref.topic)
@@ -168,12 +188,59 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         return _NotifyingProducer(producer, self, client, ref, topic)
 
     def _notify_promoted(self, client: Client, stage: StageRef) -> None:
-        """Notify each topic of a Workflow's batch once it is visible."""
+        """Notify each topic of a Workflow's batch once it is visible.
+
+        Close the topics the batch's Workflow Task closed.
+        """
+        closed = {topic for topic, _ in stage.closes}
+        if stage.closes:
+            task = asyncio.create_task(self._close_promoted(client, stage))
+            self._closing.add(task)
+            task.add_done_callback(self._closing.discard)
         if self._notifiers is None:
             return
         ref = StreamRef.for_workflow(stage.workflow_id)
         for topic in stage.topics:
-            self._track(self._notify_latest(client, ref, topic, stage.first_run_id))
+            # A close carries the topic's last counter itself.
+            if topic not in closed:
+                self._track(self._notify_latest(client, ref, topic, stage.first_run_id))
+
+    async def _close_promoted(self, client: Client, stage: StageRef) -> None:
+        for topic, result in stage.closes:
+            ref = StreamRef.for_workflow(stage.workflow_id, topic=topic)
+            try:
+                first_run_id = stage.first_run_id or await chain_first_run_id(
+                    client, ref
+                )
+                await self._close_now(client, ref, first_run_id, RawValue(result))
+            except Exception:
+                # Only a Worker that promotes the batch again, on replay in
+                # another process, tries again. Closing is idempotent.
+                logger.warning(
+                    "Could not close Workflow %r topic %r after its last batch",
+                    stage.workflow_id,
+                    topic,
+                    exc_info=True,
+                )
+
+    async def _close_topic(
+        self, client: Client, ref: StreamRef, topic: str, first_run_id: str
+    ) -> None:
+        """Close one topic of a run chain's stream in the store. Idempotent.
+
+        Internal. Once closed, a read of the topic ends after the records the
+        store holds, an append raises
+        :class:`temporalio.contrib.streams.StreamClosedError`, and the
+        Workflow's own committed output still lands.
+
+        Raises:
+            StreamUnsupportedError: The provider cannot close a topic.
+        """
+        del client, first_run_id
+        raise StreamUnsupportedError(
+            f"stream provider {self.name()!r} cannot close topic {topic!r} of "
+            f"Workflow {ref.workflow_id!r}"
+        )
 
     def _track(self, notifying: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(notifying)
