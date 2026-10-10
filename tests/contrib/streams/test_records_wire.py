@@ -13,6 +13,7 @@ from temporalio.contrib.streams import (
     BEGINNING,
     Cursor,
     RecordKind,
+    StreamRecordError,
     Supersession,
 )
 from temporalio.contrib.streams._body import (
@@ -85,17 +86,18 @@ def test_supersession_is_synthesized_from_observations():
     assert attempts.note("other", 0, topic="t", previous=Cursor("c4")) is None
 
 
-def test_the_decoder_skips_a_record_it_cannot_decode():
-    said: list[str] = []
+def test_the_decoder_raises_with_the_cursor_of_a_record_it_cannot_decode():
     converter = DataConverter.default.payload_converter
-    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=said.append)
+    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=lambda _: None)
     bad = WireRecord(
         topic="t",
         kind=RecordKind.DATA.value,  # type: ignore[arg-type]
         body=Payload(metadata={"encoding": b"json/plain"}, data=b"{not json"),
     )
-    assert decoder.decode(Cursor("c1"), bad) == []
-    assert said and "c1" in said[0]
+    with pytest.raises(StreamRecordError) as raised:
+        decoder.decode(Cursor("c1"), bad)
+    # The caller can resume past it on purpose.
+    assert raised.value.cursor == Cursor("c1")
     good = to_wire(converter, topic="t", kind=RecordKind.DATA, value=3)
     assert [r.value for r in decoder.decode(Cursor("c2"), good)] == [3]
 
