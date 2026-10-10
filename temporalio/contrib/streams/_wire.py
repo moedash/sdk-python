@@ -9,6 +9,7 @@ produced and consumed through the payload converter, so a pre-encoded
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from typing import Any
 
@@ -132,6 +133,8 @@ class RecordDecoder:
             raise StreamRecordError(
                 f"stream record at {cursor} could not be decoded: {error}", cursor
             ) from error
+        if self._attempts.behind(wire.producer_id, wire.attempt):
+            record = dataclasses.replace(record, stale=True)
         out: list[StreamRecord[Any]] = []
         superseded = self._attempts.note(
             wire.producer_id, wire.attempt, topic=wire.topic, previous=self._previous

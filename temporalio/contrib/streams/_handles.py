@@ -12,7 +12,7 @@ writes with a producer id and attempt of its own.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import Any, TypeVar, overload
+from typing import Any, TypeVar, cast, overload
 
 import temporalio.activity
 from temporalio.client import Client
@@ -82,7 +82,9 @@ class ActivityStreamHandle:
         result_type: type | None = None,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         """See :meth:`temporalio.contrib.streams.StreamHandle.read`."""
-        inner: Any = self._inner
+        # One call forwards both overloads, which the checker can't match to
+        # the protocol's overloads separately.
+        inner = cast(Any, self._inner)
         return inner.read(topic=topic, after=after, result_type=result_type)
 
     async def latest(self, *, topic: str | StreamTopic[Any] | None = None) -> Cursor:
@@ -105,7 +107,9 @@ class ActivityStreamHandle:
         retry makes readers see ``SUPERSEDED``. A retry starts a new sequence, and the store
         deduplicates a repeated append within one attempt.
         """
-        inner: Any = self._inner
+        # One call forwards both overloads, which the checker can't match to
+        # the protocol's overloads separately.
+        inner = cast(Any, self._inner)
         return inner.producer(
             topic=topic, producer_id=self._producer_id, attempt=self._attempt
         )

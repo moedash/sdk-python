@@ -110,3 +110,9 @@ class StreamRecord(Generic[T]):
     """The published value. Set on ``DATA`` only."""
     supersession: Supersession | None = None
     """The attempt change being reported. Set on ``SUPERSEDED`` only."""
+    stale: bool = False
+    """An older attempt wrote it after this read delivered a newer attempt.
+
+    Such a record is not part of the producer's current answer, for example
+    the last writes of an Activity attempt that timed out but kept running.
+    """

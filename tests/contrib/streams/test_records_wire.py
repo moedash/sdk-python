@@ -120,10 +120,13 @@ def test_the_decoder_reports_a_backwards_attempt():
             sequence=1,
         )
 
-    decoder.decode(Cursor("c1"), record(2))
+    current = decoder.decode(Cursor("c1"), record(2))
     out = decoder.decode(Cursor("c2"), record(1))
-    # Still delivered, because dropping it would hide what the store holds.
+    # Still delivered, because dropping it would hide what the store holds,
+    # but marked, so the consumer can keep it out of the current answer.
     assert [r.value for r in out] == [1]
+    assert [r.stale for r in out] == [True]
+    assert [r.stale for r in current] == [False]
     assert len(said) == 1 and "behind attempt 2" in said[0]
 
 
