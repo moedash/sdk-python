@@ -42,6 +42,7 @@ from temporalio.contrib.streams._provider import StreamHandle, StreamProducer
 from temporalio.contrib.streams._record import Cursor
 from temporalio.contrib.streams._ref import StreamRef
 from temporalio.plugin import SimplePlugin
+from temporalio.service import RPCError, RPCStatusCode
 
 if TYPE_CHECKING:
     from temporalio.client import Client, ClientConfig
@@ -54,6 +55,22 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_EXTERN = "__temporal_contrib_streams_output"
 # How long a stopping Worker waits for the notifications still out.
 _FLUSH_LIMIT = 10.0
+# The wait before a failed post-promotion close is tried again. It doubles up
+# to the cap.
+_CLOSE_RETRY_FIRST = 1.0
+_CLOSE_RETRY_CAP = 60.0
+# Answers that mean the server will never take the close, so a retry can't
+# help.
+_CLOSE_REFUSED = frozenset(
+    {
+        RPCStatusCode.UNIMPLEMENTED,
+        RPCStatusCode.INVALID_ARGUMENT,
+        RPCStatusCode.NOT_FOUND,
+        RPCStatusCode.PERMISSION_DENIED,
+        RPCStatusCode.UNAUTHENTICATED,
+        RPCStatusCode.FAILED_PRECONDITION,
+    }
+)
 
 _activity_provider: contextvars.ContextVar[StreamProviderPlugin | None] = (
     contextvars.ContextVar("__temporal_contrib_streams_provider", default=None)
@@ -120,6 +137,9 @@ class StreamProviderPlugin(SimplePlugin, ABC):
 
     async def flush_notifications(self) -> None:
         """Wait until no notification of this provider is out or waiting.
+
+        That includes a Workflow's close that is still being retried after a
+        promotion, so bound the wait when the server may be down.
 
         .. warning::
             This API is experimental.
@@ -215,20 +235,40 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     async def _close_promoted(self, client: Client, stage: StageRef) -> None:
         for topic, result in stage.closes:
             ref = StreamRef.for_workflow(stage.workflow_id, topic=topic)
-            try:
-                first_run_id = stage.first_run_id or await chain_first_run_id(
-                    client, ref
-                )
-                await self._close_now(client, ref, first_run_id, RawValue(result))
-            except Exception:
-                # Only a Worker that promotes the batch again, on replay in
-                # another process, tries again. Closing is idempotent.
-                logger.warning(
-                    "Could not close Workflow %r topic %r after its last batch",
-                    stage.workflow_id,
-                    topic,
-                    exc_info=True,
-                )
+            delay = _CLOSE_RETRY_FIRST
+            # The close lives only in this Worker's memory, so it's tried until
+            # it lands or the Worker stops. Closing is idempotent.
+            while True:
+                try:
+                    first_run_id = stage.first_run_id or await chain_first_run_id(
+                        client, ref
+                    )
+                    await self._close_now(client, ref, first_run_id, RawValue(result))
+                    break
+                except RPCError as error:
+                    if error.status in _CLOSE_REFUSED:
+                        logger.warning(
+                            "The server refused the close of Workflow %r topic %r",
+                            stage.workflow_id,
+                            topic,
+                            exc_info=True,
+                        )
+                        break
+                    self._warn_close_retry(stage.workflow_id, topic, delay)
+                except Exception:
+                    self._warn_close_retry(stage.workflow_id, topic, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _CLOSE_RETRY_CAP)
+
+    def _warn_close_retry(self, workflow_id: str, topic: str, delay: float) -> None:
+        logger.warning(
+            "Could not close Workflow %r topic %r after its last batch; trying "
+            "again in %.0f s",
+            workflow_id,
+            topic,
+            delay,
+            exc_info=True,
+        )
 
     def _warn_closed_topic(self, workflow_id: str, topic: str) -> None:
         """Say that a Workflow's promoted output landed on a closed topic.
@@ -496,6 +536,12 @@ class _NotifyingProducer(StreamProducer[Any]):
                 cursor.token,
                 exc_info=True,
             )
+            return
+        # The chain the store wrote to, when the producer knows it, so a new
+        # chain on the Workflow id in between can't take this notification.
+        written = getattr(self._inner, "_written_chain", None)
+        if isinstance(written, str) and written:
+            self._notifier(written).notify(cursor.token, counter)
             return
         found = self._first_run_id
         if found is not None and found.done() and found.exception() is None:
