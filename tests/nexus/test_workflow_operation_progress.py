@@ -531,8 +531,8 @@ async def test_live_progress_is_ordered_folded_ended_and_replayed(
 
     # With no worker polling, the burst lands while the caller's next task is
     # scheduled but not started. The first notification that reaches the caller
-    # rides that task, and the rest fold into it without a task of their own:
-    # they only say the stream moved, and the task's read sees what they report.
+    # rides that task, and the server schedules at most one more task for the
+    # newer progress that folded in after the task's scheduled event was written.
     for counter in (2, 3, 4):
         await _notify(client, stream_workflow_id, counter)
     # The notifier delivers in order, so by now the caller has every counter.
@@ -554,7 +554,7 @@ async def test_live_progress_is_ordered_folded_ended_and_replayed(
     assert described.callbacks[0].delivered_counter == 4
 
     async with worker():
-        burst = await _wait_for_counters(client, workflow_id, lambda c: len(c) > 1)
+        burst = await _wait_for_counters(client, workflow_id, lambda c: 4 in c)
         assert burst is not None
         # Closing the stream completes the operation, which ends the wait.
         await _notify(client, stream_workflow_id, 5, close_result="done")
@@ -562,9 +562,10 @@ async def test_live_progress_is_ordered_folded_ended_and_replayed(
 
     assert observed.result == "done"
     assert observed.counters == burst
-    assert len(observed.counters) == 2, "the whole burst costs one task"
     assert observed.counters[0] == 1
-    assert observed.counters[1] in (2, 3, 4)
+    assert observed.counters[-1] == 4, "a burst folds to its highest counter"
+    assert observed.counters == sorted(set(observed.counters))
+    assert len(observed.counters) <= 3, "the burst costs at most two tasks"
     assert observed.positions == [f"cursor-{c}" for c in observed.counters]
 
     live_replayed.clear()

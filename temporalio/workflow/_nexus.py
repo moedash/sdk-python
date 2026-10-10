@@ -89,12 +89,9 @@ class NexusOperationHandle(Generic[OutputT]):
         comes from History, so a replay returns the same values at the same
         points.
 
-        Progress is a hint that the operation's output moved at least to
-        :py:attr:`NexusOperationProgress.position`. Progress that arrives
-        while this Workflow's next task is scheduled but not yet started rides
-        that task without one of its own, so counters may be skipped and the
-        last one seen can be lower than the handler's latest. Read the output
-        from the position to see everything it holds.
+        Progress is a hint that the operation's output moved to
+        :py:attr:`NexusOperationProgress.position`. A burst of progress folds
+        to its highest counter, so intermediate counters may be skipped.
 
         .. warning::
            This API is experimental.
