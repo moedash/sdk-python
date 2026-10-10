@@ -139,6 +139,7 @@ from temporalio.contrib.streams._output import (
     events_after,
 )
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
+from temporalio.contrib.streams._provider import StreamProducer
 from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
 from temporalio.contrib.streams._ref import StreamRef
 from temporalio.contrib.streams._topic import StreamTopic, resolve_topic
@@ -740,7 +741,7 @@ class RedisStreamHandle:
         producer_id: str,
         attempt: int,
         next_sequence: int = 1,
-    ) -> RedisProducer[Any]:
+    ) -> StreamProducer[Any]:
         """See :meth:`temporalio.contrib.streams.StreamHandle.producer`."""
         if not producer_id:
             raise ValueError("producer_id must not be empty")
@@ -750,7 +751,12 @@ class RedisStreamHandle:
                     f"{label} must be an int of at least 1, got {number!r}"
                 )
         name, _ = self._resolve(topic, None)
-        return RedisProducer(self, name, producer_id, attempt, next_sequence)
+        return self._streams._notified_producer(
+            self._client,
+            self._ref,
+            name,
+            RedisProducer(self, name, producer_id, attempt, next_sequence),
+        )
 
     def _resolve(
         self, topic: str | StreamTopic[Any] | None, result_type: type | None

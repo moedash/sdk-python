@@ -44,7 +44,7 @@ from temporalio.contrib.streams._body import (
 )
 from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
-from temporalio.contrib.streams.redis import RedisStreams
+from temporalio.contrib.streams.redis import RedisProducer, RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.exceptions import ApplicationError
 from tests.helpers import new_worker
@@ -388,6 +388,7 @@ async def test_the_worker_closes_the_streams_of_an_ended_chain(
         await producer.append({"n": 2})
     # A retry of a batch that landed before the close still finds it.
     retry = stream.producer(topic=OTHER, producer_id="backend", attempt=1)
+    assert isinstance(retry, RedisProducer)
     retry._owner_checked_at = time.monotonic()
     assert await retry.append({"n": 1}) == landed
     # The final Workflow Task's own publish is committed output, never refused.

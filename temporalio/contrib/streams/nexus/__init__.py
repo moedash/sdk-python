@@ -21,10 +21,21 @@ is generated from it by ``scripts/gen_nexus_streams_api.py``:
   Worker, posting to the endpoint over the Nexus HTTP ingress. It depends on
   nothing beyond the standard library.
 
-:class:`TemporalStreamsHandler` is the one hand-written piece: it serves the
-generated service over a :class:`temporalio.contrib.streams.StreamProvider`.
+:class:`TemporalStreamsHandler` serves the generated service over a
+:class:`temporalio.contrib.streams.StreamProvider`.
+
+A Nexus operation can also hand its caller a stream.
+:class:`StreamOperationHandler` is such an operation: its start attaches the
+caller to the stream's notifier on the server and puts the
+:class:`StreamRef` in the operation token (:func:`stream_ref_from_token`).
+A provider with :meth:`temporalio.contrib.streams.StreamProviderPlugin.notify_on_append`
+on tells the notifier when the stream moves, which the caller sees as
+operation progress, and
+:meth:`temporalio.contrib.streams.StreamProviderPlugin.close_stream` completes
+the operation. :class:`StreamNotifier` is the notifier client both use.
 """
 
+from temporalio.contrib.streams._notify import StreamNotifier
 from temporalio.contrib.streams.nexus._generated import (
     AppendInput,
     AppendOutput,
@@ -40,6 +51,10 @@ from temporalio.contrib.streams.nexus._generated.client import (
     TemporalStreamsHttpClient,
 )
 from temporalio.contrib.streams.nexus._handler import TemporalStreamsHandler
+from temporalio.contrib.streams.nexus._operation import (
+    StreamOperationHandler,
+    stream_ref_from_token,
+)
 
 __all__ = [
     "AppendInput",
@@ -49,8 +64,11 @@ __all__ = [
     "ReadOutput",
     "RecordWire",
     "StreamCursor",
+    "StreamNotifier",
+    "StreamOperationHandler",
     "StreamRef",
     "TemporalStreams",
     "TemporalStreamsHandler",
     "TemporalStreamsHttpClient",
+    "stream_ref_from_token",
 ]

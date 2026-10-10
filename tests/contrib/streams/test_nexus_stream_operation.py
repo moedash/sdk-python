@@ -1,0 +1,555 @@
+"""A Nexus operation whose start hands its caller a stream.
+
+The handler attaches the caller's callback to the stream's notifier and puts
+the stream reference in the operation token. A producer's appends notify the
+notifier, folded with one call in flight, and closing the stream completes
+the operation with the close result.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any
+
+import nexusrpc
+import nexusrpc.handler
+import pytest
+
+import temporalio.nexus
+from temporalio import workflow
+from temporalio.api.enums.v1 import StreamOwnerKind
+from temporalio.api.stream.v1 import StreamReference
+from temporalio.api.workflowservice.v1 import (
+    AttachStreamCallbackRequest,
+    DescribeStreamNotifierRequest,
+    DetachStreamCallbackRequest,
+    NotifyStreamRequest,
+)
+from temporalio.client import Client
+from temporalio.contrib.streams import StreamRef, workflow_writer
+from temporalio.contrib.streams._output import StageRef
+from temporalio.contrib.streams.memory import MemoryStreams
+from temporalio.contrib.streams.nexus import (
+    StreamNotifier,
+    StreamOperationHandler,
+    stream_ref_from_token,
+)
+from temporalio.converter import DataConverter
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
+from temporalio.worker._nexus import _NexusTaskCancellation
+from tests.helpers.nexus import make_nexus_endpoint_name
+
+REF = StreamRef.for_workflow("owner-1", topic="tokens")
+
+
+@dataclass
+class FakeWorkflowService:
+    """Records the notifier calls. A call can be held until released."""
+
+    attached: list[AttachStreamCallbackRequest] = field(default_factory=list)
+    detached: list[DetachStreamCallbackRequest] = field(default_factory=list)
+    notified: list[NotifyStreamRequest] = field(default_factory=list)
+    hold: asyncio.Event | None = None
+    in_flight: int = 0
+    max_in_flight: int = 0
+    fail_next: bool = False
+
+    async def attach_stream_callback(self, request: AttachStreamCallbackRequest) -> Any:
+        self.attached.append(request)
+
+    async def detach_stream_callback(self, request: DetachStreamCallbackRequest) -> Any:
+        self.detached.append(request)
+
+    async def notify_stream(self, request: NotifyStreamRequest) -> Any:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self.hold is not None:
+                await self.hold.wait()
+            if self.fail_next:
+                self.fail_next = False
+                raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+            self.notified.append(request)
+        finally:
+            self.in_flight -= 1
+
+
+class FakeClient:
+    """Enough of a client for the handler and the notifier, delegating the
+    rest to a real one when given."""
+
+    def __init__(
+        self, service: FakeWorkflowService, real: Client | None = None
+    ) -> None:
+        self.workflow_service = service
+        self.namespace = "default"
+        self.data_converter = DataConverter.default
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        if self._real is None:
+            raise AttributeError(name)
+        return getattr(self._real, name)
+
+
+def fake_client(service: FakeWorkflowService, real: Client | None = None) -> Client:
+    client: Any = FakeClient(service, real)
+    return client
+
+
+def start_context(callback_url: str | None = "temporal://system") -> Any:
+    return nexusrpc.handler.StartOperationContext(
+        service="ChatService",
+        operation="chat",
+        headers={},
+        task_cancellation=_NexusTaskCancellation(),
+        request_id="attach-1",
+        callback_url=callback_url,
+        callback_headers={"nexus-callback-token": "abc"},
+    )
+
+
+def cancel_context() -> Any:
+    return nexusrpc.handler.CancelOperationContext(
+        service="ChatService",
+        operation="chat",
+        headers={},
+        task_cancellation=_NexusTaskCancellation(),
+    )
+
+
+async def open_stream(_ctx: Any, _prompt: str) -> StreamRef:
+    return REF
+
+
+def handler_with(
+    monkeypatch: pytest.MonkeyPatch, service: FakeWorkflowService
+) -> StreamOperationHandler[str, str]:
+    monkeypatch.setattr("temporalio.nexus.client", lambda: FakeClient(service))
+    return StreamOperationHandler(open_stream)
+
+
+async def test_start_attaches_the_callers_callback_and_hands_back_the_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeWorkflowService()
+    handler = handler_with(monkeypatch, service)
+
+    result = await handler.start(start_context(), "hi")
+
+    assert isinstance(result, nexusrpc.handler.StartOperationResultAsync)
+    assert stream_ref_from_token(result.token) == REF
+    [attach] = service.attached
+    assert attach.namespace == "default"
+    assert attach.request_id == "attach-1"
+    assert attach.callback.url == "temporal://system"
+    assert dict(attach.callback.header) == {"nexus-callback-token": "abc"}
+    assert attach.stream_ref == StreamReference(
+        owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
+        workflow_id="owner-1",
+        topic="tokens",
+    )
+
+
+async def test_a_pinned_ref_attaches_without_its_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeWorkflowService()
+    monkeypatch.setattr("temporalio.nexus.client", lambda: FakeClient(service))
+    pinned = StreamRef.for_workflow("owner-1", run_id="run-1", topic="tokens")
+
+    async def open_pinned(_ctx: Any, _prompt: str) -> StreamRef:
+        return pinned
+
+    result = await StreamOperationHandler(open_pinned).start(start_context(), "hi")
+
+    assert stream_ref_from_token(result.token) == pinned
+    # One notifier per stream across runs: the run is the reader's business.
+    assert service.attached[0].stream_ref.run_id == ""
+
+
+async def test_a_start_without_a_callback_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeWorkflowService()
+    handler = handler_with(monkeypatch, service)
+
+    with pytest.raises(nexusrpc.HandlerError) as raised:
+        await handler.start(start_context(callback_url=None), "hi")
+
+    assert raised.value.type == nexusrpc.HandlerErrorType.BAD_REQUEST
+    assert not service.attached
+
+
+async def test_cancel_detaches_the_callback_it_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeWorkflowService()
+    handler = handler_with(monkeypatch, service)
+    started = await handler.start(start_context(), "hi")
+
+    await handler.cancel(cancel_context(), started.token)
+
+    [detach] = service.detached
+    assert detach.request_id == "attach-1"
+    assert detach.stream_ref == service.attached[0].stream_ref
+
+
+def test_a_token_that_names_no_stream_is_refused() -> None:
+    for token in ["", "not-a-token", "eyJ2IjogMn0"]:
+        with pytest.raises(ValueError):
+            stream_ref_from_token(token)
+
+
+async def test_notifications_fold_with_one_call_in_flight() -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    notifier = StreamNotifier(fake_client(service), REF)
+
+    for position in ("p1", "p2", "p3", "p4", "p5"):
+        notifier.notify(position)
+        await asyncio.sleep(0)
+    hold.set()
+    await notifier.flush()
+
+    assert [request.position for request in service.notified] == ["p1", "p5"]
+    assert service.max_in_flight == 1
+    first, second = service.notified
+    assert 0 < first.counter < second.counter
+    assert not first.close and not second.close
+
+
+async def test_close_waits_for_the_call_in_flight_and_carries_the_result() -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    notifier = StreamNotifier(fake_client(service), REF)
+    notifier.notify("p1")
+    await asyncio.sleep(0)
+
+    closing = asyncio.create_task(notifier.close("done"))
+    await asyncio.sleep(0.01)
+    assert not closing.done()
+    hold.set()
+    await closing
+
+    assert service.max_in_flight == 1
+    last = service.notified[-1]
+    assert last.close
+    assert last.counter > service.notified[0].counter
+    assert (
+        DataConverter.default.payload_converter.from_payload(last.close_result)
+        == "done"
+    )
+
+
+async def test_a_notification_after_close_sends_nothing() -> None:
+    service = FakeWorkflowService()
+    notifier = StreamNotifier(fake_client(service), REF)
+    await notifier.close()
+    sent = len(service.notified)
+
+    notifier.notify("late")
+    await notifier.flush()
+
+    assert len(service.notified) == sent
+
+
+async def test_a_failed_notification_leaves_the_next_one_to_tell_the_reader() -> None:
+    service = FakeWorkflowService(fail_next=True)
+    notifier = StreamNotifier(fake_client(service), REF)
+
+    notifier.notify("p1")
+    await notifier.flush()
+    notifier.notify("p2")
+    await notifier.flush()
+
+    assert [request.position for request in service.notified] == ["p2"]
+
+
+async def test_a_provider_that_notifies_tells_the_notifier_after_each_append(
+    client: Client,
+) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    ref = StreamRef.for_workflow(f"owner-{uuid.uuid4()}", topic="tokens")
+    handle = provider.get_stream_handle(stream_client, ref)
+    producer = handle.producer(producer_id="p", attempt=1)
+
+    first = await producer.append("a")
+    last = await producer.append("b", "c")
+    await provider.close_stream(stream_client, ref, "done")
+
+    positions = [request.position for request in service.notified if not request.close]
+    # The two appends may fold into one notification, but the newest is told.
+    assert positions[-1] == last.token
+    assert set(positions) <= {first.token, last.token}
+    assert all(
+        request.stream_ref.workflow_id == ref.workflow_id
+        and request.stream_ref.topic == "tokens"
+        for request in service.notified
+    )
+    assert service.notified[-1].close
+    await provider.close()
+
+
+def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stage = StageRef(
+        namespace="default",
+        workflow_id="owner-1",
+        first_run_id="run-1",
+        token="stage-1",
+        topics=("tokens", "status"),
+    )
+
+    async def promote() -> None:
+        provider._notify_promoted(fake_client(service), stage)  # type: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.05)
+
+    asyncio.run(promote())
+
+    assert sorted(request.stream_ref.topic for request in service.notified) == [
+        "status",
+        "tokens",
+    ]
+    assert all(
+        request.stream_ref.workflow_id == "owner-1" for request in service.notified
+    )
+
+
+def test_a_provider_without_notifications_tells_nobody() -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams()
+    stage = StageRef(
+        namespace="default",
+        workflow_id="owner-1",
+        first_run_id="run-1",
+        token="stage-1",
+        topics=("tokens",),
+    )
+
+    async def promote() -> None:
+        provider._notify_promoted(fake_client(service), stage)  # type: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.05)
+
+    asyncio.run(promote())
+
+    assert service.notified == []
+
+
+# Live: a caller Workflow sees the producer's appends as progress and the
+# close result as the operation's result. Needs a server with Nexus progress
+# and the stream notifier; any other server makes the test skip.
+
+
+@nexusrpc.service
+class ChatService:
+    chat: nexusrpc.Operation[str, str]
+
+
+@dataclass
+class Observed:
+    counters: list[int]
+    result: str
+
+
+@workflow.defn(name="StreamOperationCaller")
+class StreamOperationCaller:
+    def __init__(self) -> None:
+        self._counters: list[int] = []
+
+    @workflow.run
+    async def run(self, endpoint: str) -> Observed:
+        nexus_client = workflow.create_nexus_client(
+            service=ChatService, endpoint=endpoint
+        )
+        handle = await nexus_client.start_operation(ChatService.chat, "hello")
+        last = 0
+        while (progress := await handle.progress(after_counter=last)) is not None:
+            self._counters.append(progress.counter)
+            last = progress.counter
+        return Observed(counters=list(self._counters), result=await handle)
+
+    @workflow.query
+    def counters(self) -> list[int]:
+        return list(self._counters)
+
+
+async def _skip_without_notifier(client: Client, ref: StreamRef) -> None:
+    try:
+        await client.workflow_service.describe_stream_notifier(
+            DescribeStreamNotifierRequest(
+                namespace=client.namespace,
+                stream_ref=StreamReference(
+                    owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
+                    workflow_id=ref.workflow_id,
+                    topic=ref.topic,
+                ),
+            )
+        )
+    except RPCError as err:
+        if err.status == RPCStatusCode.UNIMPLEMENTED:
+            pytest.skip(f"server has no stream notifier: {err.message}")
+        if err.status != RPCStatusCode.NOT_FOUND:
+            raise
+
+
+async def _wait_for(predicate: Any, attempts: int = 100) -> Any:
+    for _ in range(attempts):
+        value = await predicate()
+        if value:
+            return value
+        await asyncio.sleep(0.1)
+    return None
+
+
+async def test_a_caller_sees_appends_as_progress_and_the_close_as_the_result(
+    client: Client, env: WorkflowEnvironment
+) -> None:
+    ref = StreamRef.for_workflow(f"owner-{uuid.uuid4()}", topic="tokens")
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-operation-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+    provider = MemoryStreams().notify_on_append()
+    started = asyncio.Event()
+
+    async def open_owned_stream(_ctx: Any, _prompt: str) -> StreamRef:
+        started.set()
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(open_owned_stream)
+
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[StreamOperationCaller],
+        nexus_service_handlers=[ChatServiceHandler()],
+    ):
+        handle = await client.start_workflow(
+            StreamOperationCaller.run,
+            endpoint,
+            id=f"stream-operation-caller-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        await asyncio.wait_for(started.wait(), 10)
+        # Progress that reaches the caller before its started event is dropped
+        # (DD-43), so the first append waits for the operation to be started.
+
+        async def operation_started() -> bool:
+            history = await handle.fetch_history()
+            return any(
+                event.HasField("nexus_operation_started_event_attributes")
+                for event in history.events
+            )
+
+        assert await _wait_for(operation_started)
+        producer = provider.get_stream_handle(client, ref).producer(
+            producer_id="writer", attempt=1
+        )
+        await producer.append("a")
+
+        async def first_progress() -> list[int]:
+            return await handle.query(StreamOperationCaller.counters)
+
+        assert await _wait_for(first_progress), "the caller never saw progress"
+        await producer.append("b", "c")
+        await provider.close_stream(client, ref, "done")
+
+        observed = await asyncio.wait_for(handle.result(), 20)
+
+    assert observed.result == "done"
+    assert observed.counters, observed
+    assert observed.counters == sorted(set(observed.counters)), observed
+    await provider.close()
+
+
+TOKENS_TOPIC = "tokens"
+
+
+@workflow.defn(name="StreamOwnerThatPublishes")
+class StreamOwnerThatPublishes:
+    """Publishes its tokens on its own stream, then waits to be told to end."""
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self, tokens: list[str]) -> None:
+        writer = workflow_writer(TOKENS_TOPIC)
+        for token in tokens:
+            writer.publish(token)
+            await workflow.sleep(timedelta(milliseconds=200))
+        writer.finish()
+        await workflow.wait_condition(lambda: self._done)
+
+    @workflow.signal
+    def done(self) -> None:
+        self._done = True
+
+
+async def test_a_workflows_own_publishes_reach_the_caller_as_progress(
+    client: Client, env: WorkflowEnvironment
+) -> None:
+    owner_id = f"owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=TOKENS_TOPIC)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-owner-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+    provider = MemoryStreams().notify_on_append()
+
+    async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
+        await temporalio.nexus.client().start_workflow(
+            StreamOwnerThatPublishes.run,
+            ["a", "b", "c"],
+            id=owner_id,
+            task_queue=task_queue,
+        )
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(start_owner)
+
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[StreamOperationCaller, StreamOwnerThatPublishes],
+        nexus_service_handlers=[ChatServiceHandler()],
+        plugins=[provider],
+    ):
+        caller = await client.start_workflow(
+            StreamOperationCaller.run,
+            endpoint,
+            id=f"stream-owner-caller-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+        # The Workflow's batches are notified only once they are visible,
+        # which is after the task that published them completed.
+        async def several_progresses() -> list[int] | None:
+            counters = await caller.query(StreamOperationCaller.counters)
+            return counters if len(counters) >= 2 else None
+
+        assert await _wait_for(several_progresses), "the caller saw too little progress"
+        await client.get_workflow_handle(owner_id).signal(StreamOwnerThatPublishes.done)
+        await provider.close_stream(client, ref, "3 tokens")
+        observed = await asyncio.wait_for(caller.result(), 20)
+
+    assert observed.result == "3 tokens"
+    assert observed.counters == sorted(set(observed.counters)), observed
+    await provider.close()

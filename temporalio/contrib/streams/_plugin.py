@@ -20,16 +20,20 @@ import contextvars
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import Self
+
 import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
 from temporalio.contrib.streams._errors import StreamUnsupportedError
+from temporalio.contrib.streams._notify import StreamNotifier
 from temporalio.contrib.streams._output import (
     OutputCoordinator,
     StagedBatch,
     StageRef,
 )
-from temporalio.contrib.streams._provider import StreamHandle
+from temporalio.contrib.streams._provider import StreamHandle, StreamProducer
+from temporalio.contrib.streams._record import Cursor
 from temporalio.contrib.streams._ref import StreamRef
 from temporalio.plugin import SimplePlugin
 
@@ -60,6 +64,76 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     def __init__(self, name: str) -> None:
         """Name the plugin; the name shows in the Worker's plugin list."""
         super().__init__(name)
+        # Notifiers by namespace, owner and topic, once notify_on_append is on.
+        self._notifiers: dict[tuple[str, str, str], StreamNotifier] | None = None
+
+    def notify_on_append(self) -> Self:
+        """Tell each stream's notifier on the server when the stream moves.
+
+        With this on, every append and finish through this provider, and every
+        batch a Workflow publishes once it is visible, notifies the notifier
+        of that stream and topic, folded, with one call in flight per stream
+        (see :class:`temporalio.contrib.streams.nexus.StreamNotifier`). That is
+        what makes a caller of a stream-returning Nexus operation see progress.
+        Close a stream with :meth:`close_stream`.
+
+        Needs a server with the stream notifier.
+
+        .. warning::
+            This API is experimental.
+        """
+        if self._notifiers is None:
+            self._notifiers = {}
+        return self
+
+    async def close_stream(
+        self, client: Client, ref: StreamRef, result: Any = None
+    ) -> None:
+        """Close ``ref``'s stream on the server's notifier with ``result``.
+
+        Every Nexus operation that handed out this stream completes with
+        ``result``. The records stay readable. Waits for the notification in
+        flight first.
+
+        Raises:
+            temporalio.service.RPCError: The server refused the close.
+
+        .. warning::
+            This API is experimental.
+        """
+        key = (client.namespace, ref.workflow_id, ref.topic)
+        notifier = (self._notifiers or {}).pop(key, None) or StreamNotifier(client, ref)
+        await notifier.close(result)
+
+    def _notified_producer(
+        self,
+        client: Client | None,
+        ref: StreamRef,
+        topic: str,
+        producer: StreamProducer[Any],
+    ) -> StreamProducer[Any]:
+        """``producer``, notifying after each write when notifications are on."""
+        if self._notifiers is None or client is None:
+            return producer
+        return _NotifyingProducer(producer, self._notifier(client, ref, topic))
+
+    def _notify_promoted(self, client: Client, stage: StageRef) -> None:
+        """Notify each topic of a Workflow's batch once it is visible."""
+        if self._notifiers is None:
+            return
+        ref = StreamRef.for_workflow(stage.workflow_id)
+        for topic in stage.topics:
+            # A promotion has no cursor of its own; the reader reads from its own.
+            self._notifier(client, ref, topic).notify("")
+
+    def _notifier(self, client: Client, ref: StreamRef, topic: str) -> StreamNotifier:
+        assert self._notifiers is not None
+        key = (client.namespace, ref.workflow_id, topic)
+        notifier = self._notifiers.get(key)
+        if notifier is None:
+            notifier = StreamNotifier(client, ref, topic=topic)
+            self._notifiers[key] = notifier
+        return notifier
 
     @abstractmethod
     def get_stream_handle(self, client: Client, ref: StreamRef) -> StreamHandle:
@@ -166,6 +240,37 @@ class StreamProviderPlugin(SimplePlugin, ABC):
                 # Worker twice; one interceptor is enough.
                 return held
         return [*held, _StreamsInterceptor(self, client, namespace)]
+
+
+class _NotifyingProducer(StreamProducer[Any]):
+    """A producer that notifies the stream's notifier after each write."""
+
+    def __init__(self, inner: StreamProducer[Any], notifier: StreamNotifier) -> None:
+        self._inner = inner
+        self._notifier = notifier
+
+    @property
+    def producer_id(self) -> str:
+        """See :attr:`temporalio.contrib.streams.StreamProducer.producer_id`."""
+        return self._inner.producer_id
+
+    @property
+    def attempt(self) -> int:
+        """See :attr:`temporalio.contrib.streams.StreamProducer.attempt`."""
+        return self._inner.attempt
+
+    async def append(self, *values: Any) -> Cursor:
+        """See :meth:`temporalio.contrib.streams.StreamProducer.append`."""
+        cursor = await self._inner.append(*values)
+        if values:
+            self._notifier.notify(cursor.token)
+        return cursor
+
+    async def finish(self) -> Cursor:
+        """See :meth:`temporalio.contrib.streams.StreamProducer.finish`."""
+        cursor = await self._inner.finish()
+        self._notifier.notify(cursor.token)
+        return cursor
 
 
 def _two_providers(held: StreamProviderPlugin, new: StreamProviderPlugin) -> str:

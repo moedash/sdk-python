@@ -591,6 +591,10 @@ class OutputCoordinator:
         async with run.settling:
             await self._settle(run)
 
+    def _notify_promoted(self, stage: StageRef) -> None:
+        if self._client is not None:
+            self.provider._notify_promoted(self._client, stage)
+
     def _note_settled(self, token: str) -> None:
         self._settled[token] = None
         self._settled.move_to_end(token)
@@ -600,6 +604,7 @@ class OutputCoordinator:
     async def _settle(self, run: _RunOutput) -> None:
         for proven in list(run.proven):
             await self.provider._promote(proven.ref)
+            self._notify_promoted(proven.ref)
             self._note_settled(proven.token)
             # In place: an eviction may have handed this list on already.
             run.staged[:] = [
@@ -625,6 +630,7 @@ class OutputCoordinator:
             decision = decide(events, stage)
             if decision is _Decision.PROMOTE:
                 await self.provider._promote(stage.ref)
+                self._notify_promoted(stage.ref)
             elif decision is _Decision.ABORT:
                 await self.provider._abort(stage.ref)
             else:
