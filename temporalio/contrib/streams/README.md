@@ -5,8 +5,10 @@
 A stream is an ordered log that a Workflow owns. The Workflow publishes to
 it, and so do its Activities and any client. Outside readers follow it from
 a cursor. Records live in the application's Redis and never pass through
-Temporal or its History, so publishing costs no Actions and no History
-events.
+Temporal or its History. A Workflow Task that publishes adds one marker
+event to History, which carries a small manifest of what it published and
+counts toward the History limits. Appends from Activities and clients add
+nothing to History.
 
 ## Install and register
 
@@ -85,6 +87,10 @@ async for record in get_stream_handle(client, "answer-1").read(topic=TOKENS):
     elif record.kind is RecordKind.DATA:
         text.append(record.value)
 ```
+
+`SUPERSEDED` is per producer. This topic has one, so clearing everything is
+right. With several producers on a topic, keep the text per
+`record.producer_id` and clear only that producer's.
 
 Both samples run in full in `tests/contrib/streams/samples/`.
 
