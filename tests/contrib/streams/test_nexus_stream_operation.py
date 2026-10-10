@@ -69,6 +69,8 @@ class FakeWorkflowService:
     in_flight: int = 0
     max_in_flight: int = 0
     fail_next: bool = False
+    refuse: RPCStatusCode | None = None
+    calls: int = 0
     # The first run of each Workflow id's current chain, as describe answers.
     chains: dict[str, str] = field(default_factory=dict)
     described: list[DescribeWorkflowExecutionRequest] = field(default_factory=list)
@@ -90,6 +92,9 @@ class FakeWorkflowService:
         self.detached.append(request)
 
     async def notify_stream(self, request: NotifyStreamRequest) -> Any:
+        self.calls += 1
+        if self.refuse is not None:
+            raise RPCError("refused", self.refuse, b"")
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
@@ -668,6 +673,72 @@ async def test_a_promoted_close_closes_the_store_then_the_notifier() -> None:
     await provider.close()
 
 
+def closing_stage(result: str = "3 tokens") -> StageRef:
+    [payload] = DataConverter.default.payload_converter.to_payloads([result])
+    return StageRef(
+        namespace="default",
+        workflow_id="owner-1",
+        first_run_id="run-1",
+        token="stage-1",
+        topics=("tokens",),
+        closes=(("tokens", payload),),
+    )
+
+
+async def test_a_promoted_close_is_retried_until_it_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("temporalio.contrib.streams._plugin._CLOSE_RETRY_FIRST", 0.01)
+    service = FakeWorkflowService(chains={"owner-1": "run-1"}, fail_next=True)
+    provider = MemoryStreams().notify_on_append()
+
+    promote = provider._notify_promoted  # type: ignore[reportPrivateUsage]
+    promote(fake_client(service), closing_stage())
+    await asyncio.wait_for(provider.flush_notifications(), 5)
+
+    # The first close met a frontend that was down for a moment.
+    [close] = [request for request in service.notified if request.close]
+    assert close.stream_ref.run_id == "run-1"
+    assert service.calls == 2
+    await provider.close()
+
+
+async def test_a_close_the_server_cannot_take_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("temporalio.contrib.streams._plugin._CLOSE_RETRY_FIRST", 0.01)
+    service = FakeWorkflowService(
+        chains={"owner-1": "run-1"}, refuse=RPCStatusCode.UNIMPLEMENTED
+    )
+    provider = MemoryStreams().notify_on_append()
+
+    promote = provider._notify_promoted  # type: ignore[reportPrivateUsage]
+    promote(fake_client(service), closing_stage())
+    await asyncio.wait_for(provider.flush_notifications(), 5)
+
+    assert service.calls == 1
+    await provider.close()
+
+
+async def test_a_producer_notifies_the_chain_it_wrote_to(client: Client) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    ref = StreamRef.for_workflow(f"owner-{uuid.uuid4()}", topic="tokens")
+    service.chains[ref.workflow_id] = "chain-1"
+    producer = provider.get_stream_handle(stream_client, ref).producer(
+        producer_id="p", attempt=1
+    )
+
+    await producer.append("a")
+    # The Workflow id moves on to a new chain before the notification runs.
+    service.chains[ref.workflow_id] = "chain-2"
+    await provider.flush_notifications()
+
+    assert [request.stream_ref.run_id for request in service.notified] == ["chain-1"]
+    await provider.close()
+
+
 def test_a_provider_without_notifications_tells_nobody() -> None:
     service = FakeWorkflowService()
     provider = MemoryStreams()
@@ -1175,7 +1246,8 @@ async def test_a_workflow_publish_after_an_outside_close_lands_with_a_warning(
     provider = _provider_for(backing)
     workflow_id = f"owner-{uuid.uuid4()}"
     ref = StreamRef.for_workflow(workflow_id, topic=TOKENS_TOPIC)
-    await provider._close_topic(client, ref, TOKENS_TOPIC, "run-1")  # type: ignore[reportPrivateUsage]
+    close_topic = provider._close_topic  # type: ignore[reportPrivateUsage]
+    await close_topic(client, ref, TOKENS_TOPIC, "run-1")
     record = to_wire(
         DataConverter.default.payload_converter,
         topic=TOKENS_TOPIC,
@@ -1197,4 +1269,64 @@ async def test_a_workflow_publish_after_an_outside_close_lands_with_a_warning(
         "after it was closed" in message and TOKENS_TOPIC in message
         for message in caplog.messages
     )
+    await provider.close()
+
+
+# The store halves of the close tests above. They need no stream notifier, so
+# they run on any server.
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_a_store_close_refuses_appends_but_a_retry_still_answers(
+    client: Client, backing: str
+) -> None:
+    provider = _provider_for(backing)
+    async with new_worker(client, OwnerUntilDone) as worker:
+        owner = await client.start_workflow(
+            OwnerUntilDone.run, id=f"owner-{uuid.uuid4()}", task_queue=worker.task_queue
+        )
+        ref = StreamRef.for_workflow(owner.id, topic=TOKENS_TOPIC)
+        handle = provider.get_stream_handle(client, ref)
+        producer = handle.producer(producer_id="owner-activity", attempt=1)
+        first = await producer.append("a")
+        first_run_id = owner.first_execution_run_id
+        assert first_run_id
+
+        close_topic = provider._close_topic  # type: ignore[reportPrivateUsage]
+        await close_topic(client, ref, TOKENS_TOPIC, first_run_id)
+
+        with pytest.raises(StreamClosedError):
+            await producer.append("b")
+        retried = handle.producer(producer_id="owner-activity", attempt=1)
+        assert await retried.append("a") == first
+        values = await asyncio.wait_for(_values(handle), 10)
+        await owner.signal(OwnerUntilDone.done)
+
+    assert values == ["a"]
+    await provider.close()
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_a_close_with_the_last_publishes_closes_the_store_after_them(
+    client: Client, backing: str
+) -> None:
+    provider = _provider_for(backing)
+    async with new_worker(
+        client, OwnerThatClosesInOneTask, plugins=[provider]
+    ) as worker:
+        owner = await client.start_workflow(
+            OwnerThatClosesInOneTask.run,
+            50,
+            id=f"owner-{uuid.uuid4()}",
+            task_queue=worker.task_queue,
+        )
+        ref = StreamRef.for_workflow(owner.id, topic=TOKENS_TOPIC)
+        # Only the store close can end this read, since the owner still runs.
+        values = await asyncio.wait_for(
+            _values(provider.get_stream_handle(client, ref)), 15
+        )
+        await owner.signal(OwnerThatClosesInOneTask.done)
+        await owner.result()
+
+    assert values == [f"t{n}" for n in range(50)]
     await provider.close()
