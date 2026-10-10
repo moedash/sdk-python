@@ -288,14 +288,26 @@ class _NotifyingProducer(StreamProducer[Any]):
         """See :meth:`temporalio.contrib.streams.StreamProducer.append`."""
         cursor = await self._inner.append(*values)
         if values:
-            self._notifier.notify(cursor.token, progress_counter(cursor))
+            self._notify(cursor)
         return cursor
 
     async def finish(self) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamProducer.finish`."""
         cursor = await self._inner.finish()
-        self._notifier.notify(cursor.token, progress_counter(cursor))
+        self._notify(cursor)
         return cursor
+
+    def _notify(self, cursor: Cursor) -> None:
+        # The write landed, so a notification that cannot go must not turn it
+        # into an error the caller might retry with other content (DD-68).
+        try:
+            self._notifier.notify(cursor.token, progress_counter(cursor))
+        except Exception:
+            logger.warning(
+                "Could not notify the stream after the write at %r",
+                cursor.token,
+                exc_info=True,
+            )
 
 
 def _two_providers(held: StreamProviderPlugin, new: StreamProviderPlugin) -> str:

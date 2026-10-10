@@ -329,6 +329,34 @@ async def test_a_provider_that_notifies_tells_the_notifier_after_each_append(
     await provider.close()
 
 
+class ForeignPositionProducer:
+    """A third-party producer whose positions no counter can come from."""
+
+    producer_id = "p"
+    attempt = 1
+
+    async def append(self, *values: Any) -> Cursor:
+        return Cursor("other:x:not-a-position")
+
+    async def finish(self) -> Cursor:
+        return Cursor("other:x:not-a-position")
+
+
+async def test_a_position_without_a_counter_does_not_fail_the_append() -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    producer = provider._notified_producer(  # type: ignore[reportPrivateUsage]
+        fake_client(service), REF, "tokens", ForeignPositionProducer()
+    )
+
+    # The records landed, so the append answers with their cursor.
+    assert (await producer.append("a")).token == "other:x:not-a-position"
+    assert (await producer.finish()).token == "other:x:not-a-position"
+    await asyncio.sleep(0.01)
+
+    assert service.notified == []
+
+
 def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
     service = FakeWorkflowService()
     provider = MemoryStreams().notify_on_append()
