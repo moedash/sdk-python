@@ -39,6 +39,7 @@ from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     StreamNotifier,
     StreamOperationHandler,
+    close_workflow_stream,
     stream_ref_from_token,
 )
 from temporalio.converter import DataConverter
@@ -582,6 +583,69 @@ async def test_a_workflows_own_publishes_reach_the_caller_as_progress(
 
     assert observed.result == "3 tokens"
     assert observed.counters == sorted(set(observed.counters)), observed
+    await provider.close()
+
+
+@workflow.defn(name="StreamOwnerThatCloses")
+class StreamOwnerThatCloses:
+    """Publishes its tokens on its own stream, then closes it from Workflow code."""
+
+    @workflow.run
+    async def run(self, tokens: list[str]) -> None:
+        writer = workflow_writer(TOKENS_TOPIC)
+        for token in tokens:
+            writer.publish(token)
+            await workflow.sleep(timedelta(milliseconds=200))
+        writer.finish()
+        await close_workflow_stream(f"{len(tokens)} tokens", topic=TOKENS_TOPIC)
+
+
+async def test_a_workflow_closes_its_own_stream_through_system_nexus(
+    client: Client, env: WorkflowEnvironment
+) -> None:
+    owner_id = f"owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=TOKENS_TOPIC)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-closer-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+    provider = MemoryStreams().notify_on_append()
+
+    async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
+        await temporalio.nexus.client().start_workflow(
+            StreamOwnerThatCloses.run,
+            ["a", "b", "c"],
+            id=owner_id,
+            task_queue=task_queue,
+        )
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(start_owner)
+
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[StreamOperationCaller, StreamOwnerThatCloses],
+        nexus_service_handlers=[ChatServiceHandler()],
+        plugins=[provider],
+    ):
+        observed = await asyncio.wait_for(
+            client.execute_workflow(
+                StreamOperationCaller.run,
+                endpoint,
+                id=f"stream-closer-caller-{uuid.uuid4()}",
+                task_queue=task_queue,
+            ),
+            30,
+        )
+        owner_result = await client.get_workflow_handle(owner_id).result()
+
+    assert observed.result == "3 tokens"
+    assert owner_result is None
     await provider.close()
 
 
