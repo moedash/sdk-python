@@ -3,8 +3,9 @@
 A stream-returning operation stays open while its stream runs. Its handler
 reports progress whenever the stream moves and completes the operation when
 the stream closes; the operation token names the stream. The reader turns
-that into batches of typed records: it waits for progress, then reads from its
-cursor through the stream service on a Nexus endpoint.
+that into batches of typed records: it reads from its cursor through the
+stream service on a Nexus endpoint, and waits for progress once a read finds
+nothing new.
 
 Every read is a Nexus operation of the Workflow, so History records what each
 read answered, and a replay hands over the same batches at the same points.
