@@ -34,6 +34,8 @@ from temporalio.contrib.streams._errors import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
+    StreamRefusedError,
+    StreamStorageError,
     StreamUnsupportedError,
 )
 from temporalio.contrib.streams._record import (
@@ -56,6 +58,8 @@ __all__ = [
     "StreamOutcomeUnknownError",
     "StreamProducerError",
     "StreamRecord",
+    "StreamRefusedError",
+    "StreamStorageError",
     "StreamUnsupportedError",
     "Supersession",
 ]
