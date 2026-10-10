@@ -70,3 +70,20 @@ def test_a_ref_from_a_later_release_decodes_to_unsupported():
     )
     with pytest.raises(StreamUnsupportedError, match="only Workflow-owned"):
         converter.from_payloads([payload], [StreamRef])
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["x" * 257, "é" * 129, "a\x1fb", "line\nbreak", "\x00"],
+)
+def test_a_topic_name_that_is_too_long_or_has_a_control_character_is_refused(name: str):
+    # Every provider puts the name in keys, cursors and Core's manifest budget.
+    with pytest.raises(ValueError):
+        topic(name)
+    with pytest.raises(ValueError):
+        resolve_topic(name)
+
+
+def test_a_topic_name_of_256_bytes_is_accepted():
+    assert topic("x" * 256).name == "x" * 256
+    assert resolve_topic("é" * 128)[0] == "é" * 128
