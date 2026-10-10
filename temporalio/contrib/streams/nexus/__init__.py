@@ -35,6 +35,7 @@ operation progress, and
 the operation. :class:`StreamNotifier` is the notifier client both use.
 """
 
+from temporalio.contrib.streams import StreamRef
 from temporalio.contrib.streams._notify import StreamNotifier
 from temporalio.contrib.streams.nexus._generated import (
     AppendInput,
@@ -43,7 +44,6 @@ from temporalio.contrib.streams.nexus._generated import (
     ReadOutput,
     RecordWire,
     StreamCursor,
-    StreamRef,
     TemporalStreams,
 )
 from temporalio.contrib.streams.nexus._generated.client import (
