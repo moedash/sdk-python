@@ -20,7 +20,8 @@ import asyncio
 import contextvars
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Coroutine
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from typing_extensions import Self
@@ -43,13 +44,15 @@ from temporalio.plugin import SimplePlugin
 
 if TYPE_CHECKING:
     from temporalio.client import Client, ClientConfig
-    from temporalio.worker import ReplayerConfig, WorkerConfig
+    from temporalio.worker import ReplayerConfig, Worker, WorkerConfig
 
 __all__ = ["StreamProviderPlugin"]
 
 logger = logging.getLogger(__name__)
 
 _WORKFLOW_EXTERN = "__temporal_contrib_streams_output"
+# How long a stopping Worker waits for the notifications still out.
+_FLUSH_LIMIT = 10.0
 
 _activity_provider: contextvars.ContextVar[StreamProviderPlugin | None] = (
     contextvars.ContextVar("__temporal_contrib_streams_provider", default=None)
@@ -70,12 +73,15 @@ class StreamProviderPlugin(SimplePlugin, ABC):
     def __init__(self, name: str) -> None:
         """Name the plugin; the name shows in the Worker's plugin list."""
         super().__init__(name)
-        # Notifiers by namespace, owner, chain and topic, once notify_on_append
-        # is on.
-        self._notifiers: dict[tuple[str, str, str, str], StreamNotifier] | None = None
+        # Notifiers by namespace, owner, chain and topic, least recently used
+        # first, once notify_on_append is on.
+        self._notifiers: (
+            OrderedDict[tuple[str, str, str, str], StreamNotifier] | None
+        ) = None
+        self._max_notifiers = 0
         self._notifying: set[asyncio.Task[None]] = set()
 
-    def notify_on_append(self) -> Self:
+    def notify_on_append(self, *, max_notifiers: int = 1000) -> Self:
         """Tell each stream's notifier on the server when the stream moves.
 
         With this on, every append and finish through this provider, and every
@@ -85,14 +91,43 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         what makes a caller of a stream-returning Nexus operation see progress.
         Close a stream with :meth:`close_stream`.
 
+        The provider keeps a notifier per stream it wrote to, and drops it
+        when the stream closes through :meth:`close_stream`, when the owner's
+        run chain ends on this Worker, or when it is the least recently used
+        of more than ``max_notifiers``. A Worker run with ``Worker.run`` waits
+        briefly, once it stops, for the notifications still out. ``async
+        with`` on the Worker does not, so call :meth:`flush_notifications`
+        after it, or in a process without a Worker.
+
         Needs a server with the stream notifier.
+
+        Raises:
+            ValueError: ``max_notifiers`` is not positive.
 
         .. warning::
             This API is experimental.
         """
+        if max_notifiers <= 0:
+            raise ValueError("max_notifiers must be positive")
+        self._max_notifiers = max_notifiers
         if self._notifiers is None:
-            self._notifiers = {}
+            self._notifiers = OrderedDict()
         return self
+
+    async def flush_notifications(self) -> None:
+        """Wait until no notification of this provider is out or waiting.
+
+        .. warning::
+            This API is experimental.
+        """
+        while self._notifying:
+            await asyncio.gather(*self._notifying, return_exceptions=True)
+        notifiers = [] if self._notifiers is None else list(self._notifiers.values())
+        await asyncio.gather(
+            *(notifier.flush() for notifier in notifiers), return_exceptions=True
+        )
+        while self._notifying:
+            await asyncio.gather(*self._notifying, return_exceptions=True)
 
     async def close_stream(
         self, client: Client, ref: StreamRef, result: Any = None
@@ -114,9 +149,8 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         # A write's notification may still be finding its chain.
         await asyncio.gather(*self._notifying, return_exceptions=True)
         key = (client.namespace, ref.workflow_id, first_run_id, ref.topic)
-        notifier = (self._notifiers or {}).pop(key, None) or StreamNotifier(
-            client, ref, first_run_id=first_run_id
-        )
+        held = None if self._notifiers is None else self._notifiers.pop(key, None)
+        notifier = held or StreamNotifier(client, ref, first_run_id=first_run_id)
         # One above the newest record, so the close outranks every notification.
         latest = await self.get_stream_handle(client, ref).latest(topic=ref.topic)
         await notifier.close(result, progress_counter(latest) + 1)
@@ -171,12 +205,46 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         assert self._notifiers is not None
         key = (client.namespace, ref.workflow_id, first_run_id, topic)
         notifier = self._notifiers.get(key)
-        if notifier is None:
-            notifier = StreamNotifier(
-                client, ref, topic=topic, first_run_id=first_run_id
-            )
-            self._notifiers[key] = notifier
+        if notifier is not None:
+            self._notifiers.move_to_end(key)
+            return notifier
+        notifier = StreamNotifier(client, ref, topic=topic, first_run_id=first_run_id)
+        self._notifiers[key] = notifier
+        if len(self._notifiers) > self._max_notifiers:
+            _, dropped = self._notifiers.popitem(last=False)
+            self._retire(dropped)
         return notifier
+
+    def _retire(self, notifier: StreamNotifier) -> None:
+        # A dropped notifier still sends what it holds, and a flush waits for it.
+        self._track(notifier.flush())
+
+    def _forget_chain(
+        self, namespace: str, workflow_id: str, first_run_id: str
+    ) -> None:
+        """Drop the notifiers of an ended run chain's streams."""
+        if self._notifiers is None:
+            return
+        for key in [
+            key
+            for key in self._notifiers
+            if key[:3] == (namespace, workflow_id, first_run_id)
+        ]:
+            self._retire(self._notifiers.pop(key))
+
+    async def run_worker(
+        self, worker: Worker, next: Callable[[Worker], Awaitable[None]]
+    ) -> None:
+        """Run the Worker, then wait briefly for the notifications still out."""
+        try:
+            await super().run_worker(worker, next)
+        finally:
+            try:
+                await asyncio.wait_for(self.flush_notifications(), _FLUSH_LIMIT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Stream notifications were still out when the Worker stopped"
+                )
 
     @abstractmethod
     def get_stream_handle(self, client: Client, ref: StreamRef) -> StreamHandle:

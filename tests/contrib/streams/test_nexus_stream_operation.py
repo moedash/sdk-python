@@ -397,6 +397,110 @@ async def test_a_reused_workflow_id_and_topic_notifies_the_new_chain(
     await provider.close()
 
 
+async def append_to(provider: MemoryStreams, client: Any, workflow_id: str) -> None:
+    ref = StreamRef.for_workflow(workflow_id, topic="tokens")
+    producer = provider.get_stream_handle(client, ref).producer(
+        producer_id="p", attempt=1
+    )
+    await producer.append("a")
+    await asyncio.sleep(0.01)
+
+
+def notifier_owners(provider: MemoryStreams) -> list[str]:
+    notifiers = provider._notifiers  # type: ignore[reportPrivateUsage]
+    return [workflow_id for _, workflow_id, _, _ in notifiers or ()]
+
+
+async def test_a_closed_streams_notifier_is_dropped(client: Client) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    workflow_id = f"owner-{uuid.uuid4()}"
+    await append_to(provider, stream_client, workflow_id)
+    assert notifier_owners(provider) == [workflow_id]
+
+    await provider.close_stream(
+        stream_client, StreamRef.for_workflow(workflow_id, topic="tokens")
+    )
+
+    assert notifier_owners(provider) == []
+    await provider.close()
+
+
+async def test_notifiers_beyond_the_cap_are_dropped_least_recent_first(
+    client: Client,
+) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append(max_notifiers=2)
+    stream_client: Any = FakeClient(service, real=client)
+    first, second, third = (f"owner-{uuid.uuid4()}" for _ in range(3))
+
+    await append_to(provider, stream_client, first)
+    await append_to(provider, stream_client, second)
+    # A write makes its notifier the most recent.
+    await append_to(provider, stream_client, first)
+    await append_to(provider, stream_client, third)
+
+    assert sorted(notifier_owners(provider)) == sorted([first, third])
+    await provider.close()
+
+
+async def test_an_ended_chain_drops_its_notifiers(client: Client) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    ended, running = f"owner-{uuid.uuid4()}", f"owner-{uuid.uuid4()}"
+    await append_to(provider, stream_client, ended)
+    await append_to(provider, stream_client, running)
+
+    provider._forget_chain("default", ended, "chain-1")  # type: ignore[reportPrivateUsage]
+
+    assert notifier_owners(provider) == [running]
+    await provider.close()
+
+
+async def test_flush_waits_for_every_notification_in_flight(client: Client) -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    provider = MemoryStreams().notify_on_append(max_notifiers=1)
+    stream_client: Any = FakeClient(service, real=client)
+    # The second stream pushes out the first one's notifier while its call
+    # is still out.
+    await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+    await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+
+    flushing = asyncio.create_task(provider.flush_notifications())
+    await asyncio.sleep(0.05)
+    assert not flushing.done()
+    hold.set()
+    await asyncio.wait_for(flushing, 5)
+
+    assert len(service.notified) == 2
+    await provider.close()
+
+
+async def test_a_worker_that_stops_waits_for_its_notifications(
+    client: Client,
+) -> None:
+    hold = asyncio.Event()
+    service = FakeWorkflowService(hold=hold)
+    provider = MemoryStreams().notify_on_append()
+    stream_client: Any = FakeClient(service, real=client)
+    worker = new_worker(client, OwnerUntilDone, plugins=[provider])
+    # Worker.run, not async with: the context manager cancels the run once
+    # shutdown returns, and with it what plugins do after the Worker stops.
+    running = asyncio.create_task(worker.run())
+    await append_to(provider, stream_client, f"owner-{uuid.uuid4()}")
+    await worker.shutdown()
+    await asyncio.sleep(0.5)
+    assert not running.done()
+    hold.set()
+    await asyncio.wait_for(running, 10)
+
+    assert len(service.notified) == 1
+    await provider.close()
+
+
 class ForeignPositionProducer:
     """A third-party producer whose positions no counter can come from."""
 
