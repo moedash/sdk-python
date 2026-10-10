@@ -18,11 +18,13 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.bridge.proto.external_data import ExternalStreamMarkerData
 from temporalio.client import Client, WorkflowHandle
 from temporalio.contrib.streams import (
-    CONTENT_HASH_KEY,
     RecordKind,
     StreamRef,
     topic,
     workflow_writer,
+)
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
 )
 from temporalio.contrib.streams._output import MARKER_NAME
 from temporalio.contrib.streams.memory import MemoryStreams
