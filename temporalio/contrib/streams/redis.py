@@ -21,18 +21,22 @@ handoff.
 
 **Appends.** One Lua script writes a whole batch, so a reader never sees
 part of one. The meta hash keeps one high-water field per producer attempt:
-the batch's first sequence, its first and last entry ids, and its digest,
-taken over the converted records before the codec. A retry of the newest
-batch with the same digest returns the original position and writes
-nothing; the same sequence with another digest, or any lower sequence, is
-refused with :class:`temporalio.contrib.streams.StreamProducerError`. A
+the newest batch's first sequence, its record count, its first and last
+entry ids, and its digest, taken over the converted records before the
+codec. A retry of the newest batch with the same digest returns the original
+position and writes nothing; the same sequence with another digest, or any
+sequence below the end of that batch, is refused with
+:class:`temporalio.contrib.streams.StreamProducerError`. A
 connection that fails while the script may have run raises
 :class:`temporalio.contrib.streams.StreamOutcomeUnknownError`. No append
 sends anything to Temporal.
 
 **A Workflow's own publish** is staged next to the log and moved into it by
 one script once History shows the Workflow Task's commit, so readers see a
-task's records together or not at all.
+task's records together or not at all. A Worker that replays a run sends one
+such script for each recorded batch it hasn't settled in this process, so a
+new Worker process touches the store once per batch of the History it
+replays. A Replayer touches nothing.
 
 **Retention.** Every script that writes a log trims it with ``XTRIM MINID``
 to the provider's ``retention`` (seven days by default) and refreshes the
@@ -107,24 +111,42 @@ T = TypeVar("T")
 
 # Trims a log to the retention window and slides the expiry of the log and
 # its meta. The meta also records how many records the log ever took and the
-# newest id, which is what remains of a log after it expires.
+# newest id, which is what remains of a log after it expires. Each call also
+# looks at a few session fields, resuming where the last call stopped, and
+# drops those whose last write is older than the retention: the records they
+# guard against a duplicate are gone, and the meta would otherwise grow with
+# every session the topic ever had.
 _KEEP_LUA = """
 local function now_ms()
   local time = redis.call('TIME')
   return tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 end
+local function sweep_sessions(meta, floor)
+  local cursor = redis.call('HGET', meta, 'hwscan') or '0'
+  local found = redis.call('HSCAN', meta, cursor, 'MATCH', 'hw:*', 'COUNT', 50)
+  local fields = found[2]
+  for i = 1, #fields, 2 do
+    local last_ms = string.match(fields[i + 1], '|(%d+)%-%d+|[^|]+$')
+    if last_ms and tonumber(last_ms) < floor then
+      redis.call('HDEL', meta, fields[i])
+    end
+  end
+  redis.call('HSET', meta, 'hwscan', found[1])
+end
 local function keep(log, meta, added, last, retention, grace)
-  redis.call('XTRIM', log, 'MINID', (now_ms() - retention) .. '-0')
+  local floor = now_ms() - retention
+  redis.call('XTRIM', log, 'MINID', floor .. '-0')
   redis.call('PEXPIRE', log, retention)
   redis.call('HINCRBY', meta, 'added', added)
   redis.call('HSET', meta, 'last', last)
   redis.call('PEXPIRE', meta, retention + grace)
+  sweep_sessions(meta, floor)
 end
 """
 
 # KEYS: log, meta, chain. ARGV: retention ms, grace ms, session field, first
 # sequence, digest, records... The high-water field reads
-# "<sequence>|<first id>|<last id>|<digest>".
+# "<sequence>|<count>|<first id>|<last id>|<digest>".
 _APPEND_LUA = (
     _KEEP_LUA
     + """
@@ -133,9 +155,10 @@ local field, digest_arg = ARGV[3], ARGV[5]
 local held = redis.call('HGET', KEYS[2], field)
 local sequence = tonumber(ARGV[4])
 if held then
-  local held_sequence, first, last, digest =
-    string.match(held, '^(%d+)|([^|]+)|([^|]+)|(%x+)$')
+  local held_sequence, held_count, first, last, digest =
+    string.match(held, '^(%d+)|(%d+)|([^|]+)|([^|]+)|(%x+)$')
   held_sequence = tonumber(held_sequence)
+  local next_sequence = held_sequence + tonumber(held_count)
   if sequence == held_sequence then
     if digest == digest_arg then
       return {first, last}
@@ -143,9 +166,9 @@ if held then
     return redis.error_reply('STREAMS_DIVERGENT sequence ' .. ARGV[4] ..
       ' was already written with different content')
   end
-  if sequence < held_sequence then
+  if sequence < next_sequence then
     return redis.error_reply('STREAMS_STALE sequence ' .. ARGV[4] ..
-      ' is below the newest one written, ' .. held_sequence)
+      ' is below the next one expected, ' .. next_sequence)
   end
 end
 if redis.call('HGET', KEYS[3], 'closed') then
@@ -160,7 +183,7 @@ for i = 6, #ARGV do
   end
 end
 redis.call('HSET', KEYS[2], field,
-  ARGV[4] .. '|' .. first .. '|' .. last .. '|' .. digest_arg)
+  ARGV[4] .. '|' .. (#ARGV - 5) .. '|' .. first .. '|' .. last .. '|' .. digest_arg)
 keep(KEYS[1], KEYS[2], #ARGV - 5, last, retention, grace)
 return {first, last}
 """
@@ -177,7 +200,8 @@ redis.call('PEXPIRE', KEYS[1], ARGV[1])
 """
 
 # KEYS: stage, then a log and its meta per topic. ARGV: retention ms,
-# grace ms, then the topics in KEYS order.
+# grace ms, then the topics in KEYS order. Redis keeps what a failed script
+# already wrote, so every item is checked before the first write.
 _PROMOTE_LUA = (
     _KEEP_LUA
     + """
@@ -189,6 +213,12 @@ local retention, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
 local slots = {}
 for i = 3, #ARGV do
   slots[ARGV[i]] = {log = KEYS[2 * (i - 2)], meta = KEYS[2 * (i - 2) + 1], added = 0}
+end
+for i = 1, #items, 2 do
+  if not slots[items[i]] then
+    return redis.error_reply('STREAMS_TOPIC the stage holds topic ' .. items[i] ..
+      ', which the promotion did not name')
+  end
 end
 for i = 1, #items, 2 do
   local slot = slots[items[i]]
@@ -246,7 +276,15 @@ def _text(value: Any) -> str:
 
 def _session_field(producer_id: str, attempt: int) -> str:
     # Length-prefixed, so an id that contains ':' cannot name another session.
-    return f"hw:{len(producer_id)}:{producer_id}:{attempt}"
+    # UTF-8 bytes, so every language counts the same length.
+    return f"hw:{len(producer_id.encode())}:{producer_id}:{attempt}"
+
+
+def _describe_error(error: RPCError) -> StreamError:
+    # Callers catch stream errors only, and the owner check is part of a call.
+    return StreamStorageError(
+        f"Temporal could not describe the stream's owner: {error}"
+    )
 
 
 def _stream_error(error: redis.exceptions.RedisError, *, write: bool) -> StreamError:
@@ -491,8 +529,17 @@ class RedisStreamHandle:
                     f"Workflow {self._ref.workflow_id!r} was not found, and its "
                     "stream is keyed by its run chain"
                 ) from error
-            raise
-        return description.raw_description.workflow_execution_info.first_run_id
+            raise _describe_error(error) from error
+        first_run_id = description.raw_description.workflow_execution_info.first_run_id
+        if not first_run_id:
+            # The Workflow's own publish keys by the chain's first run, so an
+            # empty one would split the stream in two without an error.
+            raise StreamUnsupportedError(
+                f"the server did not report the first run id of Workflow "
+                f"{self._ref.workflow_id!r}, which the Redis provider keys "
+                "streams by"
+            )
+        return first_run_id
 
 
 class RedisStreams(StreamProviderPlugin):
@@ -552,7 +599,13 @@ class RedisStreams(StreamProviderPlugin):
         self._stage_script = scripts.register_script(_STAGE_LUA)
 
     def get_stream_handle(self, client: Client, ref: StreamRef) -> RedisStreamHandle:
-        """A handle on the stream ``ref`` names."""
+        """A handle on the stream ``ref`` names.
+
+        Raises:
+            StreamUnsupportedError: ``ref`` names an owner kind this release
+                lacks.
+        """
+        ref._require_supported()
         return RedisStreamHandle(self, client, ref)
 
     async def close(self) -> None:
@@ -576,7 +629,10 @@ class RedisStreams(StreamProviderPlugin):
             items += [record.topic, record.SerializeToString()]
         async with _mapped(write=True):
             await self._stage_script(
-                keys=[keys.stage(token)], args=[self._retention_ms, *items]
+                keys=[keys.stage(token)],
+                # Until promoted, a stage holds committed output, and crash
+                # repair can come after the retention.
+                args=[self._retention_ms + self._grace_ms, *items],
             )
         return token
 

@@ -113,7 +113,8 @@ async def test_an_activity_retry_supersedes_its_first_attempt(client: Client):
         RecordKind.DATA,
         RecordKind.FINISH,
     ]
-    producer_id = f"tokens@{(await streams_client.get_workflow_handle(workflow_id).describe()).run_id}"
+    described = await streams_client.get_workflow_handle(workflow_id).describe()
+    producer_id = f"tokens@{described.run_id}"
     assert records[1].supersession == Supersession(producer_id, 1, 2)
     assert [r.value for r in records if r.kind is RecordKind.DATA] == [
         "a",

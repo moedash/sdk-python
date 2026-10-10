@@ -264,7 +264,8 @@ class ExternalOutputStreamManifest(google.protobuf.message.Message):
         """One entry per activation segment, including segments which published no output."""
     provider_id: builtins.str
     """Stable configured provider binding. Reconciliation refuses to interpret the batch through a
-    different provider or provider wire format.
+    different provider or provider wire format. Replay compares the format but not the id, since
+    a provider can be renamed without changing the output.
     """
     provider_format_version: builtins.int
     def __init__(
@@ -309,7 +310,13 @@ class ExternalOutputStreamManifest(google.protobuf.message.Message):
 global___ExternalOutputStreamManifest = ExternalOutputStreamManifest
 
 class ExternalOutputTopicManifest(google.protobuf.message.Message):
-    """Logical, pre-codec identity of one topic sub-batch."""
+    """Logical, pre-codec identity of one topic sub-batch.
+
+    Lang computes these over the topic's records in publish order, as the payload converter made
+    them and before any payload codec, so replay can compute them again. Lang leaves out of each
+    record anything that a reset changes, such as the run that published it. Core checks only that
+    the fingerprint is 32 bytes, and that replay gives the same values.
+    """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -321,8 +328,13 @@ class ExternalOutputTopicManifest(google.protobuf.message.Message):
     topic: builtins.str
     record_count: builtins.int
     logical_byte_count: builtins.int
+    """The sum of the records' serialized sizes, measured the same way as the fingerprint."""
     logical_fingerprint: builtins.bytes
+    """For fingerprint_version 1, the SHA-256 over each record as its length in 8 bytes big-endian,
+    then its deterministic protobuf serialization.
+    """
     finished: builtins.bool
+    """True when the batch holds a FINISH record for this topic."""
     def __init__(
         self,
         *,
