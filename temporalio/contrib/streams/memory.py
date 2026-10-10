@@ -51,6 +51,7 @@ from temporalio.contrib.streams._errors import (
     StreamCursorError,
     StreamExpiredError,
     StreamProducerError,
+    StreamRecordError,
 )
 from temporalio.contrib.streams._plugin import StreamProviderPlugin
 from temporalio.contrib.streams._record import (
@@ -126,7 +127,7 @@ class _Topic:
 
         Raises:
             StreamProducerError: ``sequence`` is the newest batch's with
-                different content, or below it.
+                different content, inside that batch, or below it.
         """
         if session is not None:
             held = self.sessions.get(session)
@@ -138,11 +139,11 @@ class _Topic:
                             f"used sequence {sequence} with different content"
                         )
                     return held.first, held.count
-                if sequence < held.sequence:
+                if sequence < held.sequence + held.count:
                     raise StreamProducerError(
                         f"producer {session[0]!r} attempt {session[1]} sent sequence "
-                        f"{sequence}, below the newest one the store holds, "
-                        f"{held.sequence}"
+                        f"{sequence}, below the next one the store expects, "
+                        f"{held.sequence + held.count}"
                     )
         first = self.head
         self.records.extend(
@@ -311,7 +312,8 @@ class MemoryStreamHandle:
         previous = (
             mint_cursor(_PROVIDER, stream, str(start - 1)) if start else BEGINNING
         )
-        return self._read(store, stream, start, previous, result_type)
+        resumed = after not in (BEGINNING, END)
+        return self._read(store, stream, start, previous, result_type, resumed)
 
     async def _read(
         self,
@@ -320,6 +322,7 @@ class MemoryStreamHandle:
         offset: int,
         after: Cursor,
         result_type: type | None,
+        resumed: bool,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         decoder = RecordDecoder(
             self._converter.payload_converter,
@@ -327,6 +330,13 @@ class MemoryStreamHandle:
             after=after,
             warn=logger.warning,
         )
+        if resumed and store.base < offset:
+            # The record at the cursor was delivered before, so its attempt
+            # is the one a newer attempt supersedes.
+            try:
+                decoder.prime(WireRecord.FromString(store.at(offset - 1)))
+            except DecodeError:
+                pass
         closed = False
         while True:
             while offset < store.head:
@@ -340,10 +350,12 @@ class MemoryStreamHandle:
                 offset += 1
                 try:
                     wire = WireRecord.FromString(raw)
-                except DecodeError as error:
-                    logger.warning("skipping stream record at %s: %s", cursor, error)
-                    continue
-                await decode_body(self._converter, wire)
+                    await decode_body(self._converter, wire)
+                except Exception as error:
+                    raise StreamRecordError(
+                        f"stream record at {cursor} could not be decoded: {error}",
+                        cursor,
+                    ) from error
                 for record in decoder.decode(cursor, wire):
                     yield record
             if closed:

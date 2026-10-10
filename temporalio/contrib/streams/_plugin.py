@@ -3,7 +3,9 @@
 A provider is registered once, as a plugin:
 ``Client.connect(plugins=[provider])``. The client keeps it, and every Worker
 built from that client inherits it. ``Worker(plugins=[provider])`` and
-``Replayer(plugins=[provider])`` register it on a Worker alone.
+``Replayer(plugins=[provider])`` register it on a Worker alone. Registering it
+on the client and again on a Worker built from it warns about a duplicate
+plugin.
 
 On a Worker the plugin adds one interceptor and nothing else, so the
 Worker knows which provider it carries. No Worker internals change.
