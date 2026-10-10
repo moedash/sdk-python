@@ -800,6 +800,40 @@ async def test_a_reader_repairs_pending_stages_in_commit_order(
     await reader.close()
 
 
+async def test_a_reader_repairs_past_a_stage_whose_run_is_gone(
+    client: Client, raw: Any
+):
+    prefix = f"test-{uuid.uuid4().hex}"
+    url = os.environ["STREAMS_REDIS_URL"]
+    stopped = StopsBeforePromoting(url, key_prefix=prefix)
+    workflow_id = f"redis-reader-repair-gone-{uuid.uuid4().hex}"
+    stopped_client = client_with(client, stopped)
+    async with new_worker(stopped_client, PublishAndFinish) as worker:
+        await stopped_client.execute_workflow(
+            PublishAndFinish.run, id=workflow_id, task_queue=worker.task_queue
+        )
+    reader = RedisStreams(url, key_prefix=prefix)
+    stream = reader.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+    keys = await stream._keys()
+    # A stage of a run that namespace retention already removed.
+    gone = await reader._stage(
+        StagedBatch(
+            client.namespace,
+            workflow_id,
+            keys.first_run_id,
+            str(uuid.uuid4()),
+            [WireRecord(topic="events")],
+        )
+    )
+
+    records = await read_until_end(stream.read(topic=EVENTS))
+    assert [r.value for r in records] == [{"n": 1}, {"n": 2}]
+    assert await raw.hgetall(keys.pending()) == {}
+    assert await raw.exists(keys.stage(gone)) == 0
+    await stopped.close()
+    await reader.close()
+
+
 async def test_a_promote_that_finds_its_stage_gone_warns(
     provider: RedisStreams, raw: Any, caplog: pytest.LogCaptureFixture
 ):
