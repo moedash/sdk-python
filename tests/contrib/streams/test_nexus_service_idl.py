@@ -115,6 +115,21 @@ def test_a_read_answer_decodes_with_its_cursors_and_records():
     assert answer.done is False
 
 
+def test_a_record_that_cannot_cross_decodes_as_an_error_at_its_cursor():
+    document = {
+        "records": [
+            {"token": "memory:abcd1234:0", "record": "", "error": "too large"},
+        ],
+        "next_token": "memory:abcd1234:0",
+        "done": False,
+    }
+    answer = _from_json(document, ReadOutput)
+    assert isinstance(answer, ReadOutput)
+    [record] = answer.records
+    assert record.error == "too large"
+    assert record.record == b""
+
+
 def test_an_input_with_an_unknown_member_is_refused():
     document = _to_json(ReadInput(stream=StreamRef.for_workflow("wf-1")))
     document["max_record"] = 5
@@ -130,5 +145,5 @@ def test_a_reference_this_release_cannot_open_is_refused_at_decode():
     stream = document["stream"]
     assert isinstance(stream, dict)
     stream["kind"] = "activity"
-    with pytest.raises(Exception, match="activity"):
+    with pytest.raises(ValueError, match="unknown StreamRef kind 'activity'"):
         _from_json(document, ReadInput)
