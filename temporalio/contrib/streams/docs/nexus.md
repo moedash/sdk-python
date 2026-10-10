@@ -256,6 +256,14 @@ values at the same points.
 - If a caller answers a progress delivery with 404, its operation is
   already closed, and the notifier drops that caller. Any other refusal
   turns progress off for that caller, and it still gets the completion.
+- `close_workflow_stream` closes the stream after the Worker promotes the
+  Workflow Task's records. If that close fails, it is retried only when the
+  batch is promoted again, by a Worker that replays the run. Until then
+  readers keep waiting and callers stay attached.
+- A Workflow Task's batch that a Worker never promoted is promoted later by
+  a reader's repair, which sends no notifier close. Readers still end, since
+  the store marks the run chain closed, and the notifier's owner check
+  closes the callers' operations once the owner's run chain has closed.
 
 ## Guarantees
 
