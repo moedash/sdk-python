@@ -25,13 +25,6 @@ The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 as an ordinary payload.
 """
 
-from temporalio.contrib.streams._body import (
-    CONTENT_HASH_KEY,
-    content_fingerprint,
-    content_hash,
-    decode_body,
-    encode_body,
-)
 from temporalio.contrib.streams._cursor import BEGINNING, END
 from temporalio.contrib.streams._errors import (
     StreamClosedError,
@@ -52,7 +45,6 @@ from temporalio.contrib.streams._record import (
 
 __all__ = [
     "BEGINNING",
-    "CONTENT_HASH_KEY",
     "Cursor",
     "END",
     "RecordKind",
@@ -66,8 +58,4 @@ __all__ = [
     "StreamRecord",
     "StreamUnsupportedError",
     "Supersession",
-    "content_fingerprint",
-    "content_hash",
-    "decode_body",
-    "encode_body",
 ]
