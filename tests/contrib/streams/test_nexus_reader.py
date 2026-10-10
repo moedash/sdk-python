@@ -58,6 +58,7 @@ from temporalio.contrib.streams.nexus import (
     StreamReader,
     StreamRecordError,
     TemporalStreamsHandler,
+    close_workflow_stream,
 )
 from temporalio.contrib.streams.nexus._operation import _encode_token
 from temporalio.converter import DataConverter, PayloadCodec
@@ -385,9 +386,9 @@ async def test_a_full_batch_is_followed_by_a_read_without_waiting() -> None:
     ]
 
 
-async def test_after_the_operation_completes_a_short_answer_is_not_the_end() -> None:
-    """The stream service caps an answer's bytes, so after the operation
-    completes the reader reads until an answer, read with a wait, is empty."""
+async def test_after_the_operation_completes_only_the_streams_end_ends_it() -> None:
+    """After the operation completes, neither a short answer nor an empty one
+    ends the reader: only the stream service saying the stream is done."""
     h = History()
     h.started()
     h.task()
@@ -401,9 +402,12 @@ async def test_after_the_operation_completes_a_short_answer_is_not_the_end() -> 
     h.task()
     h.read(answer(record(1, text="a")))
     h.task()
+    # Empty, but not done: the stream is still open, so the reader reads on.
+    h.read(answer(cursor="cursor-1"))
+    h.task()
     h.read(answer(record(2, text="b")))
     h.task()
-    h.read(answer(cursor="cursor-2"))
+    h.read(answer(cursor="cursor-2", done=True))
     h.task()
     h.workflow_completed()
     await replay(WorkflowHistory(workflow_id="chat-reader", events=h.events))
@@ -569,7 +573,12 @@ async def _skip_without_notifier(client: Client, ref: StreamRef) -> None:
     except RPCError as err:
         if err.status == RPCStatusCode.UNIMPLEMENTED:
             pytest.skip(f"server has no stream notifier: {err.message}")
-        if err.status != RPCStatusCode.NOT_FOUND:
+        # A server that keys the notifier by run chain refuses the probe's
+        # empty run id, which still shows it has the notifier.
+        if err.status not in (
+            RPCStatusCode.NOT_FOUND,
+            RPCStatusCode.INVALID_ARGUMENT,
+        ):
             raise
 
 
@@ -837,6 +846,93 @@ async def test_live_a_reader_reads_on_past_answers_cut_by_the_byte_budget(
         client, env, backing, [f"{n}:{body}" for n in range(12)], per_append=1
     )
     assert labels == [str(n) for n in range(12)]
+
+
+@workflow.defn(name="LiveOwnerThatClosesInOneTask")
+class LiveOwnerThatClosesInOneTask:
+    """Publishes its tokens and closes its stream in one Workflow Task, then
+    keeps running until told to end."""
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @workflow.run
+    async def run(self, texts: list[str]) -> None:
+        writer = workflow_writer(STREAM.topic)
+        for text in texts:
+            writer.publish(Token(text))
+        close_workflow_stream(f"{len(texts)} tokens", topic=STREAM.topic)
+        await workflow.wait_condition(lambda: self._done)
+
+    @workflow.signal
+    def done(self) -> None:
+        self._done = True
+
+
+@pytest.mark.parametrize("backing", BACKINGS)
+async def test_live_a_close_with_the_last_publishes_loses_none_of_them(
+    client: Client, env: WorkflowEnvironment, backing: str
+) -> None:
+    """The completion can reach the reader before the task's records are
+    promoted, but the stream is only done once they are. Promotion is slowed
+    here past any wait a reader would make for stragglers."""
+    provider = _notifying_provider(backing)
+    promote = provider._promote
+
+    async def slow_promote(stage: Any) -> None:
+        await asyncio.sleep(3)
+        await promote(stage)
+
+    provider._promote = slow_promote
+    if backing == "memory-async-codec":
+        config = client.config()
+        config["data_converter"] = dataclasses.replace(
+            DataConverter.default, payload_codec=SlowCodec()
+        )
+        client = Client(**config)
+    owner_id = f"closing-owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-reader-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+    texts = [f"{n}:" for n in range(300)]
+
+    async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
+        await temporalio.nexus.client().start_workflow(
+            LiveOwnerThatClosesInOneTask.run, texts, id=owner_id, task_queue=task_queue
+        )
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(start_owner)
+
+    streams = TemporalStreamsHandler(provider)
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[LiveLabelReader, LiveOwnerThatClosesInOneTask],
+        nexus_service_handlers=[ChatServiceHandler(), streams],
+        plugins=[provider],
+    ):
+        labels = await asyncio.wait_for(
+            client.execute_workflow(
+                LiveLabelReader.run,
+                endpoint,
+                id=f"stream-reader-{uuid.uuid4()}",
+                task_queue=task_queue,
+            ),
+            60,
+        )
+        await client.get_workflow_handle(owner_id).signal(
+            LiveOwnerThatClosesInOneTask.done
+        )
+        await streams.close()
+    await provider.close()
+    assert labels == [str(n) for n in range(300)]
 
 
 async def test_an_undecodable_record_raises_and_the_reader_goes_on_past_it() -> None:
