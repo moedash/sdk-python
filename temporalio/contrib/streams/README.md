@@ -106,5 +106,9 @@ Both samples run in full in `tests/contrib/streams/samples/`.
   `StreamClosedError`, after a short closing window.
 - **Deleting.** Deleting a Workflow does not delete its streams.
   `RedisStreams.delete_workflow_streams` removes them at once.
+- **Topics per task.** One Workflow Task can publish to a few hundred topics
+  before its manifest reaches the budget, and the publish that would cross
+  it raises `StreamError`. Catch it. Uncaught, it fails the Workflow Task,
+  and every retry fails the same way.
 - **Not in this release.** Reading a stream inside a Workflow, and streams
   owned by an Activity or by no one, raise `StreamUnsupportedError`.

@@ -77,6 +77,8 @@ class WorkflowStreamWriter(Generic[T]):
                 published to so many topics that one more would take the
                 Workflow Task's manifest past its budget. Nothing is
                 published; publish the rest after the Workflow next waits.
+                Catch it: uncaught, it fails the Workflow Task, and every
+                retry runs the same code and fails the same way.
         """
         _refuse_read_only("publish to a stream")
         if self._topic in self._state.finished:
