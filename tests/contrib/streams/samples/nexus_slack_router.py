@@ -22,6 +22,7 @@ import nexusrpc.handler
 import temporalio.nexus
 from temporalio import workflow
 from temporalio.client import Client
+from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.contrib.streams import StreamRef, topic, workflow_writer
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
@@ -77,6 +78,7 @@ async def open_conversation(ctx: Any, request: str) -> StreamRef:
         request,
         id=workflow_id,
         task_queue=temporalio.nexus.info().task_queue,
+        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
     )
     return StreamRef.for_workflow(workflow_id, topic=MESSAGES.name)
 
