@@ -259,6 +259,11 @@ values at the same points.
   fails the callers.
 - A closed stream's notifier completes late attaches right away for
   `streamnotifier.closedRetention` (24 hours by default), then refuses them.
+- Once a Workflow id is reused by a new run chain, a late start for the
+  earlier chain's stream (a stream reference that names one of its runs)
+  fails: the server refuses its attach with `InvalidArgument` instead of
+  completing it with that stream's close result. The server attaches only to the chain that holds the id now.
+  A reference that names no run attaches to the new chain.
 - If a caller answers a progress delivery with 404, its operation is
   already closed, and the notifier drops that caller. Any other refusal
   turns progress off for that caller, and it still gets the completion.
