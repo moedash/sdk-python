@@ -16,7 +16,9 @@ Workflow's own publish commits with its Workflow Task.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +27,7 @@ from typing_extensions import Self
 import temporalio.activity
 import temporalio.worker
 import temporalio.workflow
+from temporalio.contrib.streams._cursor import progress_counter
 from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._notify import StreamNotifier
 from temporalio.contrib.streams._output import (
@@ -42,6 +45,8 @@ if TYPE_CHECKING:
     from temporalio.worker import ReplayerConfig, WorkerConfig
 
 __all__ = ["StreamProviderPlugin"]
+
+logger = logging.getLogger(__name__)
 
 _WORKFLOW_EXTERN = "__temporal_contrib_streams_output"
 
@@ -66,6 +71,7 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         super().__init__(name)
         # Notifiers by namespace, owner and topic, once notify_on_append is on.
         self._notifiers: dict[tuple[str, str, str], StreamNotifier] | None = None
+        self._notifying: set[asyncio.Task[None]] = set()
 
     def notify_on_append(self) -> Self:
         """Tell each stream's notifier on the server when the stream moves.
@@ -103,7 +109,9 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         """
         key = (client.namespace, ref.workflow_id, ref.topic)
         notifier = (self._notifiers or {}).pop(key, None) or StreamNotifier(client, ref)
-        await notifier.close(result)
+        # One above the newest record, so the close outranks every notification.
+        latest = await self.get_stream_handle(client, ref).latest(topic=ref.topic)
+        await notifier.close(result, progress_counter(latest) + 1)
 
     def _notified_producer(
         self,
@@ -123,8 +131,25 @@ class StreamProviderPlugin(SimplePlugin, ABC):
             return
         ref = StreamRef.for_workflow(stage.workflow_id)
         for topic in stage.topics:
-            # A promotion has no cursor of its own; the reader reads from its own.
-            self._notifier(client, ref, topic).notify("")
+            task = asyncio.create_task(self._notify_latest(client, ref, topic))
+            self._notifying.add(task)
+            task.add_done_callback(self._notifying.discard)
+
+    async def _notify_latest(self, client: Client, ref: StreamRef, topic: str) -> None:
+        # A promotion has no cursor of its own, so the newest record's is told.
+        try:
+            latest = await self.get_stream_handle(client, ref).latest(topic=topic)
+        except Exception:
+            logger.warning(
+                "Could not find the newest record of Workflow %r topic %r to notify",
+                ref.workflow_id,
+                topic,
+                exc_info=True,
+            )
+            return
+        self._notifier(client, ref, topic).notify(
+            latest.token, progress_counter(latest)
+        )
 
     def _notifier(self, client: Client, ref: StreamRef, topic: str) -> StreamNotifier:
         assert self._notifiers is not None
@@ -263,13 +288,13 @@ class _NotifyingProducer(StreamProducer[Any]):
         """See :meth:`temporalio.contrib.streams.StreamProducer.append`."""
         cursor = await self._inner.append(*values)
         if values:
-            self._notifier.notify(cursor.token)
+            self._notifier.notify(cursor.token, progress_counter(cursor))
         return cursor
 
     async def finish(self) -> Cursor:
         """See :meth:`temporalio.contrib.streams.StreamProducer.finish`."""
         cursor = await self._inner.finish()
-        self._notifier.notify(cursor.token)
+        self._notifier.notify(cursor.token, progress_counter(cursor))
         return cursor
 
 

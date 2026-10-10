@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -50,11 +49,11 @@ class StreamNotifier:
     logged and dropped, because a notification is only a hint: the next one
     tells the reader again, and the reader reads from its own cursor.
 
-    Counters are milliseconds since the epoch, raised by one when the clock
-    has not moved. The notifier keeps the highest counter it has seen and a
-    caller drops a lower one, so notifiers in different processes for one
-    stream stay ordered as far as their clocks agree, and a restarted process
-    does not start again at one.
+    Each notification carries a counter from the store's position (see
+    :func:`temporalio.contrib.streams._cursor.progress_counter`). The notifier
+    on the server keeps the highest counter and a caller drops a lower one, so
+    the counters of producers in different processes stay in the stream's own
+    order whatever their clocks say.
 
     .. warning::
         This API is experimental.
@@ -66,17 +65,23 @@ class StreamNotifier:
         """Notify the notifier of ``ref``'s stream, on ``topic`` or the ref's own."""
         self._client = client
         self._reference = stream_reference(ref, ref.topic if topic is None else topic)
-        self._counter = 0
-        self._pending: tuple[str, dict[str, str]] | None = None
+        self._pending: tuple[str, int, dict[str, str]] | None = None
         self._last_position = ""
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
-    def notify(self, position: str, metadata: Mapping[str, str] | None = None) -> None:
-        """Say the stream moved to ``position``. Does nothing after :meth:`close`."""
+    def notify(
+        self, position: str, counter: int, metadata: Mapping[str, str] | None = None
+    ) -> None:
+        """Say the stream moved to ``position``, whose counter is ``counter``.
+
+        Does nothing after :meth:`close`. Of the notifications that fold,
+        the one with the highest counter goes.
+        """
         if self._closed:
             return
-        self._pending = (position, dict(metadata or {}))
+        if self._pending is None or counter >= self._pending[1]:
+            self._pending = (position, counter, dict(metadata or {}))
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._send_pending())
 
@@ -85,11 +90,12 @@ class StreamNotifier:
         while self._task is not None and not self._task.done():
             await asyncio.shield(self._task)
 
-    async def close(self, result: Any = None) -> None:
+    async def close(self, result: Any, counter: int) -> None:
         """Close the stream on the server, completing every attached operation.
 
         ``result`` becomes the operations' result, encoded with the client's
-        data converter. Waits for the notification in flight first, so the
+        data converter. ``counter`` must rank above the stream's last
+        notification. Waits for the notification in flight first, so the
         close is the last thing the notifier hears from this process.
 
         Raises:
@@ -102,25 +108,21 @@ class StreamNotifier:
             namespace=self._client.namespace,
             stream_ref=self._reference,
             position=self._last_position,
-            counter=self._next_counter(),
+            counter=counter,
             close=True,
         )
         request.close_result.CopyFrom(payload)
         await self._client.workflow_service.notify_stream(request)
 
-    def _next_counter(self) -> int:
-        self._counter = max(self._counter + 1, time.time_ns() // 1_000_000)
-        return self._counter
-
     async def _send_pending(self) -> None:
         while self._pending is not None:
-            position, metadata = self._pending
+            position, counter, metadata = self._pending
             self._pending = None
             request = NotifyStreamRequest(
                 namespace=self._client.namespace,
                 stream_ref=self._reference,
                 position=position,
-                counter=self._next_counter(),
+                counter=counter,
                 metadata=metadata,
             )
             try:

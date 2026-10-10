@@ -140,6 +140,25 @@ hash, and resumes strictly after the entry id. It reports the cursor as
 expired when `meta.trimmed` is newer than it, or, if the log is gone, when
 `meta.last` is newer than it.
 
+## Notification counters
+
+A provider with `notify_on_append()` tells the server's stream notifier
+when the stream moves (see `temporalio.contrib.streams.nexus`). Each
+notification carries a counter, the notifier keeps the highest, and a
+caller drops a lower one. So the counter comes from the store's position,
+which grows with the stream whichever process writes, not from a clock.
+
+- A Redis entry id `<ms>-<seq>` gives `ms << 20 | seq`. A sequence above
+  `2**20 - 1` is held at that value, which keeps the order. The result fits
+  a positive int64 until the year 2248.
+- A memory provider offset gives `offset + 1`.
+- `BEGINNING` gives 0. A close carries the newest record's counter plus one,
+  so it outranks every notification before it.
+
+The notification's `position` is the cursor token of the newest record it
+reports. One code path computes it:
+`temporalio.contrib.streams._cursor.progress_counter`.
+
 ## Closing
 
 Any party that sees the Workflow's run chain end (complete, fail, cancel,
