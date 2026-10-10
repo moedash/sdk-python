@@ -37,8 +37,9 @@ class AttemptTracker:
 
         ``previous`` is the cursor of the last record delivered before the
         one being noted, or the cursor the read started from. The synthesized
-        record carries it, so a consumer that checkpoints the supersession and
-        resumes after it gets the new attempt's first record next.
+        record carries it. A read that resumes there is primed with the
+        record at its cursor, so it reports the supersession again before the
+        new attempt's first record.
 
         A producer that declares no attempt supersedes nothing, because there
         is no generation to compare.
