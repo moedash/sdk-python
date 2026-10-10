@@ -20,13 +20,6 @@ The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
 as an ordinary payload.
 """
 
-from temporalio.contrib.streams._body import (
-    CONTENT_HASH_KEY,
-    content_fingerprint,
-    content_hash,
-    decode_body,
-    encode_body,
-)
 from temporalio.contrib.streams._record import (
     Cursor,
     RecordKind,
@@ -35,13 +28,8 @@ from temporalio.contrib.streams._record import (
 )
 
 __all__ = [
-    "CONTENT_HASH_KEY",
     "Cursor",
     "RecordKind",
     "StreamRecord",
     "Supersession",
-    "content_fingerprint",
-    "content_hash",
-    "decode_body",
-    "encode_body",
 ]
