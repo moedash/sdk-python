@@ -890,35 +890,53 @@ class RedisStreams(StreamProviderPlugin):
         if self._checked_server:
             return
         async with _mapped(write=False):
-            info = await _awaited(self._redis.info("server"))
-        version = str(info.get("redis_version", "0"))
-        major = int(version.split(".", 1)[0] or 0)
-        if major < 7:
-            raise StreamUnsupportedError(
-                f"RedisStreams needs Redis 7.0 or later, but the server reports "
-                f"redis_version {version}"
-            )
+            infos = await self._on_each_primary("info", "server")
+        for info in infos:
+            version = str(info.get("redis_version", "0"))
+            major = int(version.split(".", 1)[0] or 0)
+            if major < 7:
+                raise StreamUnsupportedError(
+                    f"RedisStreams needs Redis 7.0 or later, but the server reports "
+                    f"redis_version {version}"
+                )
         self._checked_server = True
         await self._warn_on_eviction()
 
+    async def _on_each_primary(self, command: str, *args: Any) -> list[Any]:
+        """Run a server command on the server, or on every primary of a cluster."""
+        client: Any = self._redis
+        if not isinstance(client, redis.asyncio.RedisCluster):
+            return [await _awaited(getattr(client, command)(*args))]
+        # A cluster sends such commands to one node; each primary holds its
+        # own share of the keys and its own settings.
+        await client.initialize()
+        return [
+            await getattr(client, command)(*args, target_nodes=node)
+            for node in client.get_primaries()
+        ]
+
     async def _warn_on_eviction(self) -> None:
-        try:
-            policy = await _awaited(self._redis.config_get("maxmemory-policy"))
-        except redis.exceptions.ResponseError as error:
-            # Managed services often refuse CONFIG; the policy is theirs to
-            # document then.
-            logger.debug("Could not read maxmemory-policy: %s", error)
-            return
-        value = _text(
-            policy.get("maxmemory-policy", "") or policy.get(b"maxmemory-policy", "")
-        )
-        if value and value != "noeviction":
-            logger.warning(
-                "Redis maxmemory-policy is %r; under memory pressure Redis may "
-                "evict whole stream keys, losing records and their dedupe state. "
-                "Use 'noeviction' for streams.",
-                value,
+        async with _mapped(write=False):
+            try:
+                policies = await self._on_each_primary("config_get", "maxmemory-policy")
+            except redis.exceptions.ResponseError as error:
+                # Managed services often refuse CONFIG; the policy is theirs
+                # to document then.
+                logger.debug("Could not read maxmemory-policy: %s", error)
+                return
+        for policy in policies:
+            value = _text(
+                policy.get("maxmemory-policy", "")
+                or policy.get(b"maxmemory-policy", "")
             )
+            if value and value != "noeviction":
+                logger.warning(
+                    "Redis maxmemory-policy is %r; under memory pressure Redis may "
+                    "evict whole stream keys, losing records and their dedupe "
+                    "state. Use 'noeviction' for streams.",
+                    value,
+                )
+                return
 
     async def _stage(self, batch: StagedBatch) -> str:
         await self._ready()

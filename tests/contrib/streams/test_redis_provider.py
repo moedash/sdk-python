@@ -793,6 +793,41 @@ async def test_a_noeviction_server_is_not_warned_about(
     assert not [r for r in caplog.records if "maxmemory" in r.getMessage()]
 
 
+@pytest.mark.skipif(
+    "STREAMS_REDIS_CLUSTER_URL" not in os.environ,
+    reason="set STREAMS_REDIS_CLUSTER_URL to a Redis Cluster to run",
+)
+async def test_an_evicting_primary_of_a_cluster_is_warned_about(
+    client: Client, caplog: pytest.LogCaptureFixture
+):
+    cluster = redis.asyncio.RedisCluster.from_url(
+        os.environ["STREAMS_REDIS_CLUSTER_URL"]
+    )
+    await cluster.initialize()
+    others = [
+        node
+        for node in cluster.get_primaries()
+        if node.name != cluster.get_default_node().name
+    ]
+    await cluster.config_set("maxmemory-policy", "allkeys-lru", target_nodes=others)
+    try:
+        provider = RedisStreams(cluster, key_prefix=f"test-{uuid.uuid4().hex}")
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow("any"))
+        with caplog.at_level(
+            logging.WARNING, logger="temporalio.contrib.streams.redis"
+        ):
+            with pytest.raises(StreamNotFoundError):
+                await stream.latest()
+        assert any("allkeys-lru" in r.getMessage() for r in caplog.records)
+    finally:
+        await cluster.config_set(
+            "maxmemory-policy",
+            "noeviction",
+            target_nodes=redis.asyncio.RedisCluster.PRIMARIES,
+        )
+        await cluster.aclose()
+
+
 @workflow.defn
 class PublishInThreeTasks:
     @workflow.run
