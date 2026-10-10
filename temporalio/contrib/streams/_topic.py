@@ -12,6 +12,7 @@ On the wire a topic is a string, and
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, overload
 
@@ -56,10 +57,10 @@ def topic(name: str, result_type: type | None = None) -> StreamTopic[Any]:
             the payload converter's default applies.
 
     Raises:
-        ValueError: ``name`` is empty.
+        ValueError: ``name`` is empty, longer than 256 UTF-8 bytes, or holds
+            a control character.
     """
-    if not name:
-        raise ValueError("topic name must not be empty")
+    _check_name(name)
     return StreamTopic(name, result_type)
 
 
@@ -74,7 +75,8 @@ def resolve_topic(
 
     Raises:
         ValueError: A definition was given together with ``result_type``,
-            which would name two types for one topic, or the name is empty.
+            which would name two types for one topic, or the name is empty,
+            longer than 256 UTF-8 bytes, or holds a control character.
     """
     if isinstance(topic, StreamTopic):
         if result_type is not None:
@@ -87,6 +89,20 @@ def resolve_topic(
         name = DEFAULT_TOPIC
     else:
         name = topic
-    if not name:
-        raise ValueError("topic must not be empty")
+    _check_name(name)
     return name, result_type
+
+
+_MAX_NAME_BYTES = 256
+
+
+def _check_name(name: str) -> None:
+    # The same limit for every provider: the name goes into store keys, cursor
+    # hashes and Core's manifest budget, and a provider may join names with a
+    # control character.
+    if not name:
+        raise ValueError("topic name must not be empty")
+    if len(name.encode()) > _MAX_NAME_BYTES:
+        raise ValueError(f"topic name must be at most {_MAX_NAME_BYTES} UTF-8 bytes")
+    if any(unicodedata.category(c) == "Cc" for c in name):
+        raise ValueError(f"topic name {name!r} must not hold a control character")

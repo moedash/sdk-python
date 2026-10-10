@@ -52,8 +52,9 @@ class RecordKind(enum.IntEnum):
 
     The reader synthesizes it from the records it observed. No store holds
     it, so every provider reports a retry the same way. Its cursor is the
-    position before the new attempt's first record, so a reader that resumes
-    after it gets that record next.
+    position before the new attempt's first record. A reader that resumes
+    there gets this record again, then the new attempt, since dropping the
+    earlier attempt's records twice is harmless and missing it is not.
     """
 
 
