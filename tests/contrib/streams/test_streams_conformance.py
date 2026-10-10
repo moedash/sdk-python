@@ -47,6 +47,7 @@ from temporalio.contrib.streams import (
     StreamHandle,
     StreamProducerError,
     StreamProvider,
+    StreamRecordError,
     StreamRef,
     Supersession,
     topic,
@@ -436,11 +437,43 @@ async def test_a_new_attempt_supersedes_the_old_one(case: ProviderCase):
     ]
     assert records[1].supersession == Supersession("model", 1, 2)
     assert records[1].value is None
-    # A consumer that checkpoints the supersession and resumes after it gets
-    # the new attempt's first record next.
+    # The supersession sits at the cursor of the old attempt's last record. A
+    # read that resumes there knows that attempt, so it reports the new one
+    # again rather than mixing the two, then delivers the new attempt.
     assert records[1].cursor == records[0].cursor
-    resumed = await take(stream.read(topic=OUT, after=records[1].cursor), 1)
-    assert resumed[0].value == {"n": 2}
+    resumed = await take(stream.read(topic=OUT, after=records[1].cursor), 2)
+    assert [r.kind for r in resumed] == [RecordKind.SUPERSEDED, RecordKind.DATA]
+    assert resumed[1].value == {"n": 2}
+
+
+@reads
+async def test_a_read_resumed_before_a_new_attempt_reports_it(case: ProviderCase):
+    stream = await case.open(new_workflow_id())
+    first = stream.producer(topic=OUT, producer_id="model", attempt=1)
+    await first.append({"n": 1})
+    delivered = await first.append({"n": 2})
+    # The reader stops here, then the producer's retry writes.
+    await stream.producer(topic=OUT, producer_id="model", attempt=2).append({"n": 3})
+    resumed = await take(stream.read(topic=OUT, after=delivered), 2)
+    assert [r.kind for r in resumed] == [RecordKind.SUPERSEDED, RecordKind.DATA]
+    assert resumed[0].supersession == Supersession("model", 1, 2)
+    assert resumed[1].value == {"n": 3}
+
+
+@reads
+async def test_a_record_the_reader_cannot_decode_raises_with_its_cursor(
+    case: ProviderCase,
+):
+    stream = await case.open(new_workflow_id())
+    producer = stream.producer(topic="counts", producer_id="p", attempt=1)
+    bad = await producer.append({"not": "an int"})
+    await producer.append(7)
+    with pytest.raises(StreamRecordError) as raised:
+        await take(stream.read(topic="counts", result_type=int), 1)
+    assert raised.value.cursor == bad
+    # Resuming past it is the caller's choice, and the next record reads.
+    after = await take(stream.read(topic="counts", after=bad, result_type=int), 1)
+    assert [r.value for r in after] == [7]
 
 
 @reads
