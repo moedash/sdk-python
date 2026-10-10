@@ -296,7 +296,9 @@ async def test_progress_keeps_the_highest_counter_and_answers_from_it() -> None:
     scheduled = h.operation_scheduled()
     h.operation_started(scheduled)
     h.task(progress(scheduled, 3))
+    # After an event-based failover, counters already seen can come back.
     h.task(progress(scheduled, 2))
+    h.task(progress(scheduled, 3))
     h.operation_completed(scheduled, "done")
     h.task()
     h.workflow_completed()
