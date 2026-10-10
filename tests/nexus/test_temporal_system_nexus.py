@@ -13,6 +13,7 @@ from google.protobuf.message import Message
 
 import temporalio.api.common.v1
 import temporalio.api.failure.v1
+import temporalio.api.stream.v1
 import temporalio.api.workflowservice.v1.request_response_pb2 as workflowservice_pb2
 import temporalio.converter
 import temporalio.exceptions
@@ -697,6 +698,12 @@ def _field_is_repeated(field: FieldDescriptor) -> bool:
     [
         workflowservice_pb2.SignalWithStartWorkflowExecutionRequest,
         workflowservice_pb2.SignalWithStartWorkflowExecutionResponse,
+        workflowservice_pb2.AttachStreamCallbackRequest,
+        workflowservice_pb2.AttachStreamCallbackResponse,
+        workflowservice_pb2.DetachStreamCallbackRequest,
+        workflowservice_pb2.DetachStreamCallbackResponse,
+        workflowservice_pb2.NotifyStreamRequest,
+        workflowservice_pb2.NotifyStreamResponse,
     ],
 )
 def test_system_nexus_proto_roundtrip(message_type: type[Message]) -> None:
@@ -714,6 +721,16 @@ def test_system_nexus_proto_roundtrip(message_type: type[Message]) -> None:
     roundtripped = payload_converter.from_payload(payload, message_type)
     assert isinstance(roundtripped, message_type)
     assert roundtripped == proto_value
+
+
+def test_stream_reference_without_run_id_reads_as_none() -> None:
+    converter = workflow_service_models._StreamReferenceTransferTypeConverter()
+    proto = temporalio.api.stream.v1.StreamReference(workflow_id="wf", topic="t")
+    reference = converter.from_transfer_type(
+        proto, workflow_service_models.StreamReference
+    )
+    assert reference.run_id is None
+    assert converter.to_transfer_type(reference) == proto
 
 
 def test_system_nexus_uses_user_failure_converter() -> None:

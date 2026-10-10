@@ -650,3 +650,34 @@ class PayloadVisitor:
         self, fs: VisitorFunctions, o: Any
     ) -> None:
         pass
+
+    async def _visit_temporal_api_workflowservice_v1_AttachStreamCallbackRequest(
+        self, fs: VisitorFunctions, o: Any
+    ) -> None:
+        pass
+
+    async def _visit_temporal_api_workflowservice_v1_AttachStreamCallbackResponse(
+        self, fs: VisitorFunctions, o: Any
+    ) -> None:
+        pass
+
+    async def _visit_temporal_api_workflowservice_v1_DetachStreamCallbackRequest(
+        self, fs: VisitorFunctions, o: Any
+    ) -> None:
+        pass
+
+    async def _visit_temporal_api_workflowservice_v1_DetachStreamCallbackResponse(
+        self, fs: VisitorFunctions, o: Any
+    ) -> None:
+        pass
+
+    async def _visit_temporal_api_workflowservice_v1_NotifyStreamRequest(
+        self, fs: VisitorFunctions, o: Any
+    ):
+        if o.HasField("close_result"):
+            await self._visit_temporal_api_common_v1_Payload(fs, o.close_result)
+
+    async def _visit_temporal_api_workflowservice_v1_NotifyStreamResponse(
+        self, fs: VisitorFunctions, o: Any
+    ) -> None:
+        pass
