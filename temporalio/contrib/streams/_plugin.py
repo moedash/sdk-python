@@ -370,12 +370,18 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         try:
             await super().run_worker(worker, next)
         finally:
+            flush = asyncio.ensure_future(self.flush_notifications())
             try:
-                await asyncio.wait_for(self.flush_notifications(), _FLUSH_LIMIT)
+                await asyncio.wait_for(asyncio.shield(flush), _FLUSH_LIMIT)
             except asyncio.TimeoutError:
                 logger.warning(
                     "Stream notifications were still out when the Worker stopped"
                 )
+            except asyncio.CancelledError:
+                # ``async with`` on a Worker cancels its run once shutdown
+                # returns. Raising here would make the Worker cancel the task
+                # that left the block, so the flush goes on in the background.
+                pass
 
     @abstractmethod
     def get_stream_handle(self, client: Client, ref: StreamRef) -> StreamHandle:
