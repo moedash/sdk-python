@@ -416,6 +416,60 @@ async def test_after_the_operation_completes_only_the_streams_end_ends_it() -> N
     assert seen[0].after_end is None
 
 
+async def test_after_a_completion_a_stream_that_never_ends_raises() -> None:
+    """A stream that never says it's done would grow the caller's History for
+    ever, so the drain after a completion is bounded."""
+    h = History()
+    h.started()
+    h.task()
+    chat = h.scheduled("ChatService", "chat")
+    h.chat_started(chat)
+    h.task()
+    h.read(answer())
+    h.task()
+    h.completed(chat, "summary")
+    h.task()
+    h.read(answer())
+    h.task()
+    h.read(answer())
+    # A minute of empty reads later.
+    h._time += timedelta(seconds=61)  # type: ignore[reportPrivateUsage]
+    h.task()
+    h.workflow_completed()
+    await replay(WorkflowHistory(workflow_id="chat-reader", events=h.events))
+    assert seen[0].error == "StreamIncompleteError"
+
+
+async def test_a_record_too_large_to_cross_raises_and_the_reader_goes_on() -> None:
+    h = History()
+    h.started()
+    h.task()
+    chat = h.scheduled("ChatService", "chat")
+    h.chat_started(chat)
+    h.task(progress(chat, 1))
+    h.read(
+        answer(
+            record(1, text="a"),
+            RecordWire(token="cursor-2", record=b"", error="too large"),
+            record(3, text="c"),
+        )
+    )
+    # a is handed over, the large record raises, then the reader reads after it.
+    h.task()
+    h.read(answer(record(3, text="c")))
+    h.task()
+    h.read(answer(cursor="cursor-3"))
+    h.task()
+    h.completed(chat, "summary")
+    h.task()
+    h.read(answer(cursor="cursor-3", done=True))
+    h.task()
+    h.workflow_completed()
+    await replay(WorkflowHistory(workflow_id="chat-reader", events=h.events))
+    assert seen[0].batches == [[Token("a")], [Token("c")]]
+    assert seen[0].undecodable == ["cursor-2"]
+
+
 async def test_a_read_error_raises_from_next() -> None:
     h = History()
     h.started()
@@ -1007,6 +1061,109 @@ async def test_live_a_start_on_a_closed_stream_still_names_it(
     assert stream_ref_from_token(token) == ref
     assert labels == [f"t{n}" for n in range(5)]
     assert result == "closed before"
+
+
+@workflow.defn(name="LiveResumingReader")
+class LiveResumingReader:
+    """Reads a first batch, then reads the rest with a new reader that starts
+    after the first one's cursor, as a run after Continue-as-New would."""
+
+    def __init__(self) -> None:
+        self._resume = False
+
+    @workflow.run
+    async def run(self, endpoint: str) -> tuple[list[str], list[str]]:
+        client = workflow.create_nexus_client(service=ChatService, endpoint=endpoint)
+        handle = await client.start_operation(ChatService.chat, "hello")
+        first = StreamReader(handle, item_type=Token, endpoint=endpoint)
+        batch = await first.next()
+        assert batch is not None
+        await workflow.wait_condition(lambda: self._resume)
+        rest = StreamReader(
+            handle, item_type=Token, endpoint=endpoint, after=first.cursor
+        )
+        later: list[str] = []
+        while (more := await rest.next()) is not None:
+            later += [token.text for token in more]
+        return [token.text for token in batch], later
+
+    @workflow.signal
+    def resume(self) -> None:
+        self._resume = True
+
+
+async def test_live_a_new_reader_resumes_after_a_cursor(
+    client: Client, env: WorkflowEnvironment
+) -> None:
+    provider = _notifying_provider("memory")
+    owner_id = f"resume-owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-reader-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+
+    async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
+        await temporalio.nexus.client().start_workflow(
+            LiveIdleOwner.run, id=owner_id, task_queue=task_queue
+        )
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(start_owner)
+
+    streams = TemporalStreamsHandler(provider)
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[LiveResumingReader, LiveIdleOwner],
+        nexus_service_handlers=[ChatServiceHandler(), streams],
+        plugins=[provider],
+    ):
+        caller = await client.start_workflow(
+            LiveResumingReader.run,
+            endpoint,
+            id=f"stream-reader-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        for _ in range(200):
+            history = await caller.fetch_history()
+            if any(
+                event.HasField("nexus_operation_started_event_attributes")
+                for event in history.events
+            ):
+                break
+            await asyncio.sleep(0.1)
+        producer = provider.get_stream_handle(client, ref).producer(
+            producer_id="writer", attempt=1
+        )
+        await producer.append(Token("t0"), Token("t1"), Token("t2"))
+        for _ in range(200):
+            history = await caller.fetch_history()
+            reads = sum(
+                event.nexus_operation_completed_event_attributes.HasField("result")
+                for event in history.events
+                if event.HasField("nexus_operation_completed_event_attributes")
+            )
+            if reads >= 1 and any(
+                b"t2" in event.nexus_operation_completed_event_attributes.result.data
+                for event in history.events
+            ):
+                break
+            await asyncio.sleep(0.1)
+        await producer.append(Token("t3"), Token("t4"))
+        await provider.close_stream(client, ref, "done")
+        await caller.signal(LiveResumingReader.resume)
+        first, later = await asyncio.wait_for(caller.result(), 30)
+        await client.get_workflow_handle(owner_id).signal(LiveIdleOwner.done)
+        await streams.close()
+    await provider.close()
+
+    assert first == ["t0", "t1", "t2"]
+    assert later == ["t3", "t4"]
 
 
 async def test_an_undecodable_record_raises_and_the_reader_goes_on_past_it() -> None:
