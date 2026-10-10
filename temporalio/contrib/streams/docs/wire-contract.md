@@ -181,6 +181,7 @@ a `temporal.io/stream-close` record) sets `HSET meta closed 1` and
 `PEXPIRE meta <retention + 30 days>` on that topic, before the server's
 notifier completes the operations. The append script refuses a batch on a
 closed topic with `STREAMS_CLOSED`, after its retry check, so a retry of a
-batch that landed before the close still answers. Promotion never checks
-it, as with the chain flag. A read of a closed topic delivers what is left
+batch that landed before the close still answers. Promotion never refuses
+a closed topic, as with the chain flag: the Worker logs a warning, since the
+owner's own publishes still land and readers that ended miss them. A read of a closed topic delivers what is left
 and ends.

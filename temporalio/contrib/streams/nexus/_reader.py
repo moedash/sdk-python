@@ -103,6 +103,13 @@ class StreamReader(Generic[T]):
     raises :class:`StreamRecordError` from :meth:`next` once the records
     before it are handed over; the call after that goes on past it.
 
+    Each read goes to the run chain the Workflow id has when the read runs,
+    not to the chain the operation token names: a stream reference pins a
+    run, not a chain. So if the owner's chain ends and the same Workflow id
+    starts a new chain while this reader still drains, a later read can hand
+    over the new chain's records. Give each stream's owner a Workflow id of
+    its own, or let the reader finish before the id is reused.
+
     Bodies reach Workflow code decoded: the stream service decodes each body
     with its Worker's data converter, payload codec included, and the read's
     result travels back as one Nexus operation result, which this Worker's

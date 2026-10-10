@@ -9,6 +9,8 @@ the operation with the close result.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import time
 import uuid
@@ -35,8 +37,9 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.client import Client
 from temporalio.contrib.streams import StreamClosedError, StreamRef, workflow_writer
 from temporalio.contrib.streams._cursor import BEGINNING, progress_counter
-from temporalio.contrib.streams._output import StageRef
+from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams._record import Cursor, RecordKind
+from temporalio.contrib.streams._wire import to_wire
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.contrib.streams.nexus import (
     StreamNotifier,
@@ -256,7 +259,23 @@ async def test_cancel_detaches_from_the_chain_it_attached_to(
 
 
 def test_a_token_that_names_no_stream_is_refused() -> None:
-    for token in ["", "not-a-token", "eyJ2IjogMn0"]:
+    # A version 1 token, from before the token named the chain.
+    old = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "v": 1,
+                "attach": "attach-1",
+                "chain": "chain-1",
+                "ref": {
+                    "kind": "workflow",
+                    "workflow_id": "owner-1",
+                    "run_id": None,
+                    "topic": "tokens",
+                },
+            }
+        ).encode()
+    ).decode()
+    for token in ["", "not-a-token", "eyJ2IjogMn0", old]:
         with pytest.raises(ValueError):
             stream_ref_from_token(token)
 
@@ -520,6 +539,34 @@ async def test_a_worker_that_stops_waits_for_its_notifications(
     await provider.close()
 
 
+async def test_a_reused_workflow_id_reads_only_its_own_chain_on_memory(
+    client: Client,
+) -> None:
+    service = FakeWorkflowService()
+    provider = MemoryStreams()
+    stream_client: Any = FakeClient(service, real=client)
+    ref = StreamRef.for_workflow(f"owner-{uuid.uuid4()}", topic="tokens")
+    service.chains[ref.workflow_id] = "chain-1"
+    first = provider.get_stream_handle(stream_client, ref).producer(
+        producer_id="p", attempt=1
+    )
+    await first.append("a1", "a2")
+
+    # A new chain reuses the Workflow id and topic, and its producer starts
+    # over, as a fresh store would let it.
+    service.chains[ref.workflow_id] = "chain-2"
+    handle = provider.get_stream_handle(stream_client, ref)
+    second = handle.producer(producer_id="p", attempt=1)
+    await second.append("b1", "b2", "b3")
+
+    records = handle.read()
+    values = [(await asyncio.wait_for(records.__anext__(), 5)).value for _ in range(3)]
+    await records.aclose()
+    assert values == ["b1", "b2", "b3"]
+    assert (await handle.latest()) == (await second.append())
+    await provider.close()
+
+
 class ForeignPositionProducer:
     """A third-party producer whose positions no counter can come from."""
 
@@ -575,12 +622,10 @@ def test_a_workflows_batch_notifies_each_of_its_topics_once_visible() -> None:
         and request.stream_ref.run_id == "run-1"
         for request in service.notified
     )
-    # The stage names its chain, so nothing is described.
-    assert service.described == []
 
 
 async def test_a_promoted_close_closes_the_store_then_the_notifier() -> None:
-    service = FakeWorkflowService()
+    service = FakeWorkflowService(chains={"owner-1": "run-1"})
     provider = MemoryStreams().notify_on_append()
     client = fake_client(service)
     [result] = DataConverter.default.payload_converter.to_payloads(["3 tokens"])
@@ -1121,3 +1166,35 @@ async def _values(handle: Any) -> list[Any]:
     return [
         record.value async for record in handle.read() if record.kind is RecordKind.DATA
     ]
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_a_workflow_publish_after_an_outside_close_lands_with_a_warning(
+    client: Client, backing: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = _provider_for(backing)
+    workflow_id = f"owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(workflow_id, topic=TOKENS_TOPIC)
+    await provider._close_topic(client, ref, TOKENS_TOPIC, "run-1")  # type: ignore[reportPrivateUsage]
+    record = to_wire(
+        DataConverter.default.payload_converter,
+        topic=TOKENS_TOPIC,
+        kind=RecordKind.DATA,
+        value="late",
+    )
+    token = await provider._stage(  # type: ignore[reportPrivateUsage]
+        StagedBatch(client.namespace, workflow_id, "run-1", "run-1", [record])
+    )
+
+    # Workflow code cannot be told, so the output lands, and the Worker says
+    # that readers which already ended miss it.
+    with caplog.at_level("WARNING"):
+        await provider._promote(  # type: ignore[reportPrivateUsage]
+            StageRef(client.namespace, workflow_id, "run-1", token, (TOKENS_TOPIC,))
+        )
+
+    assert any(
+        "after it was closed" in message and TOKENS_TOPIC in message
+        for message in caplog.messages
+    )
+    await provider.close()

@@ -141,11 +141,18 @@ class StreamProviderPlugin(SimplePlugin, ABC):
         """Close ``ref``'s stream with ``result``.
 
         The stream closes in the store first: every read of it ends once it
-        has delivered the records already there, and a later append raises
-        :class:`temporalio.contrib.streams.StreamClosedError`, the owner's
-        included. Then every Nexus operation that handed out this stream
-        completes with ``result``. The records stay readable. Waits for the
-        notification in flight first.
+        has delivered the records already there, and a later append from a
+        client or an Activity raises
+        :class:`temporalio.contrib.streams.StreamClosedError`. Then every
+        Nexus operation that handed out this stream completes with
+        ``result``. The records stay readable. Waits for the notification in
+        flight first.
+
+        The owning Workflow's own later publishes still land, with a warning,
+        and readers that already ended miss them: Workflow code cannot be
+        refused deterministically. Close a Workflow's own stream from the
+        Workflow with
+        :func:`temporalio.contrib.streams.nexus.close_workflow_stream`.
 
         Raises:
             temporalio.service.RPCError: The server refused the close, or the
@@ -222,6 +229,21 @@ class StreamProviderPlugin(SimplePlugin, ABC):
                     topic,
                     exc_info=True,
                 )
+
+    def _warn_closed_topic(self, workflow_id: str, topic: str) -> None:
+        """Say that a Workflow's promoted output landed on a closed topic.
+
+        Workflow code cannot be told when it publishes, since the close is
+        not in its History, so the output lands and readers that ended miss
+        it.
+        """
+        logger.warning(
+            "Workflow %r published to topic %r after it was closed from outside "
+            "the Workflow; readers that already ended do not see those records. "
+            "Close a Workflow's own stream with close_workflow_stream",
+            workflow_id,
+            topic,
+        )
 
     async def _close_topic(
         self, client: Client, ref: StreamRef, topic: str, first_run_id: str
