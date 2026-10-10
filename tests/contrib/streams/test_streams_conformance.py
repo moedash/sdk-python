@@ -653,11 +653,12 @@ class YieldingCodec(PayloadCodec):
         return list(payloads)
 
 
+@reads
 async def test_concurrent_appends_on_one_producer_take_consecutive_sequences(
     case: ProviderCase,
 ):
     coded = _client_with(case.client, DataConverter(payload_codec=YieldingCodec()))
-    stream = case.open(new_workflow_id(), client=coded)
+    stream = await case.open(new_workflow_id(), client=coded)
     producer = stream.producer(topic=OUT, producer_id="p", attempt=1)
     await asyncio.gather(*(producer.append({"n": n}) for n in range(10)))
     records = await take(stream.read(topic=OUT), 10)
