@@ -113,7 +113,8 @@ async def test_an_activity_retry_supersedes_its_first_attempt(client: Client):
         RecordKind.DATA,
         RecordKind.FINISH,
     ]
-    assert records[1].supersession == Supersession("tokens", 1, 2)
+    producer_id = f"tokens@{(await streams_client.get_workflow_handle(workflow_id).describe()).run_id}"
+    assert records[1].supersession == Supersession(producer_id, 1, 2)
     assert [r.value for r in records if r.kind is RecordKind.DATA] == [
         "a",
         "a",
@@ -121,10 +122,10 @@ async def test_an_activity_retry_supersedes_its_first_attempt(client: Client):
         "c",
     ]
     assert [(r.producer_id, r.attempt, r.sequence) for r in records[2:]] == [
-        ("tokens", 2, 1),
-        ("tokens", 2, 2),
-        ("tokens", 2, 3),
-        ("tokens", 2, 4),
+        (producer_id, 2, 1),
+        (producer_id, 2, 2),
+        (producer_id, 2, 3),
+        (producer_id, 2, 4),
     ]
 
 
@@ -189,3 +190,48 @@ async def test_a_client_producer_and_the_workflow_share_a_topic(client: Client):
         ("", {"step": "init"}),
         ("", None),
     ]
+
+
+@activity.defn
+async def count_twice() -> str:
+    producer = activity_handle().producer(topic=TOKENS)
+    await producer.append("one")
+    await producer.append("two")
+    return producer.producer_id
+
+
+@workflow.defn
+class CountThenContinue:
+    @workflow.run
+    async def run(self, runs_left: int) -> list[str]:
+        # The same Activity id in every run, as a counter-based id would be.
+        producer_id = await workflow.execute_activity(
+            count_twice,
+            activity_id="count",
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        if runs_left:
+            workflow.continue_as_new(runs_left - 1)
+        return [producer_id]
+
+
+async def test_an_activity_producer_writes_in_every_run_of_a_chain(client: Client):
+    provider = MemoryStreams()
+    streams_client = client_with(client, provider)
+    workflow_id = new_workflow_id()
+    async with new_worker(
+        streams_client, CountThenContinue, activities=[count_twice]
+    ) as worker:
+        handle = await streams_client.start_workflow(
+            CountThenContinue.run, 1, id=workflow_id, task_queue=worker.task_queue
+        )
+        (last_producer,) = await handle.result()
+    stream = get_stream_handle(streams_client, workflow_id, topic=TOKENS)
+    records = await read_all(stream.read())
+    # Both runs' records, under two producers: the run is part of the id.
+    assert [r.value for r in records] == ["one", "two", "one", "two"]
+    producers = [r.producer_id for r in records]
+    assert producers[0] == producers[1] != producers[2] == producers[3]
+    assert producers[3] == last_producer
+    assert last_producer.endswith("@" + (await handle.describe()).run_id)
