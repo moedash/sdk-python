@@ -558,7 +558,8 @@ class RedisStreamHandle:
         # were behind its start.
         seen = _entry(last_id)
         if position is None:
-            trimmed = await _awaited(redis_client.hget(keys.meta(topic), "trimmed"))
+            async with _mapped(write=False):
+                trimmed = await _awaited(redis_client.hget(keys.meta(topic), "trimmed"))
             if trimmed is not None:
                 seen = max(seen, _entry(_text(trimmed)))
         decoder = RecordDecoder(

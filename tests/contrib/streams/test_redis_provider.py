@@ -1234,3 +1234,21 @@ async def test_an_owner_check_during_a_read_that_fails_is_a_stream_error(
     monkeypatch.setattr(WorkflowHandle, "describe", unavailable)
     with pytest.raises(StreamStorageError, match="unavailable"):
         await asyncio.wait_for(anext(stream.read(topic=EVENTS)), 10)
+
+
+async def test_a_store_error_on_the_start_watermark_is_a_stream_error(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "hget", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await asyncio.wait_for(anext(stream.read(topic=EVENTS)), 10)
