@@ -30,12 +30,18 @@ class _StreamOwnerKindEnumTypeWrapper(
     DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
     STREAM_OWNER_KIND_UNSPECIFIED: _StreamOwnerKind.ValueType  # 0
     STREAM_OWNER_KIND_WORKFLOW: _StreamOwnerKind.ValueType  # 1
-    """A Workflow owns the stream. It closes when the Workflow's run chain closes."""
+    """A Workflow owns the stream. Readers see it end when the Workflow's run chain closes. If the
+    Workflow did not close the stream itself, the stream notifier closes it with a failure soon
+    after, which completes the operations that handed it out.
+    """
 
 class StreamOwnerKind(_StreamOwnerKind, metaclass=_StreamOwnerKindEnumTypeWrapper):
     """What owns a stream. The owner decides when the stream closes."""
 
 STREAM_OWNER_KIND_UNSPECIFIED: StreamOwnerKind.ValueType  # 0
 STREAM_OWNER_KIND_WORKFLOW: StreamOwnerKind.ValueType  # 1
-"""A Workflow owns the stream. It closes when the Workflow's run chain closes."""
+"""A Workflow owns the stream. Readers see it end when the Workflow's run chain closes. If the
+Workflow did not close the stream itself, the stream notifier closes it with a failure soon
+after, which completes the operations that handed it out.
+"""
 global___StreamOwnerKind = StreamOwnerKind

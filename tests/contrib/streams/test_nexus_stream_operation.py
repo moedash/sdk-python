@@ -178,6 +178,23 @@ async def test_start_attaches_the_callers_callback_and_hands_back_the_ref(
     )
 
 
+async def test_the_attach_carries_the_start_token_and_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeWorkflowService()
+    handler = handler_with(monkeypatch, service)
+    before = time.time()
+
+    result = await handler.start(start_context(), "hi")
+
+    [attach] = service.attached
+    # The notifier hands both back with progress and the completion, so a
+    # completion that beats the start response still names the operation.
+    assert attach.operation_token == result.token
+    assert attach.HasField("start_time")
+    assert before - 1 <= attach.start_time.ToSeconds() <= time.time() + 1
+
+
 async def test_a_pinned_ref_attaches_by_its_chains_first_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

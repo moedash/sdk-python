@@ -59,6 +59,7 @@ from temporalio.contrib.streams.nexus import (
     StreamRecordError,
     TemporalStreamsHandler,
     close_workflow_stream,
+    stream_ref_from_token,
 )
 from temporalio.contrib.streams.nexus._operation import _encode_token
 from temporalio.converter import DataConverter, PayloadCodec
@@ -933,6 +934,79 @@ async def test_live_a_close_with_the_last_publishes_loses_none_of_them(
         await streams.close()
     await provider.close()
     assert labels == [str(n) for n in range(300)]
+
+
+@workflow.defn(name="LiveTokenReader")
+class LiveTokenReader:
+    """Reads the stream and reports the token it read it by."""
+
+    @workflow.run
+    async def run(self, endpoint: str) -> tuple[str, list[str], str]:
+        client = workflow.create_nexus_client(service=ChatService, endpoint=endpoint)
+        handle = await client.start_operation(ChatService.chat, "hello")
+        reader = StreamReader(handle, item_type=Token, endpoint=endpoint)
+        labels: list[str] = []
+        while (batch := await reader.next()) is not None:
+            labels += [token.text for token in batch]
+        result = await handle
+        return handle.operation_token or "", labels, result
+
+
+@pytest.mark.parametrize("backing", ["memory", "redis"])
+async def test_live_a_start_on_a_closed_stream_still_names_it(
+    client: Client, env: WorkflowEnvironment, backing: str
+) -> None:
+    """The attach completes the operation at once, before the start answers,
+    and the completion carries the token the reader needs."""
+    provider = _notifying_provider(backing)
+    owner_id = f"closed-owner-{uuid.uuid4()}"
+    ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
+    await _skip_without_notifier(client, ref)
+    task_queue = f"stream-reader-{uuid.uuid4()}"
+    endpoint = make_nexus_endpoint_name(task_queue)
+    await env.create_nexus_endpoint(endpoint, task_queue)
+
+    async def closed_stream(_ctx: Any, _prompt: str) -> StreamRef:
+        return ref
+
+    @nexusrpc.handler.service_handler(service=ChatService)
+    class ChatServiceHandler:
+        @nexusrpc.handler.operation_handler
+        def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
+            return StreamOperationHandler(closed_stream)
+
+    streams = TemporalStreamsHandler(provider)
+    async with Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[LiveTokenReader, LiveIdleOwner],
+        nexus_service_handlers=[ChatServiceHandler(), streams],
+        plugins=[provider],
+    ):
+        owner = await client.start_workflow(
+            LiveIdleOwner.run, id=owner_id, task_queue=task_queue
+        )
+        producer = provider.get_stream_handle(client, ref).producer(
+            producer_id="writer", attempt=1
+        )
+        await producer.append(*(Token(f"t{n}") for n in range(5)))
+        await provider.close_stream(client, ref, "closed before")
+        token, labels, result = await asyncio.wait_for(
+            client.execute_workflow(
+                LiveTokenReader.run,
+                endpoint,
+                id=f"stream-reader-{uuid.uuid4()}",
+                task_queue=task_queue,
+            ),
+            30,
+        )
+        await owner.signal(LiveIdleOwner.done)
+        await streams.close()
+    await provider.close()
+
+    assert stream_ref_from_token(token) == ref
+    assert labels == [f"t{n}" for n in range(5)]
+    assert result == "closed before"
 
 
 async def test_an_undecodable_record_raises_and_the_reader_goes_on_past_it() -> None:

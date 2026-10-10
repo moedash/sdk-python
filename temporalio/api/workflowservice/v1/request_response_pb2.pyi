@@ -13723,6 +13723,8 @@ class AttachStreamCallbackRequest(google.protobuf.message.Message):
     REQUEST_ID_FIELD_NUMBER: builtins.int
     CALLBACK_FIELD_NUMBER: builtins.int
     IDENTITY_FIELD_NUMBER: builtins.int
+    OPERATION_TOKEN_FIELD_NUMBER: builtins.int
+    START_TIME_FIELD_NUMBER: builtins.int
     namespace: builtins.str
     @property
     def stream_ref(self) -> temporalio.api.stream.v1.message_pb2.StreamReference:
@@ -13739,6 +13741,14 @@ class AttachStreamCallbackRequest(google.protobuf.message.Message):
         """
     identity: builtins.str
     """The identity of the client attaching the callback."""
+    operation_token: builtins.str
+    """The operation token the handler returns from its start. The notifier sends it with each
+    progress delivery and with the completion, so a completion that reaches the caller before
+    the start response still names the operation.
+    """
+    @property
+    def start_time(self) -> google.protobuf.timestamp_pb2.Timestamp:
+        """When the handler started the operation. Sent with the token, for the same reason."""
     def __init__(
         self,
         *,
@@ -13747,11 +13757,18 @@ class AttachStreamCallbackRequest(google.protobuf.message.Message):
         request_id: builtins.str = ...,
         callback: temporalio.api.common.v1.message_pb2.Callback.Nexus | None = ...,
         identity: builtins.str = ...,
+        operation_token: builtins.str = ...,
+        start_time: google.protobuf.timestamp_pb2.Timestamp | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
-            "callback", b"callback", "stream_ref", b"stream_ref"
+            "callback",
+            b"callback",
+            "start_time",
+            b"start_time",
+            "stream_ref",
+            b"stream_ref",
         ],
     ) -> builtins.bool: ...
     def ClearField(
@@ -13763,8 +13780,12 @@ class AttachStreamCallbackRequest(google.protobuf.message.Message):
             b"identity",
             "namespace",
             b"namespace",
+            "operation_token",
+            b"operation_token",
             "request_id",
             b"request_id",
+            "start_time",
+            b"start_time",
             "stream_ref",
             b"stream_ref",
         ],
@@ -13867,7 +13888,8 @@ class NotifyStreamRequest(google.protobuf.message.Message):
     def stream_ref(self) -> temporalio.api.stream.v1.message_pb2.StreamReference: ...
     position: builtins.str
     """Where the stream stands after the append this notification reports, in the producer's terms,
-    such as a stream cursor. Passed on to the callbacks as the progress position.
+    such as a stream cursor. Passed on to the callbacks as the progress position. The server
+    rejects a position longer than 1 KiB of UTF-8.
     """
     counter: builtins.int
     """Orders the notifications of one stream. The notifier keeps the highest counter it has seen
