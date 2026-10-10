@@ -476,3 +476,15 @@ async def test_store_errors_on_reads_arrive_as_stream_errors(
     monkeypatch.setattr(provider._redis, "xrevrange", lost)
     with pytest.raises(StreamStorageError, match="connection reset"):
         await stream.latest(topic=EVENTS)
+
+
+async def test_a_large_stage_lands_whole(raw: Any):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"], key_prefix=f"test-{uuid.uuid4().hex}"
+    )
+    records = [WireRecord(topic="events", sequence=i) for i in range(10_000)]
+    token = await provider._stage(StagedBatch("ns", "wf", "first", "run", records))
+    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    keys = provider._chain_keys("ns", "wf", "first")
+    assert await raw.xlen(keys.log("events")) == 10_000
+    await provider.close()

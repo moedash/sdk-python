@@ -146,9 +146,13 @@ return {first, last}
 """
 )
 
-# KEYS: stage. ARGV: retention ms, then topic and record pairs.
+# KEYS: stage. ARGV: retention ms, then topic and record pairs. Lua's
+# unpack fails past a few thousand values, so the pairs go in chunks.
 _STAGE_LUA = """
-redis.call('RPUSH', KEYS[1], unpack(ARGV, 2))
+local chunk = 1000
+for i = 2, #ARGV, chunk do
+  redis.call('RPUSH', KEYS[1], unpack(ARGV, i, math.min(i + chunk - 1, #ARGV)))
+end
 redis.call('PEXPIRE', KEYS[1], ARGV[1])
 """
 
