@@ -60,7 +60,6 @@ from temporalio.contrib.streams.nexus import (
 from temporalio.contrib.streams.nexus._generated import client as generated_client
 from temporalio.contrib.streams.nexus._handler import _handler_error
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
-from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import PollerBehaviorSimpleMaximum, Worker
 from tests import DEV_SERVER_DOWNLOAD_VERSION
@@ -635,7 +634,27 @@ def test_each_stream_condition_crosses_as_its_own_class(
     assert crossed.type == kind
     assert crossed.retryable == retryable
     assert str(crossed).startswith(f"{name}: ")
-    cause = crossed.__cause__
-    assert isinstance(cause, ApplicationError)
-    assert cause.type == name
-    assert cause.non_retryable == (not retryable)
+    # What crosses is the failure the handler spells out, with no stack.
+    original = crossed.original_failure
+    assert original is not None
+    assert original.message == str(crossed)
+    assert not original.stack_trace
+    details = dict(original.details or {})
+    cause = details["cause"]["applicationFailureInfo"]
+    assert cause["type"] == name
+    assert cause.get("nonRetryable", False) == (not retryable)
+    assert details["nexusHandlerFailureInfo"]["type"] == kind.name
+
+
+async def test_a_refusal_carries_no_handler_stack_frames(service: Service):
+    ref = await stream_of(service)
+    await append(service, ref, "one")
+    with pytest.raises(HTTPStatusError) as refused:
+        await append(service, ref, "different")
+    # The caller learns the condition, not the handler's source layout.
+    assert refused_as(refused.value) == "StreamProducerError"
+    assert "File " not in refused.value.detail
+    assert "_handler.py" not in refused.value.detail
+    failure = json.loads(refused.value.detail)
+    assert not failure.get("stackTrace")
+    assert not failure["details"].get("stackTrace")
