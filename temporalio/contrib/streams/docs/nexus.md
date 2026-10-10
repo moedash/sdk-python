@@ -76,7 +76,6 @@ class Conversation:
         writer = workflow_writer(MESSAGES)
         for reply in make_replies(request):
             writer.publish(reply)
-        writer.finish()
         close_workflow_stream("done", topic=MESSAGES)
 
 async def open_conversation(ctx, request: str) -> StreamRef:
@@ -243,6 +242,41 @@ latest = handle.latest_progress             # or None
 progress arrives. Progress comes from History, so a replay returns the same
 values at the same points.
 
+### History cost and long streams
+
+Reading a stream adds to the caller's History in two ways.
+
+- Each read is a synchronous Nexus operation, about three events, and its
+  answer holds up to 1 MiB of records.
+- Each progress delivery costs at most one Workflow Task, three events,
+  and up to about 3 KiB on its scheduled event. The server holds progress
+  until `nexusoperation.progressMinInterval` (1 second by default) has
+  passed since the caller Workflow's last task that carried progress. So a
+  busy stream costs about one progress task per second, plus its reads.
+
+The server terminates a Workflow whose History passes 51,200 events or
+50 MiB by default. To read a long stream, Continue-as-New before that, for
+example when `workflow.info().is_continue_as_new_suggested()` is true. Pass
+`reader.cursor` to the new run, start the operation again there, and resume
+after the cursor:
+
+```python
+reader = StreamReader(handle, item_type=Message, endpoint=ENDPOINT, after=cursor)
+```
+
+Two cases stop a reader that would otherwise read for ever.
+
+- After the operation completes, the reader reads until the stream service
+  says the stream is done. If its reads find nothing for `drain_limit`
+  (60 seconds by default, a `StreamReader` keyword), it raises
+  `StreamIncompleteError`, whose `.cursor` says where it stopped. That
+  happens when the owner's close never reached the store, or when the
+  Workflow id moved on to a new run chain whose topic is still open.
+- A record too large for one read answer raises `StreamRecordError` at its
+  cursor, and the next call goes on past it. The stream service refuses an
+  append of such a record, so this only happens for a record written to the
+  store directly.
+
 ## Limits and timeouts
 
 - A notification's `position` is at most 1 KiB of UTF-8, and its metadata
@@ -279,13 +313,15 @@ values at the same points.
   the new chain's records. Give each stream owner its own Workflow id, or
   reuse an id only after its readers finish.
 - `close_workflow_stream` closes the stream after the Worker promotes the
-  Workflow Task's records. If that close fails, it is retried only when the
-  batch is promoted again, by a Worker that replays the run. Until then
-  readers keep waiting and callers stay attached.
-- A Workflow Task's batch that a Worker never promoted is promoted later by
-  a reader's repair, which sends no notifier close. Readers still end, since
-  the store marks the run chain closed, and the notifier's owner check
-  closes the callers' operations once the owner's run chain has closed.
+  Workflow Task's records. If the close call fails, the Worker tries again
+  with backoff, from 1 second up to 1 minute, until it lands or the Worker
+  stops. It doesn't retry a close the server refuses for good, such as one
+  for a stream it doesn't know. If the close never lands, or a reader's
+  repair promoted the batch instead (a repair sends no close), readers
+  still end once the owner's run chain closes, since the store marks the
+  chain closed. The callers' operations then fail, and don't complete with
+  the close result, at the notifier's next owner check
+  (`streamnotifier.ownerCheckInterval`).
 
 ## Guarantees
 
@@ -324,8 +360,23 @@ The stream reference names a stream: its owner and its topic. It carries no
 credential for the store. Do not put a Redis URL, a key prefix or any store
 credential in the operation's input, result or token, and do not build a
 caller that reads the handler's store directly. The caller reads through
-the stream service on the handler's endpoint, so the handler keeps control
-of who reads, and the caller needs no access to the handler's store.
+the stream service on the handler's endpoint, so it needs no access to the
+handler's store.
+
+The stream service writes and reads with its Worker's client and store
+credentials, whatever caller sent the call. So by default every caller that
+can reach the endpoint can read and append to every stream of the handler's
+namespace, as any producer. Limit who reaches the endpoint with its allowed
+caller namespaces, and pass `authorize` to `TemporalStreamsHandler` to check
+each call. It gets a `StreamAccess` (`operation`, `stream`, the Nexus
+`context` with the caller's headers, and for an append `producer_id` and
+`attempt`) and answers whether to serve it. A refused call fails as
+unauthorized.
+
+Parked reads hold Nexus task slots on the handler's Worker for up to a few
+seconds each. With many readers, give that Worker more Nexus pollers
+(`nexus_task_poller_behavior`), and serve appends and reads on separate
+task queues or endpoints, so an append doesn't wait behind parked reads.
 
 ## Sample
 
