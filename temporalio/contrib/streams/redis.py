@@ -496,7 +496,9 @@ class RedisStreamHandle:
         status = description.status
         if self._ref.run_id is not None:
             return status is not None and status != WorkflowExecutionStatus.RUNNING
-        if status not in CHAIN_ENDED:
+        # A Workflow id reused by a new chain means this chain has ended.
+        latest = description.raw_description.workflow_execution_info
+        if status not in CHAIN_ENDED and latest.first_run_id == keys.first_run_id:
             return False
         await self._streams._mark_closed(keys)
         return True
