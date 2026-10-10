@@ -227,6 +227,7 @@ class _ChainKeys:
     def __init__(
         self, prefix: str, namespace: str, workflow_id: str, first_run_id: str
     ) -> None:
+        self.first_run_id = first_run_id
         self.base = (
             f"{_part(prefix)}:"
             f"{{{_part(namespace)}:{_part(workflow_id)}:{_part(first_run_id)}}}"
@@ -547,13 +548,19 @@ class RedisStreamHandle:
     async def _refuse_if_ended(self, keys: _ChainKeys) -> None:
         """Mark the chain closed and raise if its latest run has ended.
 
+        A Workflow id reused by a new chain also means this chain has ended.
+
         Raises:
             StreamClosedError: The chain has ended.
         """
         description = await self._client.get_workflow_handle(
             self._ref.workflow_id
         ).describe()
-        if description.status in CHAIN_ENDED:
+        latest = description.raw_description.workflow_execution_info
+        if (
+            description.status in CHAIN_ENDED
+            or latest.first_run_id != keys.first_run_id
+        ):
             await self._streams._mark_closed(keys)
             raise StreamClosedError(
                 f"the Workflow {self._ref.workflow_id!r} that owns this stream has "

@@ -740,6 +740,24 @@ async def wait_for_next_run_after_completion(
     raise AssertionError("the first cron run never completed")
 
 
+async def test_a_producer_whose_workflow_id_was_reused_is_refused(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    await stream._keys()
+    await owner.terminate()
+    # A new chain under the same id: the old chain is over even though the
+    # id's latest run is running.
+    async with new_worker(client, Owner) as worker:
+        reused = await client.start_workflow(
+            Owner.run, id=owner.id, task_queue=worker.task_queue
+        )
+        producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+        with pytest.raises(StreamClosedError):
+            await producer.append(1)
+        await reused.terminate()
+
+
 async def test_a_producer_rechecks_its_owner_once_retention_passed(
     client: Client, owner: WorkflowHandle, raw: Any
 ):
