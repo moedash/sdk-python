@@ -287,3 +287,73 @@ async def test_a_completion_and_an_eviction_settle_a_stage_once():
         coordinator.after_completion("run"), coordinator.on_eviction("run")
     )
     assert provider.promoted == [token]
+
+
+async def test_a_stage_from_a_failed_transient_attempt_is_aborted(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+):
+    # Attempts 1 and 2 of the first Workflow Task are rejected after staging;
+    # attempt 3 commits. Attempt 2 is transient: History never records its
+    # failure, so only the later attempt's commit at the same floor, or the
+    # run's close, can settle it.
+    real = output_module.build_manifest
+    broken = {"left": 2}
+
+    def wrong_floor_twice(*args: Any, **kwargs: Any) -> ExternalOutputStreamManifest:
+        manifest = real(*args, **kwargs)
+        if broken["left"]:
+            broken["left"] -= 1
+            manifest.history_floor_event_id += 1000
+        return manifest
+
+    monkeypatch.setattr(output_module, "build_manifest", wrong_floor_twice)
+    provider = CountingStreams()
+    streams_client = client_with(client, provider)
+    workflow_id = new_workflow_id()
+    async with new_worker(streams_client, PublishOnce) as worker:
+        await streams_client.execute_workflow(
+            PublishOnce.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        for _ in range(100):
+            if len(provider.aborted) == 2:
+                break
+            await asyncio.sleep(0.1)
+
+    assert len(provider.staged) == 3
+    assert sorted(provider.aborted) == sorted(provider.staged[:2])
+    assert provider.promoted == provider.staged[2:]
+    # Nothing is left to read History for.
+    assert provider._stages == {}
+
+
+class _FailingPromote(CountingStreams):
+    async def _promote(self, stage: StageRef) -> None:
+        raise RuntimeError("the store is unavailable")
+
+
+async def test_an_eviction_keeps_stages_it_could_not_settle():
+    provider = _FailingPromote()
+    token = await provider._stage(StagedBatch("default", "wf", "run", "run", []))
+    history: Any = _HistoryWithMarker(token)
+    coordinator = OutputCoordinator(provider, history, "default")
+    run = coordinator.open_run("wf", "run")
+    run.staged.append(_Stage(StageRef("default", "wf", "run", token, ()), 1))
+    await coordinator.on_eviction("run")
+    # The stage waits for the run's return instead of being forgotten.
+    returned = coordinator.open_run("wf", "run")
+    assert [stage.token for stage in returned.staged] == [token]
+
+
+async def test_settling_a_proven_stage_updates_the_list_others_hold():
+    provider = CountingStreams()
+    token = await provider._stage(StagedBatch("default", "wf", "run", "run", []))
+    coordinator = OutputCoordinator(provider, None, "default")
+    run = coordinator.open_run("wf", "run")
+    stage = _Stage(StageRef("default", "wf", "run", token, ()), 1)
+    run.staged.append(stage)
+    # An eviction hands this same list to the run's next incarnation.
+    shared = run.staged
+    run.proven.append(stage)
+    await coordinator.after_completion("run")
+    assert provider.promoted == [token]
+    assert shared == []
