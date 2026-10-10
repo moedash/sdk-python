@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from datetime import timedelta
@@ -20,8 +21,9 @@ import redis.exceptions
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHandle
+from temporalio.common import RetryPolicy
 from temporalio.contrib.streams import (
-    CONTENT_HASH_KEY,
+    END,
     RUN_ID_KEY,
     StreamClosedError,
     StreamExpiredError,
@@ -29,15 +31,21 @@ from temporalio.contrib.streams import (
     StreamOutcomeUnknownError,
     StreamProducerError,
     StreamRef,
+    StreamRefusedError,
+    StreamStorageError,
     StreamUnsupportedError,
     get_stream_handle,
     topic,
     workflow_writer,
 )
+from temporalio.contrib.streams._body import (
+    CONTENT_HASH_KEY,
+)
 from temporalio.contrib.streams._output import StagedBatch, StageRef
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.contrib.streams.redis import RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
+from temporalio.exceptions import ApplicationError
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
@@ -379,7 +387,7 @@ async def test_the_worker_closes_the_streams_of_an_ended_chain(
         await producer.append({"n": 2})
     # A retry of a batch that landed before the close still finds it.
     retry = stream.producer(topic=OTHER, producer_id="backend", attempt=1)
-    retry._checked_owner = True
+    retry._owner_checked_at = time.monotonic()
     assert await retry.append({"n": 1}) == landed
     # The final Workflow Task's own publish is committed output, never refused.
     events = await log_entries(raw, stream, "events")
@@ -733,3 +741,242 @@ async def test_a_reader_promotes_output_a_stopped_worker_committed(
     assert [r.value for r in again] == [{"n": 1}, {"n": 2}]
     await stopped.close()
     await reader.close()
+
+
+class YieldingCodec(PayloadCodec):
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        await asyncio.sleep(0.01)
+        return list(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return list(payloads)
+
+
+async def test_concurrent_appends_on_one_producer_take_consecutive_sequences(
+    client: Client, provider: RedisStreams, owner: WorkflowHandle, raw: Any
+):
+    coded = client_with(client, provider, DataConverter(payload_codec=YieldingCodec()))
+    stream = provider.get_stream_handle(coded, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await asyncio.gather(*(producer.append({"n": n}) for n in range(10)))
+    records = await log_entries(raw, stream, "events")
+    assert [r.sequence for r in records] == list(range(1, 11))
+
+
+async def test_store_errors_on_writes_arrive_as_stream_errors(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append({"n": 0})
+
+    async def out_of_memory(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ResponseError(
+            "OOM command not allowed when used memory > 'maxmemory'."
+        )
+
+    monkeypatch.setattr(provider, "_append", out_of_memory)
+    with pytest.raises(StreamRefusedError, match="OOM"):
+        await producer.append({"n": 1})
+
+    batch = StagedBatch("ns", "wf", "first", "run", [WireRecord(topic="events")])
+    # A real call first, so any first-contact checks are already done.
+    await provider._stage(batch)
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "execute_command", lost)
+    with pytest.raises(StreamOutcomeUnknownError):
+        await provider._stage(batch)
+
+    async def wrong_type(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ResponseError(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        )
+
+    monkeypatch.setattr(provider._redis, "execute_command", wrong_type)
+    with pytest.raises(StreamRefusedError, match="WRONGTYPE"):
+        await provider._promote(StageRef("ns", "wf", "first", "token", ("events",)))
+
+
+async def test_store_errors_on_reads_arrive_as_stream_errors(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(provider._redis, "xrevrange", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await stream.latest(topic=EVENTS)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await anext(stream.read(topic=EVENTS, after=END))
+    monkeypatch.setattr(type(provider._redis.pipeline()), "execute", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await anext(stream.read(topic=EVENTS))
+
+
+async def test_store_errors_on_read_checks_arrive_as_stream_errors(
+    client: Client,
+    provider: RedisStreams,
+    owner: WorkflowHandle,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    cursor = await producer.append({"n": 1})
+
+    async def lost(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    pipeline_type = type(provider._redis.pipeline())
+    monkeypatch.setattr(pipeline_type, "execute", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await anext(stream.read(topic=EVENTS, after=cursor))
+    monkeypatch.undo()
+
+    fresh = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"], key_prefix=f"test-{uuid.uuid4().hex}"
+    )
+    monkeypatch.setattr(fresh._redis, "info", lost)
+    with pytest.raises(StreamStorageError, match="connection reset"):
+        await fresh.get_stream_handle(client, StreamRef.for_workflow(owner.id)).latest(
+            topic=EVENTS
+        )
+    await fresh.close()
+
+
+async def test_a_large_stage_lands_whole(raw: Any):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"], key_prefix=f"test-{uuid.uuid4().hex}"
+    )
+    records = [WireRecord(topic="events", sequence=i) for i in range(10_000)]
+    token = await provider._stage(StagedBatch("ns", "wf", "first", "run", records))
+    await provider._promote(StageRef("ns", "wf", "first", token, ("events",)))
+    keys = provider._chain_keys("ns", "wf", "first")
+    assert await raw.xlen(keys.log("events")) == 10_000
+    await provider.close()
+
+
+@workflow.defn
+class PublishAndFailTheFirstAttempt:
+    @workflow.run
+    async def run(self) -> str:
+        workflow_writer(EVENTS).publish({"attempt": workflow.info().attempt})
+        if workflow.info().attempt == 1:
+            raise ApplicationError("fail this run so the retry policy starts another")
+        return "done"
+
+
+async def wait_for_next_run(handle: WorkflowHandle, first_run_id: str) -> None:
+    for _ in range(200):
+        if (await handle.describe()).run_id != first_run_id:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("no next run started")
+
+
+async def test_a_retried_run_keeps_the_chain_open(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-retry-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, PublishAndFailTheFirstAttempt) as worker:
+        handle = await streams_client.start_workflow(
+            PublishAndFailTheFirstAttempt.run,
+            id=workflow_id,
+            task_queue=worker.task_queue,
+            retry_policy=RetryPolicy(
+                maximum_attempts=2, initial_interval=timedelta(seconds=3)
+            ),
+        )
+        assert handle.first_execution_run_id is not None
+        await wait_for_next_run(handle, handle.first_execution_run_id)
+        # Give the Worker's close check, which runs after the failed run's
+        # final task, time to act.
+        await asyncio.sleep(1.0)
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        keys = await stream._keys()
+        assert not await raw.hget(keys.chain(), "closed")
+        await stream.producer(topic=OTHER, producer_id="p", attempt=1).append(1)
+        assert await handle.result() == "done"
+
+
+@workflow.defn
+class CronPublisher:
+    @workflow.run
+    async def run(self) -> None:
+        workflow_writer(EVENTS).publish({"run": workflow.info().run_id})
+
+
+@pytest.mark.timeout(150)
+async def test_a_cron_run_keeps_the_chain_open(
+    client: Client, provider: RedisStreams, raw: Any
+):
+    streams_client = client_with(client, provider)
+    workflow_id = f"redis-cron-{uuid.uuid4().hex}"
+    async with new_worker(streams_client, CronPublisher) as worker:
+        handle = await streams_client.start_workflow(
+            CronPublisher.run,
+            id=workflow_id,
+            task_queue=worker.task_queue,
+            cron_schedule="* * * * *",
+        )
+        assert handle.first_execution_run_id is not None
+        await wait_for_next_run_after_completion(streams_client, handle)
+        await asyncio.sleep(1.0)
+        stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+        keys = await stream._keys()
+        assert not await raw.hget(keys.chain(), "closed")
+        await stream.producer(topic=OTHER, producer_id="p", attempt=1).append(1)
+        await handle.terminate()
+
+
+async def wait_for_next_run_after_completion(
+    client: Client, handle: WorkflowHandle
+) -> None:
+    first = handle.first_execution_run_id
+    assert first is not None
+    for _ in range(1400):
+        first_run = await client.get_workflow_handle(handle.id, run_id=first).describe()
+        if first_run.status == WorkflowExecutionStatus.COMPLETED:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("the first cron run never completed")
+
+
+async def test_a_producer_rechecks_its_owner_once_retention_passed(
+    client: Client, owner: WorkflowHandle, raw: Any
+):
+    provider = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"],
+        key_prefix=f"test-{uuid.uuid4().hex}",
+        retention=timedelta(milliseconds=300),
+    )
+    # The closed flag outlives retention by the tombstone grace; with none,
+    # it expires with the stream.
+    provider._grace_ms = 0
+    stream = provider.get_stream_handle(client, StreamRef.for_workflow(owner.id))
+    producer = stream.producer(topic=EVENTS, producer_id="p", attempt=1)
+    await producer.append(1)
+    await owner.terminate()
+    keys = await stream._keys()
+    await provider._mark_closed(keys)
+    await asyncio.sleep(0.5)
+    assert not await raw.exists(keys.chain())
+    with pytest.raises(StreamClosedError):
+        await producer.append(2)
+    await provider.close()
