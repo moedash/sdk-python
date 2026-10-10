@@ -35,8 +35,9 @@ class StreamReference(google.protobuf.message.Message):
     workflow_id: builtins.str
     """The owning Workflow, for `STREAM_OWNER_KIND_WORKFLOW`."""
     run_id: builtins.str
-    """Pins the stream to one run of the owning Workflow. Empty follows the run chain. A stream
-    notifier is keyed without it, so one notifier serves the stream across runs.
+    """The id of the first run in the owning Workflow's run chain. The stream notifier is keyed by
+    it, so one notifier serves the stream across the chain's runs, and a stream that reuses the
+    Workflow id in a new chain gets a notifier of its own. An empty run id is refused.
     """
     topic: builtins.str
     """The stream's topic within its owner."""
@@ -80,7 +81,10 @@ class StreamCallbackInfo(google.protobuf.message.Message):
     request_id: builtins.str
     """The request ID the callback was attached with."""
     @property
-    def callback(self) -> temporalio.api.common.v1.message_pb2.Callback: ...
+    def callback(self) -> temporalio.api.common.v1.message_pb2.Callback:
+        """The callback. Its header keeps its keys, but every value is empty, since the values hold
+        the caller's credentials.
+        """
     state: temporalio.api.enums.v1.common_pb2.CallbackState.ValueType
     """The state of the callback's completion delivery."""
     delivered_counter: builtins.int

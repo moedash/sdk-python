@@ -62,6 +62,7 @@ from temporalio.contrib.streams._errors import (
     StreamCursorError,
     StreamExpiredError,
     StreamProducerError,
+    StreamRecordError,
 )
 from temporalio.contrib.streams._notify import chain_first_run_id
 from temporalio.contrib.streams._output import StagedBatch, StageRef
@@ -144,7 +145,7 @@ class _Topic:
 
         Raises:
             StreamProducerError: ``sequence`` is the newest batch's with
-                different content, or below it.
+                different content, inside that batch, or below it.
             StreamClosedError: The topic is closed and ``refuse_closed``.
         """
         if session is not None:
@@ -157,11 +158,11 @@ class _Topic:
                             f"used sequence {sequence} with different content"
                         )
                     return held.first, held.count
-                if sequence < held.sequence:
+                if sequence < held.sequence + held.count:
                     raise StreamProducerError(
                         f"producer {session[0]!r} attempt {session[1]} sent sequence "
-                        f"{sequence}, below the newest one the store holds, "
-                        f"{held.sequence}"
+                        f"{sequence}, below the next one the store expects, "
+                        f"{held.sequence + held.count}"
                     )
         if refuse_closed and self.closed:
             raise StreamClosedError("the stream has closed")
@@ -343,7 +344,8 @@ class MemoryStreamHandle:
         # Parsed here so a cursor from another stream or provider fails this
         # call. Where it falls in the store is known once the chain is.
         position = self._position(stream, after)
-        return self._read(name, stream, after, position, result_type)
+        resumed = after not in (BEGINNING, END)
+        return self._read(name, stream, after, position, result_type, resumed)
 
     async def _read(
         self,
@@ -352,6 +354,7 @@ class MemoryStreamHandle:
         after: Cursor,
         position: int | None,
         result_type: type | None,
+        resumed: bool,
     ) -> AsyncGenerator[StreamRecord[Any], None]:
         store = await self._store(name)
         offset = self._start(store, after, position)
@@ -362,6 +365,13 @@ class MemoryStreamHandle:
             after=after,
             warn=logger.warning,
         )
+        if resumed and store.base < offset:
+            # The record at the cursor was delivered before, so its attempt
+            # is the one a newer attempt supersedes.
+            try:
+                decoder.prime(WireRecord.FromString(store.at(offset - 1)))
+            except DecodeError:
+                pass
         closed = False
         while True:
             while offset < store.head:
@@ -375,10 +385,12 @@ class MemoryStreamHandle:
                 offset += 1
                 try:
                     wire = WireRecord.FromString(raw)
-                except DecodeError as error:
-                    logger.warning("skipping stream record at %s: %s", cursor, error)
-                    continue
-                await decode_body(self._converter, wire)
+                    await decode_body(self._converter, wire)
+                except Exception as error:
+                    raise StreamRecordError(
+                        f"stream record at {cursor} could not be decoded: {error}",
+                        cursor,
+                    ) from error
                 for record in decoder.decode(cursor, wire):
                     yield record
             if closed:
@@ -567,7 +579,12 @@ class MemoryStreams(StreamProviderPlugin):
         ``client`` may be ``None`` here, unlike on a storage provider. Then
         the handle uses the default data converter and the ``default``
         namespace, and a read waits until the caller stops it.
+
+        Raises:
+            StreamUnsupportedError: ``ref`` names an owner kind this release
+                lacks.
         """
+        ref._require_supported()
         return MemoryStreamHandle(self, client, ref)
 
     async def close(self) -> None:

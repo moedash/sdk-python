@@ -545,10 +545,11 @@ async def test_a_reference_this_release_cannot_open_is_refused(service: Service)
         await asyncio.to_thread(
             generated_client._post, f"{service.caller._base_url}/read", body_, {}, 10.0
         )
-    # The Worker refuses an input its converter cannot decode, before the
-    # handler runs, and names the reason in the cause.
-    assert refused.value.status == 400
+    # The reference decodes, and the handler refuses it where it opens the
+    # stream, as not implemented in this release.
+    assert refused.value.status == 501
     assert not refused.value.retryable
+    assert refused_as(refused.value) == "StreamUnsupportedError"
     assert "activity" in refused.value.detail
 
 

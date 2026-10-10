@@ -21,7 +21,7 @@ from typing import Any, Generic, TypeVar, cast
 from google.protobuf.message import DecodeError
 
 from temporalio import workflow
-from temporalio.contrib.streams._errors import StreamError
+from temporalio.contrib.streams._errors import StreamError, StreamRecordError
 from temporalio.contrib.streams._record import Cursor, RecordKind, Supersession
 from temporalio.contrib.streams._ref import StreamRef
 from temporalio.contrib.streams._wire import RecordDecoder, WireRecord
@@ -32,7 +32,6 @@ __all__ = [
     "ReadSupersession",
     "StreamIncompleteError",
     "StreamReader",
-    "StreamRecordError",
 ]
 
 T = TypeVar("T")
@@ -41,25 +40,6 @@ _BATCH = 100
 # Once the operation completes, a read waits this long for a record, so a
 # reader waiting for the stream's end does not spin.
 _DRAIN_WAIT_MS = 2000
-
-
-class StreamRecordError(StreamError):
-    """A record the reader could not turn into an item.
-
-    .. warning::
-        This API is experimental and may change in future versions.
-
-    The reader's cursor is already past the record, so the next call to
-    :meth:`StreamReader.next` goes on after it. A body that fails to decode
-    usually means the Workers do not share a payload codec, or the item type
-    does not match what the producer wrote.
-    """
-
-    def __init__(self, message: str, *, cursor: Cursor) -> None:
-        """A record at ``cursor`` that could not be decoded."""
-        super().__init__(message)
-        self.cursor = cursor
-        """Where the record is in the stream."""
 
 
 class StreamIncompleteError(StreamError):
@@ -125,7 +105,8 @@ class StreamReader(Generic[T]):
     attempt's records already handed over stay handed over, and
     :attr:`supersessions` says where the later attempt began. A record whose
     body the Workflow's payload converter cannot decode into ``item_type``
-    raises :class:`StreamRecordError` from :meth:`next` once the records
+    raises :class:`temporalio.contrib.streams.StreamRecordError` from
+    :meth:`next` once the records
     before it are handed over; the call after that goes on past it.
 
     Each read goes to the run chain the Workflow id has when the read runs,
@@ -203,7 +184,6 @@ class StreamReader(Generic[T]):
         self._supersessions: list[ReadSupersession] = []
         self._undecodable: StreamRecordError | None = None
         self._decode_failure: str | None = None
-        self._last_warning = ""
 
     @property
     def cursor(self) -> Cursor:
@@ -231,7 +211,8 @@ class StreamReader(Generic[T]):
             temporalio.exceptions.NexusOperationError: A read failed, or the
                 operation failed. A failed operation raises after the records
                 it left are handed over.
-            StreamRecordError: A record could not be decoded into
+            temporalio.contrib.streams.StreamRecordError: A record could not
+                be decoded into
                 ``item_type``, or was too large to cross. The next call goes
                 on past it.
             StreamIncompleteError: The operation completed, but reads found
@@ -330,11 +311,11 @@ class StreamReader(Generic[T]):
                 except DecodeError as error:
                     self._decode_failure = str(error)
             if wire is not None:
-                records = self._decoder.decode(cursor, wire)
-                if not records:
-                    # The decoder hands back nothing only for a record it
-                    # could not decode, after warning why.
-                    self._decode_failure = self._last_warning
+                try:
+                    records = self._decoder.decode(cursor, wire)
+                except StreamRecordError as error:
+                    self._decode_failure = str(error)
+                    records = []
                 for record in records:
                     if record.kind is RecordKind.DATA:
                         batch.append(cast(T, record.value))
@@ -353,7 +334,7 @@ class StreamReader(Generic[T]):
                     f"stream record at {cursor} could not be read as "
                     f"{getattr(self._item_type, '__name__', self._item_type)!s}: "
                     f"{self._decode_failure}",
-                    cursor=cursor,
+                    cursor,
                 )
                 self._decode_failure = None
                 self._caught_up = False
@@ -365,5 +346,4 @@ class StreamReader(Generic[T]):
         return batch
 
     def _warn(self, message: str) -> None:
-        self._last_warning = message
         workflow.logger.warning(message)

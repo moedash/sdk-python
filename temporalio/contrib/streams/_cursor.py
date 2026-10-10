@@ -41,7 +41,10 @@ def stream_hash(namespace: str, owner_kind: str, owner_id: str, topic: str) -> s
 
     Taken over the namespace, the owner and the topic. A run id is never
     part of it, because a stream follows its owner's run chain and a cursor
-    stays valid across Continue-as-New.
+    stays valid across Continue-as-New. So a cursor does not tell two chains
+    of one Workflow id apart: one from an earlier chain passes the check on a
+    later chain. Eight hex characters catch a mistake, not a crafted token,
+    so the hash is no authorization check.
     """
     digest = hashlib.sha256()
     for part in (namespace, owner_kind, owner_id, topic):

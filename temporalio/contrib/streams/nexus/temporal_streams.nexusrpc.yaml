@@ -62,9 +62,8 @@ $defs:
       kind:
         type: string
         description: >-
-          What owns the stream. Only "workflow" is opened in this release. A
-          reference with another kind is refused when the call is decoded, as
-          a bad request.
+          What owns the stream. Only "workflow" is opened in this release, and
+          a call with another kind is refused.
       workflow_id:
         type: string
         description: "The owning Workflow."

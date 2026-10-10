@@ -46,7 +46,12 @@ from temporalio.api.stream.v1 import StreamReference
 from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import DescribeStreamNotifierRequest
 from temporalio.client import Client, WorkflowHistory
-from temporalio.contrib.streams import StreamRef, Supersession, workflow_writer
+from temporalio.contrib.streams import (
+    StreamRecordError,
+    StreamRef,
+    Supersession,
+    workflow_writer,
+)
 from temporalio.contrib.streams._record import Cursor, RecordKind
 from temporalio.contrib.streams._wire import WireRecord, to_wire
 from temporalio.contrib.streams.memory import MemoryStreams
@@ -56,7 +61,6 @@ from temporalio.contrib.streams.nexus import (
     RecordWire,
     StreamOperationHandler,
     StreamReader,
-    StreamRecordError,
     TemporalStreamsHandler,
     close_workflow_stream,
     stream_ref_from_token,
