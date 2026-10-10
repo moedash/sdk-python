@@ -44,6 +44,7 @@ services:
         x-nexus-long-poll:
           wait-field: wait_ms
           result-field: records
+          done-field: done
         input: { $ref: "#/$defs/ReadInput" }
         output: { $ref: "#/$defs/ReadOutput" }
 

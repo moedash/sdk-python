@@ -61,7 +61,6 @@ from temporalio.contrib.streams.nexus import (
 from temporalio.contrib.streams.nexus._generated import client as generated_client
 from temporalio.contrib.streams.nexus._handler import _handler_error
 from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
-from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import PollerBehaviorSimpleMaximum, Worker
 from tests import DEV_SERVER_DOWNLOAD_VERSION
@@ -676,7 +675,47 @@ def test_each_stream_condition_crosses_as_its_own_class(
     assert crossed.type == kind
     assert crossed.retryable == retryable
     assert str(crossed).startswith(f"{name}: ")
-    cause = crossed.__cause__
-    assert isinstance(cause, ApplicationError)
-    assert cause.type == name
-    assert cause.non_retryable == (not retryable)
+    # What crosses is the failure the handler spells out, with no stack.
+    original = crossed.original_failure
+    assert original is not None
+    assert original.message == str(crossed)
+    assert not original.stack_trace
+    details = dict(original.details or {})
+    cause = details["cause"]["applicationFailureInfo"]
+    assert cause["type"] == name
+    assert cause.get("nonRetryable", False) == (not retryable)
+    assert details["nexusHandlerFailureInfo"]["type"] == kind.name
+
+
+async def test_a_refusal_carries_no_handler_stack_frames(service: Service):
+    ref = await stream_of(service)
+    await append(service, ref, "one")
+    with pytest.raises(HTTPStatusError) as refused:
+        await append(service, ref, "different")
+    # The caller learns the condition, not the handler's source layout.
+    assert refused_as(refused.value) == "StreamProducerError"
+    assert "File " not in refused.value.detail
+    assert "_handler.py" not in refused.value.detail
+    failure = json.loads(refused.value.detail)
+    assert not failure.get("stackTrace")
+    assert not failure["details"].get("stackTrace")
+
+
+async def test_the_generated_read_loop_ends_when_the_stream_does(service: Service):
+    workflow_id = f"streams-service-{uuid.uuid4().hex}"
+    ref = StreamRef.for_workflow(workflow_id, topic="out")
+    async with new_worker(service.client, StreamOwner) as worker:
+        owner = await service.client.start_workflow(
+            StreamOwner.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        landed = await append(service, ref, "one")
+        await owner.signal(StreamOwner.finish)
+        await owner.result()
+    started = asyncio.get_running_loop().time()
+    answer = await service.caller.read_until_records(
+        ReadInput(stream=ref, after_token=landed.cursor), deadline=10.0
+    )
+    # The stream has ended, so the loop hands back the done answer at once
+    # rather than asking again until its deadline.
+    assert answer.done and answer.records == []
+    assert asyncio.get_running_loop().time() - started < 5.0

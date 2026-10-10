@@ -13,11 +13,14 @@ from typing import Any
 
 import nexusrpc
 import nexusrpc.handler
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import DecodeError
 
+import temporalio.api.failure.v1
 import temporalio.converter
 import temporalio.nexus
 from temporalio.api.common.v1 import Payload
+from temporalio.api.enums.v1 import NexusHandlerErrorRetryBehavior
 from temporalio.client import Client
 from temporalio.common import RawValue
 from temporalio.contrib.streams._cursor import BEGINNING
@@ -44,7 +47,6 @@ from temporalio.contrib.streams.nexus._generated import (
     RecordWire,
     TemporalStreams,
 )
-from temporalio.exceptions import ApplicationError
 
 __all__ = ["TemporalStreamsHandler"]
 
@@ -72,6 +74,10 @@ _ERROR_TYPES: tuple[tuple[type[StreamError], nexusrpc.HandlerErrorType, bool], .
     (StreamStorageError, nexusrpc.HandlerErrorType.UNAVAILABLE, True),
 )
 
+# The Nexus failure metadata type under which the details are a
+# temporal.api.failure.v1.Failure, which the failure converter reads back as is.
+_TEMPORAL_FAILURE_TYPE = "temporal.api.failure.v1.Failure"
+
 # The default converter passes a RawValue through untouched, so a body the
 # caller's codec encoded is never decoded or re-encoded here.
 _RAW_CONVERTER = temporalio.converter.DataConverter.default.payload_converter
@@ -91,13 +97,35 @@ def _handler_error(error: ValueError | StreamError) -> nexusrpc.HandlerError:
                 kind, retryable = error_kind, error_retryable
                 break
         name = type(error).__name__
-    handler_error = nexusrpc.HandlerError(
-        f"{name}: {error}", type=kind, retryable_override=retryable
+    message = f"{name}: {error}"
+    # The failure that crosses is spelled out here rather than derived from the
+    # raised error, so the handler's stack frames stay on this side.
+    failure = temporalio.api.failure.v1.Failure(
+        cause=temporalio.api.failure.v1.Failure(
+            message=str(error),
+            application_failure_info=temporalio.api.failure.v1.ApplicationFailureInfo(
+                type=name, non_retryable=not retryable
+            ),
+        ),
+        nexus_handler_failure_info=temporalio.api.failure.v1.NexusHandlerFailureInfo(
+            type=kind.name,
+            retry_behavior=(
+                NexusHandlerErrorRetryBehavior.NEXUS_HANDLER_ERROR_RETRY_BEHAVIOR_RETRYABLE
+                if retryable
+                else NexusHandlerErrorRetryBehavior.NEXUS_HANDLER_ERROR_RETRY_BEHAVIOR_NON_RETRYABLE
+            ),
+        ),
     )
-    handler_error.__cause__ = ApplicationError(
-        str(error), type=name, non_retryable=not retryable
+    return nexusrpc.HandlerError(
+        message,
+        type=kind,
+        retryable_override=retryable,
+        original_failure=nexusrpc.Failure(
+            message=message,
+            metadata={"type": _TEMPORAL_FAILURE_TYPE},
+            details=MessageToDict(failure),
+        ),
     )
-    return handler_error
 
 
 _StreamKey = tuple[str, str, str, str]

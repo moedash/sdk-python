@@ -180,8 +180,9 @@ class TemporalStreamsHttpClient:
 
         Each attempt sets `wait_ms` from the budget left, so the endpoint parks
         for the caller instead of the caller spinning. The first answer whose
-        `records` is non-empty is returned. When the deadline passes first, the
-        last answer is returned, which still carries the caller's resume position.
+        `records` is non-empty, or whose `done` is true, is returned. When the
+        deadline passes first, the last answer is returned, which still carries
+        the caller's resume position.
 
         `deadline` is the whole budget in seconds. The single-shot method stays
         available for a caller that wants one attempt.
@@ -201,7 +202,7 @@ class TemporalStreamsHttpClient:
                 await _long_poll_pause(backoff, end)
                 backoff = _long_poll_next_backoff(backoff)
                 continue
-            if answer.records:
+            if answer.records or answer.done:
                 return answer
             if time.monotonic() >= end:
                 return answer
