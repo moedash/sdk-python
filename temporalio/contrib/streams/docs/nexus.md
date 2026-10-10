@@ -32,8 +32,11 @@ involved:
 | Setting | Why |
 |---|---|
 | `history.enableChasm` | The stream notifier and the caller's operation run on CHASM. |
+| `history.enableCHASMCallbacks` | The notifier delivers progress and the completion through CHASM callbacks. |
 | `nexusoperation.enableChasmWorkflowOperations` and `nexusoperation.chasmWorkflowOperationsRolloutPercent: 100` | The caller's operation must use the CHASM path. Only that path accepts progress. |
 | `nexusoperation.enableProgress` | The caller accepts progress deliveries. |
+| `nexusoperation.callback.endpoint.template` | The callback URL the caller gives the handler. Point it at the frontend's HTTP address, for example `http://localhost:7243/namespaces/{{.NamespaceName}}/nexus/callback`. |
+| `callback.allowedAddresses` | The notifier only calls addresses on this list. Add the frontend's HTTP address, for example `- Pattern: "localhost:7243"` with `AllowInsecure: true` when it serves plain HTTP. |
 | `streamnotifier.enabled` | The server holds the callbacks of a stream and delivers its progress. |
 
 Without progress, the operation still runs. The caller then gets the
@@ -189,9 +192,11 @@ reader = nexus_client.read_respond_stream(handle)
 
 What `next()` does:
 
-- It waits for progress, then reads every record after its cursor through
-  the stream service on `endpoint`, and returns their bodies decoded to
-  `item_type`. It never returns an empty list.
+- It reads the records after its cursor through the stream service on
+  `endpoint`, and returns their bodies decoded to `item_type`. The first
+  call reads at once. Later calls read on while answers carry records, and
+  wait for newer progress only after an answer with no record. It never
+  returns an empty list.
 - It returns `None` only when the stream service says the stream is done,
   and the last records are handed over. After the operation completes, the
   reader keeps reading until then, waiting up to 2 seconds per read. Every
@@ -221,8 +226,9 @@ Worker's payload codec, and the caller's codec decodes it. So the handler's
 Worker and the caller's Worker must use the same payload codec.
 
 Each read is a synchronous Nexus operation of the Workflow, so History
-records it and a replay reads the same records. Between reads the reader
-waits on the operation's progress, which is also on the handle:
+records it and a replay reads the same records. When a read finds no new
+record, the reader waits on the operation's progress, which is also on the
+handle:
 
 ```python
 progress = await handle.progress()          # waits for the first progress
