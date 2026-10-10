@@ -452,11 +452,11 @@ global___WorkflowActivationJob = WorkflowActivationJob
 class ReplayExternalStreams(google.protobuf.message.Message):
     """Carries a recorded external stream marker back to lang during replay.
 
-    Core issues exactly one of these per marker, in the activation for the Workflow Task that wrote
-    it, found by lookahead. Lang must not stage the output again, so a publishing Workflow replays
-    without touching the stream store. Lang may compare its recomputed output against `output`
-    itself, or send it back as a WorkflowOutputStreamCommit for Core to compare. Fields 1 to 3 are
-    left free for the stream input state the same marker will carry.
+    Core issues exactly one of these per marker, found by lookahead, all in the first activation of
+    the Workflow Task that wrote them, in History order. Lang must not stage the output again, so a
+    publishing Workflow replays without touching the stream store. Lang must send each recomputed
+    output back as a WorkflowOutputStreamCommit, in the order it published, for Core to compare.
+    Fields 1 to 3 are left free for the stream input state the same marker will carry.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
