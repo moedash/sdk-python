@@ -43,21 +43,6 @@ _WORKFLOW_EXTERN = "__temporal_contrib_streams_store"
 
 T = TypeVar("T")
 
-_WORKFLOW_EXTERN = "__temporal_contrib_streams_provider"
-
-
-class _WorkflowOutput(Protocol):
-    """Where a Workflow's own publish goes, on the Workflow thread.
-
-    Internal: the Worker side of a Workflow publish is not part of the
-    public surface. ``publish`` is synchronous and must not block, because
-    it runs on the Workflow thread.
-    """
-
-    def publish(self, records: Sequence[WireRecord]) -> None:
-        """Take records the running Workflow published."""
-        ...
-
 
 class StreamStorePlugin(SimplePlugin):
     """The base class of the store configuration classes.
@@ -75,18 +60,6 @@ class StreamStorePlugin(SimplePlugin):
         self._service: StreamService | None = None
         self._store: StreamStore | None = None
         self._connecting: asyncio.Lock | None = None
-
-    def _workflow_output(self, info: temporalio.workflow.Info) -> _WorkflowOutput:
-        """The output for one run's own publish, opened on the Workflow thread.
-
-        Raises:
-            StreamUnsupportedError: The provider does not accept a Workflow's
-                own publish.
-        """
-        raise StreamUnsupportedError(
-            f"stream provider {self.name()!r} does not accept the own publish of "
-            f"Workflow {info.workflow_id!r}"
-        )
 
     def configure_client(self, config: ClientConfig) -> ClientConfig:
         """Register this store on the client.

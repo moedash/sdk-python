@@ -32,7 +32,10 @@ The contract:
 
 A store is configured as a plugin:
 ``Client.connect(..., plugins=[RedisStreams(...)])`` registers it on the
-client and on every Worker built from that client.
+client and on every Worker built from that client. Each
+context then reaches a stream the same way:
+
+- Workflow code publishes to its own stream with :func:`workflow_writer`.
 
 The stored record is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.bridge.proto.streams.v1`, with the user's value in ``body``
@@ -62,6 +65,7 @@ from temporalio.contrib.streams._record import (
 )
 from temporalio.contrib.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.contrib.streams._topic import DEFAULT_TOPIC, StreamTopic, topic
+from temporalio.contrib.streams._workflow import WorkflowStreamWriter, workflow_writer
 
 __all__ = [
     "BEGINNING",

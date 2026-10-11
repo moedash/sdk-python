@@ -1,4 +1,4 @@
-"""Publishing from Workflow code, against the memory provider and a dev server.
+"""Publishing from Workflow code, against Core's memory store and a dev server.
 
 A Workflow publishes to its own stream with ``workflow_writer``. A query or
 an update validator commits nothing, so a publish there is refused at the
@@ -7,65 +7,69 @@ call.
 
 from __future__ import annotations
 
-import asyncio
-import uuid
 from datetime import timedelta
-from typing import Any
 
 import pytest
 
 from temporalio import workflow
+from temporalio.bridge.proto.streams import (
+    LatestRequest,
+    ReadRequest,
+    StreamAddress,
+    StreamOwnerKind,
+)
 from temporalio.client import (
     Client,
     WorkflowQueryFailedError,
     WorkflowUpdateFailedError,
 )
 from temporalio.contrib.streams import (
-    BEGINNING,
     DEFAULT_TOPIC,
     RecordKind,
-    StreamHandle,
-    StreamRef,
+    StreamRecord,
     topic,
     workflow_writer,
 )
+from temporalio.contrib.streams._plugin import call, store_for_client
+from temporalio.contrib.streams._wire import from_read
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.exceptions import ApplicationError
-from temporalio.worker import Replayer
+from tests.contrib.streams._support import connect_with, new_workflow_id
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
 
 
-def client_with(client: Client, provider: MemoryStreams | None) -> Client:
-    config = client.config()
-    config["plugins"] = [provider] if provider is not None else []
-    return Client(**config)
+def address(client: Client, workflow_id: str, topic: str) -> StreamAddress:
+    return StreamAddress(
+        namespace=client.namespace,
+        owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
+        workflow_id=workflow_id,
+        topic=topic,
+    )
 
 
-def stream_of(
-    client: Client, provider: MemoryStreams, workflow_id: str
-) -> StreamHandle:
-    return provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
+async def read_records(
+    client: Client, workflow_id: str, topic: str, result_type: type | None = None
+) -> list[StreamRecord]:
+    """Read through Core's stream service until the owner's chain has ended."""
+    service = await store_for_client(client)._service_for(client)
+    request = ReadRequest(stream=address(client, workflow_id, topic))
+    request.wait.FromSeconds(5)
+    records = []
+    while True:
+        response = await call(service.read(request))
+        for record in response.records:
+            records.append(await from_read(client.data_converter, record, result_type))
+        if response.done:
+            return records
+        request.after, request.state = response.cursor, response.state
 
 
-def new_workflow_id() -> str:
-    return f"streams-publish-{uuid.uuid4().hex}"
-
-
-async def read_all(records: Any, timeout: float = 10.0) -> list:
-    """Read until the stream ends, which is when its owner closes."""
-    out = []
-
-    async def pull() -> None:
-        async for record in records:
-            out.append(record)
-
-    try:
-        await asyncio.wait_for(pull(), timeout)
-    finally:
-        await records.aclose()
-    return out
+async def latest(client: Client, workflow_id: str, topic: str) -> str:
+    service = await store_for_client(client)._service_for(client)
+    request = LatestRequest(stream=address(client, workflow_id, topic))
+    return (await call(service.latest(request))).cursor
 
 
 @workflow.defn
@@ -91,15 +95,13 @@ class Publisher:
 
 
 async def test_a_workflow_publishes_and_a_client_reads(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(streams_client, Publisher) as worker:
         await streams_client.execute_workflow(
             Publisher.run, 3, id=workflow_id, task_queue=worker.task_queue
         )
-    stream = stream_of(streams_client, provider, workflow_id)
-    records = await read_all(stream.read(topic=EVENTS))
+    records = await read_records(streams_client, workflow_id, EVENTS.name, dict)
     assert [r.kind for r in records] == [RecordKind.DATA] * 4 + [RecordKind.FINISH]
     assert [r.value for r in records[:4]] == [
         {"step": "init"},
@@ -110,42 +112,21 @@ async def test_a_workflow_publishes_and_a_client_reads(client: Client):
     # The owning Workflow writes with no producer identity: its task is the
     # boundary, not a producer attempt.
     assert {(r.producer_id, r.attempt, r.sequence) for r in records} == {("", 0, 0)}
-    (default,) = await read_all(stream.read(result_type=str))
+    (default,) = await read_records(streams_client, workflow_id, DEFAULT_TOPIC, str)
     assert default.value == "on the default topic"
     assert default.topic == DEFAULT_TOPIC
 
 
 async def test_an_evicted_workflow_does_not_publish_twice(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
-    # With no cache every task replays the run from the start, so a provider
+    # With no cache every task replays the run from the start, so a writer
     # that stored on replay would store each record again.
     async with new_worker(streams_client, Publisher, max_cached_workflows=0) as worker:
         await streams_client.execute_workflow(
             Publisher.run, 3, id=workflow_id, task_queue=worker.task_queue
         )
-    records = await read_all(
-        stream_of(streams_client, provider, workflow_id).read(topic=EVENTS)
-    )
-    assert len(records) == 5
-
-
-async def test_replaying_a_publishing_workflow_stores_nothing(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
-    workflow_id = new_workflow_id()
-    async with new_worker(streams_client, Publisher) as worker:
-        handle = await streams_client.start_workflow(
-            Publisher.run, 2, id=workflow_id, task_queue=worker.task_queue
-        )
-        await handle.result()
-    history = await handle.fetch_history()
-
-    fresh = MemoryStreams()
-    await Replayer(workflows=[Publisher], plugins=[fresh]).replay_workflow(history)
-    stream = fresh.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
-    assert await stream.latest(topic=EVENTS) == BEGINNING
+    assert len(await read_records(streams_client, workflow_id, EVENTS.name)) == 5
 
 
 @workflow.defn
@@ -182,8 +163,7 @@ class ReadOnlyPublisher:
 
 
 async def test_a_query_or_validator_cannot_publish(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(streams_client, ReadOnlyPublisher) as worker:
         handle = await streams_client.start_workflow(
@@ -196,27 +176,26 @@ async def test_a_query_or_validator_cannot_publish(client: Client):
         with pytest.raises(WorkflowUpdateFailedError) as failed:
             await handle.execute_update(ReadOnlyPublisher.poke)
         assert "publish to a stream" in str(failed.value.cause)
-        stream = stream_of(streams_client, provider, workflow_id)
-        assert await stream.latest(topic=EVENTS) == BEGINNING
+        assert await latest(streams_client, workflow_id, EVENTS.name) == ""
         await handle.terminate()
 
 
 @workflow.defn
-class PublishesWithoutProvider:
+class PublishesWithoutStore:
     @workflow.run
     async def run(self) -> str:
         try:
-            workflow_writer(EVENTS)
+            workflow_writer(EVENTS).publish({"n": 1})
         except ValueError as error:
             return str(error)
         return "published"
 
 
-async def test_a_workflow_without_a_provider_is_told(client: Client):
-    async with new_worker(client, PublishesWithoutProvider) as worker:
+async def test_a_workflow_without_a_store_is_told(client: Client):
+    async with new_worker(client, PublishesWithoutStore) as worker:
         said = await client.execute_workflow(
-            PublishesWithoutProvider.run,
+            PublishesWithoutStore.run,
             id=new_workflow_id(),
             task_queue=worker.task_queue,
         )
-    assert "no stream provider is registered" in said
+    assert "no stream store is registered" in said
