@@ -22,7 +22,8 @@ is generated from it by ``scripts/gen_nexus_streams_api.py``:
   nothing beyond the standard library.
 
 :class:`TemporalStreamsHandler` is the one hand-written piece: it serves the
-generated service over a :class:`temporalio.contrib.streams.StreamProvider`.
+generated service over Core's stream service, on the store of its Worker's
+client.
 """
 
 from temporalio.contrib.streams import StreamRef

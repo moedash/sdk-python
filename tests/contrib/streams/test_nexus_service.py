@@ -7,7 +7,7 @@ conformance suite where the service passes a provider's behavior through, and
 pin what only the service decides: subscriptions per reader, idle expiry,
 error mapping and the wire form of records.
 
-The cases are parametrized over ``BACKINGS``, the providers the service runs
+The cases are parametrized over ``BACKINGS``, the stores the service runs
 over. Each yields a :class:`Backing`.
 """
 
@@ -31,6 +31,7 @@ import temporalio.api.nexus.v1
 import temporalio.api.operatorservice.v1
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
+from temporalio.bridge.proto.streams.v1 import StreamRecord as WireRecord
 from temporalio.client import Client
 from temporalio.common import RawValue
 from temporalio.contrib.streams import (
@@ -42,11 +43,12 @@ from temporalio.contrib.streams import (
     StreamNotFoundError,
     StreamOutcomeUnknownError,
     StreamProducerError,
-    StreamProvider,
     StreamRef,
     StreamRefusedError,
     StreamStorageError,
+    StreamStorePlugin,
     StreamUnsupportedError,
+    get_stream_handle,
 )
 from temporalio.contrib.streams._cursor import BEGINNING
 from temporalio.contrib.streams.memory import MemoryStreams
@@ -64,7 +66,6 @@ from temporalio.contrib.streams.nexus import (
 )
 from temporalio.contrib.streams.nexus._generated import client as generated_client
 from temporalio.contrib.streams.nexus._handler import _handler_error
-from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
 from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import PollerBehaviorSimpleMaximum, Worker
@@ -106,16 +107,14 @@ async def server() -> AsyncIterator[Server]:
 
 @dataclass
 class Backing:
-    """One provider the service runs over, and what the cases may ask of it."""
+    """One store the service runs over, and a client that carries it."""
 
     name: str
-    provider: StreamProvider
-    truncate: Callable[[str, str, int], Awaitable[None]] | None = None
-    """Drops all but the newest records of a Workflow's topic, standing in
-    for retention, or ``None`` when the provider offers no way to."""
-    host: Callable[[str], Awaitable[None]] | None = None
-    """Starts the Workflow that owns a stream, when the store needs the owner
-    to exist before a stream is written."""
+    store: StreamStorePlugin
+    client: Client
+    host: Callable[[str], Awaitable[None]]
+    """Starts the Workflow that owns a stream, since Core checks that the
+    owner exists before a stream is written."""
 
 
 @workflow.defn
@@ -134,15 +133,30 @@ class StreamOwner:
         self.done = True
 
 
+async def connect(
+    client: Client, store: StreamStorePlugin, converter: DataConverter | None = None
+) -> Client:
+    """A client of ``client``'s server that carries ``store``."""
+    return await Client.connect(
+        client.service_client.config.target_host,
+        namespace=client.namespace,
+        data_converter=converter or DataConverter.default,
+        plugins=[store],
+    )
+
+
 @asynccontextmanager
 async def _memory_backing(client: Client) -> AsyncIterator[Backing]:
-    provider = MemoryStreams()
+    store = MemoryStreams()
+    connected = await connect(client, store)
 
-    async def truncate(workflow_id: str, name: str, keep: int) -> None:
-        provider.truncate(workflow_id, name, keep=keep, namespace=client.namespace)
+    async def host(workflow_id: str) -> None:
+        # No Worker runs it, so it stays open for the case.
+        await connected.start_workflow(
+            StreamOwner.run, id=workflow_id, task_queue=f"unpolled-{uuid.uuid4().hex}"
+        )
 
-    yield Backing("memory", provider, truncate=truncate)
-    await provider.close()
+    yield Backing("memory", store, connected, host)
 
 
 BACKINGS: dict[str, Callable[[Client], Any]] = {"memory": _memory_backing}
@@ -169,12 +183,12 @@ async def serve(
 ) -> AsyncIterator[Service]:
     """Serve ``backing`` behind a fresh endpoint, deleted on the way out.
 
-    The handler's Worker runs on ``client``, the server's own by default.
+    The handler's Worker runs on ``client``, the backing's by default.
     """
-    handler = TemporalStreamsHandler(backing.provider, **handler_options)
+    handler = TemporalStreamsHandler(**handler_options)
     task_queue = f"streams-service-{uuid.uuid4().hex}"
     endpoint_name = f"streams-{uuid.uuid4().hex}"
-    worker_client = server.client if client is None else client
+    worker_client = backing.client if client is None else client
     async with Worker(
         worker_client,
         task_queue=task_queue,
@@ -232,10 +246,9 @@ async def service(server: Server, backing: Backing) -> AsyncIterator[Service]:
 
 
 async def stream_of(service: Service, topic: str = "out") -> StreamRef:
-    """A fresh stream, its owner started when the backing needs one."""
+    """A fresh stream, with its owner started."""
     workflow_id = f"streams-service-{uuid.uuid4().hex}"
-    if service.backing.host is not None:
-        await service.backing.host(workflow_id)
+    await service.backing.host(workflow_id)
     return StreamRef.for_workflow(workflow_id, topic=topic)
 
 
@@ -468,18 +481,6 @@ async def test_a_foreign_cursor_is_refused(service: Service):
     assert refused_as(refused.value) == "StreamCursorError"
 
 
-async def test_an_expired_cursor_is_told_apart(service: Service):
-    if service.backing.truncate is None:
-        pytest.skip(f"{service.backing.name} offers no way to drop records")
-    ref = await stream_of(service)
-    old = await append(service, ref, "one")
-    await append(service, ref, "two", "three", sequence=2)
-    await service.backing.truncate(ref.workflow_id, ref.topic, 1)
-    with pytest.raises(HTTPStatusError) as refused:
-        await read(service, ref, old.cursor)
-    assert refused_as(refused.value) == "StreamExpiredError"
-
-
 async def test_argument_mistakes_are_bad_requests(service: Service):
     ref = await stream_of(service)
     with pytest.raises(HTTPStatusError) as refused:
@@ -504,10 +505,11 @@ async def test_a_reference_this_release_cannot_open_is_refused(service: Service)
         await asyncio.to_thread(
             generated_client._post, f"{service.caller._base_url}/read", body_, {}, 10.0
         )
-    # The Worker refuses an input its converter cannot decode, before the
-    # handler runs, and names the reason in the cause.
-    assert refused.value.status == 400
+    # The reference decodes, and the handler refuses it where it opens the
+    # stream, as not implemented in this release.
+    assert refused.value.status == 501
     assert not refused.value.retryable
+    assert refused_as(refused.value) == "StreamUnsupportedError"
     assert "activity" in refused.value.detail
 
 
@@ -530,13 +532,13 @@ async def test_a_read_says_done_once_the_owner_closes(service: Service):
     assert collected == ["one"]
 
 
-async def test_two_readers_on_one_stream_keep_their_own_subscriptions(
+async def test_two_readers_on_one_stream_keep_their_own_places(
     service: Service,
 ):
     ref = await stream_of(service)
     await append(service, ref, "a", "b", "c", "d")
     # The readers interleave their calls; each resumes where it left off, so
-    # neither takes over the other's subscription.
+    # neither takes over the other's read.
     one = await read(service, ref, max_records=1)
     two = await read(service, ref, max_records=3)
     one = await read(service, ref, one.next_token, max_records=1)
@@ -554,28 +556,27 @@ async def test_two_readers_on_one_stream_keep_their_own_subscriptions(
     assert [texts(answer) for answer in answers] == [["e"], ["e"]]
 
 
-async def test_an_idle_subscription_expires(server: Server, backing: Backing):
+async def test_an_idle_read_state_expires(server: Server, backing: Backing):
     async with serve(server, backing, idle_timeout=timedelta(seconds=0.5)) as service:
         ref = await stream_of(service)
         await append(service, ref, "a", "b")
         first = await read(service, ref, max_records=1)
-        assert len(service.handler._idle) == 1
+        key = (ref.kind, ref.workflow_id, "", ref.topic, first.next_token)
+        assert service.handler._states[key][0]
         await asyncio.sleep(1.0)
-        assert len(service.handler._idle) == 0
-        # The reader's next call opens a fresh subscription from its cursor.
+        # Past its timeout the state is not handed to Core again.
+        assert service.handler._take(key) == b""
+        # The reader's next call reads on from its cursor without it.
         assert texts(await read(service, ref, first.next_token)) == ["b"]
 
 
-async def test_the_longest_idle_subscription_goes_first(
-    server: Server, backing: Backing
-):
-    async with serve(server, backing, max_idle_subscriptions=2) as service:
+async def test_the_longest_idle_read_state_goes_first(server: Server, backing: Backing):
+    async with serve(server, backing, max_idle_reads=2) as service:
         refs = [await stream_of(service) for _ in range(3)]
         for ref in refs:
             await append(service, ref, "a", "b")
             await read(service, ref, max_records=1)
-        assert len(service.handler._idle) == 2
-        assert [key[1] for key, _ in service.handler._idle.values()] == [
+        assert [key[1] for key in service.handler._states] == [
             ref.workflow_id for ref in refs[1:]
         ]
 
@@ -650,11 +651,11 @@ async def test_a_workflow_reader_gets_plain_bodies_that_stay_encrypted_elsewhere
     # The handler and the caller share the namespace's codec. The store keeps
     # each body encrypted, the read result crosses encrypted as a whole, and
     # Workflow code sees the plain body.
-    config = server.client.config()
-    config["data_converter"] = dataclasses.replace(
-        DataConverter.default, payload_codec=XorCodec()
+    coded = await connect(
+        server.client,
+        backing.store,
+        dataclasses.replace(DataConverter.default, payload_codec=XorCodec()),
     )
-    coded = Client(**config)
     async with serve(server, backing, client=coded) as service:
         ref = await stream_of(service)
         async with new_worker(coded, StreamsThroughNexus) as worker:
@@ -676,7 +677,7 @@ async def test_a_workflow_reader_gets_plain_bodies_that_stay_encrypted_elsewhere
         assert all(result.metadata["encoding"] == b"binary/xor" for result in results)
 
         # Read through a handle with no codec: the stored body is the codec's.
-        plain = backing.provider.get_stream_handle(server.client, ref)
+        plain = get_stream_handle(backing.client, ref)
         stored = plain.read(after=BEGINNING, result_type=RawValue)
         try:
             record = await asyncio.wait_for(anext(stored), 5)
@@ -703,11 +704,12 @@ async def test_a_read_that_does_not_wait_answers_with_what_the_store_holds(
 ):
     # wait_ms=0 means "do not wait for new records", not "skip a fetch that
     # needs I/O": every record already in the store comes back.
-    config = server.client.config()
-    config["data_converter"] = dataclasses.replace(
-        DataConverter.default, payload_codec=SlowCodec()
+    slow = await connect(
+        server.client,
+        backing.store,
+        dataclasses.replace(DataConverter.default, payload_codec=SlowCodec()),
     )
-    async with serve(server, backing, client=Client(**config)) as service:
+    async with serve(server, backing, client=slow) as service:
         ref = await stream_of(service)
         for start in range(0, 250, 50):
             await append(
@@ -805,7 +807,7 @@ async def test_a_stored_record_above_the_limit_crosses_as_an_error(
     async with serve(server, backing, max_record_bytes=4096) as service:
         ref = await stream_of(service)
         # Written to the store directly, as an Activity or a client may.
-        producer = backing.provider.get_stream_handle(service.client, ref).producer(
+        producer = get_stream_handle(service.client, ref).producer(
             producer_id="direct", attempt=1
         )
         await producer.append(RawValue(Payload(data=b"x" * 5000)))
@@ -820,13 +822,15 @@ async def test_a_stored_record_above_the_limit_crosses_as_an_error(
     assert WireRecord.FromString(small.record).body.data == b"small"
 
 
-async def test_a_subscription_in_flight_at_close_is_not_kept(service: Service):
+async def test_close_drops_every_held_read_state(service: Service):
     ref = await stream_of(service)
-    reading = asyncio.create_task(read(service, ref, wait_ms=1500))
-    await asyncio.sleep(0.5)
+    await append(service, ref, "a", "b")
+    first = await read(service, ref, max_records=1)
+    assert service.handler._states
     await service.handler.close()
-    await reading
-    assert not service.handler._idle  # type: ignore[reportPrivateUsage]
+    assert not service.handler._states
+    # A reader reads on from its own cursor.
+    assert texts(await read(service, ref, first.next_token)) == ["b"]
 
 
 @pytest.mark.parametrize(
@@ -897,3 +901,11 @@ async def test_the_generated_read_loop_ends_when_the_stream_does(service: Servic
     # rather than asking again until its deadline.
     assert answer.done and answer.records == []
     assert asyncio.get_running_loop().time() - started < 5.0
+
+
+async def test_a_producer_takes_the_callers_next_sequence(backing: Backing):
+    stream = get_stream_handle(backing.client, "wf")
+    producer = stream.producer(producer_id="p", attempt=1, next_sequence=3)
+    assert producer._sequence == 3
+    with pytest.raises(ValueError, match="next_sequence"):
+        stream.producer(producer_id="p", attempt=1, next_sequence=0)

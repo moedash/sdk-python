@@ -16,7 +16,7 @@ import nexusrpc
 import pytest
 
 import temporalio.contrib.streams
-from temporalio.contrib.streams import StreamRef
+from temporalio.contrib.streams import StreamRef, StreamUnsupportedError
 from temporalio.contrib.streams.nexus import (
     AppendInput,
     AppendOutput,
@@ -140,10 +140,14 @@ def test_an_input_with_an_unknown_member_is_refused():
     assert "max_record" in str(refused.value.details)
 
 
-def test_a_reference_this_release_cannot_open_is_refused_at_decode():
+def test_a_reference_of_another_kind_decodes_for_the_handler_to_refuse():
     document = _to_json(ReadInput(stream=StreamRef.for_workflow("wf-1")))
     stream = document["stream"]
     assert isinstance(stream, dict)
     stream["kind"] = "activity"
-    with pytest.raises(ValueError, match="unknown StreamRef kind 'activity'"):
-        _from_json(document, ReadInput)
+    decoded = _from_json(document, ReadInput)
+    assert isinstance(decoded, ReadInput)
+    assert decoded.stream.kind == "activity"
+    # Opening a handle on it is what refuses it.
+    with pytest.raises(StreamUnsupportedError, match="'activity'"):
+        decoded.stream._require_supported()  # type: ignore[reportPrivateUsage]

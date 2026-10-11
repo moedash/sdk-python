@@ -77,6 +77,7 @@ class StreamProducer(Generic[T]):
         producer_id: str,
         attempt: int,
         activity: ActivityProducer | None = None,
+        next_sequence: int = 1,
     ) -> None:
         """Prefer :meth:`StreamHandle.producer`."""
         self._handle = handle
@@ -84,7 +85,7 @@ class StreamProducer(Generic[T]):
         self._producer_id = producer_id
         self._attempt = attempt
         self._activity = activity
-        self._sequence = 1
+        self._sequence = next_sequence
         self._last = BEGINNING
         # A batch reads the sequence, then awaits the codec and Core, then
         # moves it on; calls one at a time keep each batch's sequences.
@@ -301,12 +302,22 @@ class StreamHandle:
 
     @overload
     def producer(
-        self, *, topic: StreamTopic[T], producer_id: str, attempt: int
+        self,
+        *,
+        topic: StreamTopic[T],
+        producer_id: str,
+        attempt: int,
+        next_sequence: int = 1,
     ) -> StreamProducer[T]: ...
 
     @overload
     def producer(
-        self, *, topic: str | None = None, producer_id: str, attempt: int
+        self,
+        *,
+        topic: str | None = None,
+        producer_id: str,
+        attempt: int,
+        next_sequence: int = 1,
     ) -> StreamProducer[Any]: ...
 
     def producer(
@@ -315,6 +326,7 @@ class StreamHandle:
         topic: str | StreamTopic[Any] | None = None,
         producer_id: str,
         attempt: int,
+        next_sequence: int = 1,
     ) -> StreamProducer[Any]:
         """A producer on ``topic`` that writes as ``producer_id`` in ``attempt``.
 
@@ -324,15 +336,24 @@ class StreamHandle:
         attempt)``. Each object numbers its own records from one, so a second
         object for the same session is refused as stale.
 
+        ``next_sequence`` is the sequence of the producer's next record. A
+        caller that keeps its own count across processes, such as the stream
+        service's handler, passes it, so a repeat of a batch dedupes.
+
         Raises:
-            ValueError: ``producer_id`` is empty or ``attempt`` is below one.
+            ValueError: ``producer_id`` is empty, or ``attempt`` or
+                ``next_sequence`` is below one.
         """
         if not producer_id:
             raise ValueError("producer_id must not be empty")
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
             raise ValueError(f"attempt must be an int of at least 1, got {attempt!r}")
+        if next_sequence < 1:
+            raise ValueError(f"next_sequence must be at least 1, got {next_sequence}")
         name, _ = self._resolve(topic, None)
-        return StreamProducer(self, name, producer_id, attempt)
+        return StreamProducer(
+            self, name, producer_id, attempt, next_sequence=next_sequence
+        )
 
     def _resolve(
         self, topic: str | StreamTopic[Any] | None, result_type: type | None

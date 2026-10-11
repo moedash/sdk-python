@@ -1,15 +1,13 @@
-"""The stream service's handler over any stream provider."""
+"""The stream service's handler over Core's stream service."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import dataclasses
-import logging
+import time
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Literal
 
 import nexusrpc
 import nexusrpc.handler
@@ -21,9 +19,9 @@ import temporalio.converter
 import temporalio.nexus
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import NexusHandlerErrorRetryBehavior
-from temporalio.client import Client
+from temporalio.bridge.proto.streams import LatestRequest, ReadRecord, ReadRequest
 from temporalio.common import RawValue
-from temporalio.contrib.streams._cursor import BEGINNING
+from temporalio.contrib.streams._body import decode_body
 from temporalio.contrib.streams._errors import (
     StreamClosedError,
     StreamCursorError,
@@ -35,10 +33,9 @@ from temporalio.contrib.streams._errors import (
     StreamStorageError,
     StreamUnsupportedError,
 )
-from temporalio.contrib.streams._provider import StreamHandle, StreamProvider
-from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
+from temporalio.contrib.streams._handles import StreamHandle, get_stream_handle
+from temporalio.contrib.streams._plugin import call
 from temporalio.contrib.streams._ref import StreamRef
-from temporalio.contrib.streams._wire import to_wire
 from temporalio.contrib.streams.nexus._generated import (
     AppendInput,
     AppendOutput,
@@ -50,8 +47,6 @@ from temporalio.contrib.streams.nexus._generated import (
 
 __all__ = ["StreamAccess", "TemporalStreamsHandler"]
 
-logger = logging.getLogger(__name__)
-
 _DEFAULT_MAX_RECORDS = 100
 # A read answer is a sync Nexus result, recorded in the caller's History, so it
 # stays well below the server's blob size limit (2 MiB by default).
@@ -62,9 +57,6 @@ _DEFAULT_MAX_RECORD_BYTES = 3 << 19
 # What a body gains inside its stored record: topic, producer, attempt,
 # sequence and the content hash.
 _RECORD_OVERHEAD = 256
-# How long a read waits for records the store already holds to be fetched and
-# decoded, such as behind a slow payload codec.
-_CATCH_UP_LIMIT = 10.0
 # Room left inside the request deadline for the answer to travel back.
 _DEADLINE_MARGIN = timedelta(milliseconds=500)
 
@@ -89,11 +81,6 @@ _ERROR_TYPES: tuple[tuple[type[StreamError], nexusrpc.HandlerErrorType, bool], .
 # The Nexus failure metadata type under which the details are a
 # temporal.api.failure.v1.Failure, which the failure converter reads back as is.
 _TEMPORAL_FAILURE_TYPE = "temporal.api.failure.v1.Failure"
-
-# The default converter passes a RawValue through untouched. The codec runs
-# in the provider, with the Worker client's data converter: it encodes a body
-# on the way into the store and decodes it on the way out.
-_RAW_CONVERTER = temporalio.converter.DataConverter.default.payload_converter
 
 
 def _handler_error(error: ValueError | StreamError) -> nexusrpc.HandlerError:
@@ -170,137 +157,94 @@ class StreamAccess:
     """The producer attempt an append writes. ``None`` for a read."""
 
 
-_StreamKey = tuple[str, str, str, str]
-
-
-def _stream_key(ref: StreamRef) -> _StreamKey:
-    return (ref.kind, ref.workflow_id, ref.run_id or "", ref.topic)
-
-
-@dataclasses.dataclass(eq=False)
-class _Subscription:
-    """One open read on the store, carried from one read call to the next.
-
-    It sits idle between calls under the cursor its last answer handed out,
-    so the reader's next call, which resumes from that cursor, continues it
-    instead of opening the store's read again.
-    """
-
-    key: _StreamKey
-    records: AsyncGenerator[StreamRecord[Any], None]
-    position: str
-    handle: StreamHandle
-    pending: asyncio.Task[StreamRecord[Any]] | None = None
-    """A record fetch still in flight when the last call ran out of time. The
-    next call waits on it rather than starting another, so a record the store
-    already handed over is never dropped."""
-    expiry: asyncio.TimerHandle | None = None
-    ended: bool = False
-    fetched: str = ""
-    """The position of the last record fetched from the store, whether or not
-    an answer carried it yet."""
-    carried: RecordWire | None = None
-    """A fetched record the last answer had no room for. It leads the next."""
+_ReadKey = tuple[str, str, str, str, str]
 
 
 @nexusrpc.handler.service_handler(service=TemporalStreams)
 class TemporalStreamsHandler:
-    """Serves the stream service over ``provider``.
+    """Serves the stream service over the store of its Worker's client.
 
     Register it on a Worker with ``nexus_service_handlers=[handler]`` and
     point a Nexus endpoint at the Worker's task queue. The Worker's client
-    opens the streams, so a stream lives in the Worker's namespace. That
-    client carries the namespace's payload codec, the one the stream's
+    must carry a stream store, and a stream lives in the client's namespace.
+    That client carries the namespace's payload codec, the one the stream's
     producers and readers use: the store keeps each body encoded with it, a
     read decodes the bodies, and the read result crosses encoded as a whole
     like any Nexus result, so Workflow code that reads gets plain bodies with
     no codec of its own.
 
-    A reader's subscription is kept between its calls and found again by the
-    cursor its last answer handed out, so readers never share one and a
-    second reader cannot take over the first's. A subscription no call has
-    used for ``idle_timeout`` is closed, and beyond ``max_idle_subscriptions``
-    the longest idle is closed first; a reader whose subscription was closed
-    is answered from a fresh one on its next call, from its own cursor, so
-    nothing is lost. Retries are deduplicated by the store, not here: a call
-    carries the writer's sequence and the provider compares it with what it
+    Core keeps a read's progress in an opaque state between its calls. The
+    handler holds each reader's state under the cursor its last answer handed
+    out, so the reader's next call continues it. A state no call has used for
+    ``idle_timeout`` is dropped, and beyond ``max_idle_reads`` the longest
+    idle goes first. A reader whose state was dropped reads on from its own
+    cursor, so nothing is lost. Retries are deduplicated by the store: a call
+    carries the writer's sequence, and the store compares it with what it
     holds.
 
     A read answers with at most ``max_records`` records and, past its first
     record, at most ``max_answer_bytes`` of records as they cross, so a read's
-    result stays below the server's blob size limit; a reader reads again
-    from the cursor it got. A read with ``wait_ms`` 0 waits for no new record,
-    but answers with every record the store held when it started, up to those
-    limits.
+    result stays below the server's blob size limit. A reader reads again
+    from the cursor it got.
 
     The handler writes and reads with its Worker's client and that client's
-    store credentials, whatever caller sent the call. So every caller that
-    may reach the endpoint gets the Worker's store rights, for every stream in
-    the namespace and as any producer. Pass ``authorize`` to check each call:
-    it gets a :class:`StreamAccess` and answers whether to serve it, and a
+    store, whatever caller sent the call. So every caller that may reach the
+    endpoint gets the Worker's store rights, for every stream in the
+    namespace and as any producer. Pass ``authorize`` to check each call: it
+    gets a :class:`StreamAccess` and answers whether to serve it, and a
     refused call fails as unauthorized.
 
     A record whose bytes would take more than ``max_record_bytes`` in a read
     result can never be read through the service, so an append with one is
     refused. A record already in the store that is larger, written there
     directly, crosses as an error at its cursor, which a reader goes on past.
-    Sizes count what crosses: the record bytes as base64, about 4/3 of them.
+    So does a record whose body the codec can't decode. Sizes count what
+    crosses: the record bytes as base64, about 4/3 of them.
 
     Parked reads hold Nexus task slots for up to their ``wait_ms``. With many
     readers, serve appends and reads on separate task queues or endpoints, so
-    an append doesn't wait for a slot behind parked reads.
-
-    Give the Worker more Nexus pollers than the default
-    (``nexus_task_poller_behavior``). A Nexus request is matched only to a
-    waiting poll, and with the default five pollers spread over a task queue's
-    partitions, an append was seen to wait behind parked reads until one of
-    them answered.
-
-    Call :meth:`close` when the Worker stops.
+    an append doesn't wait for a slot behind parked reads, and give the
+    Worker more Nexus pollers than the default (``nexus_task_poller_behavior``).
     """
 
     def __init__(
         self,
-        provider: StreamProvider,
         *,
         idle_timeout: timedelta = timedelta(minutes=1),
-        max_idle_subscriptions: int = 1000,
+        max_idle_reads: int = 1000,
         max_answer_bytes: int = _DEFAULT_MAX_ANSWER_BYTES,
         max_record_bytes: int = _DEFAULT_MAX_RECORD_BYTES,
         authorize: Callable[[StreamAccess], Awaitable[bool]] | None = None,
     ) -> None:
-        """Serve ``provider``.
+        """Serve the store of the Worker's client.
 
         Raises:
-            ValueError: ``idle_timeout`` is not positive,
-                ``max_idle_subscriptions`` is below zero, or
-                ``max_answer_bytes`` or ``max_record_bytes`` is not positive.
+            ValueError: ``idle_timeout`` is not positive, ``max_idle_reads``
+                is below zero, or ``max_answer_bytes`` or ``max_record_bytes``
+                is not positive.
         """
         if idle_timeout <= timedelta(0):
             raise ValueError("idle_timeout must be positive")
-        if max_idle_subscriptions < 0:
-            raise ValueError("max_idle_subscriptions must not be negative")
+        if max_idle_reads < 0:
+            raise ValueError("max_idle_reads must not be negative")
         if max_answer_bytes <= 0:
             raise ValueError("max_answer_bytes must be positive")
         if max_record_bytes <= 0:
             raise ValueError("max_record_bytes must be positive")
+        self._idle_timeout = idle_timeout.total_seconds()
+        self._max_idle = max_idle_reads
         self._max_answer_bytes = max_answer_bytes
         self._max_record_bytes = max_record_bytes
         self._authorize = authorize
-        self._closed = False
-        self._provider = provider
-        self._idle_timeout = idle_timeout.total_seconds()
-        self._max_idle = max_idle_subscriptions
-        # Idle subscriptions by the cursor a reader resumes from, oldest first.
-        # Several can sit under one cursor when readers are at the same place.
-        self._idle: OrderedDict[_Subscription, tuple[_StreamKey, str]] = OrderedDict()
-        self._closing: set[asyncio.Task[None]] = set()
+        # Each reader's Core state and when it was parked, by the cursor the
+        # reader resumes from, oldest first.
+        self._states: OrderedDict[_ReadKey, tuple[bytes, float]] = OrderedDict()
 
     @nexusrpc.handler.sync_operation
     async def append(
         self, ctx: nexusrpc.handler.StartOperationContext, input: AppendInput
     ) -> AppendOutput:
-        """Write one batch, or finish the producer, through the provider."""
+        """Write one batch, or finish the producer."""
         await self._check(
             StreamAccess(
                 "append",
@@ -327,15 +271,8 @@ class TemporalStreamsHandler:
             raise _handler_error(error)
 
     async def close(self) -> None:
-        """Close every idle subscription and wait for those already closing.
-
-        A call still running releases its subscription when it answers.
-        """
-        self._closed = True
-        for subscription in list(self._idle):
-            self._release(subscription)
-        if self._closing:
-            await asyncio.gather(*self._closing, return_exceptions=True)
+        """Drop every held read state. A reader reads on from its own cursor."""
+        self._states.clear()
 
     async def _check(self, access: StreamAccess) -> None:
         if self._authorize is None or await self._authorize(access):
@@ -348,8 +285,7 @@ class TemporalStreamsHandler:
         )
 
     def _open(self, ref: StreamRef) -> StreamHandle:
-        client: Client = temporalio.nexus.client()
-        return self._provider.get_stream_handle(client, ref)
+        return get_stream_handle(temporalio.nexus.client(), ref)
 
     async def _append(self, input: AppendInput) -> AppendOutput:
         payloads = input.payloads or []
@@ -360,216 +296,123 @@ class TemporalStreamsHandler:
             )
         if not input.finish and not payloads:
             raise ValueError("an append carries payloads or finishes")
+        values: list[RawValue] = []
+        for index, body in enumerate(payloads):
+            size = _crossing_size(len(body) + _RECORD_OVERHEAD)
+            if size > self._max_record_bytes:
+                raise ValueError(
+                    f"payload {index} would take {size} bytes in a read result, "
+                    f"above the per-record limit of {self._max_record_bytes}"
+                )
+            try:
+                values.append(RawValue(Payload.FromString(body)))
+            except DecodeError as error:
+                raise ValueError(
+                    f"payload {index} is not a serialized Payload: {error}"
+                ) from None
         producer = self._open(input.stream).producer(
             producer_id=input.producer_id,
             attempt=input.attempt,
             next_sequence=input.sequence,
         )
-        if input.finish:
-            cursor = await producer.finish()
-        else:
-            values: list[RawValue] = []
-            for index, body in enumerate(payloads):
-                size = _crossing_size(len(body) + _RECORD_OVERHEAD)
-                if size > self._max_record_bytes:
-                    raise ValueError(
-                        f"payload {index} would take {size} bytes in a read result, "
-                        f"above the per-record limit of {self._max_record_bytes}"
-                    )
-                try:
-                    values.append(RawValue(Payload.FromString(body)))
-                except DecodeError as error:
-                    raise ValueError(
-                        f"payload {index} is not a serialized Payload: {error}"
-                    ) from None
-            cursor = await producer.append(*values)
+        cursor = await (producer.finish() if input.finish else producer.append(*values))
         return AppendOutput(cursor=cursor.token)
 
     async def _read(
         self, ctx: nexusrpc.handler.StartOperationContext, input: ReadInput
     ) -> ReadOutput:
         after = input.after_token or ""
+        handle = self._open(input.stream)
+        address = handle._address(handle.ref.topic)
+        client = temporalio.nexus.client()
+        service = await handle._plugin._service_for(client)
         if input.latest_only:
             if after:
                 raise ValueError(
                     "latest_only starts a read at the newest record; it takes no "
                     "after_token"
                 )
-            latest = await self._open(input.stream).latest()
-            return ReadOutput(records=[], next_token=latest.token, done=False)
-        max_records = input.max_records or _DEFAULT_MAX_RECORDS
-        wait = (input.wait_ms or 0) / 1000
-        ceiling = _CATCH_UP_LIMIT
+            latest = await call(service.latest(LatestRequest(stream=address)))
+            return ReadOutput(records=[], next_token=latest.cursor, done=False)
+        wait = timedelta(milliseconds=input.wait_ms or 0)
         deadline = ctx.request_deadline
         if deadline is not None:
             if deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
-            left = (
-                deadline - datetime.now(timezone.utc) - _DEADLINE_MARGIN
-            ).total_seconds()
-            wait = max(0.0, min(wait, left))
-            ceiling = max(0.0, min(ceiling, left))
-
-        key = _stream_key(input.stream)
-        subscription = self._take(key, after)
-        if subscription is None:
-            # Resolved here, so a cursor from another stream or store is
-            # refused by this call.
-            handle = self._open(input.stream)
-            records = handle.read(
-                after=Cursor(after) if after else BEGINNING, result_type=RawValue
-            )
-            subscription = _Subscription(
-                key, records, after, handle=handle, fetched=after
-            )
-        try:
-            collected = await self._collect(subscription, max_records, wait, ceiling)
-        except BaseException:
-            # A subscription whose read failed, or whose call was cancelled
-            # mid-fetch, is not kept: the reader's next call resumes from its
-            # own cursor on a fresh one.
-            self._release(subscription)
-            raise
-        if collected:
-            subscription.position = collected[-1].token
-        done = subscription.ended and subscription.carried is None
-        if done or self._closed:
-            self._release(subscription)
-        else:
-            self._park(subscription)
-        return ReadOutput(
-            records=collected,
-            next_token=subscription.position,
-            done=done,
+            left = deadline - datetime.now(timezone.utc) - _DEADLINE_MARGIN
+            wait = max(timedelta(0), min(wait, left))
+        key = (*_ref_key(input.stream), after)
+        request = ReadRequest(
+            stream=address,
+            after=after,
+            max_records=input.max_records or _DEFAULT_MAX_RECORDS,
+            state=self._take(key),
         )
-
-    async def _collect(
-        self,
-        subscription: _Subscription,
-        max_records: int,
-        wait: float,
-        ceiling: float,
-    ) -> list[RecordWire]:
-        """Up to ``max_records`` records within the answer's byte budget.
-
-        First it waits up to ``wait`` for a record. Once it has one, or when
-        it may not wait, it takes every record the store already held, as
-        far as the newest one when that phase began: those need a fetch and
-        a decode, not a new record, so it waits up to ``ceiling`` for them.
-        """
-        loop = asyncio.get_running_loop()
-        end = loop.time() + wait
-        collected: list[RecordWire] = []
+        request.wait.FromTimedelta(wait)
+        response = await call(service.read(request))
+        records: list[RecordWire] = []
         size = 0
-        newest: str | None = None
-        if subscription.carried is not None:
-            collected.append(subscription.carried)
-            size += _crossing_size(len(subscription.carried.record))
-            subscription.carried = None
-        while len(collected) < max_records and not subscription.ended:
-            waiting = max(0.0, end - loop.time())
-            if collected or waiting == 0:
-                if newest is None:
-                    newest = (await subscription.handle.latest()).token
-                if subscription.fetched == newest:
-                    break
-                timeout = ceiling
-            else:
-                timeout = waiting
-            if subscription.pending is None:
-                subscription.pending = asyncio.ensure_future(
-                    subscription.records.__anext__()
-                )
-            done, _ = await asyncio.wait({subscription.pending}, timeout=timeout)
-            if not done:
-                break
-            fetch, subscription.pending = subscription.pending, None
-            try:
-                record = fetch.result()
-            except StopAsyncIteration:
-                subscription.ended = True
-                break
+        cut = False
+        for record in response.records:
             # A reader synthesizes supersessions from the attempts it sees, so
             # they are not transported.
-            if record.kind is RecordKind.SUPERSEDED:
+            if record.HasField("superseded"):
                 continue
-            subscription.fetched = record.cursor.token
-            wire = _record_wire(record)
+            wire = await self._record_wire(client.data_converter, record)
             wire_size = _crossing_size(len(wire.record))
-            if wire_size > self._max_record_bytes:
-                # No read result can carry it, so the reader is told why at
-                # its cursor and goes on past it.
-                wire = RecordWire(
-                    token=wire.token,
-                    record=b"",
-                    error=(
-                        f"the record would take {wire_size} bytes in a read result, "
-                        f"above the per-record limit of {self._max_record_bytes}"
-                    ),
-                )
-                wire_size = 0
-            if collected and size + wire_size > self._max_answer_bytes:
-                subscription.carried = wire
+            if records and size + wire_size > self._max_answer_bytes:
+                cut = True
                 break
-            collected.append(wire)
+            records.append(wire)
             size += wire_size
-        return collected
-
-    def _take(self, key: _StreamKey, position: str) -> _Subscription | None:
-        for subscription, (parked_key, parked_position) in self._idle.items():
-            if parked_key == key and parked_position == position:
-                del self._idle[subscription]
-                if subscription.expiry is not None:
-                    subscription.expiry.cancel()
-                    subscription.expiry = None
-                return subscription
-        return None
-
-    def _park(self, subscription: _Subscription) -> None:
-        self._idle[subscription] = (subscription.key, subscription.position)
-        subscription.expiry = asyncio.get_running_loop().call_later(
-            self._idle_timeout, self._release, subscription
+        if cut:
+            # Core's state is past the records left out, so the next call starts
+            # a fresh read from the cursor this answer hands out.
+            return ReadOutput(records=records, next_token=records[-1].token, done=False)
+        if not response.done:
+            self._park((*_ref_key(input.stream), response.cursor), response.state)
+        return ReadOutput(
+            records=records, next_token=response.cursor, done=response.done
         )
-        while len(self._idle) > self._max_idle:
-            oldest = next(iter(self._idle))
-            self._release(oldest)
 
-    def _release(self, subscription: _Subscription) -> None:
-        """Close ``subscription`` in the background and forget it."""
-        self._idle.pop(subscription, None)
-        if subscription.expiry is not None:
-            subscription.expiry.cancel()
-            subscription.expiry = None
-        task = asyncio.ensure_future(_close_subscription(subscription))
-        self._closing.add(task)
-        task.add_done_callback(self._closing.discard)
+    async def _record_wire(
+        self, converter: temporalio.converter.DataConverter, record: ReadRecord
+    ) -> RecordWire:
+        stored = record.stored
+        if stored.HasField("body"):
+            try:
+                stored.body.CopyFrom(await decode_body(converter, stored.body))
+            except Exception as error:
+                return RecordWire(
+                    token=record.cursor,
+                    record=b"",
+                    error=f"the record's body could not be decoded: {error}",
+                )
+        data = stored.SerializeToString(deterministic=True)
+        wire_size = _crossing_size(len(data))
+        if wire_size > self._max_record_bytes:
+            # No read result can carry it, so the reader is told why at its
+            # cursor and goes on past it.
+            return RecordWire(
+                token=record.cursor,
+                record=b"",
+                error=(
+                    f"the record would take {wire_size} bytes in a read result, "
+                    f"above the per-record limit of {self._max_record_bytes}"
+                ),
+            )
+        return RecordWire(token=record.cursor, record=data)
+
+    def _take(self, key: _ReadKey) -> bytes:
+        state, parked = self._states.pop(key, (b"", 0.0))
+        return state if time.monotonic() - parked < self._idle_timeout else b""
+
+    def _park(self, key: _ReadKey, state: bytes) -> None:
+        self._states[key] = (state, time.monotonic())
+        self._states.move_to_end(key)
+        while len(self._states) > self._max_idle:
+            self._states.popitem(last=False)
 
 
-async def _close_subscription(subscription: _Subscription) -> None:
-    # An in-flight fetch holds the generator, which refuses aclose while it
-    # runs, so the fetch is cancelled and awaited first.
-    if subscription.pending is not None:
-        subscription.pending.cancel()
-        with contextlib.suppress(BaseException):
-            await subscription.pending
-        subscription.pending = None
-    try:
-        await subscription.records.aclose()
-    except Exception:
-        logger.warning("closing a stream subscription failed", exc_info=True)
-
-
-def _record_wire(record: StreamRecord[Any]) -> RecordWire:
-    value = record.value if record.kind is RecordKind.DATA else None
-    wire = to_wire(
-        _RAW_CONVERTER,
-        topic=record.topic,
-        kind=record.kind,
-        value=value,
-        producer_id=record.producer_id,
-        attempt=record.attempt,
-        sequence=record.sequence,
-    )
-    return RecordWire(
-        token=record.cursor.token, record=wire.SerializeToString(deterministic=True)
-    )
+def _ref_key(ref: StreamRef) -> tuple[str, str, str, str]:
+    return (ref.kind, ref.workflow_id, ref.run_id or "", ref.topic)
