@@ -115,4 +115,4 @@ Both samples run in full in `tests/contrib/streams/samples/`.
 
 ## Further reading
 
-- [Redis provider: guarantees and setup](docs/redis-guarantees.md)
+- [Redis store: guarantees and setup](docs/redis-guarantees.md)
