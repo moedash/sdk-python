@@ -21,7 +21,7 @@ The contract:
    record of a producer's newer attempt, it yields a
    :attr:`RecordKind.SUPERSEDED` record first. No store holds that record,
    so every store reports a retry the same way.
-2. **A cursor belongs to one stream.** Hand it back to resume strictly after
+3. **A cursor belongs to one stream.** Hand it back to resume strictly after
    the record it names. A cursor from another store or another stream is
    refused with :class:`StreamCursorError`, and one whose record
    retention dropped with :class:`StreamExpiredError`. A read with no cursor
@@ -29,6 +29,10 @@ The contract:
 4. **Topics are defined once.** :func:`topic` defines a topic with the type
    its records decode to, and every party shares that definition. A call
    that names no topic addresses :data:`DEFAULT_TOPIC`.
+
+A store is configured as a plugin:
+``Client.connect(..., plugins=[RedisStreams(...)])`` registers it on the
+client and on every Worker built from that client.
 
 The stored record is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.bridge.proto.streams.v1`, with the user's value in ``body``
@@ -49,12 +53,7 @@ from temporalio.contrib.streams._errors import (
     StreamStorageError,
     StreamUnsupportedError,
 )
-from temporalio.contrib.streams._plugin import StreamProviderPlugin
-from temporalio.contrib.streams._provider import (
-    StreamHandle,
-    StreamProducer,
-    StreamProvider,
-)
+from temporalio.contrib.streams._plugin import StreamStorePlugin
 from temporalio.contrib.streams._record import (
     Cursor,
     RecordKind,
@@ -74,17 +73,16 @@ __all__ = [
     "StreamCursorError",
     "StreamError",
     "StreamExpiredError",
-    "StreamHandle",
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamOwnerKind",
-    "StreamProducer",
     "StreamProducerError",
     "StreamRecord",
     "StreamRecordError",
     "StreamRef",
     "StreamRefusedError",
     "StreamStorageError",
+    "StreamStorePlugin",
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
