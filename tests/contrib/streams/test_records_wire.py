@@ -1,4 +1,4 @@
-"""Records, their wire form, and what a provider owes a record's body."""
+"""Records, their stored form, and what lang owes a record's body."""
 
 from __future__ import annotations
 
@@ -8,31 +8,30 @@ from collections.abc import Sequence
 import pytest
 
 from temporalio.api.common.v1 import Payload
+from temporalio.bridge.proto.streams import ReadRecord, Supersession
+from temporalio.bridge.proto.streams.v1 import StreamRecordKind
 from temporalio.common import RawValue
-from temporalio.contrib.streams import (
-    BEGINNING,
-    Cursor,
-    RecordKind,
-    StreamRecordError,
-    Supersession,
-)
+from temporalio.contrib.streams import Cursor, RecordKind, StreamRecordError
+from temporalio.contrib.streams import Supersession as ReportedSupersession
 from temporalio.contrib.streams._body import (
-    CONTENT_HASH_KEY,
-    content_fingerprint,
+    batch_digest,
     content_hash,
     decode_body,
-    encode_body,
+    encode_bodies,
 )
-from temporalio.contrib.streams._policy import AttemptTracker
-from temporalio.contrib.streams._wire import RecordDecoder, from_wire, to_wire
-from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
+from temporalio.contrib.streams._wire import RUN_ID_KEY, WireRecord, from_read, to_wire
 from temporalio.converter import DataConverter, PayloadCodec
 
+CONVERTER = DataConverter.default
 
-def test_a_record_round_trips_through_the_wire():
-    converter = DataConverter.default.payload_converter
+
+def stored(wire: WireRecord, cursor: str = "c", *, stale: bool = False) -> ReadRecord:
+    return ReadRecord(cursor=cursor, stored=wire, stale=stale)
+
+
+async def test_a_record_reads_back_as_it_was_written():
     wire = to_wire(
-        converter,
+        CONVERTER.payload_converter,
         topic="out",
         kind=RecordKind.DATA,
         value={"n": 1},
@@ -40,151 +39,123 @@ def test_a_record_round_trips_through_the_wire():
         attempt=2,
         sequence=3,
     )
-    parsed = WireRecord.FromString(wire.SerializeToString())
-    record = from_wire(converter, Cursor("c"), parsed, dict)
+    record = await from_read(CONVERTER, stored(wire, "c1", stale=True), dict)
     assert record.kind is RecordKind.DATA
     assert record.value == {"n": 1}
+    assert record.cursor == Cursor("c1")
     assert (record.producer_id, record.attempt, record.sequence) == ("p", 2, 3)
+    assert record.stale
 
-    finish = to_wire(converter, topic="out", kind=RecordKind.FINISH)
+    finish = to_wire(CONVERTER.payload_converter, topic="out", kind=RecordKind.FINISH)
     assert not finish.HasField("body")
-    assert from_wire(converter, Cursor("c"), finish, None).kind is RecordKind.FINISH
+    assert (await from_read(CONVERTER, stored(finish), None)).kind is RecordKind.FINISH
 
-    unset = WireRecord(topic="out", body=converter.to_payloads([1])[0])
-    assert from_wire(converter, Cursor("c"), unset, int).kind is RecordKind.DATA
+    unset = WireRecord(
+        topic="out", body=CONVERTER.payload_converter.to_payloads([1])[0]
+    )
+    assert (await from_read(CONVERTER, stored(unset), int)).kind is RecordKind.DATA
+
+
+async def test_the_run_id_core_stamps_reaches_the_reader():
+    wire = to_wire(
+        CONVERTER.payload_converter, topic="out", kind=RecordKind.DATA, value=1
+    )
+    assert (await from_read(CONVERTER, stored(wire), int)).run_id == ""
+    wire.metadata[RUN_ID_KEY].CopyFrom(
+        Payload(metadata={"encoding": b"binary/plain"}, data=b"run-1")
+    )
+    assert (await from_read(CONVERTER, stored(wire), int)).run_id == "run-1"
+
+
+async def test_a_supersession_reads_as_the_record_core_synthesized():
+    read = ReadRecord(
+        cursor="c2",
+        superseded=Supersession(
+            topic="t", producer_id="model", previous_attempt=1, attempt=2
+        ),
+    )
+    record = await from_read(CONVERTER, read, int)
+    assert record.kind is RecordKind.SUPERSEDED
+    assert record.cursor == Cursor("c2")
+    assert (record.topic, record.producer_id, record.attempt) == ("t", "model", 2)
+    assert record.supersession == ReportedSupersession("model", 1, 2)
+    assert record.value is None
 
 
 def test_no_writer_stores_a_synthesized_kind():
-    converter = DataConverter.default.payload_converter
     for kind in (RecordKind.SUPERSEDED, RecordKind.UNSPECIFIED):
         with pytest.raises(ValueError):
-            to_wire(converter, topic="out", kind=kind)
+            to_wire(CONVERTER.payload_converter, topic="out", kind=kind)
 
 
-def test_a_raw_value_passes_through_untouched():
-    converter = DataConverter.default.payload_converter
+async def test_a_raw_value_passes_through_untouched():
     raw = Payload(metadata={"encoding": b"binary/custom"}, data=b"\x00\x01")
-    wire = to_wire(converter, topic="out", kind=RecordKind.DATA, value=RawValue(raw))
+    wire = to_wire(
+        CONVERTER.payload_converter,
+        topic="out",
+        kind=RecordKind.DATA,
+        value=RawValue(raw),
+    )
     assert wire.body == raw
-    record = from_wire(converter, Cursor("c"), wire, RawValue)
+    record = await from_read(CONVERTER, stored(wire), RawValue)
     assert isinstance(record.value, RawValue)
     assert record.value.payload == raw
 
 
-def test_supersession_is_synthesized_from_observations():
-    attempts = AttemptTracker()
-    assert attempts.note("model", 1, topic="t", previous=BEGINNING) is None
-    assert attempts.note("model", 1, topic="t", previous=Cursor("c1")) is None
-    superseded = attempts.note("model", 2, topic="t", previous=Cursor("c2"))
-    assert superseded is not None
-    assert superseded.kind is RecordKind.SUPERSEDED
-    assert superseded.cursor == Cursor("c2")
-    assert superseded.supersession == Supersession("model", 1, 2)
-    assert attempts.note("model", 2, topic="t", previous=Cursor("c3")) is None
-    # Without an id or an attempt there is no generation to compare.
-    assert attempts.note("", 5, topic="t", previous=Cursor("c4")) is None
-    assert attempts.note("other", 0, topic="t", previous=Cursor("c4")) is None
-
-
-def test_an_attempt_that_goes_backwards_is_reported():
-    said: list[str] = []
-    attempts = AttemptTracker(said.append)
-    assert attempts.note("model", 2, topic="t", previous=BEGINNING) is None
-    assert attempts.note("model", 1, topic="t", previous=Cursor("c3")) is None
-    assert len(said) == 1
-    assert "attempt 1" in said[0] and "behind attempt 2" in said[0]
-    assert "'model'" in said[0]
-
-
-def test_a_repeat_of_the_current_attempt_is_not_reported():
-    said: list[str] = []
-    attempts = AttemptTracker(said.append)
-    attempts.note("model", 1, topic="t", previous=BEGINNING)
-    assert attempts.note("model", 1, topic="t", previous=Cursor("c1")) is None
-    assert said == []
-
-
-def test_the_decoder_reports_a_backwards_attempt():
-    said: list[str] = []
-    converter = DataConverter.default.payload_converter
-    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=said.append)
-
-    def record(attempt: int) -> WireRecord:
-        return to_wire(
-            converter,
-            topic="t",
-            kind=RecordKind.DATA,
-            value=attempt,
-            producer_id="model",
-            attempt=attempt,
-            sequence=1,
-        )
-
-    current = decoder.decode(Cursor("c1"), record(2))
-    out = decoder.decode(Cursor("c2"), record(1))
-    # Still delivered, because dropping it would hide what the store holds,
-    # but marked, so the consumer can keep it out of the current answer.
-    assert [r.value for r in out] == [1]
-    assert [r.stale for r in out] == [True]
-    assert [r.stale for r in current] == [False]
-    assert len(said) == 1 and "behind attempt 2" in said[0]
-
-
-def test_the_decoder_raises_with_the_cursor_of_a_record_it_cannot_decode():
-    converter = DataConverter.default.payload_converter
-    decoder = RecordDecoder(converter, int, after=BEGINNING, warn=lambda _: None)
+async def test_a_record_that_does_not_decode_raises_with_its_cursor():
     bad = WireRecord(
         topic="t",
         kind=RecordKind.DATA.value,  # type: ignore[arg-type]
         body=Payload(metadata={"encoding": b"json/plain"}, data=b"{not json"),
     )
     with pytest.raises(StreamRecordError) as raised:
-        decoder.decode(Cursor("c1"), bad)
+        await from_read(CONVERTER, stored(bad, "c1"), int)
     # The caller can resume past it on purpose.
     assert raised.value.cursor == Cursor("c1")
-    good = to_wire(converter, topic="t", kind=RecordKind.DATA, value=3)
-    assert [r.value for r in decoder.decode(Cursor("c2"), good)] == [3]
-
-
-def test_a_decoder_primed_at_its_resume_cursor_reports_a_new_attempt():
-    converter = DataConverter.default.payload_converter
-    decoder = RecordDecoder(converter, int, after=Cursor("c2"), warn=lambda _: None)
-
-    def written(attempt: int, value: int) -> WireRecord:
-        wire = to_wire(converter, topic="t", kind=RecordKind.DATA, value=value)
-        wire.producer_id, wire.attempt = "model", attempt
-        return wire
-
-    # The record at the cursor was already delivered, before the reader stopped.
-    decoder.prime(written(1, 2))
-    out = decoder.decode(Cursor("c3"), written(2, 3))
-    assert [r.kind for r in out] == [RecordKind.SUPERSEDED, RecordKind.DATA]
-    assert out[0].cursor == Cursor("c2")
+    unknown = WireRecord(topic="t", kind=7)  # type: ignore[arg-type]
+    with pytest.raises(StreamRecordError):
+        await from_read(CONVERTER, stored(unknown, "c2"), int)
 
 
 def test_the_content_hash_is_the_plaintext_payload_hash():
-    converter = DataConverter.default.payload_converter
+    converter = CONVERTER.payload_converter
     one = converter.to_payloads([{"n": 1}])[0]
     assert content_hash(one) == content_hash(converter.to_payloads([{"n": 1}])[0])
     assert content_hash(one) != content_hash(converter.to_payloads([{"n": 2}])[0])
-    assert len(content_hash(one)) == 64
+    # Core refuses a hash that isn't a SHA-256.
+    assert len(content_hash(one)) == 32
 
 
-def test_the_fingerprint_is_length_delimited_over_the_batch():
-    converter = DataConverter.default.payload_converter
+def records(*values: str) -> list[WireRecord]:
+    return [
+        to_wire(CONVERTER.payload_converter, topic="t", kind=RecordKind.DATA, value=v)
+        for v in values
+    ]
 
-    def records(*values: str) -> list[WireRecord]:
-        return [
-            to_wire(converter, topic="t", kind=RecordKind.DATA, value=v) for v in values
-        ]
 
-    assert content_fingerprint(records("a", "b")) == content_fingerprint(
-        records("a", "b")
+def test_the_digest_is_length_delimited_over_the_batch():
+    assert batch_digest(records("a", "b")) == batch_digest(records("a", "b"))
+    assert batch_digest(records("a", "b")) != batch_digest(records("b", "a"))
+    assert batch_digest(records("ab")) != batch_digest(records("a", "b"))
+
+
+def test_the_digest_matches_what_every_sdk_takes():
+    # The vector Core's tests hold, so a retry through another SDK still dedupes.
+    batch = [
+        to_wire(
+            CONVERTER.payload_converter,
+            topic="events",
+            kind=RecordKind.DATA,
+            value={"n": n},
+            producer_id="p",
+            attempt=1,
+            sequence=n,
+        )
+        for n in (1, 2)
+    ]
+    assert batch_digest(batch).hex() == (
+        "0499768af1856bc6fd19cf6cf90e28e971099f1680e8347d70bdb4b65273f30f"
     )
-    assert content_fingerprint(records("a", "b")) != content_fingerprint(
-        records("b", "a")
-    )
-    assert content_fingerprint(records("ab")) != content_fingerprint(records("a", "b"))
 
 
 class NonceCodec(PayloadCodec):
@@ -203,31 +174,22 @@ class NonceCodec(PayloadCodec):
         return [Payload.FromString(p.data[16:]) for p in payloads]
 
 
-async def test_the_body_is_hashed_before_the_codec_and_decoded_after():
+async def test_the_codec_runs_on_the_body_and_never_on_the_hashes():
     converter = DataConverter(payload_codec=NonceCodec())
-    plain = to_wire(
-        converter.payload_converter, topic="t", kind=RecordKind.DATA, value={"n": 1}
+    plain = records("a")[0].body
+    first, second = await encode_bodies(converter, [plain, plain])
+    # The codec made the stored bytes differ, which the plaintext hash can't see.
+    assert first != second
+    assert first.metadata["encoding"] == b"binary/nonce"
+    assert await decode_body(converter, first) == plain
+
+    record = await from_read(
+        converter,
+        stored(
+            WireRecord(
+                topic="t", kind=StreamRecordKind.STREAM_RECORD_KIND_DATA, body=first
+            )
+        ),
+        str,
     )
-    expected = content_hash(plain.body)
-
-    first = WireRecord()
-    first.CopyFrom(plain)
-    second = WireRecord()
-    second.CopyFrom(plain)
-    await encode_body(converter, first)
-    await encode_body(converter, second)
-    # The codec made the stored bytes differ, and the hash did not move.
-    assert first.body != second.body
-    assert first.body.metadata["encoding"] == b"binary/nonce"
-    for stamped in (first, second):
-        assert stamped.metadata[CONTENT_HASH_KEY].data.decode() == expected
-        assert stamped.metadata[CONTENT_HASH_KEY].metadata["encoding"] == (
-            b"binary/plain"
-        )
-
-    await decode_body(converter, first)
-    assert first.body == plain.body
-
-    finish = to_wire(converter.payload_converter, topic="t", kind=RecordKind.FINISH)
-    await encode_body(converter, finish)
-    assert CONTENT_HASH_KEY not in finish.metadata
+    assert record.value == "a"

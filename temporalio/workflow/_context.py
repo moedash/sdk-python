@@ -21,6 +21,8 @@ from ..types import AnyType, ParamType
 from ._exceptions import _NotInWorkflowEventLoopError
 
 if TYPE_CHECKING:
+    import temporalio.bridge.proto.workflow_commands
+
     from ._activities import ActivityCancellationType, ActivityHandle
     from ._event_groups import EventGroup
     from ._exceptions import ContinueAsNewVersioningBehavior, VersioningIntent
@@ -364,6 +366,11 @@ class _Runtime(ABC):
 
     @abstractmethod
     def workflow_is_read_only(self) -> bool: ...
+
+    @abstractmethod
+    def workflow_stream_commit(
+        self,
+    ) -> temporalio.bridge.proto.workflow_commands.WorkflowOutputStreamCommit: ...
 
     @abstractmethod
     def workflow_memo(self) -> Mapping[str, Any]: ...

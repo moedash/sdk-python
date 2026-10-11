@@ -9,6 +9,7 @@ import pytest
 
 from temporalio.client import Client
 from temporalio.contrib.streams.redis import RedisStreams
+from tests.contrib.streams._support import connect_with
 from tests.contrib.streams.samples import (
     path_a_workflow_publish,
     path_b_activity_publish,
@@ -20,34 +21,26 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def client_with(client: Client, provider: RedisStreams) -> Client:
-    config = client.config()
-    config["plugins"] = [provider]
-    return Client(**config)
-
-
 async def test_path_a_a_client_reads_what_a_workflow_published(client: Client):
-    provider = RedisStreams(
+    store = RedisStreams(
         os.environ["STREAMS_REDIS_URL"], key_prefix=f"sample-{uuid.uuid4().hex}"
     )
     # Ids of their own, so runs that share a dev server never collide.
     steps = await path_a_workflow_publish.main(
-        client_with(client, provider),
+        await connect_with(client, store),
         f"sample-a-{uuid.uuid4().hex}",
         workflow_id=f"order-{uuid.uuid4().hex}",
     )
     assert steps == ["reserved", "charged", "shipped"]
-    await provider.close()
 
 
 async def test_path_b_a_reader_drops_what_a_failed_attempt_wrote(client: Client):
-    provider = RedisStreams(
+    store = RedisStreams(
         os.environ["STREAMS_REDIS_URL"], key_prefix=f"sample-{uuid.uuid4().hex}"
     )
     text = await path_b_activity_publish.main(
-        client_with(client, provider),
+        await connect_with(client, store),
         f"sample-b-{uuid.uuid4().hex}",
         workflow_id=f"answer-{uuid.uuid4().hex}",
     )
     assert text == "an answer to streams"
-    await provider.close()
