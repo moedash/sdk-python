@@ -13,7 +13,6 @@ from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import timezone
 from types import TracebackType
-from typing import Protocol
 
 import temporalio.api.common.v1
 import temporalio.bridge.proto.common
@@ -74,46 +73,6 @@ def _set_external_storage_metrics(
     target.total_size_bytes = metrics.total_size
     target.total_duration.FromTimedelta(metrics.total_duration)
     target.driver_names.extend(sorted(metrics.driver_names))
-
-
-class _ActivationHook(Protocol):
-    """Internal: acts on a run's activations around the Workflow instance.
-
-    An interceptor offers one through a ``_temporal_activation_hook``
-    attribute. This keeps work that needs the activation and the completion,
-    such as committing a Workflow's stream output with its task, out of the
-    public interceptor surface.
-    """
-
-    def take_jobs(
-        self, act: temporalio.bridge.proto.workflow_activation.WorkflowActivation
-    ) -> None:
-        """Remove the jobs that are the hook's before the run sees them."""
-        ...
-
-    async def before_completion(
-        self,
-        act: temporalio.bridge.proto.workflow_activation.WorkflowActivation,
-        completion: temporalio.bridge.proto.workflow_completion.WorkflowActivationCompletion,
-        data_converter: temporalio.converter.DataConverter,
-    ) -> None:
-        """Adjust a successful completion before it is encoded and sent.
-
-        Raising fails the activation like an exception from the run.
-        """
-        ...
-
-    def discard(self, run_id: str) -> None:
-        """Forget what the run produced in an activation that failed."""
-        ...
-
-    async def after_completion(self, run_id: str) -> None:
-        """Act once the completion was sent. Must not raise."""
-        ...
-
-    async def on_eviction(self, run_id: str) -> None:
-        """Act once the run is evicted. Must not raise."""
-        ...
 
 
 class _WorkflowWorker:  # type:ignore[reportUnusedClass]
@@ -197,14 +156,6 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             interceptor_class = i.workflow_interceptor_class(interceptor_class_input)
             if interceptor_class:
                 self._interceptor_classes.append(interceptor_class)
-        # Internal registration: an interceptor offers a hook through this
-        # attribute, so work that needs the raw activation and completion
-        # stays off the public interceptor API.
-        self._activation_hooks: list[_ActivationHook] = [
-            hook
-            for i in interceptors
-            if (hook := getattr(i, "_temporal_activation_hook", None)) is not None
-        ]
         self._extern_functions.update(
             **_WorkflowExternFunctions(  # type: ignore
                 __temporal_get_metric_meter=lambda: metric_meter,
@@ -387,8 +338,6 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
         data_converter = self._data_converter
         download_metrics = temporalio.converter._extstore.StorageOperationMetrics()
         try:
-            for hook in self._activation_hooks:
-                hook.take_jobs(act)
             if LOG_PROTOS:
                 logger.debug("Received workflow activation:\n%s", act)
 
@@ -484,15 +433,7 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                     workflow.deadlocked_activation_task = activate_task
                     raise deadlock_exc from None
 
-            for hook in self._activation_hooks:
-                if completion.HasField("successful"):
-                    await hook.before_completion(act, completion, data_converter)
-                else:
-                    hook.discard(act.run_id)
-
         except Exception as err:
-            for hook in self._activation_hooks:
-                hook.discard(act.run_id)
             if isinstance(err, _DeadlockError):
                 err.swap_traceback()
 
@@ -590,14 +531,6 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
             logger.exception(
                 "Failed completing activation on workflow with run ID %s", act.run_id
             )
-        for hook in self._activation_hooks:
-            try:
-                await hook.after_completion(act.run_id)
-            except Exception:
-                logger.exception(
-                    "Activation hook failed after completion on workflow with run ID %s",
-                    act.run_id,
-                )
 
     async def _handle_cache_eviction(
         self,
@@ -713,14 +646,6 @@ class _WorkflowWorker:  # type:ignore[reportUnusedClass]
                 "Failed completing eviction activation on workflow with run ID %s",
                 act.run_id,
             )
-        for hook in self._activation_hooks:
-            try:
-                await hook.on_eviction(act.run_id)
-            except Exception:
-                logger.exception(
-                    "Activation hook failed on eviction of workflow with run ID %s",
-                    act.run_id,
-                )
 
         # Run eviction hook if present
         if self._on_eviction_hook is not None:

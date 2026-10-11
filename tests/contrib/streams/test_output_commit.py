@@ -1,16 +1,17 @@
-"""A Workflow's own publish commits with its Workflow Task.
+"""A Workflow's own publish rides the completion of the activation that made it.
 
-The Worker stages what an activation published, Core records the manifest
-in a marker, and the batch is promoted once History shows that marker.
+The writer adds the records to the completion's commit, the Worker's
+completion encoder runs each body through the codec, and Core records a
+marker of them and makes them visible once the Workflow Task is accepted.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
 
 import pytest
 
@@ -18,53 +19,29 @@ from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
 from temporalio.bridge.proto.external_data import ExternalStreamMarkerData
+from temporalio.bridge.proto.streams import (
+    ReadRequest,
+    StreamAddress,
+    StreamOwnerKind,
+)
 from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
 from temporalio.contrib.streams import (
     RecordKind,
-    StreamRef,
+    StreamClosedError,
+    get_stream_handle,
     topic,
     workflow_writer,
 )
-from temporalio.contrib.streams._body import (
-    CONTENT_HASH_KEY,
-)
-from temporalio.contrib.streams._output import MARKER_NAME
 from temporalio.contrib.streams.memory import MemoryStreams
-from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
+from temporalio.contrib.streams.redis import RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
-from temporalio.worker import Replayer
+from tests.contrib.streams._support import connect_with, new_workflow_id, read_all
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
 OTHER = topic("other", dict)
 
-
-def client_with(
-    client: Client, provider: MemoryStreams, converter: DataConverter | None = None
-) -> Client:
-    config = client.config()
-    config["plugins"] = [provider]
-    if converter is not None:
-        config["data_converter"] = converter
-    return Client(**config)
-
-
-def new_workflow_id() -> str:
-    return f"streams-commit-{uuid.uuid4().hex}"
-
-
-async def read_all(records: Any, timeout: float = 10.0) -> list:
-    out = []
-
-    async def pull() -> None:
-        async for record in records:
-            out.append(record)
-
-    try:
-        await asyncio.wait_for(pull(), timeout)
-    finally:
-        await records.aclose()
-    return out
+MARKER_NAME = "core_external_stream"
 
 
 async def output_markers(handle: WorkflowHandle) -> list[ExternalStreamMarkerData]:
@@ -93,8 +70,7 @@ class PublishTwoTopics:
 
 
 async def test_an_accepted_task_commits_its_output_in_a_marker(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(streams_client, PublishTwoTopics) as worker:
         handle = await streams_client.start_workflow(
@@ -106,16 +82,12 @@ async def test_an_accepted_task_commits_its_output_in_a_marker(client: Client):
     manifest = marker.output
     assert manifest.run_id == handle.result_run_id
     assert manifest.stage_token
-    assert manifest.provider_id == provider.name()
     assert [(t.topic, t.record_count, t.finished) for t in manifest.topics] == [
         ("events", 3, True),
         ("other", 1, False),
     ]
-    assert [list(s.record_counts_by_topic) for s in manifest.segments] == [[3, 1]]
 
-    stream = provider.get_stream_handle(
-        streams_client, StreamRef.for_workflow(workflow_id)
-    )
+    stream = get_stream_handle(streams_client, workflow_id)
     events = await read_all(stream.read(topic=EVENTS))
     assert [r.value for r in events if r.kind is RecordKind.DATA] == [
         {"n": 1},
@@ -123,8 +95,6 @@ async def test_an_accepted_task_commits_its_output_in_a_marker(client: Client):
     ]
     assert events[-1].kind is RecordKind.FINISH
     assert [r.value for r in await read_all(stream.read(topic=OTHER))] == [{"n": 2}]
-    # Promotion empties the stage.
-    assert provider._stages == {}
 
 
 _task_attempts: dict[str, int] = {}
@@ -143,8 +113,7 @@ class FailsItsFirstTask:
 
 
 async def test_a_failed_task_publishes_nothing(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(streams_client, FailsItsFirstTask) as worker:
         handle = await streams_client.start_workflow(
@@ -162,13 +131,11 @@ async def test_a_failed_task_publishes_nothing(client: Client):
     ]
     assert len(failed) == 1
     assert len(await output_markers(handle)) == 1
-    stream = provider.get_stream_handle(
-        streams_client, StreamRef.for_workflow(workflow_id)
+    records = await read_all(
+        get_stream_handle(streams_client, workflow_id).read(topic=EVENTS)
     )
-    records = await read_all(stream.read(topic=EVENTS))
-    # Only the retry's record: the failed task never staged its own.
+    # Only the retry's record: the failed task's completion never reached Core.
     assert [r.value for r in records] == [{"attempt": 2}]
-    assert provider._stages == {}
 
 
 class NonceCodec(PayloadCodec):
@@ -195,19 +162,29 @@ class PublishOnce:
 
 
 async def test_bodies_go_through_the_workflow_codec(client: Client):
-    provider = MemoryStreams()
-    coded = client_with(client, provider, DataConverter(payload_codec=NonceCodec()))
+    store = MemoryStreams()
+    coded = await connect_with(client, store, DataConverter(payload_codec=NonceCodec()))
     workflow_id = new_workflow_id()
     async with new_worker(coded, PublishOnce) as worker:
         await coded.execute_workflow(
             PublishOnce.run, id=workflow_id, task_queue=worker.task_queue
         )
-    store = provider._topic(client.namespace, workflow_id, EVENTS.name)
-    (stored,) = [WireRecord.FromString(raw) for raw in store.records]
+    service = await store._service_for(coded)
+    raw = await service.read(
+        ReadRequest(
+            stream=StreamAddress(
+                namespace=client.namespace,
+                owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
+                workflow_id=workflow_id,
+                topic=EVENTS.name,
+            )
+        )
+    )
+    (stored,) = [record.stored for record in raw.records]
+    # The store holds ciphertext and the plaintext hash Core stamped from lang's.
     assert stored.body.metadata["encoding"] == b"binary/nonce"
-    assert CONTENT_HASH_KEY in stored.metadata
-    stream = provider.get_stream_handle(coded, StreamRef.for_workflow(workflow_id))
-    (record,) = await read_all(stream.read(topic=EVENTS))
+    assert len(stored.metadata["temporal.io/content-hash"].data) == 64
+    (record,) = await read_all(get_stream_handle(coded, workflow_id).read(topic=EVENTS))
     assert record.value == {"secret": "value"}
 
 
@@ -230,8 +207,7 @@ class PublishAroundALocalActivity:
 async def test_two_publishing_completions_in_one_task_commit_in_order(
     client: Client,
 ):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(
         streams_client, PublishAroundALocalActivity, activities=[nothing]
@@ -246,24 +222,10 @@ async def test_two_publishing_completions_in_one_task_commit_in_order(
     markers = await output_markers(handle)
     assert len(markers) == 2
     assert markers[0].output.stage_token != markers[1].output.stage_token
-    stream = provider.get_stream_handle(
-        streams_client, StreamRef.for_workflow(workflow_id)
+    records = await read_all(
+        get_stream_handle(streams_client, workflow_id).read(topic=EVENTS)
     )
-    records = await read_all(stream.read(topic=EVENTS))
     assert [r.value for r in records] == [{"n": "before"}, {"n": "after"}]
-
-
-async def test_a_replayer_without_the_stream_plugin_says_so(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
-    async with new_worker(streams_client, PublishOnce) as worker:
-        handle = await streams_client.start_workflow(
-            PublishOnce.run, id=new_workflow_id(), task_queue=worker.task_queue
-        )
-        await handle.result()
-    history = await handle.fetch_history()
-    with pytest.raises(Exception, match="stream provider plugin"):
-        await Replayer(workflows=[PublishOnce]).replay_workflow(history)
 
 
 @workflow.defn
@@ -293,8 +255,7 @@ class PublishAfterARejectedUpdate:
 async def test_a_publish_right_after_a_rejected_update_commits(client: Client):
     # Core drops the speculative task of a rejected Update, and with it the
     # task's history floor, so the next publishing task must find its own.
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(streams_client, PublishAfterARejectedUpdate) as worker:
         handle = await streams_client.start_workflow(
@@ -306,6 +267,98 @@ async def test_a_publish_right_after_a_rejected_update_commits(client: Client):
             await handle.execute_update(PublishAfterARejectedUpdate.set_go, False)
         await handle.signal(PublishAfterARejectedUpdate.start)
         await handle.result()
-    stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
-    (record,) = await read_all(stream.read(topic=EVENTS))
+    (record,) = await read_all(
+        get_stream_handle(streams_client, workflow_id).read(topic=EVENTS)
+    )
     assert record.value == {"after": "rejected update"}
+
+
+@workflow.defn
+class PublishThenContinue:
+    @workflow.run
+    async def run(self, runs_left: int) -> None:
+        workflow_writer(EVENTS).publish({"runs_left": runs_left})
+        if runs_left:
+            workflow.continue_as_new(runs_left - 1)
+        workflow_writer(EVENTS).finish()
+
+
+async def test_each_run_stamps_its_own_id_across_continue_as_new(client: Client):
+    streams_client = await connect_with(client, MemoryStreams())
+    workflow_id = new_workflow_id()
+    async with new_worker(streams_client, PublishThenContinue) as worker:
+        handle = await streams_client.start_workflow(
+            PublishThenContinue.run, 1, id=workflow_id, task_queue=worker.task_queue
+        )
+        first_run = handle.first_execution_run_id
+        await handle.result()
+        last_run = (await handle.describe()).run_id
+
+    records = await read_all(
+        get_stream_handle(streams_client, workflow_id).read(topic=EVENTS)
+    )
+    assert [(r.kind, r.value, r.run_id) for r in records] == [
+        (RecordKind.DATA, {"runs_left": 1}, first_run),
+        (RecordKind.DATA, {"runs_left": 0}, last_run),
+        (RecordKind.FINISH, None, last_run),
+    ]
+    assert first_run != last_run
+
+
+@workflow.defn
+class ClosesItsTopic:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        writer = workflow_writer(EVENTS)
+        writer.publish({"n": 1})
+        writer.finish()
+        # This release has no close call yet, so the case commits Core's close
+        # the way the Nexus layer's close does, next to the topic's FINISH.
+        result = workflow.payload_converter().to_payloads(["closed"])[0]
+        workflow._Runtime.current().workflow_stream_commit().closes.add(
+            topic=EVENTS.name, result=result
+        )
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+
+@pytest.mark.skipif(
+    not os.environ.get("STREAMS_REDIS_URL"),
+    reason="set STREAMS_REDIS_URL to run the Redis close case",
+)
+async def test_a_committed_close_leaves_the_topic_closed_on_redis(client: Client):
+    store = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"], key_prefix=f"close-{uuid.uuid4().hex}"
+    )
+    streams_client = await connect_with(client, store)
+    workflow_id = new_workflow_id()
+    async with new_worker(streams_client, ClosesItsTopic) as worker:
+        handle = await streams_client.start_workflow(
+            ClosesItsTopic.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = get_stream_handle(streams_client, workflow_id)
+        # Core closes the topic in the background once the task's records are
+        # promoted, so the case waits for the refusal.
+        closed = False
+        for attempt in range(1, 51):
+            producer = stream.producer(
+                topic=EVENTS, producer_id="late", attempt=attempt
+            )
+            try:
+                await producer.append({"late": attempt})
+            except StreamClosedError:
+                closed = True
+                break
+            await asyncio.sleep(0.1)
+        assert closed
+        # The run goes on, so another topic of its stream still takes appends.
+        other = stream.producer(topic=OTHER, producer_id="late", attempt=1)
+        await other.append({"other": 1})
+        await handle.signal(ClosesItsTopic.finish)
+        await handle.result()

@@ -1,10 +1,10 @@
 """A reference to one stream that crosses a process boundary as data.
 
-A handle is bound to a client and a provider, so it cannot be a Workflow
+A handle is bound to a client and its store, so it cannot be a Workflow
 argument or an Activity result. A :class:`StreamRef` can: it names the owner
 and the topic, nothing more, and whoever receives it opens the stream on the
-provider its own client carries. It carries no cursor, because a position
-belongs to a reader, and no provider name.
+store its own client carries. It carries no cursor, because a position
+belongs to a reader, and no store name.
 """
 
 from __future__ import annotations

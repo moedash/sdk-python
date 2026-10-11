@@ -16,3 +16,4 @@ tags
 /.claude
 tmpclaude-*
 /.nexgen-system
+/.nexgen-streams
