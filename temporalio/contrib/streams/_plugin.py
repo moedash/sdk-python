@@ -186,11 +186,24 @@ class StreamStorePlugin(SimplePlugin):
         )
         await call((await self._service_for(client)).close(request))
 
+    async def run_worker(
+        self,
+        worker: temporalio.worker.Worker,
+        next: Callable[[temporalio.worker.Worker], Awaitable[None]],
+    ) -> None:
+        """Run the Worker, then wait for the notifications Core still has out."""
+        try:
+            await super().run_worker(worker, next)
+        finally:
+            if self._config.notify_on_append:
+                await self.flush_notifications()
+
     async def flush_notifications(self) -> None:
         """Wait for the notifications Core still has out.
 
-        Call it before the process exits, so a caller doesn't wait for
-        progress a stopped process never sent. Without
+        A Worker built from the client does this when it stops. A process
+        that holds only a client calls it before it exits, so a caller
+        doesn't wait for progress a stopped process never sent. Without
         :meth:`notify_on_append`, or before a client connected the store, it
         returns at once.
 

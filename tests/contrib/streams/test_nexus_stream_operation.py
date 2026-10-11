@@ -726,3 +726,27 @@ async def test_a_close_with_the_last_publishes_closes_the_store_after_them(
         await owner.result()
 
     assert values == [f"t{n}" for n in range(50)]
+
+
+async def test_a_worker_flushes_on_stop_and_a_replay_after_it_runs(
+    client: Client,
+) -> None:
+    # The Worker flushes its notifications when it stops. That flush ran past
+    # the Worker's shutdown, and leaving `async with` used to cancel it, and
+    # with it whatever the caller awaited next, here a replay.
+    store = MemoryStreams().notify_on_append()
+    streams_client = await connect(client, store)
+    async with new_worker(streams_client, OwnerThatClosesInOneTask) as worker:
+        owner = await streams_client.start_workflow(
+            OwnerThatClosesInOneTask.run,
+            5,
+            id=f"owner-{uuid.uuid4()}",
+            task_queue=worker.task_queue,
+        )
+        ref = StreamRef.for_workflow(owner.id, topic=TOKENS_TOPIC)
+        await _skip_without_notifier(client, ref)
+        await asyncio.wait_for(_values(streams_client, ref), 15)
+        await owner.signal(OwnerThatClosesInOneTask.done)
+        await owner.result()
+    history = await owner.fetch_history()
+    await Replayer(workflows=[OwnerThatClosesInOneTask]).replay_workflow(history)
