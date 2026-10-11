@@ -13,6 +13,7 @@ import temporalio.api.operatorservice.v1.service_pb2 as operator_service
 import temporalio.api.testservice.v1.service_pb2 as test_service
 import temporalio.api.workflowservice.v1.service_pb2 as workflow_service
 import temporalio.bridge.proto.health.v1.health_pb2 as health_service
+import temporalio.bridge.proto.streams.streams_pb2 as stream_service
 
 
 def generate_python_services(
@@ -231,6 +232,85 @@ def generate_rust_match_arm(
     )
 
 
+def python_module_for(file_name: str) -> str:
+    """The Python package that re-exports the messages of a proto file."""
+    directory = file_name.rsplit("/", 1)[0]
+    for proto_prefix, python_prefix in (
+        ("temporal/sdk/core/", "temporalio/bridge/proto/"),
+        ("temporal/api/", "temporalio/api/"),
+    ):
+        if directory.startswith(proto_prefix):
+            return (python_prefix + directory[len(proto_prefix) :]).replace("/", ".")
+    raise ValueError(f"no Python package for {file_name}")
+
+
+def generate_python_stream_service(
+    service_descriptor: ServiceDescriptor,
+    output_file: str = "temporalio/bridge/streams_generated.py",
+):
+    print("generating python stream service")
+
+    def type_name(message) -> str:
+        return f"{python_module_for(message.file.name)}.{message.name}"
+
+    methods = sorted(
+        (
+            method
+            for method in service_descriptor.methods
+            if not method.client_streaming and not method.server_streaming
+        ),
+        key=lambda m: m.name,
+    )
+    modules = sorted(
+        {python_module_for(service_descriptor.file.name)}
+        | {python_module_for(m.input_type.file.name) for m in methods}
+        | {python_module_for(m.output_type.file.name) for m in methods}
+    )
+    method_template = Template('''
+    async def $method_name(self, req: $request_type) -> $response_type:
+        """Invokes the $service_name.$method_name call."""
+        return await self._store.call("$rpc_name", req, $response_type)
+''')
+    method_calls = [
+        method_template.substitute(
+            service_name=service_descriptor.name,
+            method_name=pascal_to_snake(method.name),
+            rpc_name=method.name,
+            request_type=type_name(method.input_type),
+            response_type=type_name(method.output_type),
+        )
+        for method in methods
+    ]
+    file_template = Template('''# Generated file. DO NOT EDIT
+"""Generated calls for Core's in-process $service_name."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+$imports
+
+if TYPE_CHECKING:
+    from temporalio.bridge.streams import StreamStore
+
+
+class $service_name:
+    """Calls for the $service_name, which Core dispatches in process."""
+
+    def __init__(self, store: StreamStore) -> None:
+        """Initialize service with the provided store."""
+        self._store = store
+$method_calls''')
+    with open(output_file, "w") as f:
+        f.write(
+            file_template.substitute(
+                service_name=service_descriptor.name,
+                imports="\n".join(f"import {module}" for module in modules),
+                method_calls="".join(method_calls),
+            )
+        )
+
+
 def pascal_to_snake(input: str) -> str:
     return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", input).lower()
 
@@ -272,4 +352,8 @@ if __name__ == "__main__":
             test_service.DESCRIPTOR,
             health_service.DESCRIPTOR,
         ]
+    )
+
+    generate_python_stream_service(
+        stream_service.DESCRIPTOR.services_by_name["StreamService"]
     )
