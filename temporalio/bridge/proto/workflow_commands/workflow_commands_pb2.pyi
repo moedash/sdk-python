@@ -29,6 +29,7 @@ import temporalio.api.workflow.v1.message_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
+import temporalio.bridge.proto.streams.v1.message_pb2
 
 if sys.version_info >= (3, 10):
     import typing as typing_extensions
@@ -104,6 +105,7 @@ class WorkflowCommand(google.protobuf.message.Message):
     UPDATE_RESPONSE_FIELD_NUMBER: builtins.int
     SCHEDULE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
     REQUEST_CANCEL_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
+    WORKFLOW_OUTPUT_STREAM_COMMIT_FIELD_NUMBER: builtins.int
     @property
     def user_metadata(self) -> temporalio.api.sdk.v1.user_metadata_pb2.UserMetadata:
         """User metadata that may or may not be persisted into history depending on the command type.
@@ -178,6 +180,8 @@ class WorkflowCommand(google.protobuf.message.Message):
     def request_cancel_nexus_operation(
         self,
     ) -> global___RequestCancelNexusOperation: ...
+    @property
+    def workflow_output_stream_commit(self) -> global___WorkflowOutputStreamCommit: ...
     def __init__(
         self,
         *,
@@ -216,6 +220,7 @@ class WorkflowCommand(google.protobuf.message.Message):
         schedule_nexus_operation: global___ScheduleNexusOperation | None = ...,
         request_cancel_nexus_operation: global___RequestCancelNexusOperation
         | None = ...,
+        workflow_output_stream_commit: global___WorkflowOutputStreamCommit | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -268,6 +273,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"user_metadata",
             "variant",
             b"variant",
+            "workflow_output_stream_commit",
+            b"workflow_output_stream_commit",
         ],
     ) -> builtins.bool: ...
     def ClearField(
@@ -323,6 +330,8 @@ class WorkflowCommand(google.protobuf.message.Message):
             b"user_metadata",
             "variant",
             b"variant",
+            "workflow_output_stream_commit",
+            b"workflow_output_stream_commit",
         ],
     ) -> None: ...
     def WhichOneof(
@@ -351,11 +360,96 @@ class WorkflowCommand(google.protobuf.message.Message):
             "update_response",
             "schedule_nexus_operation",
             "request_cancel_nexus_operation",
+            "workflow_output_stream_commit",
         ]
         | None
     ): ...
 
 global___WorkflowCommand = WorkflowCommand
+
+class WorkflowOutputStreamCommit(google.protobuf.message.Message):
+    """The stream records this activation published, sent with its completion.
+
+    Core builds the output manifest from them and records it in a `core_external_stream` marker
+    ordered before the completion's other commands, so the records become visible exactly when the
+    Workflow Task is accepted. While replaying, lang sends the same records without bodies, and
+    Core compares the manifest it builds from them with the recorded one. A mismatch, a commit
+    where none was recorded, or a recorded manifest the replayed task doesn't commit again is
+    nondeterminism. Core takes one commit per completion.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    RECORDS_FIELD_NUMBER: builtins.int
+    @property
+    def records(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___OutputRecord
+    ]: ...
+    def __init__(
+        self,
+        *,
+        records: collections.abc.Iterable[global___OutputRecord] | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["records", b"records"]
+    ) -> None: ...
+
+global___WorkflowOutputStreamCommit = WorkflowOutputStreamCommit
+
+class OutputRecord(google.protobuf.message.Message):
+    """One record a Workflow published, in publish order across topics."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOPIC_FIELD_NUMBER: builtins.int
+    KIND_FIELD_NUMBER: builtins.int
+    BODY_FIELD_NUMBER: builtins.int
+    CONTENT_HASH_FIELD_NUMBER: builtins.int
+    LOGICAL_SIZE_FIELD_NUMBER: builtins.int
+    topic: builtins.str
+    kind: temporalio.bridge.proto.streams.v1.message_pb2.StreamRecordKind.ValueType
+    @property
+    def body(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """The value on DATA, after lang's payload codec and external storage. Absent while replaying,
+        since nothing is stored again.
+        """
+    content_hash: builtins.bytes
+    """The SHA-256 of the body as the payload converter made it, before the codec. Set on DATA,
+    replaying or not, so the manifest never depends on the codec.
+    """
+    logical_size: builtins.int
+    """The size of the body as the payload converter made it."""
+    def __init__(
+        self,
+        *,
+        topic: builtins.str = ...,
+        kind: temporalio.bridge.proto.streams.v1.message_pb2.StreamRecordKind.ValueType = ...,
+        body: temporalio.api.common.v1.message_pb2.Payload | None = ...,
+        content_hash: builtins.bytes = ...,
+        logical_size: builtins.int = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["body", b"body"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "body",
+            b"body",
+            "content_hash",
+            b"content_hash",
+            "kind",
+            b"kind",
+            "logical_size",
+            b"logical_size",
+            "topic",
+            b"topic",
+        ],
+    ) -> None: ...
+
+global___OutputRecord = OutputRecord
 
 class StartTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
