@@ -6,6 +6,7 @@ mod client_rpc_generated;
 mod envconfig;
 mod metric;
 mod runtime;
+mod streams;
 mod testing;
 mod worker;
 
@@ -58,6 +59,14 @@ fn temporal_sdk_bridge(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
         "PollShutdownError",
         py.get_type::<worker::PollShutdownError>(),
     )?;
+    // Streams
+    m.add(
+        "StreamFailureError",
+        py.get_type::<streams::StreamFailureError>(),
+    )?;
+    m.add_class::<streams::StreamStoreRef>()?;
+    m.add_function(wrap_pyfunction!(streams::connect_stream_store, m)?)?;
+
     m.add_class::<worker::WorkerRef>()?;
     m.add_class::<worker::HistoryPusher>()?;
     m.add_class::<worker::CustomSlotSupplier>()?;

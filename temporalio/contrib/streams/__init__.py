@@ -5,26 +5,26 @@
 
 A Workflow owns a stream. Producers outside Workflow code, such as the
 Workflow's Activities and clients, append to it, and outside readers consume
-it from a cursor. Records live in a store the application runs, reached
-through a provider, and never pass through Temporal or its History.
+it from a cursor. Records live in a store the application runs, which
+Core reaches for every SDK, and never pass through Temporal or its History.
 
 The contract:
 
 1. **A new attempt supersedes the old one.** When a reader sees the first
    record of a producer's newer attempt, it yields a
    :attr:`RecordKind.SUPERSEDED` record first. No store holds that record,
-   so every provider reports a retry the same way.
+   so every store reports a retry the same way.
 2. **A cursor belongs to one stream.** Hand it back to resume strictly after
-   the record it names. A provider refuses a cursor from another provider
-   or another stream with :class:`StreamCursorError`, and one whose record
+   the record it names. A cursor from another store or another stream is
+   refused with :class:`StreamCursorError`, and one whose record
    retention dropped with :class:`StreamExpiredError`. A read with no cursor
    starts at :data:`BEGINNING` or :data:`END`.
 3. **Topics are defined once.** :func:`topic` defines a topic with the type
    its records decode to, and every party shares that definition. A call
    that names no topic addresses :data:`DEFAULT_TOPIC`.
 
-The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
-:mod:`temporalio.contrib.streams.proto.v1`, with the user's value in ``body``
+The stored record is ``temporal.sdk.streams.v1.StreamRecord``, in
+:mod:`temporalio.bridge.proto.streams.v1`, with the user's value in ``body``
 as an ordinary payload.
 """
 
@@ -69,9 +69,8 @@ __all__ = [
     "StreamOutcomeUnknownError",
     "StreamOwnerKind",
     "StreamProducerError",
-    "StreamRecordError",
     "StreamRecord",
-    "StreamRef",
+    "StreamRecordError",
     "StreamRefusedError",
     "StreamStorageError",
     "StreamTopic",
