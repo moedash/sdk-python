@@ -21,9 +21,18 @@ is generated from it by ``scripts/gen_nexus_streams_api.py``:
   Worker, posting to the endpoint over the Nexus HTTP ingress. It depends on
   nothing beyond the standard library.
 
-:class:`TemporalStreamsHandler` is the one hand-written piece: it serves the
-generated service over Core's stream service, on the store of its Worker's
-client.
+:class:`TemporalStreamsHandler` serves the generated service over Core's
+stream service, on the store of its Worker's client.
+
+A Nexus operation can also hand its caller a stream.
+:class:`StreamOperationHandler` is such an operation: its start attaches the
+caller to the stream's notifier on the server and puts the
+:class:`StreamRef` in the operation token (:func:`stream_ref_from_token`).
+With :meth:`temporalio.contrib.streams.StreamStorePlugin.notify_on_append`
+on, Core tells the notifier when the stream moves, which the caller sees as
+operation progress.
+:meth:`temporalio.contrib.streams.StreamStorePlugin.close_stream` completes
+the operation, or :func:`close_workflow_stream` from the owning Workflow.
 """
 
 from temporalio.contrib.streams import StreamRef
@@ -44,6 +53,11 @@ from temporalio.contrib.streams.nexus._handler import (
     StreamAccess,
     TemporalStreamsHandler,
 )
+from temporalio.contrib.streams.nexus._operation import (
+    StreamOperationHandler,
+    stream_ref_from_token,
+)
+from temporalio.contrib.streams.nexus._workflow import close_workflow_stream
 
 __all__ = [
     "AppendInput",
@@ -54,8 +68,11 @@ __all__ = [
     "RecordWire",
     "StreamAccess",
     "StreamCursor",
+    "StreamOperationHandler",
     "StreamRef",
     "TemporalStreams",
     "TemporalStreamsHandler",
     "TemporalStreamsHttpClient",
+    "close_workflow_stream",
+    "stream_ref_from_token",
 ]

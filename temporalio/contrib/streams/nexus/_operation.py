@@ -20,13 +20,15 @@ import nexusrpc.handler
 from google.protobuf.timestamp_pb2 import Timestamp
 
 import temporalio.nexus
-from temporalio.api.common.v1 import Callback
+from temporalio.api.common.v1 import Callback, WorkflowExecution
+from temporalio.api.enums.v1 import StreamOwnerKind
 from temporalio.api.stream.v1 import StreamReference
 from temporalio.api.workflowservice.v1 import (
     AttachStreamCallbackRequest,
+    DescribeWorkflowExecutionRequest,
     DetachStreamCallbackRequest,
 )
-from temporalio.contrib.streams._notify import chain_first_run_id, stream_reference
+from temporalio.client import Client
 from temporalio.contrib.streams._ref import StreamRef
 
 __all__ = ["StreamOperationHandler", "stream_ref_from_token"]
@@ -97,7 +99,28 @@ def stream_ref_from_token(token: str) -> StreamRef:
 
 
 def _stream_reference(ref: StreamRef, first_run_id: str) -> StreamReference:
-    return stream_reference(ref, ref.topic, first_run_id)
+    # The notifier is keyed by the run chain, through its first run, so a
+    # pinned ref and a following one reach the same notifier, while a new
+    # chain on the same Workflow id gets its own.
+    return StreamReference(
+        owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
+        workflow_id=ref.workflow_id,
+        run_id=first_run_id,
+        topic=ref.topic,
+    )
+
+
+async def _chain_first_run_id(client: Client, ref: StreamRef) -> str:
+    # An unpinned ref names the Workflow id's current chain.
+    response = await client.workflow_service.describe_workflow_execution(
+        DescribeWorkflowExecutionRequest(
+            namespace=client.namespace,
+            execution=WorkflowExecution(
+                workflow_id=ref.workflow_id, run_id=ref.run_id or ""
+            ),
+        )
+    )
+    return response.workflow_execution_info.first_run_id
 
 
 class StreamOperationHandler(
@@ -109,8 +132,8 @@ class StreamOperationHandler(
     stream and returns its reference. The start then attaches the caller's
     callback to that stream's notifier and answers asynchronously, with the
     reference in the operation token. From then on the server tells the
-    caller each time the stream's producer notifies (see
-    :meth:`temporalio.contrib.streams.StreamProviderPlugin.notify_on_append`),
+    caller each time the stream moves, when the store has
+    :meth:`temporalio.contrib.streams.StreamStorePlugin.notify_on_append` on,
     and completes the operation with the
     close result when the stream closes. A cancel detaches the caller.
 
@@ -148,7 +171,7 @@ class StreamOperationHandler(
             )
         ref = await self._open_stream(ctx, input)
         client = temporalio.nexus.client()
-        first_run_id = await chain_first_run_id(client, ref)
+        first_run_id = await _chain_first_run_id(client, ref)
         token = _encode_token(ref, ctx.request_id, first_run_id)
         start_time = Timestamp()
         start_time.GetCurrentTime()

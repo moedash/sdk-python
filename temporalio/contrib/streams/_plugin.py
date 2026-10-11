@@ -22,18 +22,25 @@ import temporalio.bridge.client
 import temporalio.worker
 import temporalio.workflow
 from temporalio.bridge.proto.streams import (
+    CloseRequest,
     DeleteOwnerRequest,
+    FlushNotificationsRequest,
+    StreamAddress,
     StreamOwnerKind,
     StreamStoreConfig,
 )
 from temporalio.bridge.streams import StreamCallFailure, StreamStore
 from temporalio.bridge.streams_generated import StreamService
+from temporalio.contrib.streams._body import encode_bodies
 from temporalio.contrib.streams._errors import error_from_failure
 from temporalio.plugin import SimplePlugin
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
     from temporalio.bridge.temporal_sdk_bridge import StreamStoreRef
     from temporalio.client import Client, ClientConfig
+    from temporalio.contrib.streams._ref import StreamRef
     from temporalio.service import ConnectConfig, ServiceClient
     from temporalio.worker import WorkerConfig
 
@@ -115,6 +122,83 @@ class StreamStorePlugin(SimplePlugin):
     def _temporal_stream_store(self) -> StreamStoreRef | None:
         # The Worker looks for this name on its plugins and gives the store to Core.
         return self._store.ref if self._store is not None else None
+
+    def notify_on_append(self, *, max_notifiers: int | None = None) -> Self:
+        """Tell each stream's notifier on the server when the stream moves.
+
+        Core tells it after every append and every Workflow batch that
+        becomes visible, which a caller of a stream-returning Nexus operation
+        sees as progress. Off by default, since most streams have no such
+        caller and each notification costs a call. It needs a server with
+        the stream notifier. Turn it on before a client connects the store.
+
+        Args:
+            max_notifiers: How many streams Core keeps a notifier for,
+                dropping the least recently used. Core's default when unset.
+
+        Raises:
+            ValueError: A client already connected this store.
+
+        .. warning::
+            This API is experimental.
+        """
+        if self._store is not None:
+            raise ValueError(
+                "turn notifications on before a client connects the stream store"
+            )
+        self._config.notify_on_append = True
+        if max_notifiers is not None:
+            self._config.max_notifiers = max_notifiers
+        return self
+
+    async def close_stream(
+        self, client: Client, ref: StreamRef, result: Any = None
+    ) -> None:
+        """Close the stream ``ref`` names, and complete its operations with ``result``.
+
+        The store refuses appends from then on, and every read ends after the
+        last record. With :meth:`notify_on_append` on, Core then closes the
+        stream's notifier on the server, so every stream-returning Nexus
+        operation that handed out the stream completes with ``result``,
+        encoded with ``client``'s data converter.
+
+        Raises:
+            temporalio.contrib.streams.StreamError: The store or the notifier
+                refused the close.
+
+        .. warning::
+            This API is experimental.
+        """
+        ref._require_supported()
+        converter = client.data_converter
+        [payload] = await encode_bodies(
+            converter, converter.payload_converter.to_payloads([result])
+        )
+        request = CloseRequest(
+            stream=StreamAddress(
+                namespace=client.namespace,
+                owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
+                workflow_id=ref.workflow_id,
+                run_id=ref.run_id or "",
+                topic=ref.topic,
+            ),
+            result=payload,
+        )
+        await call((await self._service_for(client)).close(request))
+
+    async def flush_notifications(self) -> None:
+        """Wait for the notifications Core still has out.
+
+        Call it before the process exits, so a caller doesn't wait for
+        progress a stopped process never sent. Without
+        :meth:`notify_on_append`, or before a client connected the store, it
+        returns at once.
+
+        .. warning::
+            This API is experimental.
+        """
+        if self._service is not None:
+            await call(self._service.flush_notifications(FlushNotificationsRequest()))
 
     async def delete_workflow_streams(self, namespace: str, workflow_id: str) -> int:
         """Delete every stream of ``workflow_id`` in ``namespace``.
