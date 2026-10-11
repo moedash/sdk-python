@@ -155,15 +155,27 @@ class StreamStoreConfig(google.protobuf.message.Message):
 
     REDIS_FIELD_NUMBER: builtins.int
     MEMORY_FIELD_NUMBER: builtins.int
+    NOTIFY_ON_APPEND_FIELD_NUMBER: builtins.int
+    MAX_NOTIFIERS_FIELD_NUMBER: builtins.int
     @property
     def redis(self) -> global___RedisStoreConfig: ...
     @property
     def memory(self) -> global___MemoryStoreConfig: ...
+    notify_on_append: builtins.bool
+    """Tells each stream's notifier on the server when the stream moves, after every append and
+    every Workflow batch that becomes visible. That's what makes a caller of a stream-returning
+    Nexus operation see progress. Off by default, since most streams have no such caller and each
+    notification costs a call. Needs a server with the stream notifier.
+    """
+    max_notifiers: builtins.int
+    """How many streams to keep a notifier for, dropping the least recently used. Zero uses 1000."""
     def __init__(
         self,
         *,
         redis: global___RedisStoreConfig | None = ...,
         memory: global___MemoryStoreConfig | None = ...,
+        notify_on_append: builtins.bool = ...,
+        max_notifiers: builtins.int = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -174,7 +186,16 @@ class StreamStoreConfig(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "memory", b"memory", "redis", b"redis", "store", b"store"
+            "max_notifiers",
+            b"max_notifiers",
+            "memory",
+            b"memory",
+            "notify_on_append",
+            b"notify_on_append",
+            "redis",
+            b"redis",
+            "store",
+            b"store",
         ],
     ) -> None: ...
     def WhichOneof(
@@ -781,18 +802,30 @@ class CloseRequest(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     STREAM_FIELD_NUMBER: builtins.int
+    RESULT_FIELD_NUMBER: builtins.int
     @property
     def stream(self) -> global___StreamAddress: ...
+    @property
+    def result(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """What every stream-returning Nexus operation that handed out the stream completes with, after
+        lang's payload codec. With the store config's `notify_on_append`, the stream's notifier on
+        the server closes once the store has. When set, a notifier that doesn't take the close fails
+        the call. Unset, the operations complete with an empty result, and the notifier close is
+        retried in the background.
+        """
     def __init__(
         self,
         *,
         stream: global___StreamAddress | None = ...,
+        result: temporalio.api.common.v1.message_pb2.Payload | None = ...,
     ) -> None: ...
     def HasField(
-        self, field_name: typing_extensions.Literal["stream", b"stream"]
+        self,
+        field_name: typing_extensions.Literal["result", b"result", "stream", b"stream"],
     ) -> builtins.bool: ...
     def ClearField(
-        self, field_name: typing_extensions.Literal["stream", b"stream"]
+        self,
+        field_name: typing_extensions.Literal["result", b"result", "stream", b"stream"],
     ) -> None: ...
 
 global___CloseRequest = CloseRequest
@@ -805,6 +838,24 @@ class CloseResponse(google.protobuf.message.Message):
     ) -> None: ...
 
 global___CloseResponse = CloseResponse
+
+class FlushNotificationsRequest(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___FlushNotificationsRequest = FlushNotificationsRequest
+
+class FlushNotificationsResponse(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___FlushNotificationsResponse = FlushNotificationsResponse
 
 class DeleteOwnerRequest(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

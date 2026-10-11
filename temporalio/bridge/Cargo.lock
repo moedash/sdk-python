@@ -2931,6 +2931,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "crc16",
+ "lru",
  "prost",
  "redis",
  "sha2",
