@@ -16,15 +16,35 @@ from typing import Any, Generic, TypeVar, overload
 
 from temporalio import workflow
 from temporalio.bridge.proto.streams.v1 import StreamRecordKind
-from temporalio.bridge.proto.workflow_commands import OutputRecord
+from temporalio.bridge.proto.workflow_commands import (
+    OutputRecord,
+    WorkflowOutputStreamCommit,
+)
 from temporalio.contrib.streams._body import content_hash
-from temporalio.contrib.streams._errors import StreamUnsupportedError
+from temporalio.contrib.streams._errors import StreamError, StreamUnsupportedError
 from temporalio.contrib.streams._plugin import worker_has_store
 from temporalio.contrib.streams._topic import StreamTopic, resolve_topic
 
 __all__ = ["WorkflowStreamWriter", "workflow_reader", "workflow_writer"]
 
 T = TypeVar("T")
+
+MANIFEST_BUDGET_BYTES = 48 * 1024
+"""The largest manifest one publishing completion may produce.
+
+Core refuses a manifest over 64 KiB by failing the Workflow Task, again on
+every retry, and it takes one commit per completion. A publish that would
+take the completion's manifest past this budget is refused at the call
+instead, which leaves room under Core's limit for the fields this bound
+estimates.
+"""
+
+# Upper bounds, in bytes, on what the manifest spends: once per completion
+# (versions, stage token, floor, run id, store name, the segment's header),
+# and per topic (its entry, counts, fingerprint and segment count) on top of
+# the topic name itself.
+_MANIFEST_FIXED_BYTES = 512
+_MANIFEST_TOPIC_BYTES = 72
 
 
 class _RunStreams:
@@ -34,10 +54,35 @@ class _RunStreams:
         # FINISH is a statement about the topic, not about a writer object,
         # and every workflow_writer() call returns a new writer.
         self.finished: set[str] = set()
+        self.commit: WorkflowOutputStreamCommit | None = None
+        self.topics: set[str] = set()
+        self.manifest_bound = _MANIFEST_FIXED_BYTES
 
     def add(self, record: OutputRecord) -> None:
-        """Add ``record`` to this activation's commit."""
-        workflow._Runtime.current().workflow_stream_commit().records.append(record)
+        """Add ``record`` to this activation's commit.
+
+        Raises:
+            StreamError: The record would take this completion's manifest
+                past :data:`MANIFEST_BUDGET_BYTES`. Nothing is added.
+        """
+        commit = workflow._Runtime.current().workflow_stream_commit()
+        if commit is not self.commit:
+            self.commit, self.topics = commit, set()
+            self.manifest_bound = _MANIFEST_FIXED_BYTES
+        if record.topic not in self.topics:
+            bound = (
+                self.manifest_bound + _MANIFEST_TOPIC_BYTES + len(record.topic.encode())
+            )
+            if bound > MANIFEST_BUDGET_BYTES:
+                raise StreamError(
+                    f"publishing to {record.topic!r} would take this Workflow Task's "
+                    f"stream manifest past {MANIFEST_BUDGET_BYTES} bytes, with "
+                    f"{len(self.topics)} topics already published in this "
+                    "activation; spread the topics across Workflow Tasks"
+                )
+            self.topics.add(record.topic)
+            self.manifest_bound = bound
+        commit.records.append(record)
 
 
 # Keyed by the run's runtime, so the state goes with the run at eviction and
