@@ -5,19 +5,17 @@
 A stream is an ordered log that a Workflow owns. The Workflow publishes to
 it, and so do its Activities and any client. Outside readers follow it from
 a cursor. Records live in the application's Redis and never pass through
-Temporal or its History. A Workflow Task that publishes adds one marker
+Temporal or its History. Core runs the store for every SDK, so Python reads
+what any other SDK writes. A Workflow Task that publishes adds one marker
 event to History, which carries a small manifest of what it published and
 counts toward the History limits. Appends from Activities and clients add
 nothing to History.
 
-## Install and register
+## Register
 
-```
-pip install "temporalio[redis]"
-```
-
-Register the provider once, on the client. Every Worker built from that
-client publishes through it.
+Register the store once, on the client, with `Client.connect`. Connecting
+the client connects the store, and every Worker built from that client
+publishes through it. There's nothing extra to install.
 
 ```python
 from temporalio.client import Client
@@ -29,8 +27,10 @@ client = await Client.connect(
 ```
 
 Redis 7.0 or later is required. Use `maxmemory-policy noeviction`: an
-evicting Redis drops whole stream keys under memory pressure, and the
-provider logs a warning when it sees another policy.
+evicting Redis drops whole stream keys under memory pressure, and Core logs
+a warning when it sees another policy. For tests and local development,
+`temporalio.contrib.streams.memory.MemoryStreams` keeps streams in the
+process.
 
 ## Path A: a Workflow publishes, a client reads
 

@@ -28,7 +28,6 @@ import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.workflow.v1.message_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
-import temporalio.bridge.proto.external_data.external_data_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
 import temporalio.bridge.proto.streams.v1.message_pb2
 

@@ -43,9 +43,6 @@ from temporalio.bridge.proto.child_workflow import (
 from temporalio.bridge.proto.common import (
     common_pb2 as temporal_dot_sdk_dot_core_dot_common_dot_common__pb2,
 )
-from temporalio.bridge.proto.external_data import (
-    external_data_pb2 as temporal_dot_sdk_dot_core_dot_external__data_dot_external__data__pb2,
-)
 from temporalio.bridge.proto.nexus import (
     nexus_pb2 as temporal_dot_sdk_dot_core_dot_nexus_dot_nexus__pb2,
 )

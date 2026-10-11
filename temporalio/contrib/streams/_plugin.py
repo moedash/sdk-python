@@ -61,40 +61,6 @@ class StreamStorePlugin(SimplePlugin):
         self._store: StreamStore | None = None
         self._connecting: asyncio.Lock | None = None
 
-    async def _promote(self, stage: StageRef) -> None:
-        """Make the staged batch ``stage`` visible to readers, in order.
-
-        Internal. Called once History shows the marker that names the
-        stage. Promoting a stage twice, or one the provider does not hold,
-        does nothing.
-        """
-        raise StreamUnsupportedError(
-            f"stream provider {self.name()!r} cannot promote stage {stage.token!r} "
-            f"of Workflow {stage.workflow_id!r}"
-        )
-
-    async def _abort(self, stage: StageRef) -> None:
-        """Drop the staged batch ``stage`` without making it visible.
-
-        Internal. Called once History shows that the task which staged it
-        failed. Aborting a stage twice, or one the provider does not hold,
-        does nothing.
-        """
-        raise StreamUnsupportedError(
-            f"stream provider {self.name()!r} cannot abort stage {stage.token!r} "
-            f"of Workflow {stage.workflow_id!r}"
-        )
-
-    async def _close_chain(
-        self, namespace: str, workflow_id: str, first_run_id: str
-    ) -> None:
-        """Refuse further appends to the streams of an ended run chain.
-
-        Internal. Called best effort by the Worker after a run's final
-        Workflow Task. A provider without a close gate does nothing.
-        """
-        del namespace, workflow_id, first_run_id
-
     def configure_client(self, config: ClientConfig) -> ClientConfig:
         """Register this store on the client.
 

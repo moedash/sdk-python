@@ -44,12 +44,11 @@ def to_wire(
     producer_id: str = "",
     attempt: int = 0,
     sequence: int = 0,
-    run_id: str = "",
 ) -> WireRecord:
     """The record as the converter produced it, before the codec.
 
     Only a ``DATA`` record carries a body; the converter encodes ``value``
-    into it. A ``run_id`` goes into the metadata under :data:`RUN_ID_KEY`.
+    into it.
 
     Raises:
         ValueError: ``kind`` is ``SUPERSEDED`` or ``UNSPECIFIED``, which no
@@ -66,10 +65,6 @@ def to_wire(
     )
     if kind is RecordKind.DATA:
         record.body.CopyFrom(converter.to_payloads([value])[0])
-    if run_id:
-        record.metadata[RUN_ID_KEY].CopyFrom(
-            Payload(metadata={"encoding": _RUN_ID_ENCODING}, data=run_id.encode())
-        )
     return record
 
 
