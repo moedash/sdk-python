@@ -11,7 +11,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.bridge.proto.streams import ReadRecord, Supersession
 from temporalio.bridge.proto.streams.v1 import StreamRecordKind
 from temporalio.common import RawValue
-from temporalio.contrib.streams import Cursor, RecordKind
+from temporalio.contrib.streams import Cursor, RecordKind, StreamRecordError
 from temporalio.contrib.streams import Supersession as ReportedSupersession
 from temporalio.contrib.streams._body import (
     batch_digest,
@@ -100,6 +100,21 @@ async def test_a_raw_value_passes_through_untouched():
     record = await from_read(CONVERTER, stored(wire), RawValue)
     assert isinstance(record.value, RawValue)
     assert record.value.payload == raw
+
+
+async def test_a_record_that_does_not_decode_raises_with_its_cursor():
+    bad = WireRecord(
+        topic="t",
+        kind=RecordKind.DATA.value,  # type: ignore[arg-type]
+        body=Payload(metadata={"encoding": b"json/plain"}, data=b"{not json"),
+    )
+    with pytest.raises(StreamRecordError) as raised:
+        await from_read(CONVERTER, stored(bad, "c1"), int)
+    # The caller can resume past it on purpose.
+    assert raised.value.cursor == Cursor("c1")
+    unknown = WireRecord(topic="t", kind=7)  # type: ignore[arg-type]
+    with pytest.raises(StreamRecordError):
+        await from_read(CONVERTER, stored(unknown, "c2"), int)
 
 
 def test_the_content_hash_is_the_plaintext_payload_hash():

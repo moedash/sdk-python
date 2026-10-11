@@ -15,6 +15,7 @@ from temporalio.bridge.proto.streams import ReadRecord
 from temporalio.bridge.proto.streams.v1 import StreamRecord as WireRecord
 from temporalio.bridge.proto.streams.v1 import StreamRecordKind
 from temporalio.contrib.streams._body import decode_body
+from temporalio.contrib.streams._errors import StreamRecordError
 from temporalio.contrib.streams._record import (
     Cursor,
     RecordKind,
@@ -75,8 +76,8 @@ async def from_read(
     """The record a reader yields for one record of Core's answer.
 
     Raises:
-        ValueError: The record holds a kind no store may hold, or one this
-            SDK does not know.
+        StreamRecordError: The body did not decode or convert, or the record
+            holds a kind this SDK does not know.
     """
     cursor = Cursor(read.cursor)
     if read.HasField("superseded"):
@@ -92,14 +93,19 @@ async def from_read(
             ),
         )
     wire = read.stored
-    kind = RecordKind(wire.kind)
-    if kind is RecordKind.SUPERSEDED:
-        raise ValueError("a SUPERSEDED record is synthesized, never stored")
-    value: Any = None
-    if kind in (RecordKind.DATA, RecordKind.UNSPECIFIED) and wire.HasField("body"):
-        body = await decode_body(converter, wire.body)
-        hints = [result_type] if result_type is not None else None
-        value = converter.payload_converter.from_payloads([body], hints)[0]
+    try:
+        kind = RecordKind(wire.kind)
+        if kind is RecordKind.SUPERSEDED:
+            raise ValueError("a SUPERSEDED record is synthesized, never stored")
+        value: Any = None
+        if kind in (RecordKind.DATA, RecordKind.UNSPECIFIED) and wire.HasField("body"):
+            body = await decode_body(converter, wire.body)
+            hints = [result_type] if result_type is not None else None
+            value = converter.payload_converter.from_payloads([body], hints)[0]
+    except Exception as error:
+        raise StreamRecordError(
+            f"stream record at {cursor} could not be decoded: {error}", cursor
+        ) from error
     return StreamRecord(
         kind=RecordKind.DATA if kind is RecordKind.UNSPECIFIED else kind,
         cursor=cursor,

@@ -11,6 +11,7 @@ _PRIVATE = {
     "content_hash",
     "decode_body",
     "encode_bodies",
+    "error_from_failure",
 }
 
 
