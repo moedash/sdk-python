@@ -58,7 +58,8 @@ Differences to plan for:
 
 ## Moving a running application
 
-1. Register `RedisStreams` on the client and deploy Workers that carry it.
+1. Register `RedisStreams` on the client with `Client.connect`, and deploy
+   Workers built from that client.
 2. Move producers and readers of one topic together. A topic split across
    both libraries is two streams.
 3. For Workflows already running, switch at a natural boundary, such as the
@@ -75,3 +76,29 @@ Differences to plan for:
    ```
 4. Remove `WorkflowStream` from a Workflow only after no reader needs its
    records.
+
+## Moving from the fork build
+
+The fork build ran the store in Python. This release runs it in Core, and
+these changes reach application code:
+
+- **Register the store with `Client.connect`.** Pass `RedisStreams` or
+  `MemoryStreams` in `Client.connect(..., plugins=[...])`. Connecting the
+  client connects the store, and Workers built from that client take it. A
+  store passed only to `Worker(plugins=[...])`, or to a client made without
+  `Client.connect`, is refused with `ValueError`, since Core needs the
+  client's connection to check a stream's owner.
+- **`RedisStreams` takes URLs.** Pass a `redis://` or `rediss://` URL, or
+  the seed nodes of a cluster with `cluster=True`. It no longer takes an
+  application-owned `redis.asyncio` client, and `poll_interval` is gone.
+  There's no `redis` extra to install.
+- **No provider protocol.** `StreamProvider` and `StreamProviderPlugin` are
+  gone. `StreamStorePlugin` is the base of the two store classes, and
+  `StreamHandle` and `StreamProducer` are concrete classes.
+- **A bad cursor fails at the first iteration.** `StreamCursorError` for a
+  cursor from another store or stream is raised when the read's generator
+  first runs, not by the `read()` call, because Core checks the cursor.
+- **A read from `END` starts at its first iteration.** To catch the next
+  record without a gap, position the reader with `latest()` first.
+- **Replay needs no store.** A `Replayer` replays a publishing Workflow with
+  no stream plugin, since replay stores nothing again.

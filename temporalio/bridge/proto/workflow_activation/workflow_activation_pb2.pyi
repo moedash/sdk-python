@@ -26,7 +26,6 @@ import temporalio.api.update.v1.message_pb2
 import temporalio.bridge.proto.activity_result.activity_result_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
-import temporalio.bridge.proto.external_data.external_data_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
 
 if sys.version_info >= (3, 10):
@@ -97,7 +96,6 @@ class WorkflowActivation(google.protobuf.message.Message):
     LAST_SDK_VERSION_FIELD_NUMBER: builtins.int
     SUGGEST_CONTINUE_AS_NEW_REASONS_FIELD_NUMBER: builtins.int
     TARGET_WORKER_DEPLOYMENT_VERSION_CHANGED_FIELD_NUMBER: builtins.int
-    HISTORY_FLOOR_EVENT_ID_FIELD_NUMBER: builtins.int
     run_id: builtins.str
     """The id of the currently active run of the workflow. Also used as a cache key. There may
     only ever be one active workflow task (and hence activation) of a run at one time.
@@ -159,11 +157,6 @@ class WorkflowActivation(google.protobuf.message.Message):
     the workflow is Pinned.
     Experimental.
     """
-    history_floor_event_id: builtins.int
-    """The event immediately preceding this Workflow Task's WorkflowTaskScheduled event in the
-    ordered History view Core used to build the activation. Zero means Core could not identify
-    that exact predecessor, in which case output must not be staged for this task.
-    """
     def __init__(
         self,
         *,
@@ -183,7 +176,6 @@ class WorkflowActivation(google.protobuf.message.Message):
         ]
         | None = ...,
         target_worker_deployment_version_changed: builtins.bool = ...,
-        history_floor_event_id: builtins.int = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -203,8 +195,6 @@ class WorkflowActivation(google.protobuf.message.Message):
             b"continue_as_new_suggested",
             "deployment_version_for_current_task",
             b"deployment_version_for_current_task",
-            "history_floor_event_id",
-            b"history_floor_event_id",
             "history_length",
             b"history_length",
             "history_size_bytes",
@@ -246,8 +236,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     DO_UPDATE_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_START_FIELD_NUMBER: builtins.int
     RESOLVE_NEXUS_OPERATION_FIELD_NUMBER: builtins.int
-    REPLAY_EXTERNAL_STREAMS_FIELD_NUMBER: builtins.int
-    RESOLVE_NEXUS_OPERATION_PROGRESS_FIELD_NUMBER: builtins.int
     REMOVE_FROM_CACHE_FIELD_NUMBER: builtins.int
     @property
     def initialize_workflow(self) -> global___InitializeWorkflow:
@@ -308,14 +296,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
     def resolve_nexus_operation(self) -> global___ResolveNexusOperation:
         """A nexus operation resolved."""
     @property
-    def replay_external_streams(self) -> global___ReplayExternalStreams:
-        """Replay: deliver the output manifest recorded in an external stream marker."""
-    @property
-    def resolve_nexus_operation_progress(
-        self,
-    ) -> global___ResolveNexusOperationProgress:
-        """A started nexus operation reported progress."""
-    @property
     def remove_from_cache(self) -> global___RemoveFromCache:
         """Remove the workflow identified by the [WorkflowActivation] containing this job from the
         cache after performing the activation. It is guaranteed that this will be the only job
@@ -343,9 +323,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
         do_update: global___DoUpdate | None = ...,
         resolve_nexus_operation_start: global___ResolveNexusOperationStart | None = ...,
         resolve_nexus_operation: global___ResolveNexusOperation | None = ...,
-        replay_external_streams: global___ReplayExternalStreams | None = ...,
-        resolve_nexus_operation_progress: global___ResolveNexusOperationProgress
-        | None = ...,
         remove_from_cache: global___RemoveFromCache | None = ...,
     ) -> None: ...
     def HasField(
@@ -365,8 +342,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"query_workflow",
             "remove_from_cache",
             b"remove_from_cache",
-            "replay_external_streams",
-            b"replay_external_streams",
             "resolve_activity",
             b"resolve_activity",
             "resolve_child_workflow_execution",
@@ -375,8 +350,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"resolve_child_workflow_execution_start",
             "resolve_nexus_operation",
             b"resolve_nexus_operation",
-            "resolve_nexus_operation_progress",
-            b"resolve_nexus_operation_progress",
             "resolve_nexus_operation_start",
             b"resolve_nexus_operation_start",
             "resolve_request_cancel_external_workflow",
@@ -408,8 +381,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"query_workflow",
             "remove_from_cache",
             b"remove_from_cache",
-            "replay_external_streams",
-            b"replay_external_streams",
             "resolve_activity",
             b"resolve_activity",
             "resolve_child_workflow_execution",
@@ -418,8 +389,6 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             b"resolve_child_workflow_execution_start",
             "resolve_nexus_operation",
             b"resolve_nexus_operation",
-            "resolve_nexus_operation_progress",
-            b"resolve_nexus_operation_progress",
             "resolve_nexus_operation_start",
             b"resolve_nexus_operation_start",
             "resolve_request_cancel_external_workflow",
@@ -453,53 +422,12 @@ class WorkflowActivationJob(google.protobuf.message.Message):
             "do_update",
             "resolve_nexus_operation_start",
             "resolve_nexus_operation",
-            "replay_external_streams",
-            "resolve_nexus_operation_progress",
             "remove_from_cache",
         ]
         | None
     ): ...
 
 global___WorkflowActivationJob = WorkflowActivationJob
-
-class ReplayExternalStreams(google.protobuf.message.Message):
-    """Carries a recorded external stream marker back to lang during replay.
-
-    Core issues exactly one of these per marker, found by lookahead, all in the first activation of
-    the Workflow Task that wrote them, in History order. Lang must not stage the output again, so a
-    publishing Workflow replays without touching the stream store. Lang must send each recomputed
-    output back as a WorkflowOutputStreamCommit, in the order it published, for Core to compare.
-    Fields 1 to 3 are left free for the stream input state the same marker will carry.
-    """
-
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    TERMINAL_BOUNDARY_FIELD_NUMBER: builtins.int
-    OUTPUT_FIELD_NUMBER: builtins.int
-    terminal_boundary: temporalio.bridge.proto.external_data.external_data_pb2.ExternalStreamBoundary.ValueType
-    @property
-    def output(
-        self,
-    ) -> temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest:
-        """The output manifest recorded in the marker, if this Workflow Task published output."""
-    def __init__(
-        self,
-        *,
-        terminal_boundary: temporalio.bridge.proto.external_data.external_data_pb2.ExternalStreamBoundary.ValueType = ...,
-        output: temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest
-        | None = ...,
-    ) -> None: ...
-    def HasField(
-        self, field_name: typing_extensions.Literal["output", b"output"]
-    ) -> builtins.bool: ...
-    def ClearField(
-        self,
-        field_name: typing_extensions.Literal[
-            "output", b"output", "terminal_boundary", b"terminal_boundary"
-        ],
-    ) -> None: ...
-
-global___ReplayExternalStreams = ReplayExternalStreams
 
 class InitializeWorkflow(google.protobuf.message.Message):
     """Initialize a new workflow"""
@@ -1524,75 +1452,6 @@ class ResolveNexusOperation(google.protobuf.message.Message):
     ) -> None: ...
 
 global___ResolveNexusOperation = ResolveNexusOperation
-
-class ResolveNexusOperationProgress(google.protobuf.message.Message):
-    """The latest progress of a started Nexus operation, as the server folded it onto this Workflow
-    Task's scheduled event.
-
-    Core issues at most one per operation per Workflow Task, in the task's first activation, with
-    the highest counter recorded since the previous task. It comes from History, so replay issues
-    the same job at the same point. Progress for an operation that is not started, or that has
-    already resolved, is dropped. A counter only grows across the jobs for one operation.
-    """
-
-    DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-    class MetadataEntry(google.protobuf.message.Message):
-        DESCRIPTOR: google.protobuf.descriptor.Descriptor
-
-        KEY_FIELD_NUMBER: builtins.int
-        VALUE_FIELD_NUMBER: builtins.int
-        key: builtins.str
-        value: builtins.str
-        def __init__(
-            self,
-            *,
-            key: builtins.str = ...,
-            value: builtins.str = ...,
-        ) -> None: ...
-        def ClearField(
-            self,
-            field_name: typing_extensions.Literal["key", b"key", "value", b"value"],
-        ) -> None: ...
-
-    SEQ_FIELD_NUMBER: builtins.int
-    POSITION_FIELD_NUMBER: builtins.int
-    COUNTER_FIELD_NUMBER: builtins.int
-    METADATA_FIELD_NUMBER: builtins.int
-    seq: builtins.int
-    """Sequence number as provided by lang in the corresponding ScheduleNexusOperation command"""
-    position: builtins.str
-    """Where the operation's output stands, in the handler's terms, such as a stream cursor."""
-    counter: builtins.int
-    """Orders the progress of one operation."""
-    @property
-    def metadata(
-        self,
-    ) -> google.protobuf.internal.containers.ScalarMap[builtins.str, builtins.str]:
-        """Small details from the handler."""
-    def __init__(
-        self,
-        *,
-        seq: builtins.int = ...,
-        position: builtins.str = ...,
-        counter: builtins.int = ...,
-        metadata: collections.abc.Mapping[builtins.str, builtins.str] | None = ...,
-    ) -> None: ...
-    def ClearField(
-        self,
-        field_name: typing_extensions.Literal[
-            "counter",
-            b"counter",
-            "metadata",
-            b"metadata",
-            "position",
-            b"position",
-            "seq",
-            b"seq",
-        ],
-    ) -> None: ...
-
-global___ResolveNexusOperationProgress = ResolveNexusOperationProgress
 
 class RemoveFromCache(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
