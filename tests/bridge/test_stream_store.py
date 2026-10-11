@@ -70,6 +70,8 @@ def append_request(
             )
             for body in bodies
         ],
+        # Stands in for lang's batch digest, which the store compares on a retry.
+        digest=hashlib.sha256(b"".join(bodies)).digest(),
     )
 
 

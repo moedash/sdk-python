@@ -454,6 +454,7 @@ class AppendRequest(google.protobuf.message.Message):
     ACTIVITY_FIELD_NUMBER: builtins.int
     SEQUENCE_FIELD_NUMBER: builtins.int
     RECORDS_FIELD_NUMBER: builtins.int
+    DIGEST_FIELD_NUMBER: builtins.int
     @property
     def stream(self) -> global___StreamAddress: ...
     @property
@@ -468,6 +469,12 @@ class AppendRequest(google.protobuf.message.Message):
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
         global___AppendRecord
     ]: ...
+    digest: builtins.bytes
+    """The batch's identity, which the store compares when the producer repeats its newest batch.
+    Lang takes it before the codec, as the SHA-256 over each converted record as its length in 8
+    bytes big-endian, then its deterministic serialization. Every SDK takes it this way, so a
+    retry through another SDK or release still dedupes. Required.
+    """
     def __init__(
         self,
         *,
@@ -476,6 +483,7 @@ class AppendRequest(google.protobuf.message.Message):
         activity: global___ActivityProducer | None = ...,
         sequence: builtins.int = ...,
         records: collections.abc.Iterable[global___AppendRecord] | None = ...,
+        digest: builtins.bytes = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -495,6 +503,8 @@ class AppendRequest(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "activity",
             b"activity",
+            "digest",
+            b"digest",
             "named",
             b"named",
             "producer",

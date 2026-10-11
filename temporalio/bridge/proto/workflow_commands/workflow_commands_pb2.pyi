@@ -381,22 +381,66 @@ class WorkflowOutputStreamCommit(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     RECORDS_FIELD_NUMBER: builtins.int
+    CLOSES_FIELD_NUMBER: builtins.int
     @property
     def records(
         self,
     ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
         global___OutputRecord
     ]: ...
+    @property
+    def closes(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___OutputClose
+    ]:
+        """The topics this activation closed. Readers end once the output is promoted, and an
+        operation that handed out a closed topic completes with its result. Each close needs its
+        topic's FINISH record in `records`, so the marker proves it.
+        """
     def __init__(
         self,
         *,
         records: collections.abc.Iterable[global___OutputRecord] | None = ...,
+        closes: collections.abc.Iterable[global___OutputClose] | None = ...,
     ) -> None: ...
     def ClearField(
-        self, field_name: typing_extensions.Literal["records", b"records"]
+        self,
+        field_name: typing_extensions.Literal[
+            "closes", b"closes", "records", b"records"
+        ],
     ) -> None: ...
 
 global___WorkflowOutputStreamCommit = WorkflowOutputStreamCommit
+
+class OutputClose(google.protobuf.message.Message):
+    """One topic a Workflow closed, with the result its readers' operations complete with."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOPIC_FIELD_NUMBER: builtins.int
+    RESULT_FIELD_NUMBER: builtins.int
+    topic: builtins.str
+    @property
+    def result(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """After lang's payload codec. Sent again while replaying, since a close that History proves
+        may still need sending.
+        """
+    def __init__(
+        self,
+        *,
+        topic: builtins.str = ...,
+        result: temporalio.api.common.v1.message_pb2.Payload | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["result", b"result"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal["result", b"result", "topic", b"topic"],
+    ) -> None: ...
+
+global___OutputClose = OutputClose
 
 class OutputRecord(google.protobuf.message.Message):
     """One record a Workflow published, in publish order across topics."""
