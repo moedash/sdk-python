@@ -31,7 +31,9 @@ import temporalio.api.nexus.v1
 import temporalio.api.operatorservice.v1
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
+from temporalio.bridge.proto.streams import StreamFailure, StreamFailureKind
 from temporalio.bridge.proto.streams.v1 import StreamRecord as WireRecord
+from temporalio.bridge.streams import StreamCallFailure, StreamStore
 from temporalio.client import Client
 from temporalio.common import RawValue
 from temporalio.contrib.streams import (
@@ -479,6 +481,33 @@ async def test_a_foreign_cursor_is_refused(service: Service):
     with pytest.raises(HTTPStatusError) as refused:
         await read(service, ref.with_topic("other"), theirs.cursor)
     assert refused_as(refused.value) == "StreamCursorError"
+
+
+async def test_an_expired_cursor_is_told_apart(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+):
+    # Core decides expiry, and its own tests cover when. What crosses here is
+    # Core's answer, so the store's call answers EXPIRED for one cursor.
+    ref = await stream_of(service)
+    await append(service, ref, "one")
+    real = StreamStore.call
+
+    async def call(self: StreamStore, rpc: str, req: Any, resp_type: Any) -> Any:
+        if rpc == "Read" and req.after == "trimmed-cursor":
+            raise StreamCallFailure(
+                StreamFailure(
+                    kind=StreamFailureKind.STREAM_FAILURE_KIND_EXPIRED,
+                    message="the records after this cursor were trimmed",
+                )
+            )
+        return await real(self, rpc, req, resp_type)
+
+    monkeypatch.setattr(StreamStore, "call", call)
+    with pytest.raises(HTTPStatusError) as refused:
+        await read(service, ref, "trimmed-cursor")
+    assert refused.value.status == 400
+    assert not refused.value.retryable
+    assert refused_as(refused.value) == "StreamExpiredError"
 
 
 async def test_argument_mistakes_are_bad_requests(service: Service):
