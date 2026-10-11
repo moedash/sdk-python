@@ -33,7 +33,6 @@ proto_paths.extend(additional_proto_dir.glob("**/*.proto"))
 
 api_out_dir = base_dir / "temporalio" / "api"
 sdk_out_dir = base_dir / "temporalio" / "bridge" / "proto"
-streams_out_dir = base_dir / "temporalio" / "contrib" / "streams" / "proto"
 
 py_fixes = [
     partial(re.compile(r"from temporal\.api\.").sub, r"from temporalio.api."),
