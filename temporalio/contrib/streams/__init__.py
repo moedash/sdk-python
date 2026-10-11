@@ -5,8 +5,8 @@
 
 A Workflow owns a stream. Producers outside Workflow code, such as the
 Workflow's Activities and clients, append to it, and outside readers consume
-it from a cursor. Records live in a store the application runs, reached
-through a provider, and never pass through Temporal or its History.
+it from a cursor. Records live in a store the application runs, which
+Core reaches for every SDK, and never pass through Temporal or its History.
 
 The contract:
 
@@ -20,24 +20,22 @@ The contract:
 2. **A new attempt supersedes the old one.** When a reader sees the first
    record of a producer's newer attempt, it yields a
    :attr:`RecordKind.SUPERSEDED` record first. No store holds that record,
-   so every provider reports a retry the same way.
+   so every store reports a retry the same way.
 3. **A cursor belongs to one stream.** Hand it back to resume strictly after
-   the record it names. A provider refuses a cursor from another provider
-   or another stream with :class:`StreamCursorError`, and one whose record
+   the record it names. A cursor from another store or another stream is
+   refused with :class:`StreamCursorError`, and one whose record
    retention dropped with :class:`StreamExpiredError`. A read with no cursor
    starts at :data:`BEGINNING` or :data:`END`.
 4. **Topics are defined once.** :func:`topic` defines a topic with the type
    its records decode to, and every party shares that definition. A call
    that names no topic addresses :data:`DEFAULT_TOPIC`.
 
-A provider is a plugin: ``Client.connect(..., plugins=[provider])``
-registers it on the client and on every Worker built from that client. Each
-context then reaches a stream the same way:
+A store is configured as a plugin:
+``Client.connect(..., plugins=[RedisStreams(...)])`` registers it on the
+client and on every Worker built from that client.
 
-- Workflow code publishes to its own stream with :func:`workflow_writer`.
-
-The record on the wire is ``temporal.sdk.streams.v1.StreamRecord``, in
-:mod:`temporalio.contrib.streams.proto.v1`, with the user's value in ``body``
+The stored record is ``temporal.sdk.streams.v1.StreamRecord``, in
+:mod:`temporalio.bridge.proto.streams.v1`, with the user's value in ``body``
 as an ordinary payload.
 """
 
@@ -55,12 +53,7 @@ from temporalio.contrib.streams._errors import (
     StreamStorageError,
     StreamUnsupportedError,
 )
-from temporalio.contrib.streams._plugin import StreamProviderPlugin
-from temporalio.contrib.streams._provider import (
-    StreamHandle,
-    StreamProducer,
-    StreamProvider,
-)
+from temporalio.contrib.streams._plugin import StreamStorePlugin
 from temporalio.contrib.streams._record import (
     Cursor,
     RecordKind,
@@ -69,7 +62,6 @@ from temporalio.contrib.streams._record import (
 )
 from temporalio.contrib.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.contrib.streams._topic import DEFAULT_TOPIC, StreamTopic, topic
-from temporalio.contrib.streams._workflow import WorkflowStreamWriter, workflow_writer
 
 __all__ = [
     "BEGINNING",
@@ -81,19 +73,16 @@ __all__ = [
     "StreamCursorError",
     "StreamError",
     "StreamExpiredError",
-    "StreamHandle",
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamOwnerKind",
-    "StreamProducer",
     "StreamProducerError",
-    "StreamProvider",
-    "StreamProviderPlugin",
-    "StreamRecordError",
     "StreamRecord",
+    "StreamRecordError",
     "StreamRef",
     "StreamRefusedError",
     "StreamStorageError",
+    "StreamStorePlugin",
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
