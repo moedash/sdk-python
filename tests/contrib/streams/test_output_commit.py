@@ -7,6 +7,8 @@ marker of them and makes them visible once the Workflow Task is accepted.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from collections.abc import Sequence
 from datetime import timedelta
@@ -25,11 +27,13 @@ from temporalio.bridge.proto.streams import (
 from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
 from temporalio.contrib.streams import (
     RecordKind,
+    StreamClosedError,
     get_stream_handle,
     topic,
     workflow_writer,
 )
 from temporalio.contrib.streams.memory import MemoryStreams
+from temporalio.contrib.streams.redis import RedisStreams
 from temporalio.converter import DataConverter, PayloadCodec
 from tests.contrib.streams._support import connect_with, new_workflow_id, read_all
 from tests.helpers import new_worker
@@ -299,3 +303,62 @@ async def test_each_run_stamps_its_own_id_across_continue_as_new(client: Client)
         (RecordKind.FINISH, None, last_run),
     ]
     assert first_run != last_run
+
+
+@workflow.defn
+class ClosesItsTopic:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        writer = workflow_writer(EVENTS)
+        writer.publish({"n": 1})
+        writer.finish()
+        # This release has no close call yet, so the case commits Core's close
+        # the way the Nexus layer's close does, next to the topic's FINISH.
+        result = workflow.payload_converter().to_payloads(["closed"])[0]
+        workflow._Runtime.current().workflow_stream_commit().closes.add(
+            topic=EVENTS.name, result=result
+        )
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+
+@pytest.mark.skipif(
+    not os.environ.get("STREAMS_REDIS_URL"),
+    reason="set STREAMS_REDIS_URL to run the Redis close case",
+)
+async def test_a_committed_close_leaves_the_topic_closed_on_redis(client: Client):
+    store = RedisStreams(
+        os.environ["STREAMS_REDIS_URL"], key_prefix=f"close-{uuid.uuid4().hex}"
+    )
+    streams_client = await connect_with(client, store)
+    workflow_id = new_workflow_id()
+    async with new_worker(streams_client, ClosesItsTopic) as worker:
+        handle = await streams_client.start_workflow(
+            ClosesItsTopic.run, id=workflow_id, task_queue=worker.task_queue
+        )
+        stream = get_stream_handle(streams_client, workflow_id)
+        # Core closes the topic in the background once the task's records are
+        # promoted, so the case waits for the refusal.
+        closed = False
+        for attempt in range(1, 51):
+            producer = stream.producer(
+                topic=EVENTS, producer_id="late", attempt=attempt
+            )
+            try:
+                await producer.append({"late": attempt})
+            except StreamClosedError:
+                closed = True
+                break
+            await asyncio.sleep(0.1)
+        assert closed
+        # The run goes on, so another topic of its stream still takes appends.
+        other = stream.producer(topic=OTHER, producer_id="late", attempt=1)
+        await other.append({"other": 1})
+        await handle.signal(ClosesItsTopic.finish)
+        await handle.result()
