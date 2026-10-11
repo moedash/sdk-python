@@ -2,24 +2,30 @@
 
 An Activity writes to the stream of the Workflow that scheduled it as
 itself, so its retry is reported to readers as ``SUPERSEDED``. A client
-reaches a Workflow's stream by Workflow id through its provider.
+reaches a Workflow's stream by Workflow id through its store.
 """
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import uuid
+from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
 
 import pytest
 
 from temporalio import activity, workflow
+from temporalio.api.common.v1 import Payload
 from temporalio.client import Client
 from temporalio.common import RetryPolicy
 from temporalio.contrib.streams import (
+    BEGINNING,
+    Cursor,
     RecordKind,
+    StreamClosedError,
+    StreamCursorError,
+    StreamNotFoundError,
+    StreamProducerError,
     StreamRef,
     Supersession,
     activity_handle,
@@ -27,37 +33,35 @@ from temporalio.contrib.streams import (
     topic,
 )
 from temporalio.contrib.streams.memory import MemoryStreams
+from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
+from tests.contrib.streams._support import connect_with, new_workflow_id, read_all
 from tests.contrib.streams.test_workflow_writer import EVENTS, Publisher
 from tests.helpers import new_worker
 
 TOKENS = topic("tokens", str)
 
 
-def client_with(client: Client, provider: MemoryStreams | None) -> Client:
-    config = client.config()
-    config["plugins"] = [provider] if provider is not None else []
-    return Client(**config)
+@workflow.defn
+class Waits:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
 
 
-def new_workflow_id() -> str:
-    return f"streams-publish-{uuid.uuid4().hex}"
-
-
-async def read_all(records: Any, timeout: float = 10.0) -> list:
-    """Read until the stream ends, which is when its owner closes."""
-    out = []
-
-    async def pull() -> None:
-        async for record in records:
-            out.append(record)
-
-    try:
-        await asyncio.wait_for(pull(), timeout)
-    finally:
-        await records.aclose()
-    return out
+async def running_owner(client: Client, task_queue: str) -> str:
+    # Core asks the server about the owner, so the stream's Workflow must exist.
+    workflow_id = new_workflow_id()
+    await client.start_workflow(Waits.run, id=workflow_id, task_queue=task_queue)
+    return workflow_id
 
 
 @activity.defn
@@ -91,8 +95,7 @@ class RunsStreamingActivity:
 
 
 async def test_an_activity_retry_supersedes_its_first_attempt(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(
         streams_client, RunsStreamingActivity, activities=[stream_tokens]
@@ -116,6 +119,7 @@ async def test_an_activity_retry_supersedes_its_first_attempt(client: Client):
         RecordKind.FINISH,
     ]
     described = await streams_client.get_workflow_handle(workflow_id).describe()
+    # Core derives the same producer id the handle reports.
     producer_id = f"tokens@{described.run_id}"
     assert records[1].supersession == Supersession(producer_id, 1, 2)
     assert [r.value for r in records if r.kind is RecordKind.DATA] == [
@@ -133,7 +137,7 @@ async def test_an_activity_retry_supersedes_its_first_attempt(client: Client):
 
 
 @activity.defn
-async def stream_without_provider() -> str:
+async def stream_without_store() -> str:
     try:
         activity_handle()
     except ValueError as error:
@@ -142,29 +146,28 @@ async def stream_without_provider() -> str:
 
 
 @workflow.defn
-class RunsActivityWithoutProvider:
+class RunsActivityWithoutStore:
     @workflow.run
     async def run(self) -> str:
         return await workflow.execute_activity(
-            stream_without_provider, start_to_close_timeout=timedelta(seconds=10)
+            stream_without_store, start_to_close_timeout=timedelta(seconds=10)
         )
 
 
-async def test_an_activity_without_a_provider_is_told(client: Client):
+async def test_an_activity_without_a_store_is_told(client: Client):
     async with new_worker(
-        client, RunsActivityWithoutProvider, activities=[stream_without_provider]
+        client, RunsActivityWithoutStore, activities=[stream_without_store]
     ) as worker:
         said = await client.execute_workflow(
-            RunsActivityWithoutProvider.run,
+            RunsActivityWithoutStore.run,
             id=new_workflow_id(),
             task_queue=worker.task_queue,
         )
-    assert "no stream provider is registered" in said
+    assert "no stream store is registered" in said
 
 
 async def test_a_client_handle_follows_the_chain_or_pins_a_run(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     follower = get_stream_handle(streams_client, "wf")
     assert follower.ref == StreamRef.for_workflow("wf")
     pinned = get_stream_handle(streams_client, "wf", run_id="run", topic=EVENTS)
@@ -172,27 +175,126 @@ async def test_a_client_handle_follows_the_chain_or_pins_a_run(client: Client):
     assert get_stream_handle(streams_client, pinned.ref).ref == pinned.ref
     with pytest.raises(ValueError, match="carries its own"):
         get_stream_handle(streams_client, pinned.ref, run_id="other")
-    with pytest.raises(ValueError, match="no stream provider is registered"):
-        get_stream_handle(client_with(client, None), "wf")
+    with pytest.raises(ValueError, match="no stream store is registered"):
+        get_stream_handle(client, "wf")
 
 
 async def test_a_client_producer_and_the_workflow_share_a_topic(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
-    stream = get_stream_handle(streams_client, workflow_id)
-    outside = stream.producer(topic=EVENTS, producer_id="backend", attempt=1)
-    await outside.append({"from": "backend"})
     async with new_worker(streams_client, Publisher) as worker:
-        await streams_client.execute_workflow(
+        handle = await streams_client.start_workflow(
             Publisher.run, 0, id=workflow_id, task_queue=worker.task_queue
         )
+        await handle.result()
+    stream = get_stream_handle(streams_client, workflow_id)
     records = await read_all(stream.read(topic=EVENTS))
     assert [(r.producer_id, r.value) for r in records] == [
-        ("backend", {"from": "backend"}),
         ("", {"step": "init"}),
         ("", None),
     ]
+    # The chain closed, so an outside producer is refused there.
+    outside = stream.producer(topic=EVENTS, producer_id="backend", attempt=1)
+    with pytest.raises(StreamClosedError):
+        await outside.append({"from": "backend"})
+
+
+async def test_a_producer_retry_dedupes_and_a_divergent_one_is_refused(
+    client: Client,
+):
+    streams_client = await connect_with(client, MemoryStreams())
+    async with new_worker(streams_client, Waits) as worker:
+        workflow_id = await running_owner(streams_client, worker.task_queue)
+        stream = get_stream_handle(streams_client, workflow_id, topic=TOKENS)
+        assert await stream.latest() == BEGINNING
+        producer = stream.producer(producer_id="p", attempt=1)
+        assert await producer.append() == BEGINNING
+        first = await producer.append("a", "b")
+        assert await producer.append() == first
+        assert await stream.latest() == first
+        # A second object for the same session starts at one again: a repeat
+        # of the newest batch dedupes to the original position.
+        again = stream.producer(producer_id="p", attempt=1)
+        assert await again.append("a", "b") == first
+        divergent = stream.producer(producer_id="p", attempt=1)
+        with pytest.raises(StreamProducerError):
+            await divergent.append("x", "y")
+        owner = streams_client.get_workflow_handle(workflow_id)
+        await owner.signal(Waits.finish)
+        await owner.result()
+    records = await read_all(stream.read())
+    assert [r.value for r in records] == ["a", "b"]
+
+
+async def test_a_resumed_read_continues_after_its_cursor(client: Client):
+    streams_client = await connect_with(client, MemoryStreams())
+    async with new_worker(streams_client, Waits) as worker:
+        workflow_id = await running_owner(streams_client, worker.task_queue)
+        stream = get_stream_handle(streams_client, workflow_id, topic=TOKENS)
+        producer = stream.producer(producer_id="p", attempt=1)
+        middle = await producer.append("a", "b")
+        await producer.append("c")
+        # A read from END starts at its first iteration, so a reader that must
+        # not miss the next record positions itself with latest() first.
+        live = stream.read(after=await stream.latest())
+        await producer.append("d")
+        assert (await anext(live)).value == "d"
+        await live.aclose()
+        with pytest.raises(StreamCursorError):
+            await anext(stream.read(after=Cursor("not a cursor")))
+        owner = streams_client.get_workflow_handle(workflow_id)
+        await owner.signal(Waits.finish)
+        await owner.result()
+    assert [r.value for r in await read_all(stream.read(after=middle))] == ["c", "d"]
+
+
+async def test_a_stream_without_an_owner_is_not_found(client: Client):
+    streams_client = await connect_with(client, MemoryStreams())
+    stream = get_stream_handle(streams_client, f"no-such-owner-{uuid.uuid4()}")
+    with pytest.raises(StreamNotFoundError):
+        await stream.producer(producer_id="p", attempt=1).append("a")
+
+
+async def test_a_producer_refuses_a_bad_identity(client: Client):
+    stream = get_stream_handle(await connect_with(client, MemoryStreams()), "wf")
+    with pytest.raises(ValueError, match="producer_id"):
+        stream.producer(producer_id="", attempt=1)
+    for attempt in (0, True, 1.5):
+        with pytest.raises(ValueError, match="attempt"):
+            stream.producer(producer_id="p", attempt=attempt)  # type: ignore[arg-type]
+
+
+class NonceCodec(PayloadCodec):
+    """Encrypts with a fresh nonce per call, so two encodings never match."""
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return [
+            Payload(
+                metadata={"encoding": b"binary/nonce"},
+                data=uuid.uuid4().bytes + p.SerializeToString(),
+            )
+            for p in payloads
+        ]
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return [Payload.FromString(p.data[16:]) for p in payloads]
+
+
+async def test_a_retry_through_a_nonce_codec_still_dedupes(client: Client):
+    coded = await connect_with(
+        client, MemoryStreams(), DataConverter(payload_codec=NonceCodec())
+    )
+    async with new_worker(coded, Waits) as worker:
+        workflow_id = await running_owner(coded, worker.task_queue)
+        stream = get_stream_handle(coded, workflow_id, topic=TOKENS)
+        first = await stream.producer(producer_id="p", attempt=1).append("a")
+        retry = stream.producer(producer_id="p", attempt=1)
+        # The ciphertext differs, and the digest lang took before the codec does not.
+        assert await retry.append("a") == first
+        owner = coded.get_workflow_handle(workflow_id)
+        await owner.signal(Waits.finish)
+        await owner.result()
+    assert [r.value for r in await read_all(stream.read())] == ["a"]
 
 
 async def test_an_activity_with_no_workflow_has_no_workflow_stream():
@@ -233,8 +335,7 @@ class CountThenContinue:
 
 
 async def test_an_activity_producer_writes_in_every_run_of_a_chain(client: Client):
-    provider = MemoryStreams()
-    streams_client = client_with(client, provider)
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
     async with new_worker(
         streams_client, CountThenContinue, activities=[count_twice]

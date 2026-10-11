@@ -12,64 +12,25 @@ from datetime import timedelta
 import pytest
 
 from temporalio import workflow
-from temporalio.bridge.proto.streams import (
-    LatestRequest,
-    ReadRequest,
-    StreamAddress,
-    StreamOwnerKind,
-)
 from temporalio.client import (
     Client,
     WorkflowQueryFailedError,
     WorkflowUpdateFailedError,
 )
 from temporalio.contrib.streams import (
+    BEGINNING,
     DEFAULT_TOPIC,
     RecordKind,
-    StreamRecord,
+    get_stream_handle,
     topic,
     workflow_writer,
 )
-from temporalio.contrib.streams._plugin import call, store_for_client
-from temporalio.contrib.streams._wire import from_read
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.exceptions import ApplicationError
-from tests.contrib.streams._support import connect_with, new_workflow_id
+from tests.contrib.streams._support import connect_with, new_workflow_id, read_all
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
-
-
-def address(client: Client, workflow_id: str, topic: str) -> StreamAddress:
-    return StreamAddress(
-        namespace=client.namespace,
-        owner_kind=StreamOwnerKind.STREAM_OWNER_KIND_WORKFLOW,
-        workflow_id=workflow_id,
-        topic=topic,
-    )
-
-
-async def read_records(
-    client: Client, workflow_id: str, topic: str, result_type: type | None = None
-) -> list[StreamRecord]:
-    """Read through Core's stream service until the owner's chain has ended."""
-    service = await store_for_client(client)._service_for(client)
-    request = ReadRequest(stream=address(client, workflow_id, topic))
-    request.wait.FromSeconds(5)
-    records = []
-    while True:
-        response = await call(service.read(request))
-        for record in response.records:
-            records.append(await from_read(client.data_converter, record, result_type))
-        if response.done:
-            return records
-        request.after, request.state = response.cursor, response.state
-
-
-async def latest(client: Client, workflow_id: str, topic: str) -> str:
-    service = await store_for_client(client)._service_for(client)
-    request = LatestRequest(stream=address(client, workflow_id, topic))
-    return (await call(service.latest(request))).cursor
 
 
 @workflow.defn
@@ -101,7 +62,8 @@ async def test_a_workflow_publishes_and_a_client_reads(client: Client):
         await streams_client.execute_workflow(
             Publisher.run, 3, id=workflow_id, task_queue=worker.task_queue
         )
-    records = await read_records(streams_client, workflow_id, EVENTS.name, dict)
+    stream = get_stream_handle(streams_client, workflow_id)
+    records = await read_all(stream.read(topic=EVENTS))
     assert [r.kind for r in records] == [RecordKind.DATA] * 4 + [RecordKind.FINISH]
     assert [r.value for r in records[:4]] == [
         {"step": "init"},
@@ -112,7 +74,7 @@ async def test_a_workflow_publishes_and_a_client_reads(client: Client):
     # The owning Workflow writes with no producer identity: its task is the
     # boundary, not a producer attempt.
     assert {(r.producer_id, r.attempt, r.sequence) for r in records} == {("", 0, 0)}
-    (default,) = await read_records(streams_client, workflow_id, DEFAULT_TOPIC, str)
+    (default,) = await read_all(stream.read(result_type=str))
     assert default.value == "on the default topic"
     assert default.topic == DEFAULT_TOPIC
 
@@ -126,7 +88,8 @@ async def test_an_evicted_workflow_does_not_publish_twice(client: Client):
         await streams_client.execute_workflow(
             Publisher.run, 3, id=workflow_id, task_queue=worker.task_queue
         )
-    assert len(await read_records(streams_client, workflow_id, EVENTS.name)) == 5
+    stream = get_stream_handle(streams_client, workflow_id)
+    assert len(await read_all(stream.read(topic=EVENTS))) == 5
 
 
 @workflow.defn
@@ -176,7 +139,8 @@ async def test_a_query_or_validator_cannot_publish(client: Client):
         with pytest.raises(WorkflowUpdateFailedError) as failed:
             await handle.execute_update(ReadOnlyPublisher.poke)
         assert "publish to a stream" in str(failed.value.cause)
-        assert await latest(streams_client, workflow_id, EVENTS.name) == ""
+        stream = get_stream_handle(streams_client, workflow_id)
+        assert await stream.latest(topic=EVENTS) == BEGINNING
         await handle.terminate()
 
 

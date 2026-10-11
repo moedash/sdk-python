@@ -43,10 +43,6 @@ _WORKFLOW_EXTERN = "__temporal_contrib_streams_store"
 
 T = TypeVar("T")
 
-_activity_provider: contextvars.ContextVar[StreamProviderPlugin | None] = (
-    contextvars.ContextVar("__temporal_contrib_streams_provider", default=None)
-)
-
 
 class StreamStorePlugin(SimplePlugin):
     """The base class of the store configuration classes.

@@ -63,6 +63,13 @@ from temporalio.contrib.streams._errors import (
     StreamStorageError,
     StreamUnsupportedError,
 )
+from temporalio.contrib.streams._handles import (
+    ActivityStreamHandle,
+    StreamHandle,
+    StreamProducer,
+    activity_handle,
+    get_stream_handle,
+)
 from temporalio.contrib.streams._plugin import StreamStorePlugin
 from temporalio.contrib.streams._record import (
     Cursor,
@@ -85,9 +92,11 @@ __all__ = [
     "StreamCursorError",
     "StreamError",
     "StreamExpiredError",
+    "StreamHandle",
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamOwnerKind",
+    "StreamProducer",
     "StreamProducerError",
     "StreamRecord",
     "StreamRecordError",
