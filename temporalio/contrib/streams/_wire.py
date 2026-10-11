@@ -1,38 +1,38 @@
-"""How a record crosses a provider: the proto is the record.
+"""How a record crosses to Core and back: the proto is the record.
 
-``temporal.sdk.streams.v1.StreamRecord`` is the wire format on every
-provider. A store that keeps bytes keeps ``SerializeToString()`` of it, and a
-reader in any language parses the same bytes. ``body`` is the user's payload,
+``temporal.sdk.streams.v1.StreamRecord`` is the stored format on every
+store, and Core builds and parses it. ``body`` is the user's payload,
 produced and consumed through the payload converter, so a pre-encoded
 :class:`temporalio.common.RawValue` passes through untouched.
 """
 
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Callable
 from typing import Any
 
 import temporalio.converter
-from temporalio.api.common.v1 import Payload
+from temporalio.bridge.proto.streams import ReadRecord
+from temporalio.bridge.proto.streams.v1 import StreamRecord as WireRecord
+from temporalio.bridge.proto.streams.v1 import StreamRecordKind
+from temporalio.contrib.streams._body import decode_body
 from temporalio.contrib.streams._errors import StreamRecordError
-from temporalio.contrib.streams._policy import AttemptTracker
-from temporalio.contrib.streams._record import Cursor, RecordKind, StreamRecord
-from temporalio.contrib.streams.proto.v1 import StreamRecord as WireRecord
-from temporalio.contrib.streams.proto.v1 import StreamRecordKind
+from temporalio.contrib.streams._record import (
+    Cursor,
+    RecordKind,
+    StreamRecord,
+    Supersession,
+)
 
-__all__ = ["RUN_ID_KEY", "RecordDecoder", "WireRecord", "from_wire", "to_wire"]
+__all__ = ["RUN_ID_KEY", "WireRecord", "from_read", "to_wire"]
 
 RUN_ID_KEY = "temporal.io/run-id"
 """The record metadata key the producing run id is stored under.
 
-Every record the owning Workflow publishes carries it, because a stream
-follows the Workflow's run chain and a reader needs the run to tell a reset
-branch or a successor run apart. Its value is a payload with ``encoding``
-``binary/plain`` whose data is the run id.
+Core stamps it on every record the owning Workflow publishes, because a
+stream follows the Workflow's run chain and a reader needs the run to tell a
+reset branch or a successor run apart. Its value is a payload with
+``encoding`` ``binary/plain`` whose data is the run id.
 """
-
-_RUN_ID_ENCODING = b"binary/plain"
 
 
 def to_wire(
@@ -44,12 +44,11 @@ def to_wire(
     producer_id: str = "",
     attempt: int = 0,
     sequence: int = 0,
-    run_id: str = "",
 ) -> WireRecord:
-    """Build the record a provider stores.
+    """The record as the converter produced it, before the codec.
 
     Only a ``DATA`` record carries a body; the converter encodes ``value``
-    into it. A ``run_id`` goes into the metadata under :data:`RUN_ID_KEY`.
+    into it.
 
     Raises:
         ValueError: ``kind`` is ``SUPERSEDED`` or ``UNSPECIFIED``, which no
@@ -66,36 +65,49 @@ def to_wire(
     )
     if kind is RecordKind.DATA:
         record.body.CopyFrom(converter.to_payloads([value])[0])
-    if run_id:
-        record.metadata[RUN_ID_KEY].CopyFrom(
-            Payload(metadata={"encoding": _RUN_ID_ENCODING}, data=run_id.encode())
-        )
     return record
 
 
-def from_wire(
-    converter: temporalio.converter.PayloadConverter,
-    cursor: Cursor,
-    wire: WireRecord,
+async def from_read(
+    converter: temporalio.converter.DataConverter,
+    read: ReadRecord,
     result_type: type | None,
 ) -> StreamRecord[Any]:
-    """Turn a stored record into the record a reader yields.
+    """The record a reader yields for one record of Core's answer.
 
     Raises:
-        ValueError: The kind is one no store may hold, such as a synthesized
-            ``SUPERSEDED`` or a value this SDK does not know.
+        StreamRecordError: The body did not decode or convert, or the record
+            holds a kind this SDK does not know.
     """
-    kind = RecordKind(wire.kind)
-    if kind is RecordKind.SUPERSEDED:
-        raise ValueError("a SUPERSEDED record is synthesized by readers, never stored")
-    if kind is RecordKind.UNSPECIFIED:
-        kind = RecordKind.DATA
-    value: Any = None
-    if kind is RecordKind.DATA and wire.HasField("body"):
-        hints = [result_type] if result_type is not None else None
-        value = converter.from_payloads([wire.body], hints)[0]
+    cursor = Cursor(read.cursor)
+    if read.HasField("superseded"):
+        superseded = read.superseded
+        return StreamRecord(
+            kind=RecordKind.SUPERSEDED,
+            cursor=cursor,
+            topic=superseded.topic,
+            producer_id=superseded.producer_id,
+            attempt=superseded.attempt,
+            supersession=Supersession(
+                superseded.producer_id, superseded.previous_attempt, superseded.attempt
+            ),
+        )
+    wire = read.stored
+    try:
+        kind = RecordKind(wire.kind)
+        if kind is RecordKind.SUPERSEDED:
+            raise ValueError("a SUPERSEDED record is synthesized, never stored")
+        value: Any = None
+        if kind in (RecordKind.DATA, RecordKind.UNSPECIFIED) and wire.HasField("body"):
+            body = await decode_body(converter, wire.body)
+            hints = [result_type] if result_type is not None else None
+            value = converter.payload_converter.from_payloads([body], hints)[0]
+    except Exception as error:
+        raise StreamRecordError(
+            f"stream record at {cursor} could not be decoded: {error}", cursor
+        ) from error
     return StreamRecord(
-        kind=kind,
+        kind=RecordKind.DATA if kind is RecordKind.UNSPECIFIED else kind,
         cursor=cursor,
         topic=wire.topic,
         producer_id=wire.producer_id,
@@ -105,62 +117,5 @@ def from_wire(
         if RUN_ID_KEY in wire.metadata
         else "",
         value=value,
+        stale=read.stale,
     )
-
-
-class RecordDecoder:
-    """Turns stored records into the records a reader yields.
-
-    One per read. It synthesizes ``SUPERSEDED`` from the attempts it
-    observes, and positions each synthesized record at the cursor before the
-    record that triggered it. A record it cannot decode raises
-    :class:`temporalio.contrib.streams.StreamRecordError` with that record's
-    cursor. Skipping it silently would lose data the reader never hears of.
-    """
-
-    def __init__(
-        self,
-        converter: temporalio.converter.PayloadConverter,
-        result_type: type | None,
-        *,
-        after: Cursor,
-        warn: Callable[[str], None],
-    ) -> None:
-        """Decode with ``converter`` into ``result_type``, resuming after ``after``."""
-        self._converter = converter
-        self._result_type = result_type
-        self._previous = after
-        self._warn = warn
-        self._attempts = AttemptTracker(warn)
-
-    def prime(self, wire: WireRecord) -> None:
-        """Note the attempt of the record at the resume cursor, which was already delivered.
-
-        A read that resumes would otherwise take the next attempt of that
-        producer as its first, and report no ``SUPERSEDED``. Only the cursor
-        record's producer is primed. Another producer's earlier attempts are
-        not known to a resumed read.
-        """
-        self._attempts.note(
-            wire.producer_id, wire.attempt, topic=wire.topic, previous=self._previous
-        )
-
-    def decode(self, cursor: Cursor, wire: WireRecord) -> list[StreamRecord[Any]]:
-        """The records to yield for one stored record, in order."""
-        try:
-            record = from_wire(self._converter, cursor, wire, self._result_type)
-        except Exception as error:
-            raise StreamRecordError(
-                f"stream record at {cursor} could not be decoded: {error}", cursor
-            ) from error
-        if self._attempts.behind(wire.producer_id, wire.attempt):
-            record = dataclasses.replace(record, stale=True)
-        out: list[StreamRecord[Any]] = []
-        superseded = self._attempts.note(
-            wire.producer_id, wire.attempt, topic=wire.topic, previous=self._previous
-        )
-        if superseded is not None:
-            out.append(superseded)
-        out.append(record)
-        self._previous = cursor
-        return out
