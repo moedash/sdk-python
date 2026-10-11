@@ -32,7 +32,21 @@ The contract:
 
 A store is configured as a plugin:
 ``Client.connect(..., plugins=[RedisStreams(...)])`` registers it on the
-client and on every Worker built from that client.
+client and on every Worker built from that client. Each
+context then reaches a stream the same way:
+
+- Workflow code publishes to its own stream with :func:`workflow_writer`.
+- An Activity reaches the stream of the Workflow that scheduled it with
+  :func:`activity_handle`, and writes as itself: its Activity id with the
+  scheduling run id, and its Temporal attempt. The handle is pinned to that
+  run, so a read on it ends when the run closes, Continue-as-New included.
+- Any process holding a client reaches a Workflow's stream with
+  :func:`get_stream_handle`, and writes with a producer id and an attempt of
+  its own.
+
+In this release only a Workflow owns a stream, and only Activities and
+clients read one. Reading inside a Workflow (:func:`workflow_reader`) and
+the other owner kinds raise :class:`StreamUnsupportedError`.
 
 The stored record is ``temporal.sdk.streams.v1.StreamRecord``, in
 :mod:`temporalio.bridge.proto.streams.v1`, with the user's value in ``body``
@@ -53,6 +67,13 @@ from temporalio.contrib.streams._errors import (
     StreamStorageError,
     StreamUnsupportedError,
 )
+from temporalio.contrib.streams._handles import (
+    ActivityStreamHandle,
+    StreamHandle,
+    StreamProducer,
+    activity_handle,
+    get_stream_handle,
+)
 from temporalio.contrib.streams._plugin import StreamStorePlugin
 from temporalio.contrib.streams._record import (
     Cursor,
@@ -62,8 +83,14 @@ from temporalio.contrib.streams._record import (
 )
 from temporalio.contrib.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.contrib.streams._topic import DEFAULT_TOPIC, StreamTopic, topic
+from temporalio.contrib.streams._workflow import (
+    WorkflowStreamWriter,
+    workflow_reader,
+    workflow_writer,
+)
 
 __all__ = [
+    "ActivityStreamHandle",
     "BEGINNING",
     "Cursor",
     "DEFAULT_TOPIC",
@@ -73,9 +100,11 @@ __all__ = [
     "StreamCursorError",
     "StreamError",
     "StreamExpiredError",
+    "StreamHandle",
     "StreamNotFoundError",
     "StreamOutcomeUnknownError",
     "StreamOwnerKind",
+    "StreamProducer",
     "StreamProducerError",
     "StreamRecord",
     "StreamRecordError",
@@ -86,5 +115,10 @@ __all__ = [
     "StreamTopic",
     "StreamUnsupportedError",
     "Supersession",
+    "WorkflowStreamWriter",
+    "activity_handle",
+    "get_stream_handle",
     "topic",
+    "workflow_reader",
+    "workflow_writer",
 ]
