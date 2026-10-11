@@ -28,8 +28,8 @@ import temporalio.api.sdk.v1.user_metadata_pb2
 import temporalio.api.workflow.v1.message_pb2
 import temporalio.bridge.proto.child_workflow.child_workflow_pb2
 import temporalio.bridge.proto.common.common_pb2
-import temporalio.bridge.proto.external_data.external_data_pb2
 import temporalio.bridge.proto.nexus.nexus_pb2
+import temporalio.bridge.proto.streams.v1.message_pb2
 
 if sys.version_info >= (3, 10):
     import typing as typing_extensions
@@ -368,36 +368,132 @@ class WorkflowCommand(google.protobuf.message.Message):
 global___WorkflowCommand = WorkflowCommand
 
 class WorkflowOutputStreamCommit(google.protobuf.message.Message):
-    """Reports that the output batch for this Workflow Task has been durably staged outside History.
-    Core records only this compact manifest, in a `core_external_stream` marker ordered before the
-    completion's other commands, so the batch becomes visible exactly when the task is accepted.
-    While replaying, Core writes nothing and instead requires the manifest to equal the recorded
-    one, ignoring `stage_token`, `run_id` (a reset run replays markers that name its base run) and
-    `provider_id` (a provider can be renamed or swapped for a Replayer). A mismatch, a commit where none was recorded, or a recorded manifest that the replayed task
-    does not commit again is nondeterminism.
+    """The stream records this activation published, sent with its completion.
+
+    Core builds the output manifest from them and records it in a `core_external_stream` marker
+    ordered before the completion's other commands, so the records become visible exactly when the
+    Workflow Task is accepted. While replaying, lang sends the same records without bodies, and
+    Core compares the manifest it builds from them with the recorded one. A mismatch, a commit
+    where none was recorded, or a recorded manifest the replayed task doesn't commit again is
+    nondeterminism. Core takes one commit per completion.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
-    MANIFEST_FIELD_NUMBER: builtins.int
+    RECORDS_FIELD_NUMBER: builtins.int
+    CLOSES_FIELD_NUMBER: builtins.int
     @property
-    def manifest(
+    def records(
         self,
-    ) -> temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest: ...
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___OutputRecord
+    ]: ...
+    @property
+    def closes(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___OutputClose
+    ]:
+        """The topics this activation closed. Readers end once the output is promoted, and an
+        operation that handed out a closed topic completes with its result. Each close needs its
+        topic's FINISH record in `records`, so the marker proves it.
+        """
     def __init__(
         self,
         *,
-        manifest: temporalio.bridge.proto.external_data.external_data_pb2.ExternalOutputStreamManifest
-        | None = ...,
+        records: collections.abc.Iterable[global___OutputRecord] | None = ...,
+        closes: collections.abc.Iterable[global___OutputClose] | None = ...,
     ) -> None: ...
-    def HasField(
-        self, field_name: typing_extensions.Literal["manifest", b"manifest"]
-    ) -> builtins.bool: ...
     def ClearField(
-        self, field_name: typing_extensions.Literal["manifest", b"manifest"]
+        self,
+        field_name: typing_extensions.Literal[
+            "closes", b"closes", "records", b"records"
+        ],
     ) -> None: ...
 
 global___WorkflowOutputStreamCommit = WorkflowOutputStreamCommit
+
+class OutputClose(google.protobuf.message.Message):
+    """One topic a Workflow closed, with the result its readers' operations complete with."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOPIC_FIELD_NUMBER: builtins.int
+    RESULT_FIELD_NUMBER: builtins.int
+    topic: builtins.str
+    @property
+    def result(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """After lang's payload codec. Sent again while replaying, since a close that History proves
+        may still need sending.
+        """
+    def __init__(
+        self,
+        *,
+        topic: builtins.str = ...,
+        result: temporalio.api.common.v1.message_pb2.Payload | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["result", b"result"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal["result", b"result", "topic", b"topic"],
+    ) -> None: ...
+
+global___OutputClose = OutputClose
+
+class OutputRecord(google.protobuf.message.Message):
+    """One record a Workflow published, in publish order across topics."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOPIC_FIELD_NUMBER: builtins.int
+    KIND_FIELD_NUMBER: builtins.int
+    BODY_FIELD_NUMBER: builtins.int
+    CONTENT_HASH_FIELD_NUMBER: builtins.int
+    LOGICAL_SIZE_FIELD_NUMBER: builtins.int
+    topic: builtins.str
+    kind: temporalio.bridge.proto.streams.v1.message_pb2.StreamRecordKind.ValueType
+    @property
+    def body(self) -> temporalio.api.common.v1.message_pb2.Payload:
+        """The value on DATA, after lang's payload codec and external storage. Absent while replaying,
+        since nothing is stored again.
+        """
+    content_hash: builtins.bytes
+    """The SHA-256 of the body as the payload converter made it, before the codec. Set on DATA,
+    replaying or not, so the manifest never depends on the codec.
+    """
+    logical_size: builtins.int
+    """The size of the body as the payload converter made it."""
+    def __init__(
+        self,
+        *,
+        topic: builtins.str = ...,
+        kind: temporalio.bridge.proto.streams.v1.message_pb2.StreamRecordKind.ValueType = ...,
+        body: temporalio.api.common.v1.message_pb2.Payload | None = ...,
+        content_hash: builtins.bytes = ...,
+        logical_size: builtins.int = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["body", b"body"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "body",
+            b"body",
+            "content_hash",
+            b"content_hash",
+            "kind",
+            b"kind",
+            "logical_size",
+            b"logical_size",
+            "topic",
+            b"topic",
+        ],
+    ) -> None: ...
+
+global___OutputRecord = OutputRecord
 
 class StartTimer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor

@@ -1,6 +1,6 @@
 """The value types the stream contract is expressed in.
 
-Nothing here touches Temporal or a provider, so every provider shares it
+Nothing here touches Temporal or a store, so every store shares it
 unchanged.
 """
 
@@ -52,8 +52,8 @@ class RecordKind(enum.IntEnum):
     SUPERSEDED = 3
     """A later attempt of the same producer started writing.
 
-    The reader synthesizes it from the records it observed. No store holds
-    it, so every provider reports a retry the same way. Its cursor is the
+    Core's reader synthesizes it from the records it observed. No store
+    holds it, so every store reports a retry the same way. Its cursor is the
     position before the new attempt's first record. A reader that resumes
     there gets this record again, then the new attempt, since dropping the
     earlier attempt's records twice is harmless and missing it is not.
@@ -64,9 +64,9 @@ class RecordKind(enum.IntEnum):
 class Cursor:
     """A position in one stream.
 
-    Opaque on purpose. The token names the provider that minted it and the
-    stream it belongs to, and that provider refuses a token from another
-    provider or another stream with
+    Opaque on purpose. The token names the store that minted it and the
+    stream it belongs to, and a token from another store or another stream
+    is refused with
     :class:`temporalio.contrib.streams.StreamCursorError`. Do not compare two
     cursors or do arithmetic on one: hand a cursor back to resume strictly
     after the record it names.
@@ -75,7 +75,7 @@ class Cursor:
     token: str
 
     def __str__(self) -> str:
-        """The provider's position token."""
+        """The store's position token."""
         return self.token
 
 

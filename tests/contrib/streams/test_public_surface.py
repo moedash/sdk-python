@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import temporalio.contrib.streams as streams
 
-# Provider-author helpers stay importable from their private modules, but
-# they are not part of the public surface.
+# The helpers behind the handles stay importable from their private modules,
+# but they are not part of the public surface.
 _PRIVATE = {
-    "CONTENT_HASH_KEY",
-    "content_fingerprint",
+    "batch_digest",
     "content_hash",
     "decode_body",
-    "encode_body",
+    "encode_bodies",
+    "error_from_failure",
     "resolve_topic",
 }
 
 
-def test_provider_helpers_are_not_public():
+def test_internal_helpers_are_not_public():
     assert _PRIVATE.isdisjoint(streams.__all__)
     for name in _PRIVATE:
         assert not hasattr(streams, name), name

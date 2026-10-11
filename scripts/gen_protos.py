@@ -33,7 +33,6 @@ proto_paths.extend(additional_proto_dir.glob("**/*.proto"))
 
 api_out_dir = base_dir / "temporalio" / "api"
 sdk_out_dir = base_dir / "temporalio" / "bridge" / "proto"
-streams_out_dir = base_dir / "temporalio" / "contrib" / "streams" / "proto"
 
 py_fixes = [
     partial(re.compile(r"from temporal\.api\.").sub, r"from temporalio.api."),
@@ -50,6 +49,10 @@ py_fixes = [
     ),
     partial(
         re.compile(r"from temporal\.sdk\.core\.").sub, r"from temporalio.bridge.proto."
+    ),
+    partial(
+        re.compile(r"from temporal\.sdk\.streams\.").sub,
+        r"from temporalio.bridge.proto.streams.",
     ),
     partial(
         re.compile(r"'__module__' : 'temporal\.api\.").sub,
@@ -72,6 +75,9 @@ pyi_fixes = [
         r"temporalio.api.dependencies.nexusannotations.",
     ),
     partial(re.compile(r"temporal\.sdk\.core\.").sub, r"temporalio.bridge.proto."),
+    partial(
+        re.compile(r"temporal\.sdk\.streams\.").sub, r"temporalio.bridge.proto.streams."
+    ),
 ]
 
 find_class_re = re.compile(r"\nclass ([^_\(\:]+)")
@@ -219,11 +225,11 @@ def generate_protos(output_dir: Path):
     for p in (output_dir / "temporal" / "sdk" / "core").iterdir():
         shutil.rmtree(sdk_out_dir / p.name, ignore_errors=True)
         p.replace(sdk_out_dir / p.name)
-    streams_out_dir.mkdir(exist_ok=True)
-    for p in (output_dir / "temporal" / "sdk" / "streams").iterdir():
-        if p.is_dir():
-            shutil.rmtree(streams_out_dir / p.name, ignore_errors=True)
-            p.replace(streams_out_dir / p.name)
+    # The stream record envelope sits beside Core's own stream messages, which the loop above
+    # has just moved in.
+    (output_dir / "temporal" / "sdk" / "streams" / "v1").replace(
+        sdk_out_dir / "streams" / "v1"
+    )
     shutil.rmtree(sdk_out_dir / "health", ignore_errors=True)
     (output_dir / "health").replace(sdk_out_dir / "health")
     # Move test protos

@@ -55,7 +55,7 @@ async def main(
 ) -> str:
     """Run one prompt and return the text the client assembled.
 
-    ``client`` must carry the stream provider, for example
+    ``client`` must carry the stream store, for example
     ``Client.connect(..., plugins=[RedisStreams("redis://localhost:6379")])``.
     """
     async with Worker(
