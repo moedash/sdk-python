@@ -83,6 +83,7 @@ from temporalio.contrib.streams._record import (
 )
 from temporalio.contrib.streams._ref import StreamOwnerKind, StreamRef
 from temporalio.contrib.streams._topic import DEFAULT_TOPIC, StreamTopic, topic
+from temporalio.contrib.streams._wire import RUN_ID_KEY
 from temporalio.contrib.streams._workflow import (
     WorkflowStreamWriter,
     workflow_reader,
@@ -95,6 +96,7 @@ __all__ = [
     "Cursor",
     "DEFAULT_TOPIC",
     "END",
+    "RUN_ID_KEY",
     "RecordKind",
     "StreamClosedError",
     "StreamCursorError",

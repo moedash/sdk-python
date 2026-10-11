@@ -4,8 +4,9 @@ The writer converts and hashes values on the Workflow thread and adds the
 records to the activation's ``WorkflowOutputStreamCommit``. Nothing here does
 I/O. The Worker's completion encoder runs each body through the payload
 codec, and Core stages the records, records a marker of them, and makes them
-visible once the Workflow Task is accepted. Reading a stream inside a
-Workflow is not part of this release.
+visible once the Workflow Task is accepted. While replaying, the same
+records go without bodies, and Core checks them against the marker. Reading
+a stream inside a Workflow is not part of this release.
 """
 
 from __future__ import annotations
@@ -55,7 +56,8 @@ def _publish(record: OutputRecord, action: str) -> None:
         raise workflow.ReadOnlyContextError(
             f"While in read-only function, action attempted: {action}"
         )
-    if not worker_has_store():
+    # Replaying needs no store, since nothing is stored again.
+    if not workflow.unsafe.is_replaying() and not worker_has_store():
         raise ValueError(
             "no stream store is registered on this Workflow's Worker; register "
             "one on its client, for example Client.connect(..., plugins=[store])"
@@ -104,8 +106,9 @@ class WorkflowStreamWriter(Generic[T]):
             kind=StreamRecordKind.STREAM_RECORD_KIND_DATA,
             content_hash=content_hash(payload),
             logical_size=payload.ByteSize(),
-            body=payload,
         )
+        if not workflow.unsafe.is_replaying():
+            record.body.CopyFrom(payload)
         _publish(record, "publish to a stream")
 
     def finish(self) -> None:
