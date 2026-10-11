@@ -49,11 +49,7 @@ from temporalio.contrib.streams._record import (
     Supersession,
 )
 from temporalio.contrib.streams._ref import StreamOwnerKind, StreamRef
-from temporalio.contrib.streams._topic import (
-    DEFAULT_TOPIC,
-    StreamTopic,
-    topic,
-)
+from temporalio.contrib.streams._topic import DEFAULT_TOPIC, StreamTopic, topic
 
 __all__ = [
     "BEGINNING",
@@ -71,6 +67,7 @@ __all__ = [
     "StreamProducerError",
     "StreamRecord",
     "StreamRecordError",
+    "StreamRef",
     "StreamRefusedError",
     "StreamStorageError",
     "StreamTopic",

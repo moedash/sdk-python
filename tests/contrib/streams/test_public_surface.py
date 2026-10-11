@@ -12,6 +12,7 @@ _PRIVATE = {
     "decode_body",
     "encode_bodies",
     "error_from_failure",
+    "resolve_topic",
 }
 
 
