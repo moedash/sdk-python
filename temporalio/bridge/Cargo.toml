@@ -71,7 +71,11 @@ temporalio-sdk-core = { version = "0.10.0", path = "./sdk-core/crates/sdk-core",
     "ephemeral-server",
     "envconfig",
     "prometheus",
+    "streams",
 ] }
+# The stream stores Core serves to Python and its Workers. Redis takes the rustls provider the
+# process installs, so it follows the tls-ring and tls-aws-lc features above.
+temporalio-streams = { version = "0.1.0", path = "./sdk-core/crates/streams", features = ["redis"] }
 tokio = "1.26"
 # Matches the sdk-core client crate's rustls stack; used to build the custom
 # server certificate verifier for ClientTlsConfig.verification_server_name.

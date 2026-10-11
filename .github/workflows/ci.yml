@@ -250,8 +250,8 @@ jobs:
           TEMPORAL_TEST_PROTO3: 1
 
   # The stream service's bindings are generated from its Nexus contract by a
-  # pinned nexgen fork revision of their own, separate from the one
-  # check-protos uses for the System Nexus bindings, so they get their own job.
+  # pinned nexgen fork revision, so they get their own job rather than a place
+  # in check-protos, whose nexgen is the released one.
   check-nexus-streams-api:
     timeout-minutes: 20
     runs-on: ubuntu-latest
