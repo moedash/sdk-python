@@ -260,6 +260,16 @@ class StreamHandle:
         result is a generator, so a caller that stops early calls
         ``aclose()`` on it.
 
+        The read starts when the generator first runs, not when this call
+        returns, and ``END`` is resolved then. A reader that must not miss
+        the next record, such as one about to send something the Workflow
+        answers on the stream, takes ``latest()`` first and reads after it::
+
+            start = await handle.latest()
+            await client.execute_update(...)
+            async for record in handle.read(after=start):
+                ...
+
         Raises:
             ValueError: ``result_type`` was passed with a topic definition,
                 or the topic is empty. Raised by this call.
