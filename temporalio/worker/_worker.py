@@ -702,6 +702,16 @@ class Worker:
                 ]._to_bridge(),  # type: ignore[reportTypedDictNotRequiredAccess,reportOptionalMemberAccess]
                 plugins=deduped_plugin_names,
                 storage_drivers=deduped_storage_driver_types,
+                # A stream store plugin offers its store under this name, which keeps the bridge
+                # type off the public Worker options.
+                stream_store=next(
+                    (
+                        store
+                        for plugin in self._plugins
+                        if (store := getattr(plugin, "_temporal_stream_store", None))
+                    ),
+                    None,
+                ),
                 disable_payload_error_limit=config.get(
                     "disable_payload_error_limit", False
                 ),

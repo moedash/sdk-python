@@ -80,7 +80,7 @@ def test_a_ref_from_a_later_release_decodes_and_fails_where_it_opens(kind: str):
     ["x" * 257, "é" * 129, "a\x1fb", "line\nbreak", "\x00"],
 )
 def test_a_topic_name_that_is_too_long_or_has_a_control_character_is_refused(name: str):
-    # Every provider puts the name in keys, cursors and Core's manifest budget.
+    # Every store puts the name in keys, cursors and Core's manifest budget.
     with pytest.raises(ValueError):
         topic(name)
     with pytest.raises(ValueError):
