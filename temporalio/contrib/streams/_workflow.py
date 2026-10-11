@@ -4,7 +4,8 @@ The writer converts and hashes values on the Workflow thread and adds the
 records to the activation's ``WorkflowOutputStreamCommit``. Nothing here does
 I/O. The Worker's completion encoder runs each body through the payload
 codec, and Core stages the records, records a marker of them, and makes them
-visible once the Workflow Task is accepted.
+visible once the Workflow Task is accepted. Reading a stream inside a
+Workflow is not part of this release.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from temporalio import workflow
 from temporalio.bridge.proto.streams.v1 import StreamRecordKind
 from temporalio.bridge.proto.workflow_commands import OutputRecord
 from temporalio.contrib.streams._body import content_hash
+from temporalio.contrib.streams._errors import StreamUnsupportedError
 from temporalio.contrib.streams._plugin import worker_has_store
 from temporalio.contrib.streams._topic import StreamTopic, resolve_topic
 
@@ -156,3 +158,21 @@ def workflow_writer(
     """
     name, _ = resolve_topic(topic)
     return WorkflowStreamWriter(name)
+
+
+def workflow_reader(*_args: Any, **_kwargs: Any) -> Any:
+    """Reading a stream inside a Workflow is not supported in this release.
+
+    Read from an Activity or a client with
+    :func:`temporalio.contrib.streams.activity_handle` or
+    :func:`temporalio.contrib.streams.get_stream_handle`, and send the
+    Workflow what it needs, for example as a Signal.
+
+    Raises:
+        StreamUnsupportedError: Always.
+    """
+    raise StreamUnsupportedError(
+        "reading a stream inside a Workflow is not supported in this release; "
+        "read it from an Activity or a client and send the Workflow what it "
+        "needs, for example as a Signal"
+    )

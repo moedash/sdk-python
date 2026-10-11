@@ -7,7 +7,6 @@ reaches a Workflow's stream by Workflow id through its store.
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from collections.abc import Sequence
 from datetime import timedelta
@@ -35,7 +34,6 @@ from temporalio.contrib.streams import (
 from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.exceptions import ApplicationError
-from temporalio.testing import ActivityEnvironment
 from tests.contrib.streams._support import connect_with, new_workflow_id, read_all
 from tests.contrib.streams.test_workflow_writer import EVENTS, Publisher
 from tests.helpers import new_worker

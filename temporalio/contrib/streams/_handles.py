@@ -443,15 +443,16 @@ def activity_handle() -> ActivityStreamHandle:
     producer id of your own.
 
     Raises:
-        ValueError: The Activity was not scheduled by a Workflow, or no stream
-            store is registered on the Worker's client.
+        StreamUnsupportedError: The Activity was not scheduled by a Workflow;
+            streams owned by an Activity are not supported in this release.
+        ValueError: No stream store is registered on the Worker's client.
         RuntimeError: Not called from inside an Activity.
     """
     info = temporalio.activity.info()
     if info.workflow_id is None or info.workflow_run_id is None:
-        raise ValueError(
-            "this Activity was not scheduled by a Workflow, so it has no Workflow "
-            "stream"
+        raise StreamUnsupportedError(
+            "this Activity was not scheduled by a Workflow, and streams owned by "
+            "an Activity are not supported in this release"
         )
     client = temporalio.activity.client()
     ref = StreamRef.for_workflow(info.workflow_id, run_id=info.workflow_run_id)
@@ -497,4 +498,5 @@ def get_stream_handle(
         ref = workflow_id
     else:
         ref = StreamRef.for_workflow(workflow_id, run_id=run_id, topic=topic)
+    ref._require_supported()
     return StreamHandle(store_for_client(client), client, ref)

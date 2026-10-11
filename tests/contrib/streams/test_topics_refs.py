@@ -15,7 +15,6 @@ from temporalio.contrib.streams import (
 from temporalio.contrib.streams._topic import (
     resolve_topic,
 )
-from temporalio.contrib.streams.memory import MemoryStreams
 from temporalio.converter import DataConverter
 
 OUT = topic("out", dict)
@@ -72,7 +71,7 @@ def test_a_ref_from_a_later_release_decodes_and_fails_where_it_opens(kind: str):
     ref = converter.from_payloads([payload], [StreamRef])[0]
     assert ref.kind == kind
     with pytest.raises(StreamUnsupportedError, match="only Workflow-owned"):
-        MemoryStreams().get_stream_handle(None, ref)
+        ref._require_supported()
 
 
 @pytest.mark.parametrize(
