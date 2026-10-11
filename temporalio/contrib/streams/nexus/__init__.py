@@ -5,8 +5,8 @@
 
 A process that cannot reach a stream's store, or should not, appends to and
 reads from it through a Nexus endpoint. The endpoint runs the
-``temporal.sdk.streams.v1.TemporalStreams`` service over whichever provider
-the endpoint's Worker carries, so callers never learn which store that is.
+``temporal.sdk.streams.v1.TemporalStreams`` service over the store the
+endpoint's Worker carries, so callers never learn which store that is.
 
 The service is defined once, in ``temporal_streams.nexusrpc.yaml`` next to
 this file, and everything in :mod:`temporalio.contrib.streams.nexus._generated`
