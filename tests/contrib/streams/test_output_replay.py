@@ -1,91 +1,33 @@
-"""Promotion, abort and replay of a Workflow's committed stream output.
+"""Replaying a publishing Workflow sends its records again, without bodies.
 
-A stage is promoted when History shows its marker and aborted when History
-shows its task failed. On replay nothing is staged: the recorded manifests
-come back in order and the replayed commits are checked against them.
+Core checks the replayed records against the marker History holds, so a
+Workflow that publishes something else on replay fails as nondeterministic.
+Nothing is stored again, so replaying needs no store.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
-import temporalio.contrib.streams._output as output_module
 from temporalio import activity, workflow
-from temporalio.api.enums.v1 import EventType
-from temporalio.api.history.v1 import HistoryEvent
-from temporalio.api.workflowservice.v1 import GetWorkflowExecutionHistoryReverseResponse
-from temporalio.bridge.proto.external_data import (
-    ExternalOutputStreamManifest,
-    ExternalStreamMarkerData,
-)
+from temporalio.api.common.v1 import Payload, WorkflowExecution
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
+from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import Client
-from temporalio.contrib.streams import StreamRef, topic, workflow_writer
-from temporalio.contrib.streams._output import (
-    MARKER_NAME,
-    OutputCoordinator,
-    StagedBatch,
-    StageRef,
-    _Stage,
-)
+from temporalio.contrib.streams import get_stream_handle, topic, workflow_writer
 from temporalio.contrib.streams.memory import MemoryStreams
+from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.worker import Replayer
+from tests.contrib.streams._support import connect_with, new_workflow_id
 from tests.helpers import new_worker
 
 EVENTS = topic("events", dict)
-
-
-class CountingStreams(MemoryStreams):
-    """The memory provider, counting every call on the Workflow output seam."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.staged: list[str] = []
-        self.promoted: list[str] = []
-        self.aborted: list[str] = []
-
-    async def _stage(self, batch: StagedBatch) -> str:
-        token = await super()._stage(batch)
-        self.staged.append(token)
-        return token
-
-    async def _promote(self, stage: StageRef) -> None:
-        self.promoted.append(stage.token)
-        # A store round trip yields, which is where two settles interleave.
-        await asyncio.sleep(0.01)
-        await super()._promote(stage)
-
-    async def _abort(self, stage: StageRef) -> None:
-        self.aborted.append(stage.token)
-        await super()._abort(stage)
-
-
-def client_with(client: Client, provider: MemoryStreams) -> Client:
-    config = client.config()
-    config["plugins"] = [provider]
-    return Client(**config)
-
-
-def new_workflow_id() -> str:
-    return f"streams-replay-{uuid.uuid4().hex}"
-
-
-async def read_all(records: Any, timeout: float = 10.0) -> list:
-    out = []
-
-    async def pull() -> None:
-        async for record in records:
-            out.append(record)
-
-    try:
-        await asyncio.wait_for(pull(), timeout)
-    finally:
-        await records.aclose()
-    return out
 
 
 @activity.defn
@@ -104,6 +46,7 @@ class Publisher:
         workflow_writer(EVENTS).publish({"n": "after"})
         await workflow.sleep(timedelta(milliseconds=10))
         workflow_writer(EVENTS).publish({"n": "last"})
+        workflow_writer(EVENTS).finish()
 
 
 @workflow.defn(name="Publisher")
@@ -117,57 +60,7 @@ class PublisherWithDifferentData:
         workflow_writer(EVENTS).publish({"n": "changed"})
         await workflow.sleep(timedelta(milliseconds=10))
         workflow_writer(EVENTS).publish({"n": "last"})
-
-
-async def run_publisher(client: Client, provider: MemoryStreams) -> Any:
-    streams_client = client_with(client, provider)
-    workflow_id = new_workflow_id()
-    async with new_worker(streams_client, Publisher, activities=[nothing]) as worker:
-        handle = await streams_client.start_workflow(
-            Publisher.run, id=workflow_id, task_queue=worker.task_queue
-        )
-        await handle.result()
-    return handle
-
-
-async def test_an_accepted_task_is_promoted_once(client: Client):
-    provider = CountingStreams()
-    handle = await run_publisher(client, provider)
-    assert len(provider.staged) == 3
-    assert sorted(provider.promoted) == sorted(provider.staged)
-    assert provider.aborted == []
-    stream = provider.get_stream_handle(client, StreamRef.for_workflow(handle.id))
-    records = await read_all(stream.read(topic=EVENTS))
-    assert [r.value for r in records] == [
-        {"n": "before"},
-        {"n": "after"},
-        {"n": "last"},
-    ]
-
-
-async def test_replay_touches_no_store_and_stays_deterministic(client: Client):
-    handle = await run_publisher(client, CountingStreams())
-    history = await handle.fetch_history()
-
-    fresh = CountingStreams()
-    # Two commits share the first Workflow Task, around the Local Activity,
-    # and replay pairs them with the recorded manifests in order.
-    await Replayer(workflows=[Publisher], plugins=[fresh]).replay_workflow(history)
-    assert (fresh.staged, fresh.promoted, fresh.aborted) == ([], [], [])
-    assert fresh._topics == {} and fresh._stages == {}
-
-
-async def test_a_replay_that_publishes_different_data_is_nondeterministic(
-    client: Client,
-):
-    handle = await run_publisher(client, CountingStreams())
-    history = await handle.fetch_history()
-    with pytest.raises(
-        Exception, match="External output committed while replaying differs"
-    ):
-        await Replayer(
-            workflows=[PublisherWithDifferentData], plugins=[CountingStreams()]
-        ).replay_workflow(history)
+        workflow_writer(EVENTS).finish()
 
 
 @workflow.defn(name="Publisher")
@@ -180,219 +73,136 @@ class PublisherWithFewerCommits:
         )
         await workflow.sleep(timedelta(milliseconds=10))
         workflow_writer(EVENTS).publish({"n": "last"})
+        workflow_writer(EVENTS).finish()
+
+
+async def publisher_history(client: Client) -> Any:
+    streams_client = await connect_with(client, MemoryStreams())
+    async with new_worker(streams_client, Publisher, activities=[nothing]) as worker:
+        handle = await streams_client.start_workflow(
+            Publisher.run, id=new_workflow_id(), task_queue=worker.task_queue
+        )
+        await handle.result()
+    return await handle.fetch_history()
+
+
+class RecordingCodec(PayloadCodec):
+    """Keeps what it encodes, so a test sees which payloads crossed it."""
+
+    def __init__(self) -> None:
+        self.encoded: list[Payload] = []
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        self.encoded.extend(payloads)
+        return list(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return list(payloads)
+
+
+async def test_a_replay_needs_no_store_and_sends_no_body(client: Client):
+    history = await publisher_history(client)
+    codec = RecordingCodec()
+    # Two commits share the first Workflow Task, around the Local Activity,
+    # and Core pairs them with the recorded markers in order.
+    await Replayer(
+        workflows=[Publisher], data_converter=DataConverter(payload_codec=codec)
+    ).replay_workflow(history)
+    published = [p for p in codec.encoded if b'"n"' in p.data]
+    assert published == []
+
+
+async def test_a_replay_that_publishes_different_data_is_nondeterministic(
+    client: Client,
+):
+    history = await publisher_history(client)
+    with pytest.raises(Exception, match="differs from the manifest recorded"):
+        await Replayer(workflows=[PublisherWithDifferentData]).replay_workflow(history)
 
 
 async def test_a_replay_that_commits_less_than_history_is_nondeterministic(
     client: Client,
 ):
-    handle = await run_publisher(client, CountingStreams())
-    history = await handle.fetch_history()
+    history = await publisher_history(client)
     # The first Workflow Task recorded two commits; this replay makes one.
-    with pytest.raises(Exception, match="did not commit"):
-        await Replayer(
-            workflows=[PublisherWithFewerCommits], plugins=[CountingStreams()]
-        ).replay_workflow(history)
-
-
-async def test_an_evicted_run_replays_without_publishing_twice(client: Client):
-    provider = CountingStreams()
-    streams_client = client_with(client, provider)
-    workflow_id = new_workflow_id()
-    async with new_worker(
-        streams_client, Publisher, activities=[nothing], max_cached_workflows=0
-    ) as worker:
-        await streams_client.execute_workflow(
-            Publisher.run, id=workflow_id, task_queue=worker.task_queue
-        )
-    assert len(provider.staged) == 3
-    stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
-    assert len(await read_all(stream.read(topic=EVENTS))) == 3
+    with pytest.raises(Exception, match="(?i)nondetermin"):
+        await Replayer(workflows=[PublisherWithFewerCommits]).replay_workflow(history)
 
 
 @workflow.defn
-class PublishOnce:
+class PublishAroundSignals:
+    def __init__(self) -> None:
+        self.next = False
+        self.done = False
+
     @workflow.run
     async def run(self) -> None:
         workflow_writer(EVENTS).publish({"n": 1})
+        await workflow.wait_condition(lambda: self.next)
+        workflow_writer(EVENTS).publish({"n": 2})
+        await workflow.wait_condition(lambda: self.done)
+
+    @workflow.signal
+    def go_on(self) -> None:
+        self.next = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
 
 
-async def test_a_rejected_commit_is_aborted(
-    client: Client, monkeypatch: pytest.MonkeyPatch
-):
-    # Core refuses a manifest whose history floor is not the task's, which
-    # fails the Workflow Task after the batch was staged. Only the first
-    # attempt is broken, so the retry commits.
-    real = output_module.build_manifest
-    broken = {"left": 1}
+async def take(records: Any, count: int, timeout: float = 10.0) -> list:
+    out: list[Any] = []
+    try:
+        while len(out) < count:
+            out.append(await asyncio.wait_for(anext(records), timeout))
+    finally:
+        await records.aclose()
+    return out
 
-    def wrong_floor_once(*args: Any, **kwargs: Any) -> ExternalOutputStreamManifest:
-        manifest = real(*args, **kwargs)
-        if broken["left"]:
-            broken["left"] -= 1
-            manifest.history_floor_event_id += 1000
-        return manifest
 
-    monkeypatch.setattr(output_module, "build_manifest", wrong_floor_once)
-    provider = CountingStreams()
-    streams_client = client_with(client, provider)
-    workflow_id = new_workflow_id()
-    async with new_worker(streams_client, PublishOnce) as worker:
-        await streams_client.execute_workflow(
-            PublishOnce.run, id=workflow_id, task_queue=worker.task_queue
+async def reset_to_last_completed_task(client: Client, workflow_id: str) -> str:
+    handle = client.get_workflow_handle(workflow_id)
+    completed = [
+        event.event_id
+        async for event in handle.fetch_history_events()
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
+    ]
+    response = await client.workflow_service.reset_workflow_execution(
+        ResetWorkflowExecutionRequest(
+            namespace=client.namespace,
+            workflow_execution=WorkflowExecution(workflow_id=workflow_id),
+            reason="test a reset of a publishing Workflow",
+            workflow_task_finish_event_id=completed[-1],
+            request_id=str(uuid.uuid4()),
         )
-        # The dead stage is settled once History shows the failed task, at
-        # eviction or after the run's next completion.
-        for _ in range(50):
-            if provider.aborted:
-                break
-            await asyncio.sleep(0.1)
-
-    assert len(provider.staged) == 2
-    assert provider.aborted == provider.staged[:1]
-    assert provider.promoted == provider.staged[1:]
-    assert provider._stages == {}
-    stream = provider.get_stream_handle(client, StreamRef.for_workflow(workflow_id))
-    assert [r.value for r in await read_all(stream.read(topic=EVENTS))] == [{"n": 1}]
-
-
-class _HistoryWithMarker:
-    """A client whose reverse History holds one output marker, after a pause."""
-
-    def __init__(self, token: str) -> None:
-        self.namespace = "default"
-        self.workflow_service = self
-        self._token = token
-
-    async def get_workflow_execution_history_reverse(
-        self, request: Any
-    ) -> GetWorkflowExecutionHistoryReverseResponse:
-        del request
-        await asyncio.sleep(0.05)
-        marker = ExternalStreamMarkerData()
-        marker.output.stage_token = self._token
-        event = HistoryEvent(
-            event_id=5, event_type=EventType.EVENT_TYPE_MARKER_RECORDED
-        )
-        event.marker_recorded_event_attributes.marker_name = MARKER_NAME
-        event.marker_recorded_event_attributes.details["external_stream"].payloads.add(
-            data=marker.SerializeToString()
-        )
-        response = GetWorkflowExecutionHistoryReverseResponse()
-        response.history.events.append(event)
-        return response
-
-
-async def test_a_completion_and_an_eviction_settle_a_stage_once():
-    provider = CountingStreams()
-    token = await provider._stage(StagedBatch("default", "wf", "run", "run", []))
-    history: Any = _HistoryWithMarker(token)
-    coordinator = OutputCoordinator(provider, history, "default")
-    run = coordinator.open_run("wf", "run")
-    run.staged.append(_Stage(StageRef("default", "wf", "run", token, ()), 1))
-    await asyncio.gather(
-        coordinator.after_completion("run"), coordinator.on_eviction("run")
     )
-    assert provider.promoted == [token]
+    return response.run_id
 
 
-async def test_a_stage_from_a_failed_transient_attempt_is_aborted(
-    client: Client, monkeypatch: pytest.MonkeyPatch
-):
-    # Attempts 1 and 2 of the first Workflow Task are rejected after staging;
-    # attempt 3 commits. Attempt 2 is transient: History never records its
-    # failure, so only the later attempt's commit at the same floor, or the
-    # run's close, can settle it.
-    real = output_module.build_manifest
-    broken = {"left": 2}
-
-    def wrong_floor_twice(*args: Any, **kwargs: Any) -> ExternalOutputStreamManifest:
-        manifest = real(*args, **kwargs)
-        if broken["left"]:
-            broken["left"] -= 1
-            manifest.history_floor_event_id += 1000
-        return manifest
-
-    monkeypatch.setattr(output_module, "build_manifest", wrong_floor_twice)
-    provider = CountingStreams()
-    streams_client = client_with(client, provider)
+async def test_a_reset_of_a_publishing_workflow_replays_its_output(client: Client):
+    # The reset run replays the base run's markers, whose records carry the
+    # base run's id. The run id must not be part of what replay compares.
+    streams_client = await connect_with(client, MemoryStreams())
     workflow_id = new_workflow_id()
-    async with new_worker(streams_client, PublishOnce) as worker:
-        await streams_client.execute_workflow(
-            PublishOnce.run, id=workflow_id, task_queue=worker.task_queue
+    async with new_worker(streams_client, PublishAroundSignals) as worker:
+        handle = await streams_client.start_workflow(
+            PublishAroundSignals.run, id=workflow_id, task_queue=worker.task_queue
         )
-        for _ in range(100):
-            if len(provider.aborted) == 2:
-                break
-            await asyncio.sleep(0.1)
-
-    assert len(provider.staged) == 3
-    assert sorted(provider.aborted) == sorted(provider.staged[:2])
-    assert provider.promoted == provider.staged[2:]
-    # Nothing is left to read History for.
-    assert provider._stages == {}
-
-
-class _FailingPromote(CountingStreams):
-    async def _promote(self, stage: StageRef) -> None:
-        raise RuntimeError("the store is unavailable")
-
-
-async def test_an_eviction_keeps_stages_it_could_not_settle():
-    provider = _FailingPromote()
-    token = await provider._stage(StagedBatch("default", "wf", "run", "run", []))
-    history: Any = _HistoryWithMarker(token)
-    coordinator = OutputCoordinator(provider, history, "default")
-    run = coordinator.open_run("wf", "run")
-    run.staged.append(_Stage(StageRef("default", "wf", "run", token, ()), 1))
-    await coordinator.on_eviction("run")
-    # The stage waits for the run's return instead of being forgotten.
-    returned = coordinator.open_run("wf", "run")
-    assert [stage.token for stage in returned.staged] == [token]
-
-
-async def test_settling_a_proven_stage_updates_the_list_others_hold():
-    provider = CountingStreams()
-    token = await provider._stage(StagedBatch("default", "wf", "run", "run", []))
-    coordinator = OutputCoordinator(provider, None, "default")
-    run = coordinator.open_run("wf", "run")
-    stage = _Stage(StageRef("default", "wf", "run", token, ()), 1)
-    run.staged.append(stage)
-    # An eviction hands this same list to the run's next incarnation.
-    shared = run.staged
-    run.proven.append(stage)
-    await coordinator.after_completion("run")
-    assert provider.promoted == [token]
-    assert shared == []
-
-
-class RenamedStreams(CountingStreams):
-    """The same store under another plugin name, as after a rename or a subclass."""
-
-    def name(self) -> str:
-        return "renamed.Streams"
-
-
-async def test_a_replay_through_a_renamed_provider_is_deterministic(client: Client):
-    handle = await run_publisher(client, CountingStreams())
-    history = await handle.fetch_history()
-    # The provider name is not part of what the Workflow published.
-    await Replayer(workflows=[Publisher], plugins=[RenamedStreams()]).replay_workflow(
-        history
-    )
-
-
-async def test_the_stages_kept_for_evicted_runs_are_bounded(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    # A run that never comes back to this Worker would hold its stages for the
-    # life of the process. Reader repair settles a dropped one.
-    monkeypatch.setattr(output_module, "_MAX_ORPHAN_RUNS", 2)
-    provider = CountingStreams()
-    coordinator = OutputCoordinator(provider, None, "default")
-    for n in range(3):
-        run_id = f"run{n}"
-        token = await provider._stage(StagedBatch("default", "wf", run_id, run_id, []))
-        stage = _Stage(StageRef("default", "wf", run_id, token, ()), 1)
-        coordinator.open_run("wf", run_id).staged.append(stage)
-        await coordinator.on_eviction(f"run{n}")
-    assert list(coordinator._orphans) == ["run1", "run2"]
+        stream = get_stream_handle(streams_client, workflow_id)
+        # Two publishing tasks, so the reset run replays a marker of the base run.
+        await take(stream.read(topic=EVENTS), 1)
+        await handle.signal(PublishAroundSignals.go_on)
+        await take(stream.read(topic=EVENTS), 2)
+        reset_run = await reset_to_last_completed_task(client, workflow_id)
+        reset = streams_client.get_workflow_handle(workflow_id, run_id=reset_run)
+        await reset.signal(PublishAroundSignals.finish)
+        await asyncio.wait_for(reset.result(), 30)
+    failed = [
+        event
+        async for event in reset.fetch_history_events()
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+        and event.workflow_task_failed_event_attributes.cause
+        != WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_WORKFLOW
+    ]
+    assert failed == []

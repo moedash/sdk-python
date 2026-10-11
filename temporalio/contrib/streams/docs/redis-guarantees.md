@@ -1,11 +1,12 @@
-# Redis provider: guarantees and setup
+# Redis store: guarantees and setup
 
 > This package is experimental and may change in future versions.
 
 Stream records live in your Redis. Temporal never sees them, so what a
-stream guarantees is what your Redis guarantees. This page says what the
-provider promises, which Redis settings those promises depend on, and who
-is responsible for what.
+stream guarantees is what your Redis guarantees. Core runs the store for
+every SDK, with the scripts in `crates/streams/lua/` of the Core repository.
+This page says what the store promises, which Redis settings those promises
+depend on, and who is responsible for what.
 
 ## What an acknowledged append means
 
@@ -42,7 +43,7 @@ How long an acknowledged record survives a failure depends on persistence:
 | No persistence | Nothing, after a restart. |
 
 Replicas copy writes asynchronously. A failover can lose writes the primary
-acknowledged but had not yet sent to the replica. The provider does not use
+acknowledged but had not yet sent to the replica. The store does not use
 `WAIT`. If a failover must not lose acknowledged records, use a store with
 a durable write log, or `appendfsync always` on a primary without automatic
 failover. Amazon MemoryDB has a durable write log, but this release hasn't
@@ -54,17 +55,17 @@ entries can get lower ids, so the reader skips them. Read again from
 Recommended for production: `appendonly yes` with `appendfsync everysec` or
 `always`, at least one replica, and the settings below.
 
-## Settings the provider needs
+## Settings the store needs
 
-- **Redis 7.0 or later.** The provider refuses an older server the first
-  time it talks to it. Tested with Redis 7.0, 7.4, 8.10 and Valkey 8.
+- **Redis 7.0 or later.** Core refuses an older server when the client
+  connects the store. Core's tests run against Redis 7.
 - **`maxmemory-policy noeviction`.** Under memory pressure, an evicting
   policy drops whole keys: a stream's records, its dedupe state, or a
   staged Workflow publish. If it drops a log's metadata, a reader can no
-  longer tell that a cursor expired, and it reads on across the gap. The
-  provider logs a warning when it can read another policy. It checks the
-  policy, and the server version, once when it starts, so a later change
-  goes unnoticed. With `noeviction`, a full Redis refuses writes instead,
+  longer tell that a cursor expired, and it reads on across the gap. Core
+  logs a warning when it can read another policy. It checks the policy,
+  and the server version, once when it connects, so a later change goes
+  unnoticed. With `noeviction`, a full Redis refuses writes instead,
   and producers get an error they can retry.
 - **Enough memory for retention.** A stream keeps records for `retention`
   (7 days by default) after they were written. Size Redis for your write
@@ -72,7 +73,7 @@ Recommended for production: `appendonly yes` with `appendfsync everysec` or
 
 ## Retention and cleanup
 
-The provider cleans up after itself, with no job to run:
+The store cleans up after itself, with no job to run:
 
 - Every write trims the log to `retention` and refreshes the log's expiry,
   so a stream disappears `retention` after its last write. That also covers
@@ -95,7 +96,7 @@ The provider cleans up after itself, with no job to run:
 
 ## When a Workflow closes
 
-Redis cannot see a Workflow close, so the provider marks the stream closed
+Redis cannot see a Workflow close, so Core marks the stream closed
 when someone notices: the Worker after a publishing Workflow's final
 Workflow Task, a producer when it first writes, or a reader when its read
 ends. After that, appends fail with `StreamClosedError`.
@@ -121,9 +122,9 @@ gone logs a warning that names its token. A stage whose run History no
 longer holds is never promoted, and it waits for that expiry.
 
 A publishing Workflow can only move forward. Once it has published, only a
-Worker with this release and the stream provider plugin can replay it, so
-keep the plugin registered while such Workflows run, and don't roll a
-fleet back to a release without them. Their next Workflow Task would fail
+Worker with this release can replay it, so don't roll a fleet back to a
+release without streams while such Workflows run. Replaying needs no store,
+but a Worker that runs such a Workflow on needs the store on its client. Their next Workflow Task would fail
 as nondeterministic until the rollback is undone.
 
 ## Access control
@@ -135,11 +136,11 @@ Readers write too. A read marks the chain closed when it ends, and it
 promotes or aborts the stages a stopped Worker left. So a reader needs the
 same Redis rules as a writer, and the Temporal permissions to describe the
 Workflow and read its History. A read holds one Redis connection while it
-waits, so size the client's `max_connections` to the streams a process
-follows.
+waits, from a pool Core keeps per node, so set `blocking_reads_per_node` on
+`RedisStreams` to the streams a process follows at once.
 
 Every key of a namespace's streams starts with
-`<prefix>:{<namespace>:`, where `<prefix>` is the provider's `key_prefix`
+`<prefix>:{<namespace>:`, where `<prefix>` is the store's `key_prefix`
 (default `temporal-streams`). Each part is percent-encoded, so a namespace
 `my-ns` gives keys under `temporal-streams:{my-ns:`. A Redis ACL user for
 one namespace's applications:
@@ -149,10 +150,9 @@ ACL SETUSER streams-app on >secret resetkeys ~temporal-streams:{my-ns:* resetcha
 ```
 
 The conformance suite and a Workflow publish test run as a user with
-exactly these rules, so a provider change that needs another command fails
+exactly these rules, so a store change that needs another command fails
 the tests. The delete helper also needs `+scan`. `+config|get` is only used
-to read `maxmemory-policy`, and the provider tolerates a server that refuses
-it.
+to read `maxmemory-policy`, and the store goes on when a server refuses it.
 
 What crosses the wire:
 
@@ -172,8 +172,8 @@ What crosses the wire:
 
 ## Redis Cluster
 
-The provider supports Redis Cluster. Pass a `redis.asyncio.RedisCluster`
-client; a URL string always makes a single-server client.
+The store supports Redis Cluster. Pass the seed nodes and
+`cluster=True` to `RedisStreams`.
 
 All keys of one run chain's streams share a hash tag, so every script and
 transaction touches one slot. Different Workflows, and different run
@@ -181,8 +181,7 @@ chains of one Workflow id, spread across the cluster. The version check
 and the `maxmemory-policy` check ask every primary, and
 `delete_workflow_streams` scans every primary.
 
-The conformance suite and the provider tests run against a Redis 7.4
-cluster with three primaries. The cluster client also sends `CLUSTER SLOTS`
-and `COMMAND` to discover the cluster, so an ACL user for it needs
-`+cluster|slots +command` as well. The ACL above was tested on a single
-server only.
+Core's conformance suite runs against a Redis 7 cluster too. The cluster
+client also sends `CLUSTER SLOTS` and `COMMAND` to discover the cluster, so
+an ACL user for it needs `+cluster|slots +command` as well. The ACL above
+was tested on a single server only.
