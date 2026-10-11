@@ -3,8 +3,11 @@
 > This package is experimental and may change in future versions.
 
 This page is the contract another SDK, or a tool, follows to read and write
-the same streams in Redis as the Python provider. Everything here is part
-of the stored format: change it and existing streams stop working.
+the same streams in Redis as Core's store, which every Core-based SDK uses.
+Everything here is part of the stored format: change it and existing
+streams stop working. The canonical scripts are in `crates/streams/lua/` of
+the Core repository: `append.lua`, `stage.lua` and `promote.lua`, with the
+trim and refresh they share in `keep.lua`.
 
 ## Redis
 
@@ -19,7 +22,7 @@ Workflow's run chain:
 <prefix>:{<namespace>:<workflow id>:<first run id>}<suffix>
 ```
 
-- `<prefix>` is the provider's `key_prefix`, default `temporal-streams`.
+- `<prefix>` is the store's `key_prefix`, default `temporal-streams`.
 - `<first run id>` is the first run of the Workflow's run chain
   (`first_run_id` from describing the Workflow, or
   `first_execution_run_id` inside it). Keying by the chain lets a reader
@@ -32,7 +35,7 @@ Workflow's run chain:
 | Suffix | Type | Holds |
 |---|---|---|
 | `:t:<topic>` | stream | The log of one topic |
-| `:t:<topic>:meta` | hash | Dedupe state, the log's tombstone, and `closed` = `1` once closed |
+| `:t:<topic>:meta` | hash | Dedupe state and the tombstone of that log |
 | `:chain` | hash | `closed` = `1` once the run chain has ended |
 | `:stage:<token>` | list | A staged Workflow publish: topic, record, topic, record, ... |
 | `:stages` | hash | Every stage not yet promoted or aborted |
@@ -41,7 +44,8 @@ Workflow's run chain:
 
 Each entry of a log has one field, `r`, whose value is the serialized
 `temporal.sdk.streams.v1.StreamRecord` protobuf
-(`scripts/_proto/temporal/sdk/streams/v1/message.proto`). The package
+(`crates/protos/protos/local/temporal/sdk/streams/v1/message.proto` in
+Core). The package
 `temporal.sdk.streams` is reserved for this envelope, so no other proto may
 use it:
 
@@ -63,9 +67,6 @@ Metadata keys, each a `Payload` with `encoding` = `binary/plain`:
   serialization is stable within one implementation, not across languages.
 - `temporal.io/run-id`: the run that published the record, on records the
   owning Workflow published.
-- `temporal.io/stream-close`: data `1`, on the owning Workflow's `FINISH`
-  record that closes the topic (`close_workflow_stream`). The Worker closes
-  the topic once the record's batch is promoted.
 
 The entry id that Redis assigns is the record's position. Readers never
 see a `SUPERSEDED` record in the log: a reader synthesizes one when a
@@ -124,9 +125,12 @@ the shortest retention wins.
    Topic names hold no control characters, so `\x1f` can't appear in one.
    It sets `PEXPIRE stages <retention + 30 days>` only when `PTTL stages`
    is lower, so the hash outlives every stage it lists.
-2. The manifest Core records covers each record without its
-   `temporal.io/run-id` metadata, since a reset run replays the markers of
-   its base run.
+2. Lang sends each record's topic, kind, body, content hash and
+   plaintext size in the completion's output commit, and Core builds the
+   stored record and the manifest from them. The manifest's fingerprint
+   (version 2) covers each record's topic, kind, content hash and size, as
+   length-prefixed fields, and never the run id, since a reset run replays
+   the markers of its base run.
 3. The Workflow Task's commit is recorded by Core in a
    `core_external_stream` marker whose output manifest carries the stage
    token.
@@ -137,7 +141,7 @@ the shortest retention wins.
    topic's log in order, trims and refreshes each log as above, and deletes
    the stage. Promoting twice does nothing. The script returns the number
    of records added, or -1 when the `stages` field existed but the stage
-   was gone: retention dropped committed output, and the provider logs a
+   was gone: retention dropped committed output, and Core logs a
    warning.
 5. Abort, once History shows that the stage's commit cannot happen: delete
    the stage and its `stages` field. That is when the staging Workflow Task
@@ -167,46 +171,13 @@ A cursor token is `redis:<stream hash>:<entry id>`.
   also can't tell two chains of one Workflow id apart.
 - The empty token is `BEGINNING` and `$end` is `END`.
 
-A reader refuses a token from another provider or with another stream
+A reader refuses a token from another store or with another stream
 hash, and resumes strictly after the entry id. It reports the cursor as
 expired when `meta.trimmed` is newer than it, or, if the log is gone, when
 `meta.last` is newer than it.
-
-## Notification counters
-
-A provider with `notify_on_append()` tells the server's stream notifier
-when the stream moves (see `temporalio.contrib.streams.nexus`). Each
-notification carries a counter, the notifier keeps the highest, and a
-caller drops a lower one. So the counter comes from the store's position,
-which grows with the stream whichever process writes, not from a clock.
-
-- A Redis entry id `<ms>-<seq>` gives `ms << 20 | seq`. A sequence above
-  `2**20 - 1` is held at that value, which keeps the order non-decreasing:
-  the notifier drops an equal counter as a repeat, so the later
-  notifications of such a millisecond are lost until the next one. The
-  result fits a positive int64 until the year 2248.
-- A memory provider offset gives `offset + 1`.
-- `BEGINNING` gives 0. A close carries the newest record's counter plus one,
-  so it outranks every notification before it. A close from the owning
-  Workflow's code is sent by the Worker after promotion, so it carries the
-  same.
-
-The notification's `position` is the cursor token of the newest record it
-reports. One code path computes it:
-`temporalio.contrib.streams._cursor.progress_counter`.
 
 ## Closing
 
 Any party that sees the Workflow's run chain end (complete, fail, cancel,
 terminate or time out, but not Continue-as-New) sets `HSET chain closed 1`
 and `PEXPIRE chain <retention + 30 days>`.
-
-Closing one topic (`close_stream`, or the Worker after promoting a batch
-with a `temporal.io/stream-close` record) sets `HSET meta closed 1` and
-`PEXPIRE meta <retention + 30 days>` on that topic, before the server's
-notifier completes the operations. The append script refuses a batch on a
-closed topic with `STREAMS_CLOSED`, after its retry check, so a retry of a
-batch that landed before the close still answers. Promotion never refuses a
-closed topic, as with the chain flag: the Worker logs a warning, since the
-owner's own publishes still land and readers that ended miss them. A read of
-a closed topic delivers what is left and ends.

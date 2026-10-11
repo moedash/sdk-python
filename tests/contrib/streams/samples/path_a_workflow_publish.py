@@ -39,7 +39,7 @@ async def main(
 ) -> list[str]:
     """Run one order and return the steps the client saw.
 
-    ``client`` must carry the stream provider, for example
+    ``client`` must carry the stream store, for example
     ``Client.connect(..., plugins=[RedisStreams("redis://localhost:6379")])``.
     """
     async with Worker(client, task_queue=task_queue, workflows=[ProcessOrder]):

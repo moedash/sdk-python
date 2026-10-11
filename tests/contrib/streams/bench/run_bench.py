@@ -37,12 +37,11 @@ from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.contrib.streams import (
     RecordKind,
-    StreamRef,
     activity_handle,
+    get_stream_handle,
     topic,
     workflow_writer,
 )
-from temporalio.contrib.streams._output import OutputCoordinator
 from temporalio.contrib.streams.redis import RedisStreams
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
@@ -128,15 +127,12 @@ class ActivityPublisher:
 
 
 class Bench:
-    def __init__(self, client: Client, provider: RedisStreams, task_queue: str):
+    def __init__(self, client: Client, task_queue: str):
         self.client = client
-        self.provider = provider
         self.task_queue = task_queue
 
     def stream(self, workflow_id: str) -> Any:
-        return self.provider.get_stream_handle(
-            self.client, StreamRef.for_workflow(workflow_id, topic=EVENTS)
-        )
+        return get_stream_handle(self.client, workflow_id, topic=EVENTS)
 
     async def read(
         self, workflow_id: str, count: int, sent: dict[int, int] | None = None
@@ -176,7 +172,7 @@ async def perf04_activity(bench: Bench, count: int, gap_ms: int) -> dict[str, An
     )
     latencies, _, _ = await bench.read(workflow_id, count)
     await handle.result()
-    # A producer's first append also describes the Workflow twice, and a
+    # A producer's first append also asks the server about the owner, and a
     # short token stream pays it every time, so it is reported on its own.
     return {
         "scenario": "perf04-activity",
@@ -187,41 +183,18 @@ async def perf04_activity(bench: Bench, count: int, gap_ms: int) -> dict[str, An
 
 
 async def perf04_workflow(bench: Bench, count: int, gap_ms: int) -> dict[str, Any]:
-    reads: list[float] = []
-    real = OutputCoordinator._events_after
-
-    async def timed(self: Any, run: Any, floor: int) -> Any:
-        started = _now()
-        try:
-            return await real(self, run, floor)
-        finally:
-            reads.append((_now() - started) / 1e6)
-
-    OutputCoordinator._events_after = timed  # type: ignore[method-assign]
-    try:
-        workflow_id = f"bench-wf-{uuid.uuid4().hex}"
-        handle = await bench.client.start_workflow(
-            WorkflowPublisher.run,
-            args=[count, gap_ms],
-            id=workflow_id,
-            task_queue=bench.task_queue,
-        )
-        # The publish clock is filled in as the Workflow runs, so the reader
-        # looks each record up on receipt.
-        latencies, _, _ = await bench.read(
-            workflow_id, count, sent=_SentView(workflow_id)
-        )
-        await handle.result()
-    finally:
-        OutputCoordinator._events_after = real  # type: ignore[method-assign]
-    return {
-        "scenario": "perf04-workflow",
-        "gap_ms": gap_ms,
-        **_percentiles(latencies),
-        "history_reads": len(reads),
-        "history_reads_per_publish": round(len(reads) / count, 2),
-        "history_read": _percentiles(reads),
-    }
+    workflow_id = f"bench-wf-{uuid.uuid4().hex}"
+    handle = await bench.client.start_workflow(
+        WorkflowPublisher.run,
+        args=[count, gap_ms],
+        id=workflow_id,
+        task_queue=bench.task_queue,
+    )
+    # The publish clock is filled in as the Workflow runs, so the reader
+    # looks each record up on receipt.
+    latencies, _, _ = await bench.read(workflow_id, count, sent=_SentView(workflow_id))
+    await handle.result()
+    return {"scenario": "perf04-workflow", "gap_ms": gap_ms, **_percentiles(latencies)}
 
 
 class _SentView(dict):
@@ -400,11 +373,13 @@ async def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--size", type=int, default=100)
     args = parser.parse_args(argv)
 
-    provider = RedisStreams(args.redis, key_prefix=f"bench-{uuid.uuid4().hex}")
+    store = RedisStreams(args.redis, key_prefix=f"bench-{uuid.uuid4().hex}")
     async with await WorkflowEnvironment.start_local() as env:
-        config = env.client.config()
-        config["plugins"] = [provider]
-        client = Client(**config)
+        client = await Client.connect(
+            env.client.service_client.config.target_host,
+            namespace=env.client.namespace,
+            plugins=[store],
+        )
         task_queue = f"bench-{uuid.uuid4().hex}"
         async with Worker(
             client,
@@ -414,7 +389,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             max_cached_workflows=5000,
             max_concurrent_activities=1000,
         ):
-            bench = Bench(client, provider, task_queue)
+            bench = Bench(client, task_queue)
             if args.scenario == "perf04-activity":
                 result = await perf04_activity(bench, args.count, args.gap_ms)
             elif args.scenario == "perf04-workflow":
@@ -430,19 +405,28 @@ async def main(argv: Sequence[str] | None = None) -> None:
                     size=args.size,
                     scenario=args.scenario,
                 )
-    await provider.close()
-    info = await _redis_version(args.redis)
-    print(json.dumps({"machine": machine(), "redis": info, "result": result}))
+    print(
+        json.dumps(
+            {
+                "machine": machine(),
+                "redis": _redis_version(args.redis),
+                "result": result,
+            }
+        )
+    )
 
 
-async def _redis_version(url: str) -> str:
-    import redis.asyncio
-
-    client = redis.asyncio.Redis.from_url(url)
+def _redis_version(url: str) -> str:
     try:
-        return str((await client.info("server"))["redis_version"])
-    finally:
-        await client.aclose()
+        info = subprocess.run(
+            ["redis-cli", "-u", url, "INFO", "server"], capture_output=True, text=True
+        ).stdout
+    except OSError:
+        return ""
+    for line in info.splitlines():
+        if line.startswith("redis_version:"):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 if __name__ == "__main__":
