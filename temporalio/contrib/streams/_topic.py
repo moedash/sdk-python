@@ -69,7 +69,7 @@ def resolve_topic(
 ) -> tuple[str, type | None]:
     """The name and decode hint a call means, from either form of topic.
 
-    ``None`` means :data:`DEFAULT_TOPIC`. A provider calls this once at the
+    ``None`` means :data:`DEFAULT_TOPIC`. A handle calls this once at the
     top of each call that takes a topic, so a definition and a string reach
     the store the same way.
 
@@ -97,8 +97,8 @@ _MAX_NAME_BYTES = 256
 
 
 def _check_name(name: str) -> None:
-    # The same limit for every provider: the name goes into store keys, cursor
-    # hashes and Core's manifest budget, and a provider may join names with a
+    # The same limit in every SDK: the name goes into store keys, cursor
+    # hashes and Core's manifest budget, and a store may join names with a
     # control character.
     if not name:
         raise ValueError("topic name must not be empty")
