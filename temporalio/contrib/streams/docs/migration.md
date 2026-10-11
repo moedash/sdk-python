@@ -58,7 +58,8 @@ Differences to plan for:
 
 ## Moving a running application
 
-1. Register `RedisStreams` on the client and deploy Workers that carry it.
+1. Register `RedisStreams` on the client with `Client.connect`, and deploy
+   Workers built from that client.
 2. Move producers and readers of one topic together. A topic split across
    both libraries is two streams.
 3. For Workflows already running, switch at a natural boundary, such as the
