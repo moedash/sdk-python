@@ -21,12 +21,9 @@ caller can resume past it on purpose.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import temporalio.exceptions
-
-if TYPE_CHECKING:
-    from temporalio.contrib.streams._record import Cursor
+from temporalio.bridge.proto.streams import StreamFailure, StreamFailureKind
+from temporalio.contrib.streams._record import Cursor
 
 __all__ = [
     "StreamClosedError",
@@ -54,8 +51,8 @@ class StreamNotFoundError(StreamError):
 class StreamCursorError(StreamError):
     """The cursor is not valid for this stream.
 
-    It was minted by another provider or for another stream, or it is not a
-    token the provider can parse.
+    It was minted by another store or for another stream, or it is not a
+    token the store can parse.
     """
 
 
@@ -128,4 +125,29 @@ class StreamRecordError(StreamError):
 
 
 class StreamUnsupportedError(StreamError):
-    """The capability is not offered by this release or by this provider."""
+    """The capability is not offered by this release or by this store."""
+
+
+_BY_KIND: dict[int, type[StreamError]] = {
+    StreamFailureKind.STREAM_FAILURE_KIND_PRODUCER_DIVERGENT: StreamProducerError,
+    StreamFailureKind.STREAM_FAILURE_KIND_PRODUCER_STALE: StreamProducerError,
+    StreamFailureKind.STREAM_FAILURE_KIND_OUTCOME_UNKNOWN: StreamOutcomeUnknownError,
+    StreamFailureKind.STREAM_FAILURE_KIND_REFUSED: StreamRefusedError,
+    StreamFailureKind.STREAM_FAILURE_KIND_CLOSED: StreamClosedError,
+    StreamFailureKind.STREAM_FAILURE_KIND_CURSOR: StreamCursorError,
+    StreamFailureKind.STREAM_FAILURE_KIND_EXPIRED: StreamExpiredError,
+    StreamFailureKind.STREAM_FAILURE_KIND_NOT_FOUND: StreamNotFoundError,
+    StreamFailureKind.STREAM_FAILURE_KIND_STORAGE: StreamStorageError,
+    StreamFailureKind.STREAM_FAILURE_KIND_UNSUPPORTED: StreamUnsupportedError,
+}
+
+
+def error_from_failure(failure: StreamFailure) -> StreamError:
+    """The error a caller catches for Core's ``failure``.
+
+    A kind this release does not know is a storage error, since the call
+    failed for a reason the caller can't act on beyond retrying later.
+    """
+    if failure.kind == StreamFailureKind.STREAM_FAILURE_KIND_RECORD:
+        return StreamRecordError(failure.message, Cursor(failure.cursor))
+    return _BY_KIND.get(failure.kind, StreamStorageError)(failure.message)

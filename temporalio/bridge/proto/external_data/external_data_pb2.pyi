@@ -223,11 +223,12 @@ class ExternalStreamMarkerData(google.protobuf.message.Message):
 global___ExternalStreamMarkerData = ExternalStreamMarkerData
 
 class ExternalOutputStreamManifest(google.protobuf.message.Message):
-    """Compact proof of the externally staged output belonging to one Workflow Task.
+    """Compact proof of the stream output one Workflow Task published, built by Core from the records
+    in the completion's `WorkflowOutputStreamCommit`.
 
-    This message contains no record payloads. The stage token identifies the immutable pending
-    batch in the provider, while the remaining fields let replay validate the deterministic logical
-    output and let a cold reader reconcile the pending batch against History.
+    This message contains no record payloads. The stage token names the batch held in the stream
+    store, while the remaining fields let replay check the Workflow's logical output and let a cold
+    reader settle the held batch against History.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -263,9 +264,9 @@ class ExternalOutputStreamManifest(google.protobuf.message.Message):
     ]:
         """One entry per activation segment, including segments which published no output."""
     provider_id: builtins.str
-    """Stable configured provider binding. Reconciliation refuses to interpret the batch through a
-    different provider or provider wire format. Replay compares the format but not the id, since
-    a provider can be renamed without changing the output.
+    """The stream store that holds the batch. Reconciliation refuses to interpret the batch through
+    a different store or store format. Replay compares the format but not the store, since a
+    store can be renamed or swapped for a Replayer without changing the output.
     """
     provider_format_version: builtins.int
     def __init__(
@@ -312,10 +313,9 @@ global___ExternalOutputStreamManifest = ExternalOutputStreamManifest
 class ExternalOutputTopicManifest(google.protobuf.message.Message):
     """Logical, pre-codec identity of one topic sub-batch.
 
-    Lang computes these over the topic's records in publish order, as the payload converter made
-    them and before any payload codec, so replay can compute them again. Lang leaves out of each
-    record anything that a reset changes, such as the run that published it. Core checks only that
-    the fingerprint is 32 bytes, and that replay gives the same values.
+    Core computes these over the topic's records in publish order, from each body's plaintext hash
+    and size, so replay computes them again from records that carry no body. Nothing a reset
+    changes, such as the run that published a record, takes part.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -328,10 +328,12 @@ class ExternalOutputTopicManifest(google.protobuf.message.Message):
     topic: builtins.str
     record_count: builtins.int
     logical_byte_count: builtins.int
-    """The sum of the records' serialized sizes, measured the same way as the fingerprint."""
+    """The sum of the records' body sizes as the payload converter made them."""
     logical_fingerprint: builtins.bytes
-    """For fingerprint_version 1, the SHA-256 over each record as its length in 8 bytes big-endian,
-    then its deterministic protobuf serialization.
+    """For fingerprint_version 2, the SHA-256 over each record as its length in 8 bytes big-endian,
+    then the record itself as its topic's length in 8 bytes big-endian, the topic's UTF-8 bytes,
+    its kind in 4 bytes big-endian, its content hash's length in 8 bytes big-endian and the
+    content hash.
     """
     finished: builtins.bool
     """True when the batch holds a FINISH record for this topic."""
