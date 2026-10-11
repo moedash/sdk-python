@@ -49,7 +49,9 @@ from temporalio.client import Client, WorkflowHistory
 from temporalio.contrib.streams import (
     StreamRecordError,
     StreamRef,
+    StreamStorePlugin,
     Supersession,
+    get_stream_handle,
     workflow_writer,
 )
 from temporalio.contrib.streams._record import Cursor, RecordKind
@@ -655,7 +657,8 @@ async def test_live_a_workflow_reads_every_record_then_none(
     task_queue = f"stream-reader-{uuid.uuid4()}"
     endpoint = make_nexus_endpoint_name(task_queue)
     await env.create_nexus_endpoint(endpoint, task_queue)
-    provider = MemoryStreams().notify_on_append()
+    store = MemoryStreams().notify_on_append()
+    client = await connect(client, store)
     texts = [f"token-{n}" for n in range(7)]
 
     async def start_owner(_ctx: Any, _prompt: str) -> StreamRef:
@@ -670,13 +673,12 @@ async def test_live_a_workflow_reads_every_record_then_none(
         def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
             return StreamOperationHandler(start_owner)
 
-    streams = TemporalStreamsHandler(provider)
+    streams = TemporalStreamsHandler()
     async with Worker(
         client,
         task_queue=task_queue,
         workflows=[LiveChatReader, LiveTokenOwner],
         nexus_service_handlers=[ChatServiceHandler(), streams],
-        plugins=[provider],
     ):
         caller = await client.start_workflow(
             LiveChatReader.run,
@@ -704,7 +706,7 @@ async def test_live_a_workflow_reads_every_record_then_none(
         else:
             pytest.fail("the owner never finished publishing")
         await owner.signal(LiveTokenOwner.done)
-        await provider.close_stream(client, ref, "7 tokens")
+        await store.close_stream(client, ref, "7 tokens")
         seen_live = await asyncio.wait_for(caller.result(), 30)
         await streams.close()
 
@@ -746,7 +748,6 @@ async def test_live_a_workflow_reads_every_record_then_none(
     await Replayer(
         workflows=[LiveChatReader], data_converter=data_converter
     ).replay_workflow(history)
-    await provider.close()
 
 
 @workflow.defn(name="LiveLabelReader")
@@ -799,7 +800,17 @@ class SlowCodec(MarkingCodec):
 BACKINGS = ["memory", "memory-async-codec", "redis"]
 
 
-def _notifying_provider(backing: str) -> Any:
+async def connect(client: Client, store: StreamStorePlugin) -> Client:
+    """A client of ``client``'s server, with its converter, that carries ``store``."""
+    return await Client.connect(
+        client.service_client.config.target_host,
+        namespace=client.namespace,
+        data_converter=client.data_converter,
+        plugins=[store],
+    )
+
+
+def _notifying_store(backing: str) -> StreamStorePlugin:
     if backing.startswith("memory"):
         return MemoryStreams().notify_on_append()
     url = os.environ.get("STREAMS_REDIS_URL")
@@ -819,13 +830,14 @@ async def _read_what_is_appended(
 ) -> list[str]:
     """Appends ``texts`` from outside the owner once the caller is attached,
     closes the stream, and answers with the labels the caller read."""
-    provider = _notifying_provider(backing)
+    store = _notifying_store(backing)
     if backing == "memory-async-codec":
         config = client.config()
         config["data_converter"] = dataclasses.replace(
             DataConverter.default, payload_codec=SlowCodec()
         )
         client = Client(**config)
+    client = await connect(client, store)
     owner_id = f"idle-owner-{uuid.uuid4()}"
     ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
     await _skip_without_notifier(client, ref)
@@ -845,13 +857,12 @@ async def _read_what_is_appended(
         def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
             return StreamOperationHandler(start_owner)
 
-    streams = TemporalStreamsHandler(provider)
+    streams = TemporalStreamsHandler()
     async with Worker(
         client,
         task_queue=task_queue,
         workflows=[LiveLabelReader, LiveIdleOwner],
         nexus_service_handlers=[ChatServiceHandler(), streams],
-        plugins=[provider],
     ):
         caller = await client.start_workflow(
             LiveLabelReader.run,
@@ -869,18 +880,17 @@ async def _read_what_is_appended(
             await asyncio.sleep(0.1)
         else:
             pytest.fail("the stream operation never started")
-        producer = provider.get_stream_handle(client, ref).producer(
+        producer = get_stream_handle(client, ref).producer(
             producer_id="burst", attempt=1
         )
         for start in range(0, len(texts), per_append):
             await producer.append(
                 *(Token(text) for text in texts[start : start + per_append])
             )
-        await provider.close_stream(client, ref, "done")
+        await store.close_stream(client, ref, "done")
         labels = await asyncio.wait_for(caller.result(), 60)
         await client.get_workflow_handle(owner_id).signal(LiveIdleOwner.done)
         await streams.close()
-    await provider.close()
     return labels
 
 
@@ -932,23 +942,17 @@ class LiveOwnerThatClosesInOneTask:
 async def test_live_a_close_with_the_last_publishes_loses_none_of_them(
     client: Client, env: WorkflowEnvironment, backing: str
 ) -> None:
-    """The completion can reach the reader before the task's records are
-    promoted, but the stream is only done once they are. Promotion is slowed
-    here past any wait a reader would make for stragglers."""
-    provider = _notifying_provider(backing)
-    promote = provider._promote
-
-    async def slow_promote(stage: Any) -> None:
-        await asyncio.sleep(3)
-        await promote(stage)
-
-    provider._promote = slow_promote
+    """The close commits in the same task as the last publishes. Core closes
+    the store and then the notifier only after it promotes the task's
+    records, so the reader is done only once it has every one of them."""
+    store = _notifying_store(backing)
     if backing == "memory-async-codec":
         config = client.config()
         config["data_converter"] = dataclasses.replace(
             DataConverter.default, payload_codec=SlowCodec()
         )
         client = Client(**config)
+    client = await connect(client, store)
     owner_id = f"closing-owner-{uuid.uuid4()}"
     ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
     await _skip_without_notifier(client, ref)
@@ -969,13 +973,12 @@ async def test_live_a_close_with_the_last_publishes_loses_none_of_them(
         def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
             return StreamOperationHandler(start_owner)
 
-    streams = TemporalStreamsHandler(provider)
+    streams = TemporalStreamsHandler()
     async with Worker(
         client,
         task_queue=task_queue,
         workflows=[LiveLabelReader, LiveOwnerThatClosesInOneTask],
         nexus_service_handlers=[ChatServiceHandler(), streams],
-        plugins=[provider],
     ):
         labels = await asyncio.wait_for(
             client.execute_workflow(
@@ -990,7 +993,6 @@ async def test_live_a_close_with_the_last_publishes_loses_none_of_them(
             LiveOwnerThatClosesInOneTask.done
         )
         await streams.close()
-    await provider.close()
     assert labels == [str(n) for n in range(300)]
 
 
@@ -1016,7 +1018,8 @@ async def test_live_a_start_on_a_closed_stream_still_names_it(
 ) -> None:
     """The attach completes the operation at once, before the start answers,
     and the completion carries the token the reader needs."""
-    provider = _notifying_provider(backing)
+    store = _notifying_store(backing)
+    client = await connect(client, store)
     owner_id = f"closed-owner-{uuid.uuid4()}"
     ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
     await _skip_without_notifier(client, ref)
@@ -1033,22 +1036,21 @@ async def test_live_a_start_on_a_closed_stream_still_names_it(
         def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
             return StreamOperationHandler(closed_stream)
 
-    streams = TemporalStreamsHandler(provider)
+    streams = TemporalStreamsHandler()
     async with Worker(
         client,
         task_queue=task_queue,
         workflows=[LiveTokenReader, LiveIdleOwner],
         nexus_service_handlers=[ChatServiceHandler(), streams],
-        plugins=[provider],
     ):
         owner = await client.start_workflow(
             LiveIdleOwner.run, id=owner_id, task_queue=task_queue
         )
-        producer = provider.get_stream_handle(client, ref).producer(
+        producer = get_stream_handle(client, ref).producer(
             producer_id="writer", attempt=1
         )
         await producer.append(*(Token(f"t{n}") for n in range(5)))
-        await provider.close_stream(client, ref, "closed before")
+        await store.close_stream(client, ref, "closed before")
         token, labels, result = await asyncio.wait_for(
             client.execute_workflow(
                 LiveTokenReader.run,
@@ -1060,7 +1062,6 @@ async def test_live_a_start_on_a_closed_stream_still_names_it(
         )
         await owner.signal(LiveIdleOwner.done)
         await streams.close()
-    await provider.close()
 
     assert stream_ref_from_token(token) == ref
     assert labels == [f"t{n}" for n in range(5)]
@@ -1099,7 +1100,8 @@ class LiveResumingReader:
 async def test_live_a_new_reader_resumes_after_a_cursor(
     client: Client, env: WorkflowEnvironment
 ) -> None:
-    provider = _notifying_provider("memory")
+    store = _notifying_store("memory")
+    client = await connect(client, store)
     owner_id = f"resume-owner-{uuid.uuid4()}"
     ref = StreamRef.for_workflow(owner_id, topic=STREAM.topic)
     await _skip_without_notifier(client, ref)
@@ -1119,13 +1121,12 @@ async def test_live_a_new_reader_resumes_after_a_cursor(
         def chat(self) -> nexusrpc.handler.OperationHandler[str, str]:
             return StreamOperationHandler(start_owner)
 
-    streams = TemporalStreamsHandler(provider)
+    streams = TemporalStreamsHandler()
     async with Worker(
         client,
         task_queue=task_queue,
         workflows=[LiveResumingReader, LiveIdleOwner],
         nexus_service_handlers=[ChatServiceHandler(), streams],
-        plugins=[provider],
     ):
         caller = await client.start_workflow(
             LiveResumingReader.run,
@@ -1141,7 +1142,7 @@ async def test_live_a_new_reader_resumes_after_a_cursor(
             ):
                 break
             await asyncio.sleep(0.1)
-        producer = provider.get_stream_handle(client, ref).producer(
+        producer = get_stream_handle(client, ref).producer(
             producer_id="writer", attempt=1
         )
         await producer.append(Token("t0"), Token("t1"), Token("t2"))
@@ -1159,12 +1160,11 @@ async def test_live_a_new_reader_resumes_after_a_cursor(
                 break
             await asyncio.sleep(0.1)
         await producer.append(Token("t3"), Token("t4"))
-        await provider.close_stream(client, ref, "done")
+        await store.close_stream(client, ref, "done")
         await caller.signal(LiveResumingReader.resume)
         first, later = await asyncio.wait_for(caller.result(), 30)
         await client.get_workflow_handle(owner_id).signal(LiveIdleOwner.done)
         await streams.close()
-    await provider.close()
 
     assert first == ["t0", "t1", "t2"]
     assert later == ["t3", "t4"]

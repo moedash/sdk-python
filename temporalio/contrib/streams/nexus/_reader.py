@@ -24,7 +24,8 @@ from temporalio import workflow
 from temporalio.contrib.streams._errors import StreamError, StreamRecordError
 from temporalio.contrib.streams._record import Cursor, RecordKind, Supersession
 from temporalio.contrib.streams._ref import StreamRef
-from temporalio.contrib.streams._wire import RecordDecoder, WireRecord
+from temporalio.contrib.streams._wire import WireRecord
+from temporalio.contrib.streams.nexus._decoder import RecordDecoder
 from temporalio.contrib.streams.nexus._generated import ReadInput, TemporalStreams
 from temporalio.contrib.streams.nexus._operation import stream_ref_from_token
 
