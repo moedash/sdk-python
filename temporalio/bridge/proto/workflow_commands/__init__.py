@@ -8,6 +8,8 @@ from .workflow_commands_pb2 import (
     ContinueAsNewWorkflowExecution,
     FailWorkflowExecution,
     ModifyWorkflowProperties,
+    OutputClose,
+    OutputRecord,
     QueryResult,
     QuerySuccess,
     RequestCancelActivity,
@@ -24,6 +26,7 @@ from .workflow_commands_pb2 import (
     UpdateResponse,
     UpsertWorkflowSearchAttributes,
     WorkflowCommand,
+    WorkflowOutputStreamCommit,
 )
 
 __all__ = [
@@ -36,6 +39,8 @@ __all__ = [
     "ContinueAsNewWorkflowExecution",
     "FailWorkflowExecution",
     "ModifyWorkflowProperties",
+    "OutputClose",
+    "OutputRecord",
     "QueryResult",
     "QuerySuccess",
     "RequestCancelActivity",
@@ -52,4 +57,5 @@ __all__ = [
     "UpdateResponse",
     "UpsertWorkflowSearchAttributes",
     "WorkflowCommand",
+    "WorkflowOutputStreamCommit",
 ]

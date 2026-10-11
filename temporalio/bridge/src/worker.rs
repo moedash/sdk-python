@@ -65,6 +65,7 @@ pub struct WorkerConfig {
     plugins: Vec<String>,
     storage_drivers: HashSet<String>,
     disable_payload_error_limit: bool,
+    stream_store: Option<crate::streams::StreamStoreRef>,
 }
 
 #[derive(FromPyObject)]
@@ -780,6 +781,7 @@ fn convert_worker_config(
                 .collect::<HashSet<_>>(),
         )
         .disable_payload_error_limit(conf.disable_payload_error_limit)
+        .maybe_stream_store(conf.stream_store.map(|store| store.service.store()))
         .build()
         .map_err(|err| PyValueError::new_err(format!("Invalid worker config: {err}")))
 }

@@ -8,6 +8,7 @@ from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import message as _message
 from google.protobuf import reflection as _reflection
 from google.protobuf import symbol_database as _symbol_database
+from google.protobuf.internal import enum_type_wrapper
 
 # @@protoc_insertion_point(imports)
 
@@ -18,12 +19,29 @@ from google.protobuf import duration_pb2 as google_dot_protobuf_dot_duration__pb
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n3temporal/sdk/core/external_data/external_data.proto\x12\x15\x63oresdk.external_data\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto"\xb2\x02\n\x17LocalActivityMarkerData\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x0f\n\x07\x61ttempt\x18\x02 \x01(\r\x12\x13\n\x0b\x61\x63tivity_id\x18\x03 \x01(\t\x12\x15\n\ractivity_type\x18\x04 \x01(\t\x12\x31\n\rcomplete_time\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12*\n\x07\x62\x61\x63koff\x18\x06 \x01(\x0b\x32\x19.google.protobuf.Duration\x12:\n\x16original_schedule_time\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x1d\n\x10\x61\x63tivation_index\x18\x08 \x01(\x04H\x00\x88\x01\x01\x42\x13\n\x11_activation_index"3\n\x11PatchedMarkerData\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\ndeprecated\x18\x02 \x01(\x08\x42\x32\xea\x02/Temporalio::Internal::Bridge::Api::ExternalDatab\x06proto3'
+    b'\n3temporal/sdk/core/external_data/external_data.proto\x12\x15\x63oresdk.external_data\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto"\xb2\x02\n\x17LocalActivityMarkerData\x12\x0b\n\x03seq\x18\x01 \x01(\r\x12\x0f\n\x07\x61ttempt\x18\x02 \x01(\r\x12\x13\n\x0b\x61\x63tivity_id\x18\x03 \x01(\t\x12\x15\n\ractivity_type\x18\x04 \x01(\t\x12\x31\n\rcomplete_time\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12*\n\x07\x62\x61\x63koff\x18\x06 \x01(\x0b\x32\x19.google.protobuf.Duration\x12:\n\x16original_schedule_time\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x1d\n\x10\x61\x63tivation_index\x18\x08 \x01(\x04H\x00\x88\x01\x01\x42\x13\n\x11_activation_index"3\n\x11PatchedMarkerData\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\ndeprecated\x18\x02 \x01(\x08"\xc1\x01\n\x18\x45xternalStreamMarkerData\x12\x16\n\x0eschema_version\x18\x01 \x01(\r\x12H\n\x11terminal_boundary\x18\x05 \x01(\x0e\x32-.coresdk.external_data.ExternalStreamBoundary\x12\x43\n\x06output\x18\x06 \x01(\x0b\x32\x33.coresdk.external_data.ExternalOutputStreamManifest"\xda\x02\n\x1c\x45xternalOutputStreamManifest\x12\x16\n\x0eschema_version\x18\x01 \x01(\r\x12\x1b\n\x13\x66ingerprint_version\x18\x02 \x01(\r\x12\x13\n\x0bstage_token\x18\x03 \x01(\t\x12\x1e\n\x16history_floor_event_id\x18\x04 \x01(\x03\x12\x0e\n\x06run_id\x18\x05 \x01(\t\x12\x42\n\x06topics\x18\x06 \x03(\x0b\x32\x32.coresdk.external_data.ExternalOutputTopicManifest\x12\x46\n\x08segments\x18\x07 \x03(\x0b\x32\x34.coresdk.external_data.ExternalOutputSegmentManifest\x12\x13\n\x0bprovider_id\x18\x08 \x01(\t\x12\x1f\n\x17provider_format_version\x18\t \x01(\r"\x8d\x01\n\x1b\x45xternalOutputTopicManifest\x12\r\n\x05topic\x18\x01 \x01(\t\x12\x14\n\x0crecord_count\x18\x02 \x01(\r\x12\x1a\n\x12logical_byte_count\x18\x03 \x01(\x04\x12\x1b\n\x13logical_fingerprint\x18\x04 \x01(\x0c\x12\x10\n\x08\x66inished\x18\x05 \x01(\x08"?\n\x1d\x45xternalOutputSegmentManifest\x12\x1e\n\x16record_counts_by_topic\x18\x01 \x03(\r*\xd0\x01\n\x16\x45xternalStreamBoundary\x12(\n$EXTERNAL_STREAM_BOUNDARY_UNSPECIFIED\x10\x00\x12.\n*EXTERNAL_STREAM_BOUNDARY_COMMANDS_PRODUCED\x10\x06\x12/\n+EXTERNAL_STREAM_BOUNDARY_WORKFLOW_COMPLETED\x10\x07\x12+\n\'EXTERNAL_STREAM_BOUNDARY_TASK_COMPLETED\x10\x08\x42\x32\xea\x02/Temporalio::Internal::Bridge::Api::ExternalDatab\x06proto3'
 )
+
+_EXTERNALSTREAMBOUNDARY = DESCRIPTOR.enum_types_by_name["ExternalStreamBoundary"]
+ExternalStreamBoundary = enum_type_wrapper.EnumTypeWrapper(_EXTERNALSTREAMBOUNDARY)
+EXTERNAL_STREAM_BOUNDARY_UNSPECIFIED = 0
+EXTERNAL_STREAM_BOUNDARY_COMMANDS_PRODUCED = 6
+EXTERNAL_STREAM_BOUNDARY_WORKFLOW_COMPLETED = 7
+EXTERNAL_STREAM_BOUNDARY_TASK_COMPLETED = 8
 
 
 _LOCALACTIVITYMARKERDATA = DESCRIPTOR.message_types_by_name["LocalActivityMarkerData"]
 _PATCHEDMARKERDATA = DESCRIPTOR.message_types_by_name["PatchedMarkerData"]
+_EXTERNALSTREAMMARKERDATA = DESCRIPTOR.message_types_by_name["ExternalStreamMarkerData"]
+_EXTERNALOUTPUTSTREAMMANIFEST = DESCRIPTOR.message_types_by_name[
+    "ExternalOutputStreamManifest"
+]
+_EXTERNALOUTPUTTOPICMANIFEST = DESCRIPTOR.message_types_by_name[
+    "ExternalOutputTopicManifest"
+]
+_EXTERNALOUTPUTSEGMENTMANIFEST = DESCRIPTOR.message_types_by_name[
+    "ExternalOutputSegmentManifest"
+]
 LocalActivityMarkerData = _reflection.GeneratedProtocolMessageType(
     "LocalActivityMarkerData",
     (_message.Message,),
@@ -46,13 +64,67 @@ PatchedMarkerData = _reflection.GeneratedProtocolMessageType(
 )
 _sym_db.RegisterMessage(PatchedMarkerData)
 
+ExternalStreamMarkerData = _reflection.GeneratedProtocolMessageType(
+    "ExternalStreamMarkerData",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALSTREAMMARKERDATA,
+        "__module__": "temporal.sdk.core.external_data.external_data_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.external_data.ExternalStreamMarkerData)
+    },
+)
+_sym_db.RegisterMessage(ExternalStreamMarkerData)
+
+ExternalOutputStreamManifest = _reflection.GeneratedProtocolMessageType(
+    "ExternalOutputStreamManifest",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALOUTPUTSTREAMMANIFEST,
+        "__module__": "temporal.sdk.core.external_data.external_data_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.external_data.ExternalOutputStreamManifest)
+    },
+)
+_sym_db.RegisterMessage(ExternalOutputStreamManifest)
+
+ExternalOutputTopicManifest = _reflection.GeneratedProtocolMessageType(
+    "ExternalOutputTopicManifest",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALOUTPUTTOPICMANIFEST,
+        "__module__": "temporal.sdk.core.external_data.external_data_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.external_data.ExternalOutputTopicManifest)
+    },
+)
+_sym_db.RegisterMessage(ExternalOutputTopicManifest)
+
+ExternalOutputSegmentManifest = _reflection.GeneratedProtocolMessageType(
+    "ExternalOutputSegmentManifest",
+    (_message.Message,),
+    {
+        "DESCRIPTOR": _EXTERNALOUTPUTSEGMENTMANIFEST,
+        "__module__": "temporal.sdk.core.external_data.external_data_pb2",
+        # @@protoc_insertion_point(class_scope:coresdk.external_data.ExternalOutputSegmentManifest)
+    },
+)
+_sym_db.RegisterMessage(ExternalOutputSegmentManifest)
+
 if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._options = None
     DESCRIPTOR._serialized_options = (
         b"\352\002/Temporalio::Internal::Bridge::Api::ExternalData"
     )
+    _EXTERNALSTREAMBOUNDARY._serialized_start = 1260
+    _EXTERNALSTREAMBOUNDARY._serialized_end = 1468
     _LOCALACTIVITYMARKERDATA._serialized_start = 144
     _LOCALACTIVITYMARKERDATA._serialized_end = 450
     _PATCHEDMARKERDATA._serialized_start = 452
     _PATCHEDMARKERDATA._serialized_end = 503
+    _EXTERNALSTREAMMARKERDATA._serialized_start = 506
+    _EXTERNALSTREAMMARKERDATA._serialized_end = 699
+    _EXTERNALOUTPUTSTREAMMANIFEST._serialized_start = 702
+    _EXTERNALOUTPUTSTREAMMANIFEST._serialized_end = 1048
+    _EXTERNALOUTPUTTOPICMANIFEST._serialized_start = 1051
+    _EXTERNALOUTPUTTOPICMANIFEST._serialized_end = 1192
+    _EXTERNALOUTPUTSEGMENTMANIFEST._serialized_start = 1194
+    _EXTERNALOUTPUTSEGMENTMANIFEST._serialized_end = 1257
 # @@protoc_insertion_point(module_scope)
