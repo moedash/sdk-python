@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import uuid
 import warnings
@@ -616,3 +617,54 @@ async def test_simple_plugin_no_duplication_in_interceptor_chain(
         assert interceptor.call_count["execute_workflow"] == 1, (
             f"Expected execute_workflow to be called once, but was called {interceptor.call_count['execute_workflow']} times. This indicates interceptor duplication in the chain."
         )
+
+
+class FinishesAfterTheWorker(temporalio.worker.Plugin):
+    """Does work of its own after the Worker it wraps has shut down."""
+
+    def __init__(self) -> None:
+        self.finished = False
+
+    def name(self) -> str:
+        return "finishes-after-the-worker"
+
+    def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
+        return config
+
+    async def run_worker(
+        self, worker: Worker, next: Callable[[Worker], Awaitable[None]]
+    ) -> None:
+        await next(worker)
+        await asyncio.sleep(0.2)
+        self.finished = True
+
+    def configure_replayer(self, config: ReplayerConfig) -> ReplayerConfig:
+        return config
+
+    def run_replayer(
+        self,
+        replayer: Replayer,
+        histories: AsyncIterator[temporalio.client.WorkflowHistory],
+        next: Callable[
+            [Replayer, AsyncIterator[WorkflowHistory]],
+            AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]],
+        ],
+    ) -> AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]]:
+        return next(replayer, histories)
+
+
+async def test_leaving_async_with_lets_a_plugin_finish_without_cancelling_the_caller(
+    client: Client,
+) -> None:
+    plugin = FinishesAfterTheWorker()
+    async with Worker(
+        client,
+        task_queue=f"task-queue-{uuid.uuid4()}",
+        activities=[never_run_activity],
+        plugins=[plugin],
+    ):
+        pass
+    # The code that left the block is not cancelled later.
+    await asyncio.sleep(0.5)
+    # And the plugin's own work after the Worker stopped ran to its end.
+    assert plugin.finished

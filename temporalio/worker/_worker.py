@@ -487,6 +487,7 @@ class Worker:
         self._shutdown_complete_event = asyncio.Event()
         self._async_context_inner_task: asyncio.Task | None = None
         self._async_context_run_task: asyncio.Task | None = None
+        self._async_context_exiting = False
         self._async_context_run_exception: BaseException | None = None
 
         self._activity_worker: _ActivityWorker | None = None
@@ -958,7 +959,10 @@ class Worker:
                 await self.run()
             except BaseException as err:
                 self._async_context_run_exception = err
-                self._async_context_inner_task.cancel()  # type: ignore[union-attr]
+                # Once the block is left there's nothing to interrupt, and a
+                # cancel would land in whatever the caller awaits next.
+                if not self._async_context_exiting:
+                    self._async_context_inner_task.cancel()  # type: ignore[union-attr]
 
         self._async_context_run_task = asyncio.create_task(run())
         return self
@@ -973,8 +977,11 @@ class Worker:
         if not self._async_context_run_task:
             raise RuntimeError("Never started")
         await self.shutdown()
-        # Cancel our run task
-        self._async_context_run_task.cancel()
+        # A plugin's run_worker can still have work of its own after the Worker
+        # stopped, such as a flush, so the run task finishes instead of being
+        # cancelled.
+        self._async_context_exiting = True
+        await self._async_context_run_task
         # Only re-raise our exception if present and exc_type is cancel
         if exc_type is asyncio.CancelledError and self._async_context_run_exception:
             raise self._async_context_run_exception
