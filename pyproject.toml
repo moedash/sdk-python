@@ -183,6 +183,8 @@ exclude = [
   'temporalio/api',
   'temporalio/bridge/proto',
   'temporalio/nexus/system/workflow_service',
+  # Core's own sources, which hold a Python script for Core's cross-SDK tests
+  'temporalio/bridge/sdk-core',
 ]
 
 [[tool.mypy.overrides]]
@@ -258,6 +260,8 @@ exclude = [
   "temporalio/api",
   "temporalio/bridge/proto",
   "temporalio/bridge/_visitor.py",
+  # Core's own sources, which hold a Python script for Core's cross-SDK tests
+  "temporalio/bridge/sdk-core",
   "tests/worker/workflow_sandbox/testmodules/proto",
 ]
 
